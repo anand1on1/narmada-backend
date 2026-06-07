@@ -1,0 +1,29 @@
+# Render.com blueprint — one-click deploy of the Narmada Mobility backend.
+# Push this repo to GitHub, then in Render: New + → Blueprint → pick the repo.
+services:
+  - type: web
+    name: narmada-backend
+    runtime: node
+    plan: starter            # $7/mo — includes persistent disk. Use `free` to try without disk (data resets on restart).
+    region: singapore        # closest to India; change to oregon/frankfurt if you prefer
+    branch: main
+    buildCommand: npm install && npm run build
+    startCommand: NODE_ENV=production node dist/index.cjs
+    healthCheckPath: /healthz
+    autoDeploy: true
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: ALLOWED_ORIGINS
+        value: "https://narmadamobility.com,https://www.narmadamobility.com"
+      - key: ADMIN_USERNAME
+        value: narmadamobility123
+      - key: ADMIN_PASSWORD
+        # IMPORTANT: trailing space is intentional — preserved as configured in server/routes.ts
+        value: "Mausami@@2026 "
+      - key: DATA_DIR
+        value: /opt/render/project/src/data
+    disk:
+      name: narmada-data
+      mountPath: /opt/render/project/src/data
+      sizeGB: 1
