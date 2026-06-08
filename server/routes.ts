@@ -228,7 +228,11 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
       const base = filename ? toSlug(filename.replace(/\.[^.]+$/, "")) : id;
       const finalName = `${base}-${id}.${ext}`;
       fs.writeFileSync(path.join(UPLOADS_DIR, finalName), buf);
-      res.json({ url: `/uploads/${finalName}` });
+      // Return absolute URL so frontend on different domain (GoDaddy) can load images from Render
+      const proto = (req.headers['x-forwarded-proto'] as string) || req.protocol || 'https';
+      const host = req.get('host');
+      const absoluteUrl = `${proto}://${host}/uploads/${finalName}`;
+      res.json({ url: absoluteUrl, path: `/uploads/${finalName}` });
     } catch (e: any) { res.status(500).json({ error: e.message }); }
   });
 

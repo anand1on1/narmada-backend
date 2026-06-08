@@ -410,8 +410,11 @@ export function registerV2Routes(app: Express, ctx: V2Context) {
       const id = `${Date.now()}-${randomBytes(4).toString("hex")}-${safeName}.${ext}`;
       const filePath = path.join(ctx.uploadsDir, id);
       fs.writeFileSync(filePath, buf);
-      const publicUrl = `/uploads/${id}`;
-      res.json({ ok: true, url: publicUrl, filename: id, size: buf.length });
+      // Return absolute URL so frontend on different domain (GoDaddy) can load images from Render
+      const proto = (req.headers['x-forwarded-proto'] as string) || req.protocol || 'https';
+      const host = req.get('host');
+      const absoluteUrl = `${proto}://${host}/uploads/${id}`;
+      res.json({ ok: true, url: absoluteUrl, path: `/uploads/${id}`, filename: id, size: buf.length });
     } catch (e: any) { res.status(500).json({ error: e.message }); }
   });
 
