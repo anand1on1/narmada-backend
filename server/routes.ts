@@ -8,6 +8,10 @@ import { z } from "zod";
 import { randomBytes } from "node:crypto";
 import path from "node:path";
 import fs from "node:fs";
+import Papa from "papaparse";
+import { sendContactEmail } from "./email";
+import { registerBulkRoutes } from "./bulk";
+import { registerV2Routes, TokenMap } from "./routes-v2";
 
 const ADMIN_USERNAME = "narmadamobility123";
 const ADMIN_PASSWORD = "Mausami@@2026 "; // exact as requested (trailing space preserved as user wrote it)
@@ -44,14 +48,53 @@ function toSlug(s: string) {
   return s.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/(^-|-$)/g, "");
 }
 
-// --- Simple in-memory session tokens (no localStorage needed; client passes token in header) ---
-const adminTokens = new Set<string>();
-function issueToken(): string { const t = randomBytes(32).toString("hex"); adminTokens.add(t); return t; }
+// Module-scope so routes-v2.ts can also call this via the regenSitemap callback
+function buildSitemapUrls(allProducts: Awaited<ReturnType<typeof storage.listProducts>>, baseUrl: string): string[] {
+  const urls: string[] = [];
+  const add = (loc: string, priority = "0.6", changefreq = "weekly") => {
+    urls.push(`  <url><loc>${baseUrl}${loc}</loc><changefreq>${changefreq}</changefreq><priority>${priority}</priority></url>`);
+  };
+  add("/", "1.0", "daily");
+  add("/products", "0.9", "daily");
+  add("/about", "0.7");
+  add("/contact", "0.7");
+  add("/work-with-us", "0.6");
+  add("/privacy", "0.4", "yearly");
+  add("/disclaimer", "0.4", "yearly");
+  add("/blog", "0.8", "daily");
+  add("/price-checker", "0.8", "weekly");
+  add("/track-consignment", "0.6", "monthly");
+  for (const b of BRAND_SLUGS) add(`/brand/${b}`, "0.9", "weekly");
+  for (const c of CATEGORY_SLUGS) add(`/category/${c}`, "0.8", "weekly");
+  for (const b of BRAND_SLUGS) {
+    for (const s of INDIAN_STATES) add(`/${b}-spare-parts-${toSlug(s)}`, "0.7");
+  }
+  for (const b of BRAND_SLUGS) {
+    for (const c of COUNTRIES) add(`/${b}-spare-parts-${toSlug(c)}`, "0.7");
+  }
+  for (const p of allProducts) {
+    if (p.active) add(`/product/${p.slug}`, "0.6");
+  }
+  return urls;
+}
+
+// --- Session token map shared across routes.ts + routes-v2.ts ---
+// Maps token → { username, role, displayName }. Role gates v2 endpoints; legacy
+// endpoints only check token presence (effectively admin-equivalent since old
+// system only had one user).
+const adminTokens: TokenMap = new Map();
+function issueToken(username: string, role: "admin" | "logistics" = "admin"): string {
+  const t = randomBytes(32).toString("hex");
+  adminTokens.set(t, { username, role });
+  return t;
+}
 function requireAdmin(req: Request, res: Response, next: NextFunction) {
   const token = (req.headers["x-admin-token"] as string) || "";
-  if (!token || !adminTokens.has(token)) {
-    return res.status(401).json({ error: "Unauthorized" });
-  }
+  const info = adminTokens.get(token);
+  if (!info) return res.status(401).json({ error: "Unauthorized" });
+  // Legacy endpoints: only "admin" role is allowed (logistics users use v2 endpoints)
+  if (info.role !== "admin") return res.status(403).json({ error: "Admin role required" });
+  (req as any).user = info;
   next();
 }
 
@@ -68,18 +111,36 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
   // -------- AUTH --------
   app.post("/api/admin/login", async (req, res) => {
     const { username, password } = req.body || {};
+    // Try primary admin first
     if (username === ADMIN_USERNAME && password === ADMIN_PASSWORD) {
-      const token = issueToken();
-      return res.json({ token, username: ADMIN_USERNAME });
+      const token = issueToken(ADMIN_USERNAME, "admin");
+      return res.json({ token, username: ADMIN_USERNAME, role: "admin" });
     }
+    // Try DB users via v2 helpers
+    try {
+      const v2 = await import("./storage-v2");
+      const { verifyPassword } = await import("./routes-v2");
+      const user = await v2.getAdminUserByUsername(username);
+      if (user && user.active && verifyPassword(password, user.passwordHash)) {
+        const role = (user.role as "admin" | "logistics");
+        const token = randomBytes(32).toString("hex");
+        adminTokens.set(token, { username: user.username, role, displayName: user.displayName || undefined });
+        return res.json({ token, username: user.username, role, displayName: user.displayName });
+      }
+    } catch (e) { console.error("DB user check failed:", e); }
     return res.status(401).json({ error: "Invalid credentials" });
   });
-  app.post("/api/admin/logout", requireAdmin, (req, res) => {
+  app.post("/api/admin/logout", (req, res) => {
     const token = req.headers["x-admin-token"] as string;
-    adminTokens.delete(token);
+    if (token) adminTokens.delete(token);
     res.json({ ok: true });
   });
-  app.get("/api/admin/me", requireAdmin, (_req, res) => res.json({ ok: true, username: ADMIN_USERNAME }));
+  app.get("/api/admin/me", (req, res) => {
+    const token = (req.headers["x-admin-token"] as string) || "";
+    const info = adminTokens.get(token);
+    if (!info) return res.status(401).json({ error: "Unauthorized" });
+    res.json({ ok: true, username: info.username, role: info.role, displayName: info.displayName });
+  });
 
   // -------- PUBLIC: settings (USD/INR) --------
   app.get("/api/settings/fx", async (_req, res) => {
@@ -149,6 +210,9 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
     res.json({ ok: true });
   });
 
+  // -------- BULK PRODUCT UPLOAD (admin) --------
+  registerBulkRoutes(app, requireAdmin);
+
   // -------- IMAGE UPLOAD (admin) --------
   // Accepts base64 data URL or raw base64 string and writes to /uploads/<id>.<ext>
   app.post("/api/admin/upload-image", requireAdmin, async (req, res) => {
@@ -173,10 +237,17 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
     try {
       const parsed = insertContactSchema.parse(req.body);
       const created = await storage.createContact(parsed);
-      // In production this would dispatch SMTP to SALES_EMAIL. We log + persist
-      // so the admin sees it; the user can wire SMTP later in the admin panel.
-      console.log(`[contact] new submission → ${SALES_EMAIL}`, created.id, parsed.email);
-      res.json({ ok: true, id: created.id, deliveredTo: SALES_EMAIL });
+      const mail = await sendContactEmail({
+        name: parsed.name,
+        email: parsed.email,
+        phone: parsed.phone || null,
+        country: parsed.country || null,
+        subject: parsed.subject || null,
+        productInterest: parsed.productInterest || null,
+        message: parsed.message,
+      });
+      console.log(`[contact] #${created.id} from ${parsed.email} — email: ${mail.ok ? "sent" : "not sent (" + mail.via + (mail.error ? ": " + mail.error : "") + ")"}`);
+      res.json({ ok: true, id: created.id, deliveredTo: SALES_EMAIL, emailSent: mail.ok });
     } catch (e: any) { res.status(400).json({ error: e.message, details: e.errors }); }
   });
   app.get("/api/admin/contacts", requireAdmin, async (_req, res) => res.json(await storage.listContacts()));
@@ -200,35 +271,6 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
   });
 
   // -------- SITEMAP --------
-  function buildSitemapUrls(allProducts: Awaited<ReturnType<typeof storage.listProducts>>, baseUrl: string) {
-    const urls: string[] = [];
-    const add = (loc: string, priority = "0.6", changefreq = "weekly") => {
-      urls.push(`  <url><loc>${baseUrl}${loc}</loc><changefreq>${changefreq}</changefreq><priority>${priority}</priority></url>`);
-    };
-    add("/", "1.0", "daily");
-    add("/products", "0.9", "daily");
-    add("/about", "0.7");
-    add("/contact", "0.7");
-    add("/work-with-us", "0.6");
-    add("/privacy", "0.4", "yearly");
-    add("/disclaimer", "0.4", "yearly");
-    for (const b of BRAND_SLUGS) add(`/brand/${b}`, "0.9", "weekly");
-    for (const c of CATEGORY_SLUGS) add(`/category/${c}`, "0.8", "weekly");
-    // brand x state (India SEO)
-    for (const b of BRAND_SLUGS) {
-      for (const s of INDIAN_STATES) add(`/${b}-spare-parts-${toSlug(s)}`, "0.7");
-    }
-    // brand x country (global SEO)
-    for (const b of BRAND_SLUGS) {
-      for (const c of COUNTRIES) add(`/${b}-spare-parts-${toSlug(c)}`, "0.7");
-    }
-    // products
-    for (const p of allProducts) {
-      if (p.active) add(`/product/${p.slug}`, "0.6");
-    }
-    return urls;
-  }
-
   app.get("/sitemap.xml", async (req, res) => {
     const baseUrl = (req.protocol + "://" + req.get("host")) || "https://narmadamobility.com";
     const allProducts = await storage.listProducts({ activeOnly: true });
@@ -261,6 +303,23 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
     const p = path.join(PUBLIC_DIR, "sitemap.xml");
     if (!fs.existsSync(p)) return res.status(404).json({ error: "Generate first" });
     res.download(p, "sitemap.xml");
+  });
+
+  // -------- Phase 3: CMS / Price Checker / Consignments / Sub-users / SEO helpers --------
+  registerV2Routes(app, {
+    tokenMap: adminTokens,
+    primaryAdminUsername: ADMIN_USERNAME,
+    primaryAdminPassword: ADMIN_PASSWORD,
+    uploadsDir: UPLOADS_DIR,
+    regenSitemap: async () => {
+      const baseUrl = `https://${process.env.SITE_HOST || "narmadamobility.com"}`;
+      const allProducts = await storage.listProducts({ activeOnly: true });
+      const urls = buildSitemapUrls(allProducts, baseUrl);
+      const xml = `<?xml version="1.0" encoding="UTF-8"?>\n<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n${urls.join("\n")}\n</urlset>`;
+      fs.writeFileSync(path.join(PUBLIC_DIR, "sitemap.xml"), xml);
+      await storage.logSitemapRun(urls.length);
+      return { urlCount: urls.length };
+    },
   });
 
   return httpServer;

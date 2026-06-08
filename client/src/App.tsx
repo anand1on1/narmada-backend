@@ -18,6 +18,10 @@ import DisclaimerPage from "@/pages/DisclaimerPage";
 import CategoryPage from "@/pages/CategoryPage";
 import SeoLandingPage from "@/pages/SeoLandingPage";
 import BrandPage from "@/pages/BrandPage";
+import BlogList from "@/pages/BlogList";
+import BlogDetail from "@/pages/BlogDetail";
+import PriceChecker from "@/pages/PriceChecker";
+import TrackConsignment from "@/pages/TrackConsignment";
 import { useParams } from "wouter";
 
 function SeoLandingResolver() {
@@ -35,6 +39,10 @@ import AdminProducts from "@/pages/admin/AdminProducts";
 import AdminContacts from "@/pages/admin/AdminContacts";
 import AdminSettings from "@/pages/admin/AdminSettings";
 import AdminSitemap from "@/pages/admin/AdminSitemap";
+import AdminBlog from "@/pages/admin/AdminBlog";
+import AdminPriceList from "@/pages/admin/AdminPriceList";
+import AdminConsignments from "@/pages/admin/AdminConsignments";
+import AdminTeam from "@/pages/admin/AdminTeam";
 
 import NotFound from "@/pages/not-found";
 
@@ -51,6 +59,11 @@ function PublicRoutes() {
         <Route path="/work-with-us" component={WorkWithUsPage} />
         <Route path="/privacy" component={PrivacyPage} />
         <Route path="/disclaimer" component={DisclaimerPage} />
+        {/* Phase 3 — registered BEFORE catch-all /:slug */}
+        <Route path="/blog" component={BlogList} />
+        <Route path="/blog/:slug" component={BlogDetail} />
+        <Route path="/price-checker" component={PriceChecker} />
+        <Route path="/track-consignment" component={TrackConsignment} />
         {/* Individual brand pages — MUST be before catch-all /:slug */}
         <Route path="/brand/:slug" component={BrandPage} />
         {/* SEO landing pages: /:brand-spare-parts-:location */}
@@ -73,6 +86,10 @@ function AppRouter() {
         <Route path="/admin/contacts" component={AdminContacts} />
         <Route path="/admin/settings" component={AdminSettings} />
         <Route path="/admin/sitemap" component={AdminSitemap} />
+        <Route path="/admin/blog" component={AdminBlog} />
+        <Route path="/admin/price-lists" component={AdminPriceList} />
+        <Route path="/admin/consignments" component={AdminConsignments} />
+        <Route path="/admin/team" component={AdminTeam} />
         <Route component={NotFound} />
       </Switch>
     );

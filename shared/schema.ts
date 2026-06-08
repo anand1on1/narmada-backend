@@ -69,3 +69,104 @@ export const sitemapRuns = sqliteTable("sitemap_runs", {
   urlCount: integer("url_count").notNull(),
   generatedAt: integer("generated_at").notNull(),
 });
+
+// -------- BLOG / CONTENT --------
+export const posts = sqliteTable("posts", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  slug: text("slug").notNull().unique(),
+  title: text("title").notNull(),
+  excerpt: text("excerpt"),
+  content: text("content").notNull(),       // markdown / HTML
+  coverImageUrl: text("cover_image_url"),
+  type: text("type").notNull().default("blog"),   // blog | spotlight
+  productSlug: text("product_slug"),         // when type=spotlight, links to product
+  authorName: text("author_name").default("Narmada Mobility"),
+  metaTitle: text("meta_title"),
+  metaDescription: text("meta_description"),
+  metaKeywords: text("meta_keywords"),
+  published: integer("published", { mode: "boolean" }).default(false),
+  publishedAt: integer("published_at"),
+  createdAt: integer("created_at").notNull(),
+  updatedAt: integer("updated_at").notNull(),
+});
+export const insertPostSchema = createInsertSchema(posts).omit({
+  id: true,
+  createdAt: true,
+  updatedAt: true,
+});
+export type InsertPost = z.infer<typeof insertPostSchema>;
+export type Post = typeof posts.$inferSelect;
+
+// -------- PRICE LISTS --------
+export const priceLists = sqliteTable("price_lists", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  brand: text("brand").notNull(),         // tata | bharatbenz | ashok-leyland | eicher | volvo | other
+  versionLabel: text("version_label"),    // e.g. "Q2 2026", "April price update"
+  itemCount: integer("item_count").default(0),
+  effectiveDate: integer("effective_date"),  // when this price list becomes valid
+  notes: text("notes"),
+  uploadedAt: integer("uploaded_at").notNull(),
+});
+export const insertPriceListSchema = createInsertSchema(priceLists).omit({
+  id: true,
+  uploadedAt: true,
+  itemCount: true,
+});
+export type InsertPriceList = z.infer<typeof insertPriceListSchema>;
+export type PriceList = typeof priceLists.$inferSelect;
+
+export const priceItems = sqliteTable("price_items", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  brand: text("brand").notNull(),
+  priceListId: integer("price_list_id").notNull(),
+  partNumber: text("part_number").notNull(),
+  partNumberClean: text("part_number_clean").notNull(),  // alphanumeric only, lowercase
+  description: text("description"),
+  mrp: real("mrp"),
+  dealerPrice: real("dealer_price"),
+  hsnCode: text("hsn_code"),
+  gstPercent: real("gst_percent"),
+  uom: text("uom"),    // unit of measure: pcs, set, kit
+});
+export type PriceItem = typeof priceItems.$inferSelect;
+
+// -------- CONSIGNMENTS --------
+export const consignments = sqliteTable("consignments", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  docketNumber: text("docket_number").notNull().unique(),
+  carrier: text("carrier"),                // DTDC, Gati, BlueDart, etc.
+  origin: text("origin").notNull(),
+  destination: text("destination").notNull(),
+  customerName: text("customer_name"),
+  customerPhone: text("customer_phone"),
+  bundlesCount: integer("bundles_count").default(1),
+  invoiceNumber: text("invoice_number"),
+  invoiceAmount: real("invoice_amount"),
+  dispatchDate: integer("dispatch_date"),
+  etaDate: integer("eta_date"),
+  deliveredDate: integer("delivered_date"),
+  status: text("status").notNull().default("pending"), // pending | in_transit | out_for_delivery | delivered | cancelled
+  notes: text("notes"),
+  createdBy: text("created_by"),
+  createdAt: integer("created_at").notNull(),
+  updatedAt: integer("updated_at").notNull(),
+});
+export const insertConsignmentSchema = createInsertSchema(consignments).omit({
+  id: true,
+  createdAt: true,
+  updatedAt: true,
+});
+export type InsertConsignment = z.infer<typeof insertConsignmentSchema>;
+export type Consignment = typeof consignments.$inferSelect;
+
+// -------- ADMIN USERS (multi-role) --------
+export const adminUsers = sqliteTable("admin_users", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  username: text("username").notNull().unique(),
+  passwordHash: text("password_hash").notNull(),
+  role: text("role").notNull().default("admin"),   // admin | logistics
+  displayName: text("display_name"),
+  active: integer("active", { mode: "boolean" }).default(true),
+  createdAt: integer("created_at").notNull(),
+});
+export type AdminUser = typeof adminUsers.$inferSelect;

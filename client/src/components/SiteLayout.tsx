@@ -7,10 +7,13 @@ import { Menu, Phone, Mail, MapPin, MessageCircle, ChevronDown, Globe, ArrowUpRi
 import { BRANDS, BRAND_WALL } from "@/data/brands";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 import { whatsappLink } from "@/lib/utils-app";
+import { StickyGetQuote } from "./StickyGetQuote";
 
 const NAV = [
   { to: "/", label: "Home" },
   { to: "/products", label: "Catalog" },
+  { to: "/price-checker", label: "Price Checker" },
+  { to: "/blog", label: "Insights" },
   { to: "/about", label: "About" },
   { to: "/work-with-us", label: "Work With Us" },
   { to: "/contact", label: "Contact" },
@@ -147,6 +150,9 @@ export function SiteLayout({ children }: { children: React.ReactNode }) {
         <MessageCircle className="h-4 w-4" />
         <span className="hidden sm:inline">WhatsApp</span>
       </a>
+
+      {/* Sticky Get-Quote button (bottom-left) */}
+      <StickyGetQuote />
     </div>
   );
 }
@@ -198,6 +204,9 @@ function Footer() {
             <li><Link href="/work-with-us"><a className="text-[hsl(220_60%_12%)]/80 hover:text-[hsl(212_95%_55%)] transition-colors">Work With Us</a></Link></li>
             <li><Link href="/products"><a className="text-[hsl(220_60%_12%)]/80 hover:text-[hsl(212_95%_55%)] transition-colors">Parts Catalog</a></Link></li>
             <li><Link href="/contact"><a className="text-[hsl(220_60%_12%)]/80 hover:text-[hsl(212_95%_55%)] transition-colors">Contact &amp; Quote</a></Link></li>
+            <li><Link href="/blog"><a className="text-[hsl(220_60%_12%)]/80 hover:text-[hsl(212_95%_55%)] transition-colors">Insights &amp; Blog</a></Link></li>
+            <li><Link href="/price-checker"><a className="text-[hsl(220_60%_12%)]/80 hover:text-[hsl(212_95%_55%)] transition-colors">Price Checker</a></Link></li>
+            <li><Link href="/track-consignment"><a className="text-[hsl(220_60%_12%)]/80 hover:text-[hsl(212_95%_55%)] transition-colors">Track Consignment</a></Link></li>
             <li><Link href="/privacy"><a className="text-[hsl(220_60%_12%)]/80 hover:text-[hsl(212_95%_55%)] transition-colors">Privacy Policy</a></Link></li>
             <li><Link href="/disclaimer"><a className="text-[hsl(220_60%_12%)]/80 hover:text-[hsl(212_95%_55%)] transition-colors">Disclaimer</a></Link></li>
           </ul>

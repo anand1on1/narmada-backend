@@ -24,9 +24,24 @@ export default function AdminLogin() {
         return;
       }
       setAuth(data.token, data.username);
+      // Fetch role to determine post-login redirect destination.
+      let redirectPath = '/admin/dashboard';
+      try {
+        const meRes = await fetch('/api/v2/me', {
+          headers: { 'x-admin-token': data.token },
+        });
+        if (meRes.ok) {
+          const me = await meRes.json();
+          if (me?.role === 'logistics') {
+            redirectPath = '/admin/consignments';
+          }
+        }
+      } catch {
+        // Ignore — fall back to dashboard. Primary admin (env credentials) is role admin.
+      }
       // Defer navigation so React commits the auth state first.
       setTimeout(() => {
-        window.location.hash = '/admin/dashboard';
+        window.location.hash = redirectPath;
         window.dispatchEvent(new HashChangeEvent('hashchange'));
       }, 30);
     } catch {

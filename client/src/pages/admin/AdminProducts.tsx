@@ -4,7 +4,8 @@ import { adminFetch, useAdminAuth } from "@/lib/admin-auth";
 import { BRANDS, PRODUCT_CATEGORIES } from "@/data/brands";
 import type { Product } from "@shared/schema";
 import { toSlug, parseJsonArray } from "@/lib/utils-app";
-import { Plus, Edit2, Trash2, X, Upload, Save, Search, Star } from "lucide-react";
+import { Plus, Edit2, Trash2, X, Upload, Save, Search, Star, UploadCloud } from "lucide-react";
+import { BulkUploadModal } from "./BulkUploadModal";
 
 interface ProductForm {
   id?: number;
@@ -35,6 +36,7 @@ export default function AdminProducts() {
   const [search, setSearch] = useState("");
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [showBulk, setShowBulk] = useState(false);
 
   async function load() {
     if (!token) return;
@@ -132,6 +134,13 @@ export default function AdminProducts() {
           />
         </div>
         <button
+          onClick={() => setShowBulk(true)}
+          className="px-5 py-2.5 border border-accent/40 text-accent rounded-lg font-bold inline-flex items-center gap-2 hover:bg-accent/10"
+          data-testid="button-bulk-upload"
+        >
+          <UploadCloud className="w-4 h-4" /> Bulk Upload
+        </button>
+        <button
           onClick={() => startEdit()}
           className="px-5 py-2.5 bg-accent text-accent-foreground rounded-lg font-bold inline-flex items-center gap-2 hover:bg-accent/90"
           data-testid="button-add-product"
@@ -139,6 +148,14 @@ export default function AdminProducts() {
           <Plus className="w-4 h-4" /> Add Product
         </button>
       </div>
+
+      {showBulk && token && (
+        <BulkUploadModal
+          token={token}
+          onClose={() => setShowBulk(false)}
+          onDone={() => load()}
+        />
+      )}
 
       {/* Table */}
       <div className="bg-card border rounded-xl overflow-hidden">

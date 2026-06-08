@@ -1,8 +1,15 @@
-import { products, contactSubmissions, settings, sitemapRuns } from '@shared/schema';
-import type { Product, InsertProduct, Contact, InsertContact, Setting } from '@shared/schema';
+import {
+  products, contactSubmissions, settings, sitemapRuns,
+  posts, priceLists, priceItems, consignments, adminUsers,
+} from '@shared/schema';
+import type {
+  Product, InsertProduct, Contact, InsertContact, Setting,
+  Post, InsertPost, PriceList, InsertPriceList, PriceItem,
+  Consignment, InsertConsignment, AdminUser,
+} from '@shared/schema';
 import { drizzle } from "drizzle-orm/better-sqlite3";
 import Database from "better-sqlite3";
-import { eq, desc, and, like, or } from "drizzle-orm";
+import { eq, desc, and, like, or, sql } from "drizzle-orm";
 
 // SQLite path is configurable so Render can mount a persistent disk and point DATA_DIR at it.
 // Locally / on shared hosting it defaults to ./data.db (project root).
@@ -60,6 +67,77 @@ CREATE TABLE IF NOT EXISTS sitemap_runs (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   url_count INTEGER NOT NULL,
   generated_at INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS posts (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  slug TEXT NOT NULL UNIQUE,
+  title TEXT NOT NULL,
+  excerpt TEXT,
+  content TEXT NOT NULL,
+  cover_image_url TEXT,
+  type TEXT NOT NULL DEFAULT 'blog',
+  product_slug TEXT,
+  author_name TEXT DEFAULT 'Narmada Mobility',
+  meta_title TEXT,
+  meta_description TEXT,
+  meta_keywords TEXT,
+  published INTEGER DEFAULT 0,
+  published_at INTEGER,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS price_lists (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  brand TEXT NOT NULL,
+  version_label TEXT,
+  item_count INTEGER DEFAULT 0,
+  effective_date INTEGER,
+  notes TEXT,
+  uploaded_at INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS price_items (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  brand TEXT NOT NULL,
+  price_list_id INTEGER NOT NULL,
+  part_number TEXT NOT NULL,
+  part_number_clean TEXT NOT NULL,
+  description TEXT,
+  mrp REAL,
+  dealer_price REAL,
+  hsn_code TEXT,
+  gst_percent REAL,
+  uom TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_price_items_pn_clean ON price_items(part_number_clean);
+CREATE INDEX IF NOT EXISTS idx_price_items_brand ON price_items(brand);
+CREATE TABLE IF NOT EXISTS consignments (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  docket_number TEXT NOT NULL UNIQUE,
+  carrier TEXT,
+  origin TEXT NOT NULL,
+  destination TEXT NOT NULL,
+  customer_name TEXT,
+  customer_phone TEXT,
+  bundles_count INTEGER DEFAULT 1,
+  invoice_number TEXT,
+  invoice_amount REAL,
+  dispatch_date INTEGER,
+  eta_date INTEGER,
+  delivered_date INTEGER,
+  status TEXT NOT NULL DEFAULT 'pending',
+  notes TEXT,
+  created_by TEXT,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS admin_users (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  username TEXT NOT NULL UNIQUE,
+  password_hash TEXT NOT NULL,
+  role TEXT NOT NULL DEFAULT 'admin',
+  display_name TEXT,
+  active INTEGER DEFAULT 1,
+  created_at INTEGER NOT NULL
 );
 `);
 

@@ -1,26 +1,45 @@
-import { ReactNode, useEffect } from "react";
+import { ReactNode, useEffect, useState } from "react";
 import { Link, useLocation } from "wouter";
-import { useAdminAuth } from "@/lib/admin-auth";
+import { useAdminAuth, adminFetch } from "@/lib/admin-auth";
 import { Logo } from "@/components/Logo";
-import { LayoutDashboard, Package, MessageSquare, Map, Settings, LogOut, ExternalLink } from "lucide-react";
+import { LayoutDashboard, Package, MessageSquare, Map, Settings, LogOut, ExternalLink, FileText, Tag, Truck, Users } from "lucide-react";
 
 export function AdminLayout({ children, title }: { children: ReactNode; title: string }) {
   const { token, username, clear } = useAdminAuth();
   const [location, navigate] = useLocation();
+  const [role, setRole] = useState<"admin" | "logistics" | null>(null);
 
   useEffect(() => {
     if (!token) navigate("/admin");
   }, [token, navigate]);
 
+  // Fetch the current user's role so the sidebar can be filtered for sub-users
+  useEffect(() => {
+    if (!token) return;
+    adminFetch(token, "/api/v2/me")
+      .then((r) => r.ok ? r.json() : null)
+      .then((info) => { if (info?.role) setRole(info.role); })
+      .catch(() => {});
+  }, [token]);
+
   if (!token) return null;
 
-  const navItems = [
+  // Items the logistics role is allowed to see. Admin sees everything.
+  const LOGISTICS_ONLY = new Set(["/admin/consignments"]);
+  const allItems = [
     { href: "/admin/dashboard", label: "Dashboard", icon: LayoutDashboard },
     { href: "/admin/products", label: "Products", icon: Package },
+    { href: "/admin/blog", label: "Blog", icon: FileText },
+    { href: "/admin/price-lists", label: "Price Lists", icon: Tag },
+    { href: "/admin/consignments", label: "Consignments", icon: Truck },
     { href: "/admin/contacts", label: "Enquiries", icon: MessageSquare },
-    { href: "/admin/sitemap", label: "Sitemap", icon: Map },
+    { href: "/admin/sitemap", label: "Sitemap & SEO", icon: Map },
+    { href: "/admin/team", label: "Team", icon: Users },
     { href: "/admin/settings", label: "Settings", icon: Settings },
   ];
+  const navItems = role === "logistics"
+    ? allItems.filter((i) => LOGISTICS_ONLY.has(i.href))
+    : allItems;
 
   return (
     <div className="min-h-screen flex bg-slate-50 dark:bg-slate-950">
@@ -71,6 +90,7 @@ export function AdminLayout({ children, title }: { children: ReactNode; title: s
           {username && (
             <div className="px-3 pt-2 text-xs text-[hsl(220_60%_12%)]/75 font-medium">
               Signed in as <span className="font-semibold text-foreground">{username}</span>
+              {role && <span className={`ml-1.5 inline-block text-[9px] px-1.5 py-0.5 rounded uppercase font-bold tracking-wider ${role === "admin" ? "bg-purple-500/15 text-purple-700" : "bg-blue-500/15 text-blue-700"}`}>{role}</span>}
             </div>
           )}
         </div>
