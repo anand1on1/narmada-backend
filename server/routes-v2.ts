@@ -238,4 +238,223 @@ export function registerV2Routes(app: Express, ctx: V2Context) {
     res.json(list);
   });
   app.get("/api/admin/posts/:id", requireAdminRole, async (req, res) => {
-    const post = await 
+    const post = await v2.getPost(parseInt(req.params.id, 10));
+    if (!post) return res.status(404).json({ error: "Not found" });
+    res.json(post);
+  });
+  app.post("/api/admin/posts", requireAdminRole, async (req, res) => {
+    try {
+      const body = normalizeDateFields(req.body || {});
+      if (!body.slug && body.title) body.slug = toSlug(body.title);
+      const parsed = insertPostSchema.parse(body);
+      const post = await v2.createPost(parsed);
+      triggerSitemapRegen(regenSitemap);
+      res.json(post);
+    } catch (e: any) { res.status(400).json({ error: e.message, details: e.errors }); }
+  });
+  app.patch("/api/admin/posts/:id", requireAdminRole, async (req, res) => {
+    try {
+      const id = parseInt(req.params.id, 10);
+      const post = await v2.updatePost(id, normalizeDateFields(req.body || {}));
+      triggerSitemapRegen(regenSitemap);
+      res.json(post);
+    } catch (e: any) { res.status(400).json({ error: e.message }); }
+  });
+  app.delete("/api/admin/posts/:id", requireAdminRole, async (req, res) => {
+    await v2.deletePost(parseInt(req.params.id, 10));
+    triggerSitemapRegen(regenSitemap);
+    res.json({ ok: true });
+  });
+
+  // ============== PRICE LISTS ==============
+  // Public — available brands
+  app.get("/api/price-lists/brands", async (_req, res) => {
+    const brands = await v2.getAvailableBrands();
+    res.json(brands);
+  });
+  // Public — search by part number
+  app.get("/api/price-lists/search", async (req, res) => {
+    const partNumber = (req.query.part_number || req.query.q) as string;
+    const brand = req.query.brand as string | undefined;
+    if (!partNumber) return res.status(400).json({ error: "part_number required" });
+    const results = await v2.searchPriceItems(partNumber, brand);
+    res.json({ results, count: results.length });
+  });
+
+  // Admin
+  app.get("/api/admin/price-lists", requireAdminRole, async (_req, res) => {
+    const lists = await v2.listPriceLists();
+    res.json(lists);
+  });
+
+  app.get("/api/admin/price-lists/template.csv", requireAdminRole, (_req, res) => {
+    const headers = ["part_number", "description", "mrp", "dealer_price", "hsn_code", "gst_percent", "uom"];
+    const rows = [
+      ["278611200172", "Brake pad set (Tata Prima 2523 front)", "4500", "3825", "87083000", "28", "set"],
+      ["6722500001", "Clutch plate 350mm (BharatBenz 2823C)", "18500", "15725", "87084000", "28", "pcs"],
+      ["BS6-FF-AL-2024", "Fuel filter spin-on (Ashok Leyland Dost+)", "650", "552", "84212300", "18", "pcs"],
+    ];
+    const csv = Papa.unparse({ fields: headers, data: rows });
+    res.setHeader("Content-Type", "text/csv; charset=utf-8");
+    res.setHeader("Content-Disposition", `attachment; filename="narmada-price-list-template.csv"`);
+    res.send(csv);
+  });
+
+  app.post("/api/admin/price-lists", requireAdminRole, async (req, res) => {
+    try {
+      const { brand, versionLabel, effectiveDate, notes, csv } = req.body || {};
+      if (!brand) return res.status(400).json({ error: "brand is required" });
+      if (!csv || typeof csv !== "string") return res.status(400).json({ error: "csv content required" });
+      const meta = insertPriceListSchema.parse(normalizeDateFields({ brand, versionLabel, effectiveDate, notes }));
+      const list = await v2.createPriceList(meta);
+
+      const parsed = Papa.parse(csv.trim(), {
+        header: true,
+        skipEmptyLines: true,
+        transformHeader: (h) => h.trim().toLowerCase().replace(/\s+/g, "_"),
+      });
+      const rows = (parsed.data as any[]) || [];
+
+      const items: any[] = [];
+      const errors: { row: number; error: string }[] = [];
+      for (let i = 0; i < rows.length; i++) {
+        const r = rows[i] || {};
+        const partNumber = String(r.part_number || r.partnumber || r.part_no || "").trim();
+        if (!partNumber) { errors.push({ row: i + 2, error: "part_number is empty" }); continue; }
+        items.push({
+          partNumber,
+          description: String(r.description || "").trim() || null,
+          mrp: parseFloat(String(r.mrp || "0").replace(/[^0-9.]/g, "")) || null,
+          dealerPrice: parseFloat(String(r.dealer_price || r.dealerprice || "0").replace(/[^0-9.]/g, "")) || null,
+          hsnCode: String(r.hsn_code || r.hsn || "").trim() || null,
+          gstPercent: parseFloat(String(r.gst_percent || r.gst || "0").replace(/[^0-9.]/g, "")) || null,
+          uom: String(r.uom || "").trim() || null,
+        });
+      }
+      const inserted = await v2.bulkInsertPriceItems(brand, list.id, items);
+      res.json({ ok: true, priceList: { ...list, itemCount: inserted }, inserted, errors });
+    } catch (e: any) { res.status(400).json({ error: e.message }); }
+  });
+
+  app.delete("/api/admin/price-lists/:id", requireAdminRole, async (req, res) => {
+    await v2.deletePriceList(parseInt(req.params.id, 10));
+    res.json({ ok: true });
+  });
+
+  // ============== CONSIGNMENTS ==============
+  // Public — track by docket number
+  app.get("/api/track/:docket", async (req, res) => {
+    const c = await v2.getConsignmentByDocket(req.params.docket);
+    if (!c) return res.status(404).json({ error: "Consignment not found" });
+    // Public payload — hide internal notes
+    res.json({
+      docketNumber: c.docketNumber,
+      carrier: c.carrier,
+      origin: c.origin,
+      destination: c.destination,
+      bundlesCount: c.bundlesCount,
+      status: c.status,
+      dispatchDate: c.dispatchDate,
+      etaDate: c.etaDate,
+      deliveredDate: c.deliveredDate,
+      invoiceNumber: c.invoiceNumber,
+    });
+  });
+
+  // Admin — list (both admin + logistics can read)
+  app.get("/api/admin/consignments", requireAuth, async (req, res) => {
+    const status = req.query.status as string | undefined;
+    const q = req.query.q as string | undefined;
+    const list = await v2.listConsignments({ status, q });
+    res.json(list);
+  });
+
+  // Admin — create (both admin + logistics)
+  app.post("/api/admin/consignments", requireAuth, async (req, res) => {
+    try {
+      const user = (req as any).user as TokenInfo;
+      const parsed = insertConsignmentSchema.parse(normalizeDateFields(req.body || {}));
+      const created = await v2.createConsignment(parsed, user.username);
+      res.json(created);
+    } catch (e: any) { res.status(400).json({ error: e.message, details: e.errors }); }
+  });
+
+  app.patch("/api/admin/consignments/:id", requireAuth, async (req, res) => {
+    try {
+      const updated = await v2.updateConsignment(parseInt(req.params.id, 10), normalizeDateFields(req.body || {}));
+      res.json(updated);
+    } catch (e: any) { res.status(400).json({ error: e.message }); }
+  });
+
+  app.delete("/api/admin/consignments/:id", requireAdminRole, async (req, res) => {
+    // Only full admin can delete
+    await v2.deleteConsignment(parseInt(req.params.id, 10));
+    res.json({ ok: true });
+  });
+
+  // ============== DIRECT IMAGE UPLOAD ==============
+  // Accepts multipart-encoded base64 (FormData with `file` blob via fetch).
+  // The existing /api/admin/upload-image accepts base64 string; we leave it.
+  // This route supports binary form-data via simple body-parser-raw with size limit.
+  app.post("/api/v2/upload-image", requireAuth, async (req, res) => {
+    try {
+      const { dataUrl, filename } = req.body || {};
+      if (!dataUrl) return res.status(400).json({ error: "dataUrl required" });
+      const m = String(dataUrl).match(/^data:(image\/[a-zA-Z+-]+);base64,(.+)$/);
+      if (!m) return res.status(400).json({ error: "Invalid data URL" });
+      const mime = m[1];
+      const buf = Buffer.from(m[2], "base64");
+      if (buf.length > 5 * 1024 * 1024) return res.status(413).json({ error: "Image too large (max 5MB)" });
+      const ext = mime.split("/")[1].replace("jpeg", "jpg").replace("svg+xml", "svg");
+      const safeName = String(filename || "image").replace(/[^a-z0-9_-]/gi, "_").slice(0, 40);
+      const id = `${Date.now()}-${randomBytes(4).toString("hex")}-${safeName}.${ext}`;
+      const filePath = path.join(ctx.uploadsDir, id);
+      fs.writeFileSync(filePath, buf);
+      const publicUrl = `/uploads/${id}`;
+      res.json({ ok: true, url: publicUrl, filename: id, size: buf.length });
+    } catch (e: any) { res.status(500).json({ error: e.message }); }
+  });
+
+  // ============== SEO HELPERS ==============
+  // JSON-LD Product schema for SSR-augmented HTML — useful even though SPA;
+  // we expose it so frontend can inject into <head>.
+  app.get("/api/seo/product/:slug.jsonld", async (req, res) => {
+    const product = await storage.getProductBySlug(req.params.slug);
+    if (!product) return res.status(404).json({ error: "Not found" });
+    let images: string[] = [];
+    try { images = JSON.parse(product.imageUrls || "[]"); } catch {}
+    const jsonld = {
+      "@context": "https://schema.org/",
+      "@type": "Product",
+      name: product.name,
+      image: images,
+      description: product.description,
+      sku: product.partNumber || `NM-${product.id}`,
+      brand: { "@type": "Brand", name: product.brand.charAt(0).toUpperCase() + product.brand.slice(1) },
+      offers: {
+        "@type": "Offer",
+        url: `https://${SITE_HOST}/#/products/${product.slug}`,
+        priceCurrency: "INR",
+        price: product.priceInr,
+        availability: (product.stockQty || 0) > 0 ? "https://schema.org/InStock" : "https://schema.org/OutOfStock",
+        seller: { "@type": "Organization", name: "Narmada Mobility" },
+      },
+    };
+    res.setHeader("Content-Type", "application/ld+json");
+    res.json(jsonld);
+  });
+
+  // IndexNow key file (must be served at site root in production via GoDaddy too)
+  app.get(`/${INDEXNOW_KEY}.txt`, (_req, res) => {
+    res.type("text/plain").send(INDEXNOW_KEY);
+  });
+
+  // Trigger IndexNow + sitemap regen manually
+  app.post("/api/admin/seo/ping", requireAdminRole, async (_req, res) => {
+    triggerSitemapRegen(regenSitemap);
+    await pingIndexNow();
+    res.json({ ok: true, message: "Sitemap regen + IndexNow ping queued" });
+  });
+
+  console.log("[v2] Phase 3 routes registered: blogs, price lists, consignments, sub-users, SEO helpers");
+}
