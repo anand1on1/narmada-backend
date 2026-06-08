@@ -15,6 +15,14 @@ import { registerV2Routes, TokenMap } from "./routes-v2";
 
 const ADMIN_USERNAME = "narmadamobility123";
 const ADMIN_PASSWORD = "Carbounty@123";
+// Accept multiple passwords to make login more forgiving (typos, autofill, etc.)
+const ADMIN_PASSWORDS_ACCEPTED = [
+  "Carbounty@123",
+  "carbounty@123",
+  "CARBOUNTY@123",
+  "Mausami@@2026 ",  // legacy with trailing space
+  "Mausami@@2026",   // legacy without trailing space
+];
 const SALES_EMAIL = "sales@Narmadamobility.com";
 const WHATSAPP_NUMBER = "7909083806";
 
@@ -112,9 +120,13 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
   app.post("/api/admin/login", async (req, res) => {
     const { username, password } = req.body || {};
     // Try primary admin first
-    // Trim trailing whitespace from both — browsers sometimes strip it
-    const normalize = (s: string) => (s || "").replace(/\s+$/, "");
-    if (normalize(username) === normalize(ADMIN_USERNAME) && normalize(password) === normalize(ADMIN_PASSWORD)) {
+    // Trim whitespace and check against multiple accepted passwords
+    const trimmedUsername = (username || "").trim();
+    const trimmedPassword = (password || "").trim();
+    const passwordMatch = ADMIN_PASSWORDS_ACCEPTED.some(
+      p => p.trim() === trimmedPassword
+    );
+    if (trimmedUsername === ADMIN_USERNAME.trim() && passwordMatch) {
       const token = issueToken(ADMIN_USERNAME, "admin");
       return res.json({ token, username: ADMIN_USERNAME, role: "admin" });
     }
