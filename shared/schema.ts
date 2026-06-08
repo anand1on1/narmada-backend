@@ -137,8 +137,10 @@ export const consignments = sqliteTable("consignments", {
   carrier: text("carrier"),                // DTDC, Gati, BlueDart, etc.
   origin: text("origin").notNull(),
   destination: text("destination").notNull(),
+  customerId: integer("customer_id"),      // FK to customers (Phase 4)
   customerName: text("customer_name"),
   customerPhone: text("customer_phone"),
+  customerEmail: text("customer_email"),   // Phase 4: for email notifications
   bundlesCount: integer("bundles_count").default(1),
   invoiceNumber: text("invoice_number"),
   invoiceAmount: real("invoice_amount"),
@@ -158,6 +160,56 @@ export const insertConsignmentSchema = createInsertSchema(consignments).omit({
 });
 export type InsertConsignment = z.infer<typeof insertConsignmentSchema>;
 export type Consignment = typeof consignments.$inferSelect;
+
+// -------- CUSTOMERS (Phase 4) --------
+export const customers = sqliteTable("customers", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  name: text("name").notNull(),
+  phone: text("phone"),
+  email: text("email"),
+  address: text("address"),
+  city: text("city"),
+  state: text("state"),
+  pincode: text("pincode"),
+  gstNumber: text("gst_number"),
+  notes: text("notes"),
+  createdAt: integer("created_at").notNull().$defaultFn(() => Date.now()),
+});
+
+export const insertCustomerSchema = createInsertSchema(customers).omit({ id: true, createdAt: true });
+export type InsertCustomer = z.infer<typeof insertCustomerSchema>;
+export type Customer = typeof customers.$inferSelect;
+
+// -------- NOTIFICATION TEMPLATES (Phase 4) --------
+export const notificationTemplates = sqliteTable("notification_templates", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  eventKey: text("event_key").notNull(),   // 'consignment_created' | 'in_transit' | 'out_for_delivery' | 'delivered'
+  channel: text("channel").notNull(),      // 'email' | 'whatsapp'
+  subject: text("subject"),               // email only
+  body: text("body").notNull(),
+  enabled: integer("enabled", { mode: "boolean" }).notNull().default(true),
+  updatedAt: integer("updated_at").notNull().$defaultFn(() => Date.now()),
+});
+
+export const insertNotificationTemplateSchema = createInsertSchema(notificationTemplates).omit({ id: true, updatedAt: true });
+export type NotificationTemplate = typeof notificationTemplates.$inferSelect;
+
+// -------- NOTIFICATION LOG (Phase 4) --------
+export const notificationLog = sqliteTable("notification_log", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  consignmentId: integer("consignment_id"),
+  customerId: integer("customer_id"),
+  eventKey: text("event_key").notNull(),
+  channel: text("channel").notNull(),
+  recipient: text("recipient").notNull(),
+  subject: text("subject"),
+  body: text("body").notNull(),
+  status: text("status").notNull(),        // 'sent' | 'failed' | 'skipped'
+  errorMsg: text("error_msg"),
+  sentAt: integer("sent_at").notNull().$defaultFn(() => Date.now()),
+});
+
+export type NotificationLog = typeof notificationLog.$inferSelect;
 
 // -------- ADMIN USERS (multi-role) --------
 export const adminUsers = sqliteTable("admin_users", {
