@@ -7,8 +7,10 @@ import fs from "node:fs";
 import Papa from "papaparse";
 import { storage } from "./storage";
 import * as v2 from "./storage-v2";
+import { sendNotification, buildTrackingLink } from "./notifications";
 import {
   insertPostSchema, insertConsignmentSchema, insertPriceListSchema,
+  insertCustomerSchema,
 } from "@shared/schema";
 import type { AdminUser } from "@shared/schema";
 
@@ -373,15 +375,90 @@ export function registerV2Routes(app: Express, ctx: V2Context) {
   app.post("/api/admin/consignments", requireAuth, async (req, res) => {
     try {
       const user = (req as any).user as TokenInfo;
-      const parsed = insertConsignmentSchema.parse(normalizeDateFields(req.body || {}));
+      const body = normalizeDateFields(req.body || {});
+
+      // If customerId provided, look up customer and fill denormalized fields
+      if (body.customerId) {
+        const customer = await v2.getCustomer(parseInt(body.customerId, 10));
+        if (customer) {
+          if (!body.customerName) body.customerName = customer.name;
+          if (!body.customerPhone) body.customerPhone = customer.phone || null;
+          if (!body.customerEmail) body.customerEmail = customer.email || null;
+        }
+      }
+
+      const parsed = insertConsignmentSchema.parse(body);
       const created = await v2.createConsignment(parsed, user.username);
+
+      // Fire notification asynchronously (don't block response)
+      const trackingLink = buildTrackingLink(created.docketNumber);
+      sendNotification("consignment_created", {
+        consignmentId: created.id,
+        customerId: created.customerId ?? undefined,
+        customerName: created.customerName || "Customer",
+        customerEmail: created.customerEmail ?? undefined,
+        customerPhone: created.customerPhone ?? undefined,
+        docket: created.docketNumber,
+        origin: created.origin,
+        destination: created.destination,
+        status: created.status,
+        trackingLink,
+      }).catch((e: any) => console.error("[notifications] send error:", e.message));
+
       res.json(created);
     } catch (e: any) { res.status(400).json({ error: e.message, details: e.errors }); }
   });
 
   app.patch("/api/admin/consignments/:id", requireAuth, async (req, res) => {
     try {
-      const updated = await v2.updateConsignment(parseInt(req.params.id, 10), normalizeDateFields(req.body || {}));
+      const id = parseInt(req.params.id, 10);
+      const body = normalizeDateFields(req.body || {});
+
+      // Capture old status before update (for notification trigger)
+      const existing = await v2.getConsignmentById(id);
+      const oldStatus = existing?.status;
+
+      // If customerId provided in update, fill denormalized fields
+      if (body.customerId) {
+        const customer = await v2.getCustomer(parseInt(body.customerId, 10));
+        if (customer) {
+          if (!body.customerName) body.customerName = customer.name;
+          if (!body.customerPhone && customer.phone) body.customerPhone = customer.phone;
+          if (!body.customerEmail && customer.email) body.customerEmail = customer.email;
+        }
+      }
+
+      const updated = await v2.updateConsignment(id, body);
+
+      // Fire notification if status changed
+      if (updated && body.status && body.status !== oldStatus) {
+        const notifStatuses: Record<string, string> = {
+          in_transit: "in_transit",
+          out_for_delivery: "out_for_delivery",
+          delivered: "delivered",
+        };
+        const eventKey = notifStatuses[body.status];
+        if (eventKey) {
+          const trackingLink = buildTrackingLink(updated.docketNumber);
+          const fmtDate = (ts?: number | null) => ts ? new Date(ts).toLocaleDateString("en-IN") : "";
+          sendNotification(eventKey, {
+            consignmentId: updated.id,
+            customerId: updated.customerId ?? undefined,
+            customerName: updated.customerName || "Customer",
+            customerEmail: updated.customerEmail ?? undefined,
+            customerPhone: updated.customerPhone ?? undefined,
+            docket: updated.docketNumber,
+            origin: updated.origin,
+            destination: updated.destination,
+            status: updated.status,
+            dispatchDate: fmtDate(updated.dispatchDate),
+            etaDate: fmtDate(updated.etaDate),
+            deliveredDate: fmtDate(updated.deliveredDate),
+            trackingLink,
+          }).catch((e: any) => console.error("[notifications] send error:", e.message));
+        }
+      }
+
       res.json(updated);
     } catch (e: any) { res.status(400).json({ error: e.message }); }
   });
@@ -459,5 +536,78 @@ export function registerV2Routes(app: Express, ctx: V2Context) {
     res.json({ ok: true, message: "Sitemap regen + IndexNow ping queued" });
   });
 
-  console.log("[v2] Phase 3 routes registered: blogs, price lists, consignments, sub-users, SEO helpers");
+  // ============== CUSTOMERS (Phase 4) ==============
+  app.get("/api/admin/customers", requireAuth, async (req, res) => {
+    try {
+      const q = req.query.q as string | undefined;
+      const list = await v2.getCustomers(q);
+      // Augment with consignment count
+      const withCount = await Promise.all(list.map(async (c) => ({
+        ...c,
+        consignmentCount: await v2.getCustomerConsignmentCount(c.id),
+      })));
+      res.json(withCount);
+    } catch (e: any) { res.status(500).json({ error: e.message }); }
+  });
+
+  app.get("/api/admin/customers/:id", requireAuth, async (req, res) => {
+    const customer = await v2.getCustomer(parseInt(req.params.id, 10));
+    if (!customer) return res.status(404).json({ error: "Customer not found" });
+    res.json(customer);
+  });
+
+  app.post("/api/admin/customers", requireAuth, async (req, res) => {
+    try {
+      const parsed = insertCustomerSchema.parse(req.body || {});
+      const customer = await v2.createCustomer(parsed);
+      res.json(customer);
+    } catch (e: any) { res.status(400).json({ error: e.message, details: e.errors }); }
+  });
+
+  app.patch("/api/admin/customers/:id", requireAuth, async (req, res) => {
+    try {
+      const id = parseInt(req.params.id, 10);
+      const customer = await v2.updateCustomer(id, req.body || {});
+      if (!customer) return res.status(404).json({ error: "Customer not found" });
+      res.json(customer);
+    } catch (e: any) { res.status(400).json({ error: e.message }); }
+  });
+
+  app.delete("/api/admin/customers/:id", requireAdminRole, async (req, res) => {
+    try {
+      const id = parseInt(req.params.id, 10);
+      const count = await v2.getCustomerConsignmentCount(id);
+      if (count > 0) return res.status(400).json({ error: `Cannot delete: customer has ${count} consignment(s)` });
+      await v2.deleteCustomer(id);
+      res.json({ ok: true });
+    } catch (e: any) { res.status(500).json({ error: e.message }); }
+  });
+
+  // ============== NOTIFICATION TEMPLATES (Phase 4) ==============
+  app.get("/api/admin/notification-templates", requireAuth, async (_req, res) => {
+    try {
+      const templates = await v2.getNotificationTemplates();
+      res.json(templates);
+    } catch (e: any) { res.status(500).json({ error: e.message }); }
+  });
+
+  app.patch("/api/admin/notification-templates/:id", requireAdminRole, async (req, res) => {
+    try {
+      const id = parseInt(req.params.id, 10);
+      const { subject, body, enabled } = req.body || {};
+      const updated = await v2.updateNotificationTemplate(id, { subject, body, enabled });
+      res.json(updated);
+    } catch (e: any) { res.status(400).json({ error: e.message }); }
+  });
+
+  // ============== NOTIFICATION LOG (Phase 4) ==============
+  app.get("/api/admin/consignments/:id/notifications", requireAuth, async (req, res) => {
+    try {
+      const id = parseInt(req.params.id, 10);
+      const log = await v2.getNotificationLog(id);
+      res.json(log);
+    } catch (e: any) { res.status(500).json({ error: e.message }); }
+  });
+
+  console.log("[v2] Phase 3+4 routes registered: blogs, price lists, consignments, sub-users, SEO helpers, customers, notifications");
 }
