@@ -14,7 +14,7 @@ import { registerBulkRoutes } from "./bulk";
 import { registerV2Routes, TokenMap } from "./routes-v2";
 
 const ADMIN_USERNAME = "narmadamobility123";
-const ADMIN_PASSWORD = "Mausami@@2026 "; // exact as requested (trailing space preserved as user wrote it)
+const ADMIN_PASSWORD = "Carbounty@123";
 const SALES_EMAIL = "sales@Narmadamobility.com";
 const WHATSAPP_NUMBER = "7909083806";
 
@@ -112,7 +112,9 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
   app.post("/api/admin/login", async (req, res) => {
     const { username, password } = req.body || {};
     // Try primary admin first
-    if (username === ADMIN_USERNAME && password === ADMIN_PASSWORD) {
+    // Trim trailing whitespace from both — browsers sometimes strip it
+    const normalize = (s: string) => (s || "").replace(/\s+$/, "");
+    if (normalize(username) === normalize(ADMIN_USERNAME) && normalize(password) === normalize(ADMIN_PASSWORD)) {
       const token = issueToken(ADMIN_USERNAME, "admin");
       return res.json({ token, username: ADMIN_USERNAME, role: "admin" });
     }
