@@ -219,4 +219,112 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
     try {
       const { dataUrl, filename } = req.body || {};
       if (!dataUrl) return res.status(400).json({ error: "Missing dataUrl" });
-      const match = /^data:(image\/[a
+      const match = /^data:(image\/[a-zA-Z+]+);base64,(.*)$/.exec(dataUrl);
+      let ext = "png", b64 = dataUrl;
+      if (match) { ext = match[1].split("/")[1].replace("jpeg", "jpg"); b64 = match[2]; }
+      const buf = Buffer.from(b64, "base64");
+      if (buf.length > 8 * 1024 * 1024) return res.status(413).json({ error: "Image too large (max 8MB)" });
+      const id = randomBytes(8).toString("hex");
+      const base = filename ? toSlug(filename.replace(/\.[^.]+$/, "")) : id;
+      const finalName = `${base}-${id}.${ext}`;
+      fs.writeFileSync(path.join(UPLOADS_DIR, finalName), buf);
+      // Return absolute URL so frontend on different domain (GoDaddy) can load images from Render
+      const proto = (req.headers['x-forwarded-proto'] as string) || req.protocol || 'https';
+      const host = req.get('host');
+      const absoluteUrl = `${proto}://${host}/uploads/${finalName}`;
+      res.json({ url: absoluteUrl, path: `/uploads/${finalName}` });
+    } catch (e: any) { res.status(500).json({ error: e.message }); }
+  });
+
+  // -------- CONTACT FORM --------
+  app.post("/api/contact", async (req, res) => {
+    try {
+      const parsed = insertContactSchema.parse(req.body);
+      const created = await storage.createContact(parsed);
+      const mail = await sendContactEmail({
+        name: parsed.name,
+        email: parsed.email,
+        phone: parsed.phone || null,
+        country: parsed.country || null,
+        subject: parsed.subject || null,
+        productInterest: parsed.productInterest || null,
+        message: parsed.message,
+      });
+      console.log(`[contact] #${created.id} from ${parsed.email} — email: ${mail.ok ? "sent" : "not sent (" + mail.via + (mail.error ? ": " + mail.error : "") + ")"}`);
+      res.json({ ok: true, id: created.id, deliveredTo: SALES_EMAIL, emailSent: mail.ok });
+    } catch (e: any) { res.status(400).json({ error: e.message, details: e.errors }); }
+  });
+  app.get("/api/admin/contacts", requireAdmin, async (_req, res) => res.json(await storage.listContacts()));
+  app.patch("/api/admin/contacts/:id", requireAdmin, async (req, res) => {
+    await storage.updateContactStatus(parseInt(req.params.id, 10), req.body.status || "replied");
+    res.json({ ok: true });
+  });
+
+  // -------- SETTINGS (admin) --------
+  app.get("/api/admin/settings", requireAdmin, async (_req, res) => {
+    const rate = await storage.getSetting("usd_inr_rate");
+    res.json({ usdInr: parseFloat(rate || "83.5") });
+  });
+  app.patch("/api/admin/settings", requireAdmin, async (req, res) => {
+    try {
+      const v = parseFloat(req.body.usdInr);
+      if (Number.isNaN(v) || v <= 0) throw new Error("Invalid USD/INR rate");
+      await storage.setSetting("usd_inr_rate", String(v));
+      res.json({ ok: true, usdInr: v });
+    } catch (e: any) { res.status(400).json({ error: e.message }); }
+  });
+
+  // -------- SITEMAP --------
+  app.get("/sitemap.xml", async (req, res) => {
+    const baseUrl = (req.protocol + "://" + req.get("host")) || "https://narmadamobility.com";
+    const allProducts = await storage.listProducts({ activeOnly: true });
+    const urls = buildSitemapUrls(allProducts, baseUrl);
+    const xml = `<?xml version="1.0" encoding="UTF-8"?>\n<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n${urls.join("\n")}\n</urlset>`;
+    res.set("Content-Type", "application/xml").send(xml);
+  });
+
+  app.get("/robots.txt", (_req, res) => {
+    res.type("text/plain").send(`User-agent: *\nAllow: /\nDisallow: /admin\nDisallow: /api/\nSitemap: /sitemap.xml\n`);
+  });
+
+  app.post("/api/admin/sitemap/regenerate", requireAdmin, async (req, res) => {
+    const baseUrl = req.body.baseUrl || "https://narmadamobility.com";
+    const allProducts = await storage.listProducts({ activeOnly: true });
+    const urls = buildSitemapUrls(allProducts, baseUrl);
+    const xml = `<?xml version="1.0" encoding="UTF-8"?>\n<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n${urls.join("\n")}\n</urlset>`;
+    fs.writeFileSync(path.join(PUBLIC_DIR, "sitemap.xml"), xml);
+    await storage.logSitemapRun(urls.length);
+    res.json({ ok: true, urlCount: urls.length, sample: urls.slice(0, 6), xmlSize: xml.length });
+  });
+
+  app.get("/api/admin/sitemap/status", requireAdmin, async (_req, res) => {
+    const last = await storage.getLatestSitemapRun();
+    res.json({ last });
+  });
+
+  // Download the last generated sitemap
+  app.get("/api/admin/sitemap/download", requireAdmin, (_req, res) => {
+    const p = path.join(PUBLIC_DIR, "sitemap.xml");
+    if (!fs.existsSync(p)) return res.status(404).json({ error: "Generate first" });
+    res.download(p, "sitemap.xml");
+  });
+
+  // -------- Phase 3: CMS / Price Checker / Consignments / Sub-users / SEO helpers --------
+  registerV2Routes(app, {
+    tokenMap: adminTokens,
+    primaryAdminUsername: ADMIN_USERNAME,
+    primaryAdminPassword: ADMIN_PASSWORD,
+    uploadsDir: UPLOADS_DIR,
+    regenSitemap: async () => {
+      const baseUrl = `https://${process.env.SITE_HOST || "narmadamobility.com"}`;
+      const allProducts = await storage.listProducts({ activeOnly: true });
+      const urls = buildSitemapUrls(allProducts, baseUrl);
+      const xml = `<?xml version="1.0" encoding="UTF-8"?>\n<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n${urls.join("\n")}\n</urlset>`;
+      fs.writeFileSync(path.join(PUBLIC_DIR, "sitemap.xml"), xml);
+      await storage.logSitemapRun(urls.length);
+      return { urlCount: urls.length };
+    },
+  });
+
+  return httpServer;
+}

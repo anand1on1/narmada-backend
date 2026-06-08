@@ -214,4 +214,108 @@ export async function getCustomerConsignmentCount(id: number): Promise<number> {
 
 // -------- NOTIFICATION TEMPLATES (Phase 4) --------
 export async function getNotificationTemplates(): Promise<NotificationTemplate[]> {
-  return db.select().from(notificationTemplates).orderBy(notificationTemplates.eventKey, notificat
+  return db.select().from(notificationTemplates).orderBy(notificationTemplates.eventKey, notificationTemplates.channel).all();
+}
+export async function getTemplatesByEvent(eventKey: string): Promise<NotificationTemplate[]> {
+  return db.select().from(notificationTemplates).where(eq(notificationTemplates.eventKey, eventKey)).all();
+}
+export async function updateNotificationTemplate(
+  id: number,
+  data: { subject?: string; body?: string; enabled?: boolean }
+): Promise<NotificationTemplate> {
+  const updated: any = { ...data, updatedAt: Date.now() };
+  return db.update(notificationTemplates).set(updated).where(eq(notificationTemplates.id, id)).returning().get();
+}
+
+// -------- NOTIFICATION LOG (Phase 4) --------
+export async function logNotification(data: {
+  consignmentId: number | null;
+  customerId: number | null;
+  eventKey: string;
+  channel: string;
+  recipient: string;
+  subject: string | null | undefined;
+  body: string;
+  status: string;
+  errorMsg?: string | null;
+}): Promise<NotificationLog> {
+  const row: any = {
+    consignmentId: data.consignmentId ?? null,
+    customerId: data.customerId ?? null,
+    eventKey: data.eventKey,
+    channel: data.channel,
+    recipient: data.recipient,
+    subject: data.subject ?? null,
+    body: data.body,
+    status: data.status,
+    errorMsg: data.errorMsg ?? null,
+    sentAt: Date.now(),
+  };
+  return db.insert(notificationLog).values(row).returning().get();
+}
+export async function getNotificationLog(consignmentId: number): Promise<NotificationLog[]> {
+  return db.select().from(notificationLog)
+    .where(eq(notificationLog.consignmentId, consignmentId))
+    .orderBy(desc(notificationLog.sentAt))
+    .all();
+}
+
+// -------- DEFAULT TEMPLATES SEED (Phase 4) --------
+const DEFAULT_TEMPLATES = [
+  {
+    eventKey: "consignment_created", channel: "email",
+    subject: "Order Received — Docket {docket}",
+    body: "Dear {customerName},\n\nWe have received your order. Your consignment will be dispatched soon.\n\nDocket: {docket}\nFrom: {origin}\nTo: {destination}\n\nYou can track your consignment anytime here:\n{trackingLink}\n\nThank you for choosing Narmada Mobility.\n\nRegards,\nNarmada Mobility\nsales@Narmadamobility.com\n+91 79090 83806",
+  },
+  {
+    eventKey: "consignment_created", channel: "whatsapp",
+    subject: null,
+    body: "Hi {customerName},\n\nYour order has been received. \n\n📦 Docket: {docket}\n🚚 {origin} → {destination}\n\nTrack live status: {trackingLink}\n\n— Narmada Mobility",
+  },
+  {
+    eventKey: "in_transit", channel: "email",
+    subject: "Your consignment is in transit — Docket {docket}",
+    body: "Dear {customerName},\n\nYour consignment is now in transit.\n\nDocket: {docket}\nFrom: {origin}\nTo: {destination}\nETA: {etaDate}\n\nTrack live status:\n{trackingLink}\n\nRegards,\nNarmada Mobility",
+  },
+  {
+    eventKey: "in_transit", channel: "whatsapp",
+    subject: null,
+    body: "Hi {customerName},\n\n🚚 Your order is in transit.\n\n📦 Docket: {docket}\n📅 ETA: {etaDate}\n\nTrack: {trackingLink}\n\n— Narmada Mobility",
+  },
+  {
+    eventKey: "out_for_delivery", channel: "email",
+    subject: "Out for delivery — Docket {docket}",
+    body: "Dear {customerName},\n\nYour consignment is out for delivery today.\n\nDocket: {docket}\nDestination: {destination}\n\nPlease ensure someone is available to receive it.\n\nTrack: {trackingLink}\n\nRegards,\nNarmada Mobility",
+  },
+  {
+    eventKey: "out_for_delivery", channel: "whatsapp",
+    subject: null,
+    body: "Hi {customerName},\n\n🛵 Out for delivery today.\n\n📦 Docket: {docket}\n📍 {destination}\n\nPlease be available.\n\nTrack: {trackingLink}\n\n— Narmada Mobility",
+  },
+  {
+    eventKey: "delivered", channel: "email",
+    subject: "Delivered — Docket {docket}",
+    body: "Dear {customerName},\n\nYour consignment has been delivered. Thank you for choosing Narmada Mobility.\n\nDocket: {docket}\nDelivered on: {deliveredDate}\n\nWe would love to hear your feedback. Reply to this email or WhatsApp us at +91 79090 83806.\n\nRegards,\nNarmada Mobility",
+  },
+  {
+    eventKey: "delivered", channel: "whatsapp",
+    subject: null,
+    body: "Hi {customerName},\n\n✅ Your order has been delivered.\n\n📦 Docket: {docket}\n📅 {deliveredDate}\n\nThank you for choosing Narmada Mobility. Reply with feedback!",
+  },
+];
+
+// Seed default templates — INSERT OR IGNORE using the unique index on (event_key, channel)
+(function seedDefaultTemplates() {
+  try {
+    const stmt = sqlite.prepare(`
+      INSERT OR IGNORE INTO notification_templates (event_key, channel, subject, body, enabled, updated_at)
+      VALUES (?, ?, ?, ?, 1, ?)
+    `);
+    const now = Date.now();
+    for (const t of DEFAULT_TEMPLATES) {
+      stmt.run(t.eventKey, t.channel, t.subject ?? null, t.body, now);
+    }
+  } catch (e: any) {
+    console.error("[storage-v2] Failed to seed default templates:", e.message);
+  }
+})();
