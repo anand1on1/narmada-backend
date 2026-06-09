@@ -47,6 +47,10 @@ export interface NotificationContext {
   etaDate?: string;
   deliveredDate?: string;
   trackingLink: string;
+  invoiceNumber?: string;
+  invoiceAmount?: string | number;
+  bundlesCount?: number;
+  carrier?: string;
 }
 
 export function buildTrackingLink(docket: string): string {
@@ -65,6 +69,7 @@ export async function sendNotification(eventKey: string, ctx: NotificationContex
   const vars: Record<string, string> = {
     customerName: ctx.customerName || "Customer",
     docket: ctx.docket,
+    docketNumber: ctx.docket,
     origin: ctx.origin || "",
     destination: ctx.destination || "",
     status: ctx.status || "",
@@ -72,6 +77,10 @@ export async function sendNotification(eventKey: string, ctx: NotificationContex
     etaDate: ctx.etaDate || "",
     deliveredDate: ctx.deliveredDate || "",
     trackingLink: ctx.trackingLink,
+    invoiceNumber: ctx.invoiceNumber || "",
+    invoiceAmount: ctx.invoiceAmount != null && ctx.invoiceAmount !== "" ? String(ctx.invoiceAmount) : "",
+    bundlesCount: ctx.bundlesCount != null ? String(ctx.bundlesCount) : "",
+    carrier: ctx.carrier || "",
   };
 
   for (const t of templates) {

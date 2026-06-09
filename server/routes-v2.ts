@@ -392,6 +392,7 @@ export function registerV2Routes(app: Express, ctx: V2Context) {
 
       // Fire notification asynchronously (don't block response)
       const trackingLink = buildTrackingLink(created.docketNumber);
+      const fmtDateCreate = (ts?: number | null) => ts ? new Date(ts).toLocaleDateString("en-IN") : "";
       sendNotification("consignment_created", {
         consignmentId: created.id,
         customerId: created.customerId ?? undefined,
@@ -402,6 +403,13 @@ export function registerV2Routes(app: Express, ctx: V2Context) {
         origin: created.origin,
         destination: created.destination,
         status: created.status,
+        dispatchDate: fmtDateCreate(created.dispatchDate),
+        etaDate: fmtDateCreate(created.etaDate),
+        deliveredDate: fmtDateCreate(created.deliveredDate),
+        invoiceNumber: created.invoiceNumber ?? undefined,
+        invoiceAmount: created.invoiceAmount ?? undefined,
+        bundlesCount: created.bundlesCount ?? undefined,
+        carrier: created.carrier ?? undefined,
         trackingLink,
       }).catch((e: any) => console.error("[notifications] send error:", e.message));
 
@@ -454,6 +462,10 @@ export function registerV2Routes(app: Express, ctx: V2Context) {
             dispatchDate: fmtDate(updated.dispatchDate),
             etaDate: fmtDate(updated.etaDate),
             deliveredDate: fmtDate(updated.deliveredDate),
+            invoiceNumber: updated.invoiceNumber ?? undefined,
+            invoiceAmount: updated.invoiceAmount ?? undefined,
+            bundlesCount: updated.bundlesCount ?? undefined,
+            carrier: updated.carrier ?? undefined,
             trackingLink,
           }).catch((e: any) => console.error("[notifications] send error:", e.message));
         }

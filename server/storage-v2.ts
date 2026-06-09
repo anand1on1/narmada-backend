@@ -265,42 +265,42 @@ const DEFAULT_TEMPLATES = [
   {
     eventKey: "consignment_created", channel: "email",
     subject: "Order Received — Docket {docket}",
-    body: "Dear {customerName},\n\nWe have received your order. Your consignment will be dispatched soon.\n\nDocket: {docket}\nFrom: {origin}\nTo: {destination}\n\nYou can track your consignment anytime here:\n{trackingLink}\n\nThank you for choosing Narmada Mobility.\n\nRegards,\nNarmada Mobility\nsales@Narmadamobility.com\n+91 79090 83806",
+    body: "Dear {customerName},\n\nWe have received your order. Your consignment will be dispatched soon.\n\nDocket: {docket}\nInvoice: {invoiceNumber}\nInvoice Value: ₹{invoiceAmount}\nBundles: {bundlesCount}\nFrom: {origin}\nTo: {destination}\nCarrier: {carrier}\n\nYou can track your consignment anytime here:\n{trackingLink}\n\nThank you for choosing Narmada Mobility.\n\nRegards,\nNarmada Mobility\nsales@Narmadamobility.com\n+91 79090 83806",
   },
   {
     eventKey: "consignment_created", channel: "whatsapp",
     subject: null,
-    body: "Hi {customerName},\n\nYour order has been received. \n\n📦 Docket: {docket}\n🚚 {origin} → {destination}\n\nTrack live status: {trackingLink}\n\n— Narmada Mobility",
+    body: "Hi {customerName},\n\nYour order has been received.\n\n📦 Docket: {docket}\n🧾 Invoice: {invoiceNumber}\n💰 Invoice Value: ₹{invoiceAmount}\n📦 Bundles: {bundlesCount}\n🚚 {origin} → {destination}\n\nTrack live status: {trackingLink}\n\n— Narmada Mobility",
   },
   {
     eventKey: "in_transit", channel: "email",
     subject: "Your consignment is in transit — Docket {docket}",
-    body: "Dear {customerName},\n\nYour consignment is now in transit.\n\nDocket: {docket}\nFrom: {origin}\nTo: {destination}\nETA: {etaDate}\n\nTrack live status:\n{trackingLink}\n\nRegards,\nNarmada Mobility",
+    body: "Dear {customerName},\n\nYour consignment is now in transit.\n\nDocket: {docket}\nInvoice: {invoiceNumber}\nInvoice Value: ₹{invoiceAmount}\nBundles: {bundlesCount}\nFrom: {origin}\nTo: {destination}\nCarrier: {carrier}\nETA: {etaDate}\n\nTrack live status:\n{trackingLink}\n\nRegards,\nNarmada Mobility",
   },
   {
     eventKey: "in_transit", channel: "whatsapp",
     subject: null,
-    body: "Hi {customerName},\n\n🚚 Your order is in transit.\n\n📦 Docket: {docket}\n📅 ETA: {etaDate}\n\nTrack: {trackingLink}\n\n— Narmada Mobility",
+    body: "Hi {customerName},\n\n🚚 Your order is in transit.\n\n📦 Docket: {docket}\n🧾 Invoice: {invoiceNumber}\n💰 ₹{invoiceAmount}\n📅 ETA: {etaDate}\n\nTrack: {trackingLink}\n\n— Narmada Mobility",
   },
   {
     eventKey: "out_for_delivery", channel: "email",
     subject: "Out for delivery — Docket {docket}",
-    body: "Dear {customerName},\n\nYour consignment is out for delivery today.\n\nDocket: {docket}\nDestination: {destination}\n\nPlease ensure someone is available to receive it.\n\nTrack: {trackingLink}\n\nRegards,\nNarmada Mobility",
+    body: "Dear {customerName},\n\nYour consignment is out for delivery today.\n\nDocket: {docket}\nInvoice: {invoiceNumber}\nInvoice Value: ₹{invoiceAmount}\nBundles: {bundlesCount}\nDestination: {destination}\n\nPlease ensure someone is available to receive it.\n\nTrack: {trackingLink}\n\nRegards,\nNarmada Mobility",
   },
   {
     eventKey: "out_for_delivery", channel: "whatsapp",
     subject: null,
-    body: "Hi {customerName},\n\n🛵 Out for delivery today.\n\n📦 Docket: {docket}\n📍 {destination}\n\nPlease be available.\n\nTrack: {trackingLink}\n\n— Narmada Mobility",
+    body: "Hi {customerName},\n\n🛵 Out for delivery today.\n\n📦 Docket: {docket}\n🧾 Invoice: {invoiceNumber}\n📍 {destination}\n\nPlease be available.\n\nTrack: {trackingLink}\n\n— Narmada Mobility",
   },
   {
     eventKey: "delivered", channel: "email",
     subject: "Delivered — Docket {docket}",
-    body: "Dear {customerName},\n\nYour consignment has been delivered. Thank you for choosing Narmada Mobility.\n\nDocket: {docket}\nDelivered on: {deliveredDate}\n\nWe would love to hear your feedback. Reply to this email or WhatsApp us at +91 79090 83806.\n\nRegards,\nNarmada Mobility",
+    body: "Dear {customerName},\n\nYour consignment has been delivered. Thank you for choosing Narmada Mobility.\n\nDocket: {docket}\nInvoice: {invoiceNumber}\nInvoice Value: ₹{invoiceAmount}\nDelivered on: {deliveredDate}\n\nWe would love to hear your feedback. Reply to this email or WhatsApp us at +91 79090 83806.\n\nRegards,\nNarmada Mobility",
   },
   {
     eventKey: "delivered", channel: "whatsapp",
     subject: null,
-    body: "Hi {customerName},\n\n✅ Your order has been delivered.\n\n📦 Docket: {docket}\n📅 {deliveredDate}\n\nThank you for choosing Narmada Mobility. Reply with feedback!",
+    body: "Hi {customerName},\n\n✅ Your order has been delivered.\n\n📦 Docket: {docket}\n🧾 Invoice: {invoiceNumber}\n💰 ₹{invoiceAmount}\n📅 {deliveredDate}\n\nThank you for choosing Narmada Mobility. Reply with feedback!",
   },
 ];
 
