@@ -37,9 +37,9 @@ export default function CustomerPOs() {
             <tbody className="divide-y">
               {items.map((p) => (
                 <tr key={p.id}>
-                  <td className="px-4 py-3 font-mono font-bold">{p.customerPoNumber}</td>
-                  <td className="px-4 py-3 text-xs">{new Date(p.createdAt).toLocaleDateString("en-IN")}</td>
-                  <td className="px-4 py-3 text-right font-semibold">₹{p.totalInr.toLocaleString("en-IN")}</td>
+                  <td className="px-4 py-3 font-mono font-bold">{p.customerPoNumber ?? "—"}</td>
+                  <td className="px-4 py-3 text-xs">{p.createdAt ? new Date(p.createdAt).toLocaleDateString("en-IN") : "—"}</td>
+                  <td className="px-4 py-3 text-right font-semibold">₹{(Number(p.totalInr) || 0).toLocaleString("en-IN")}</td>
                   <td className="px-4 py-3">{badge(p.status)}</td>
                   <td className="px-4 py-3 text-right whitespace-nowrap">
                     <button onClick={() => setView(p)} className="p-2 hover:bg-muted rounded" title="View"><Eye className="w-4 h-4" /></button>
@@ -60,14 +60,14 @@ export default function CustomerPOs() {
 
 function POView({ po, onClose }: any) {
   let items: any[] = [];
-  try { items = JSON.parse(po.items); } catch {}
+  try { const p = JSON.parse(po.items); if (Array.isArray(p)) items = p; } catch {}
   return (
     <div className="fixed inset-0 bg-black/60 z-50 flex items-center justify-center p-4">
       <div className="bg-card border rounded-2xl shadow-2xl w-full max-w-3xl max-h-[92vh] overflow-y-auto">
         <div className="sticky top-0 bg-card border-b px-6 py-4 flex items-center justify-between">
           <div>
-            <div className="font-display text-xl font-bold">PO {po.customerPoNumber}</div>
-            <div className="text-xs text-muted-foreground">{new Date(po.createdAt).toLocaleDateString("en-IN")}</div>
+            <div className="font-display text-xl font-bold">PO {po.customerPoNumber ?? "—"}</div>
+            <div className="text-xs text-muted-foreground">{po.createdAt ? new Date(po.createdAt).toLocaleDateString("en-IN") : "—"}</div>
           </div>
           <button onClick={onClose} className="px-3 py-1.5 hover:bg-muted rounded text-sm">Close</button>
         </div>
@@ -83,8 +83,8 @@ function POView({ po, onClose }: any) {
                   <td className="px-3 py-2 font-mono text-xs">{it.partNumber}</td>
                   <td className="px-3 py-2 text-xs">{it.description}</td>
                   <td className="px-3 py-2 text-right">{it.quantity}</td>
-                  <td className="px-3 py-2 text-right">₹{Number(it.unitPriceInr).toLocaleString("en-IN")}</td>
-                  <td className="px-3 py-2 text-right font-semibold">₹{(Number(it.quantity) * Number(it.unitPriceInr)).toLocaleString("en-IN")}</td>
+                  <td className="px-3 py-2 text-right">₹{(Number(it.unitPriceInr) || 0).toLocaleString("en-IN")}</td>
+                  <td className="px-3 py-2 text-right font-semibold">₹{((Number(it.quantity) || 0) * (Number(it.unitPriceInr) || 0)).toLocaleString("en-IN")}</td>
                 </tr>
               ))}
             </tbody>
@@ -92,7 +92,7 @@ function POView({ po, onClose }: any) {
           <div className="grid grid-cols-3 gap-3 text-sm">
             <div><div className="text-xs uppercase font-bold text-muted-foreground">Subtotal</div><div>₹{(po.subtotalInr || 0).toLocaleString("en-IN")}</div></div>
             <div><div className="text-xs uppercase font-bold text-muted-foreground">GST</div><div>₹{(po.gstInr || 0).toLocaleString("en-IN")}</div></div>
-            <div><div className="text-xs uppercase font-bold text-muted-foreground">Total</div><div className="text-lg font-bold">₹{po.totalInr.toLocaleString("en-IN")}</div></div>
+            <div><div className="text-xs uppercase font-bold text-muted-foreground">Total</div><div className="text-lg font-bold">₹{(Number(po.totalInr) || 0).toLocaleString("en-IN")}</div></div>
           </div>
           {po.notes && <div><div className="text-xs uppercase font-bold text-muted-foreground">Notes</div><div className="text-sm whitespace-pre-wrap">{po.notes}</div></div>}
         </div>

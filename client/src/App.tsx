@@ -6,6 +6,7 @@ import { Toaster } from "@/components/ui/toaster";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { AdminAuthProvider } from "@/lib/admin-auth";
 import { SiteLayout } from "@/components/SiteLayout";
+import { ErrorBoundary } from "@/components/ErrorBoundary";
 
 import HomePage from "@/pages/HomePage";
 import ProductsPage from "@/pages/ProductsPage";
@@ -112,9 +113,13 @@ function PublicRoutes() {
 
 function AppRouter() {
   const [location] = useLocation();
+  // Per-route boundary: a render crash in one page shows a recoverable screen
+  // (Go back / Reload) instead of a blank white page. Keyed by location so a
+  // crashed page clears its error state once the user navigates elsewhere.
   // Admin routes get a bare layout (no public nav/footer)
   if (location.startsWith("/admin")) {
     return (
+      <ErrorBoundary key={location} label="admin">
       <Switch>
         <Route path="/admin" component={AdminLogin} />
         <Route path="/admin/dashboard" component={AdminDashboard} />
@@ -140,10 +145,12 @@ function AppRouter() {
         <Route path="/admin/account-requests" component={AdminAccountRequests} />
         <Route component={NotFound} />
       </Switch>
+      </ErrorBoundary>
     );
   }
   if (location.startsWith("/portal")) {
     return (
+      <ErrorBoundary key={location} label="portal">
       <Switch>
         <Route path="/portal" component={CustomerLogin} />
         {/* Session C — public register route (no auth required, before other portal routes) */}
@@ -159,10 +166,12 @@ function AppRouter() {
         <Route path="/portal/chat" component={PortalChat} />
         <Route component={NotFound} />
       </Switch>
+      </ErrorBoundary>
     );
   }
   if (location.startsWith("/team")) {
     return (
+      <ErrorBoundary key={location} label="team">
       <Switch>
         <Route path="/team" component={TeamLogin} />
         <Route path="/team/login" component={TeamLogin} />
@@ -174,27 +183,34 @@ function AppRouter() {
         <Route path="/team/parts" component={TeamParts} />
         <Route component={NotFound} />
       </Switch>
+      </ErrorBoundary>
     );
   }
-  return <PublicRoutes />;
+  return (
+    <ErrorBoundary key={location} label="public">
+      <PublicRoutes />
+    </ErrorBoundary>
+  );
 }
 
 function App() {
   return (
-    <QueryClientProvider client={queryClient}>
-      <TooltipProvider>
-        <AdminAuthProvider>
-          <CustomerAuthProvider>
-            <TeamAuthProvider>
-              <Toaster />
-              <Router hook={useHashLocation}>
-                <AppRouter />
-              </Router>
-            </TeamAuthProvider>
-          </CustomerAuthProvider>
-        </AdminAuthProvider>
-      </TooltipProvider>
-    </QueryClientProvider>
+    <ErrorBoundary label="root">
+      <QueryClientProvider client={queryClient}>
+        <TooltipProvider>
+          <AdminAuthProvider>
+            <CustomerAuthProvider>
+              <TeamAuthProvider>
+                <Toaster />
+                <Router hook={useHashLocation}>
+                  <AppRouter />
+                </Router>
+              </TeamAuthProvider>
+            </CustomerAuthProvider>
+          </AdminAuthProvider>
+        </TooltipProvider>
+      </QueryClientProvider>
+    </ErrorBoundary>
   );
 }
 

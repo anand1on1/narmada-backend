@@ -15,27 +15,47 @@ export default function CustomerDashboard() {
       try {
         const r = await customerFetch(token, "/api/customer/dashboard");
         if (r.ok) setData(await r.json());
+        else console.error("[portal] dashboard load failed:", r.status);
+      } catch (e) {
+        console.error("[portal] dashboard load error:", e);
       } finally { setLoading(false); }
     })();
   }, [token]);
 
   function copy(s: string) { navigator.clipboard?.writeText(s); }
 
+  // Brand-new approved customers have no data yet — treat a null/empty response as an
+  // empty portal, never a "Failed to load" dead-end, and guard every array map.
+  const d = data || {};
+  const recentLedger = Array.isArray(d.recentLedger) ? d.recentLedger : [];
+  const openRfqs = Array.isArray(d.openRfqs) ? d.openRfqs : [];
+  const pendingPos = Array.isArray(d.pendingPos) ? d.pendingPos : [];
+  const recentPayments = Array.isArray(d.recentPayments) ? d.recentPayments : [];
+  const banks = Array.isArray(d.banks) ? d.banks : [];
+  const balanceInr = Number(d.balanceInr) || 0;
+  const fmtDate = (ts: any) => { const n = Number(ts); return n ? new Date(n).toLocaleDateString("en-IN") : "—"; };
+  const fmtInr = (n: any) => `₹${(Number(n) || 0).toLocaleString("en-IN")}`;
+
   return (
     <PortalLayout title="Dashboard">
-      {loading ? <div className="text-sm text-muted-foreground">Loading…</div> : !data ? <div>Failed to load.</div> : (
+      {loading ? <div className="text-sm text-muted-foreground">Loading…</div> : (
         <>
+          {!data && (
+            <div className="bg-card border rounded-xl p-6 mb-6 text-sm text-muted-foreground">
+              Welcome to your portal. No data yet — your activity will appear here as orders and payments are processed.
+            </div>
+          )}
           <div className="grid sm:grid-cols-4 gap-3 mb-6">
-            <Stat icon={Wallet} label="Outstanding Balance" value={`₹${(data.balanceInr || 0).toLocaleString("en-IN")}`} accent={data.balanceInr > 0 ? "text-red-600" : "text-emerald-700"} />
-            <Stat icon={FileQuestion} label="Open RFQs" value={String(data.openRfqs?.length || 0)} />
-            <Stat icon={ShoppingCart} label="Pending POs" value={String(data.pendingPos?.length || 0)} />
-            <Stat icon={CreditCard} label="Recent Payments" value={String(data.recentPayments?.length || 0)} />
+            <Stat icon={Wallet} label="Outstanding Balance" value={fmtInr(balanceInr)} accent={balanceInr > 0 ? "text-red-600" : "text-emerald-700"} />
+            <Stat icon={FileQuestion} label="Open RFQs" value={String(openRfqs.length)} />
+            <Stat icon={ShoppingCart} label="Pending POs" value={String(pendingPos.length)} />
+            <Stat icon={CreditCard} label="Recent Payments" value={String(recentPayments.length)} />
           </div>
 
           <div className="grid md:grid-cols-2 gap-6">
             <section className="bg-card border rounded-xl p-5">
               <h2 className="font-display text-lg font-bold mb-3">Recent Ledger</h2>
-              {(!data.recentLedger || data.recentLedger.length === 0) ? (
+              {recentLedger.length === 0 ? (
                 <div className="text-sm text-muted-foreground py-4">No recent activity.</div>
               ) : (
                 <table className="w-full text-sm">
@@ -43,13 +63,13 @@ export default function CustomerDashboard() {
                     <th className="py-1.5">Date</th><th className="py-1.5">Type</th><th className="py-1.5 text-right">Debit</th><th className="py-1.5 text-right">Credit</th><th className="py-1.5 text-right">Balance</th>
                   </tr></thead>
                   <tbody className="divide-y">
-                    {data.recentLedger.slice(0, 10).map((e: any) => (
+                    {recentLedger.slice(0, 10).map((e: any) => (
                       <tr key={e.id}>
-                        <td className="py-2 text-xs">{new Date(e.entryDate).toLocaleDateString("en-IN")}</td>
-                        <td className="py-2 text-xs">{e.voucherType}</td>
-                        <td className="py-2 text-right text-xs">{e.debitInr ? `₹${e.debitInr.toLocaleString("en-IN")}` : ""}</td>
-                        <td className="py-2 text-right text-xs">{e.creditInr ? `₹${e.creditInr.toLocaleString("en-IN")}` : ""}</td>
-                        <td className="py-2 text-right text-xs font-semibold">₹{(e.runningBalanceInr || 0).toLocaleString("en-IN")}</td>
+                        <td className="py-2 text-xs">{fmtDate(e.entryDate)}</td>
+                        <td className="py-2 text-xs">{e.voucherType ?? "—"}</td>
+                        <td className="py-2 text-right text-xs">{e.debitInr ? fmtInr(e.debitInr) : ""}</td>
+                        <td className="py-2 text-right text-xs">{e.creditInr ? fmtInr(e.creditInr) : ""}</td>
+                        <td className="py-2 text-right text-xs font-semibold">{fmtInr(e.runningBalanceInr)}</td>
                       </tr>
                     ))}
                   </tbody>
@@ -61,9 +81,9 @@ export default function CustomerDashboard() {
             <section className="bg-card border rounded-xl p-5">
               <h2 className="font-display text-lg font-bold mb-3 inline-flex items-center gap-2"><Landmark className="w-5 h-5" />Payment Details</h2>
               <div className="text-xs text-muted-foreground mb-3">Pay via NEFT/RTGS using the account below. Share UTR with our team after payment.</div>
-              {(!data.banks || data.banks.length === 0) ? (
+              {banks.length === 0 ? (
                 <div className="text-sm text-muted-foreground">No bank details on file. Contact support.</div>
-              ) : data.banks.map((b: any) => (
+              ) : banks.map((b: any) => (
                 <div key={b.id} className="border rounded-lg p-3 mb-2">
                   <div className="font-semibold">{b.bankName} <span className="text-xs text-muted-foreground">— {b.label}</span></div>
                   <dl className="text-xs mt-2 space-y-1">
@@ -77,14 +97,14 @@ export default function CustomerDashboard() {
             </section>
           </div>
 
-          {data.pendingPos?.length > 0 && (
+          {pendingPos.length > 0 && (
             <section className="mt-6 bg-card border rounded-xl p-5">
               <h2 className="font-display text-lg font-bold mb-3">Your Pending POs</h2>
               <table className="w-full text-sm">
                 <thead><tr className="text-left text-xs uppercase font-bold text-muted-foreground"><th className="py-1.5">PO #</th><th>Date</th><th className="text-right">Amount</th></tr></thead>
                 <tbody className="divide-y">
-                  {data.pendingPos.map((p: any) => (
-                    <tr key={p.id}><td className="py-2 font-mono">{p.customerPoNumber}</td><td className="py-2 text-xs">{new Date(p.createdAt).toLocaleDateString("en-IN")}</td><td className="py-2 text-right font-semibold">₹{p.totalInr.toLocaleString("en-IN")}</td></tr>
+                  {pendingPos.map((p: any) => (
+                    <tr key={p.id}><td className="py-2 font-mono">{p.customerPoNumber ?? "—"}</td><td className="py-2 text-xs">{fmtDate(p.createdAt)}</td><td className="py-2 text-right font-semibold">{fmtInr(p.totalInr)}</td></tr>
                   ))}
                 </tbody>
               </table>

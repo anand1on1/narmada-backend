@@ -20,6 +20,8 @@ export default function CustomerQuotes() {
     const map: Record<string, string> = { sent: "bg-blue-500/15 text-blue-700", accepted: "bg-emerald-500/15 text-emerald-700", expired: "bg-slate-500/15 text-slate-700", revised: "bg-amber-500/15 text-amber-700", cancelled: "bg-red-500/15 text-red-700" };
     return <span className={`text-[10px] uppercase font-bold px-2 py-0.5 rounded ${map[s] || "bg-slate-500/15 text-slate-700"}`}>{s}</span>;
   };
+  const fmtInr = (n: any) => `₹${(Number(n) || 0).toLocaleString("en-IN")}`;
+  const fmtDate = (ts: any) => { const x = Number(ts); return x ? new Date(x).toLocaleDateString("en-IN") : "—"; };
 
   return (
     <PortalLayout title="Quotes">
@@ -37,9 +39,9 @@ export default function CustomerQuotes() {
               {items.map((q) => (
                 <tr key={q.id}>
                   <td className="px-4 py-3 font-mono font-bold">{q.quoteNo}</td>
-                  <td className="px-4 py-3 text-xs">{new Date(q.createdAt).toLocaleDateString("en-IN")}</td>
-                  <td className="px-4 py-3 text-right font-semibold">₹{q.totalInr.toLocaleString("en-IN")}</td>
-                  <td className="px-4 py-3 text-xs">{q.validUntil ? new Date(q.validUntil).toLocaleDateString("en-IN") : "—"}</td>
+                  <td className="px-4 py-3 text-xs">{fmtDate(q.createdAt)}</td>
+                  <td className="px-4 py-3 text-right font-semibold">{fmtInr(q.totalInr)}</td>
+                  <td className="px-4 py-3 text-xs">{fmtDate(q.validUntil)}</td>
                   <td className="px-4 py-3">{badge(q.status)}</td>
                   <td className="px-4 py-3 text-right whitespace-nowrap">
                     <button onClick={() => setView(q)} className="p-2 hover:bg-muted rounded" title="View"><Eye className="w-4 h-4" /></button>
@@ -59,15 +61,16 @@ export default function CustomerQuotes() {
 }
 
 function QuoteView({ quote, onClose }: any) {
+  const fmtInr = (n: any) => `₹${(Number(n) || 0).toLocaleString("en-IN")}`;
   let items: any[] = [];
-  try { items = JSON.parse(quote.items); } catch {}
+  try { const p = JSON.parse(quote.items); if (Array.isArray(p)) items = p; } catch {}
   return (
     <div className="fixed inset-0 bg-black/60 z-50 flex items-center justify-center p-4">
       <div className="bg-card border rounded-2xl shadow-2xl w-full max-w-3xl max-h-[92vh] overflow-y-auto">
         <div className="sticky top-0 bg-card border-b px-6 py-4 flex items-center justify-between">
           <div>
             <div className="font-display text-xl font-bold">{quote.quoteNo}</div>
-            <div className="text-xs text-muted-foreground">{new Date(quote.createdAt).toLocaleDateString("en-IN")} {quote.validUntil && `· Valid until ${new Date(quote.validUntil).toLocaleDateString("en-IN")}`}</div>
+            <div className="text-xs text-muted-foreground">{quote.createdAt ? new Date(quote.createdAt).toLocaleDateString("en-IN") : "—"} {quote.validUntil && `· Valid until ${new Date(quote.validUntil).toLocaleDateString("en-IN")}`}</div>
           </div>
           <button onClick={onClose} className="px-3 py-1.5 hover:bg-muted rounded text-sm">Close</button>
         </div>
@@ -83,16 +86,16 @@ function QuoteView({ quote, onClose }: any) {
                   <td className="px-3 py-2 font-mono text-xs">{it.partNumber}</td>
                   <td className="px-3 py-2 text-xs">{it.description}</td>
                   <td className="px-3 py-2 text-right">{it.quantity}</td>
-                  <td className="px-3 py-2 text-right">₹{Number(it.unitPriceInr).toLocaleString("en-IN")}</td>
-                  <td className="px-3 py-2 text-right font-semibold">₹{(Number(it.quantity) * Number(it.unitPriceInr)).toLocaleString("en-IN")}</td>
+                  <td className="px-3 py-2 text-right">{fmtInr(it.unitPriceInr)}</td>
+                  <td className="px-3 py-2 text-right font-semibold">{fmtInr((Number(it.quantity) || 0) * (Number(it.unitPriceInr) || 0))}</td>
                 </tr>
               ))}
             </tbody>
           </table>
           <div className="grid grid-cols-3 gap-3 text-sm">
-            <div><div className="text-xs uppercase font-bold text-muted-foreground">Subtotal</div><div>₹{quote.subtotalInr.toLocaleString("en-IN")}</div></div>
-            <div><div className="text-xs uppercase font-bold text-muted-foreground">GST</div><div>₹{quote.gstInr.toLocaleString("en-IN")}</div></div>
-            <div><div className="text-xs uppercase font-bold text-muted-foreground">Total</div><div className="text-lg font-bold">₹{quote.totalInr.toLocaleString("en-IN")}</div></div>
+            <div><div className="text-xs uppercase font-bold text-muted-foreground">Subtotal</div><div>{fmtInr(quote.subtotalInr)}</div></div>
+            <div><div className="text-xs uppercase font-bold text-muted-foreground">GST</div><div>{fmtInr(quote.gstInr)}</div></div>
+            <div><div className="text-xs uppercase font-bold text-muted-foreground">Total</div><div className="text-lg font-bold">{fmtInr(quote.totalInr)}</div></div>
           </div>
           {quote.notes && <div><div className="text-xs uppercase font-bold text-muted-foreground">Notes</div><div className="text-sm whitespace-pre-wrap">{quote.notes}</div></div>}
           {quote.terms && <div><div className="text-xs uppercase font-bold text-muted-foreground">Terms</div><div className="text-sm whitespace-pre-wrap">{quote.terms}</div></div>}
@@ -132,7 +135,7 @@ function AcceptModal({ quote, onClose }: any) {
       <div className="bg-card border rounded-2xl shadow-2xl w-full max-w-md">
         <div className="border-b px-6 py-4 font-display text-lg font-bold">Accept Quote — Raise PO</div>
         <div className="p-6 space-y-3">
-          <div className="text-sm">Quote: <strong>{quote.quoteNo}</strong> · Total <strong>₹{quote.totalInr.toLocaleString("en-IN")}</strong></div>
+          <div className="text-sm">Quote: <strong>{quote.quoteNo}</strong> · Total <strong>₹{(Number(quote.totalInr) || 0).toLocaleString("en-IN")}</strong></div>
           <label className="block text-sm"><div className="text-xs font-bold uppercase tracking-wider mb-1 text-muted-foreground">Your PO Number *</div>
             <input value={poNumber} onChange={(e) => setPoNumber(e.target.value)} className="w-full border rounded-lg px-3 py-2 bg-background font-mono" placeholder="e.g. PO/2026/001" />
           </label>

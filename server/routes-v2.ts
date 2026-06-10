@@ -1429,6 +1429,22 @@ export function registerV2Routes(app: Express, ctx: V2Context) {
     res.json(safe);
   });
 
+  // Team read-only mirrors of admin reference data. The quotation wizard needs the
+  // quoting-companies list and the customer list, but the /api/admin/* versions require
+  // an admin role — a Data Team session (incl. admin SSO) is not admin-role, so those
+  // returned 401/empty. These mirrors expose the same read data under requireDataTeam.
+  app.get("/api/team/quoting-companies", requireDataTeam, async (_req, res) => {
+    try { res.json(await v2.listQuotingCompanies()); }
+    catch (e: any) { res.status(500).json({ error: e.message }); }
+  });
+
+  app.get("/api/team/customers", requireDataTeam, async (req, res) => {
+    try {
+      const q = req.query.q as string | undefined;
+      res.json(await v2.getCustomers(q));
+    } catch (e: any) { res.status(500).json({ error: e.message }); }
+  });
+
   // -------- ADMIN: QUOTING COMPANIES --------
   app.get("/api/admin/quoting-companies", requireAdminRole, async (_req, res) => {
     try { res.json(await v2.listQuotingCompanies()); }
@@ -1845,12 +1861,43 @@ export function registerV2Routes(app: Express, ctx: V2Context) {
       } as any);
       const login = await v2.createCustomerLogin(customer.id, request.email);
       await v2.updateAccountRequestStatus(id, "approved", adminUser.username, req.body?.notes);
+
+      // Welcome / approval email (fire-and-forget). The previous code generated a random
+      // login OTP here and sent it via WhatsApp — but that OTP was never stored or used,
+      // so the customer received a meaningless code. Login OTPs are issued on demand by
+      // /api/customer/request-otp; approval only needs to tell the customer they can log in.
+      const portalLoginUrl = `${process.env.APP_URL || "https://narmadamobility.com"}/#/portal`;
+      const displayName = request.name || request.company || "there";
+      sendGenericEmail({
+        to: request.email,
+        subject: "Your Narmada Mobility account is approved",
+        html: `<div style="font-family:system-ui,-apple-system,sans-serif;max-width:520px;margin:0 auto;padding:24px;">
+          <div style="background:#001a4d;color:white;padding:18px;border-radius:8px 8px 0 0;">
+            <h2 style="margin:0;font-size:18px;">Narmada Mobility — Customer Portal</h2>
+          </div>
+          <div style="border:1px solid #e5e7eb;border-top:none;padding:24px;border-radius:0 0 8px 8px;">
+            <p style="margin:0 0 12px;color:#374151;">Hi ${displayName},</p>
+            <p style="margin:0 0 12px;color:#374151;">Your customer account has been <strong>approved</strong>. You can now sign in to track consignments, view your ledger, and manage quotes and orders.</p>
+            <p style="margin:0 0 4px;color:#6b7280;font-size:13px;">Your login email:</p>
+            <div style="font-size:16px;font-weight:600;color:#001a4d;background:#f3f4f6;padding:12px 16px;border-radius:6px;">${request.email}</div>
+            <p style="margin:20px 0;text-align:center;">
+              <a href="${portalLoginUrl}" style="display:inline-block;background:#001a4d;color:white;text-decoration:none;font-weight:600;padding:12px 28px;border-radius:6px;">Sign in to your portal</a>
+            </p>
+            <p style="margin:16px 0 0;color:#6b7280;font-size:13px;">We sign you in with a one-time code sent to your email (and WhatsApp, if we have your number). No password to remember.</p>
+          </div>
+        </div>`,
+      }).catch((e: any) => console.error("[email] approval welcome send error:", e?.message));
+
+      // WhatsApp welcome: AiSensy requires a Meta-approved template per message type and we
+      // do not yet have a `narmada_account_approved` template approved. sendOTP() must stay
+      // reserved for real login codes, so we deliberately do NOT fire a WhatsApp message here.
+      // Until the template is approved, prompt the admin to message the customer manually.
       if (request.phone) {
-        const otp = Math.floor(100000 + Math.random() * 900000).toString();
-        const { sendOTP } = await import("./whatsapp");
-        Promise.resolve(sendOTP(request.phone, otp))
-          .catch((e: any) => console.error("[whatsapp] approve OTP dispatch error:", e?.message));
+        console.log(`[approve] account approved for ${request.email} (phone=${request.phone}) — welcome email sent. WhatsApp welcome skipped: no approved 'narmada_account_approved' template yet. Ping the customer manually if needed.`);
+      } else {
+        console.log(`[approve] account approved for ${request.email} (no phone on file) — welcome email sent.`);
       }
+
       await v2.writeAuditLog({ actorType: "admin", actorId: adminUser.username, action: "approve_account_request", entityType: "account_request", entityId: String(id) });
       res.json({ customer, login });
     } catch (e: any) { res.status(500).json({ error: e.message }); }

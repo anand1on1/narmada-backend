@@ -59,7 +59,8 @@ export default function PortalProfile() {
     queryFn: async () => {
       const r = await customerFetch(token!, "/api/portal/emails");
       if (!r.ok) return [];
-      return r.json();
+      const j = await r.json();
+      return Array.isArray(j) ? j : [];
     },
     enabled: !!token && tab === "emails",
   });
@@ -69,7 +70,8 @@ export default function PortalProfile() {
     queryFn: async () => {
       const r = await customerFetch(token!, "/api/portal/addresses");
       if (!r.ok) return [];
-      return r.json();
+      const j = await r.json();
+      return Array.isArray(j) ? j : [];
     },
     enabled: !!token && tab === "addresses",
   });

@@ -87,7 +87,7 @@ export default function AdminLedger() {
   }
 
   const currentCustomer = customers.find((c) => c.id === customerId);
-  const closingBalance = entries.length > 0 ? entries[entries.length - 1].runningBalanceInr : 0;
+  const closingBalance = entries.length > 0 ? (Number(entries[entries.length - 1].runningBalanceInr) || 0) : 0;
   const totalDebit = entries.reduce((s, e) => s + (e.debitInr || 0), 0);
   const totalCredit = entries.reduce((s, e) => s + (e.creditInr || 0), 0);
 
@@ -152,12 +152,12 @@ export default function AdminLedger() {
             <tbody className="divide-y">
               {entries.map((e) => (
                 <tr key={e.id} data-testid={`row-ledger-${e.id}`}>
-                  <td className="px-4 py-3 text-xs">{new Date(e.entryDate).toLocaleDateString("en-IN")}</td>
-                  <td className="px-4 py-3"><span className="text-[10px] uppercase font-bold px-2 py-0.5 rounded bg-muted">{e.voucherType}</span></td>
+                  <td className="px-4 py-3 text-xs">{e.entryDate ? new Date(e.entryDate).toLocaleDateString("en-IN") : "—"}</td>
+                  <td className="px-4 py-3"><span className="text-[10px] uppercase font-bold px-2 py-0.5 rounded bg-muted">{e.voucherType ?? "—"}</span></td>
                   <td className="px-4 py-3 text-xs font-mono">{e.voucherNo || "—"}</td>
                   <td className="px-4 py-3 text-xs">{e.description || "—"}</td>
-                  <td className="px-4 py-3 text-right">{e.debitInr ? `₹${e.debitInr.toLocaleString("en-IN")}` : ""}</td>
-                  <td className="px-4 py-3 text-right">{e.creditInr ? `₹${e.creditInr.toLocaleString("en-IN")}` : ""}</td>
+                  <td className="px-4 py-3 text-right">{e.debitInr ? `₹${(Number(e.debitInr) || 0).toLocaleString("en-IN")}` : ""}</td>
+                  <td className="px-4 py-3 text-right">{e.creditInr ? `₹${(Number(e.creditInr) || 0).toLocaleString("en-IN")}` : ""}</td>
                   <td className="px-4 py-3 text-right font-semibold">₹{(e.runningBalanceInr || 0).toLocaleString("en-IN")}</td>
                   <td className="px-4 py-3 text-right">
                     <button onClick={() => del(e.id)} className="p-2 hover:bg-red-500/10 text-red-600 rounded"><Trash2 className="w-4 h-4" /></button>

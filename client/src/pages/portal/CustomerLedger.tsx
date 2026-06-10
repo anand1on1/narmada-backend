@@ -16,10 +16,11 @@ export default function CustomerLedger() {
         const r = await customerFetch(token, "/api/customer/ledger");
         if (r.ok) {
           const j = await r.json();
-          setEntries(j.entries || []);
-          setBalance(j.balanceInr || 0);
-        }
-      } finally { setLoading(false); }
+          setEntries(Array.isArray(j?.entries) ? j.entries : []);
+          setBalance(Number(j?.balanceInr) || 0);
+        } else console.error("[portal] ledger load failed:", r.status);
+      } catch (e) { console.error("[portal] ledger load error:", e); }
+      finally { setLoading(false); }
     })();
   }, [token]);
 

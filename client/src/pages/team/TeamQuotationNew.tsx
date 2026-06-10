@@ -8,7 +8,6 @@ import {
   ChevronRight, ChevronLeft, Plus, Trash2, Upload, Search, Check,
   FileText, RefreshCw,
 } from "lucide-react";
-import { apiUrl } from "@/lib/queryClient";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -100,10 +99,10 @@ export default function TeamQuotationNew() {
   const { data: companies = [] } = useQuery<QuotingCompany[]>({
     queryKey: ["quoting-companies-team"],
     queryFn: async () => {
-      const r = await teamFetch(token, "/api/admin/quoting-companies");
+      const r = await teamFetch(token, "/api/team/quoting-companies");
       if (!r.ok) return [];
       const all: QuotingCompany[] = await r.json();
-      return all.filter((c) => c.active);
+      return (Array.isArray(all) ? all : []).filter((c) => c.active);
     },
     enabled: !!token,
   });
@@ -113,11 +112,10 @@ export default function TeamQuotationNew() {
     queryFn: async () => {
       const p = new URLSearchParams();
       if (customerSearch.trim()) p.set("q", customerSearch.trim());
-      const r = await fetch(apiUrl(`/api/admin/customers?${p}`), {
-        headers: { "x-team-token": token || "" },
-      });
+      const r = await teamFetch(token, `/api/team/customers?${p}`);
       if (!r.ok) return [];
-      return r.json();
+      const j = await r.json();
+      return Array.isArray(j) ? j : [];
     },
     enabled: !!token,
   });

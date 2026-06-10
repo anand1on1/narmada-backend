@@ -1,9 +1,8 @@
 import { useState } from "react";
 import { TeamLayout } from "./TeamLayout";
-import { useTeamAuth } from "@/lib/team-auth";
+import { useTeamAuth, teamFetch } from "@/lib/team-auth";
 import { Search } from "lucide-react";
 import { useQuery } from "@tanstack/react-query";
-import { apiUrl } from "@/lib/queryClient";
 
 interface Customer {
   id: number;
@@ -25,11 +24,10 @@ export default function TeamCustomers() {
     queryFn: async () => {
       const p = new URLSearchParams();
       if (searchQ.trim()) p.set("q", searchQ.trim());
-      const r = await fetch(apiUrl(`/api/admin/customers?${p}`), {
-        headers: { "x-team-token": token || "" },
-      });
+      const r = await teamFetch(token, `/api/team/customers?${p}`);
       if (!r.ok) return [];
-      return r.json();
+      const j = await r.json();
+      return Array.isArray(j) ? j : [];
     },
     enabled: !!token,
   });

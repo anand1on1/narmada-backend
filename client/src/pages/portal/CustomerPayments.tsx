@@ -47,10 +47,10 @@ export default function CustomerPayments() {
                   <tbody className="divide-y">
                     {payments.map((p) => (
                       <tr key={p.id}>
-                        <td className="px-4 py-3 text-xs">{new Date(p.paymentDate).toLocaleDateString("en-IN")}</td>
+                        <td className="px-4 py-3 text-xs">{p.paymentDate ? new Date(p.paymentDate).toLocaleDateString("en-IN") : "—"}</td>
                         <td className="px-4 py-3"><span className="text-[10px] uppercase font-bold px-2 py-0.5 rounded bg-emerald-500/15 text-emerald-700">{p.paymentMode}</span></td>
                         <td className="px-4 py-3 text-xs font-mono">{p.referenceNo || "—"}</td>
-                        <td className="px-4 py-3 text-right font-semibold text-emerald-700">₹{p.amountInr.toLocaleString("en-IN")}</td>
+                        <td className="px-4 py-3 text-right font-semibold text-emerald-700">₹{(Number(p.amountInr) || 0).toLocaleString("en-IN")}</td>
                         <td className="px-4 py-3 text-xs text-muted-foreground">{p.notes || "—"}</td>
                       </tr>
                     ))}

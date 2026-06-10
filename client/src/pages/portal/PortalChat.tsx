@@ -24,8 +24,8 @@ export default function PortalChat() {
       try {
         const r = await customerFetch(token, "/api/portal/chat/history");
         if (r.ok) {
-          const history: ChatMessage[] = await r.json();
-          setMessages(history);
+          const history = await r.json();
+          setMessages(Array.isArray(history) ? history : []);
         }
       } catch {}
       finally { setLoading(false); }
