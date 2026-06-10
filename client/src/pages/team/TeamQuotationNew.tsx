@@ -185,7 +185,10 @@ export default function TeamQuotationNew() {
       fd.append("file", file);
       const r = await teamFetch(token, "/api/team/quotations/extract", { method: "POST", body: fd });
       if (!r.ok) { const e = await r.json(); toast({ title: "Import failed", description: e.error, variant: "destructive" }); return; }
-      const parsed: any[] = await r.json();
+      const json = await r.json();
+      // Backend returns { parts: [...] }; older clients expected array — handle both.
+      const parsed: any[] = Array.isArray(json) ? json : Array.isArray(json?.parts) ? json.parts : [];
+      if (!parsed.length) { toast({ title: "No items detected", description: "The document parser returned no rows. Try a clearer file.", variant: "destructive" }); return; }
       const lines: LineItem[] = parsed.map((p, i) => computeLine({
         lineNo: i + 1,
         partNumber: p.part_number || p.partNumber || "",
@@ -229,7 +232,8 @@ export default function TeamQuotationNew() {
       };
       const r = await teamFetch(token, "/api/team/quotations", { method: "POST", body: JSON.stringify(payload) });
       if (!r.ok) { const e = await r.json(); throw new Error(e.error || "Save failed"); }
-      const created = await r.json();
+      const resp = await r.json();
+      const created = resp.quotation || resp; // backend returns {quotation, items}
       toast({ title: "Draft saved", description: `Quotation ${created.quoteNo} created.` });
       navigate(`/team/quotations/${created.id}`);
     } catch (e: any) {
@@ -253,7 +257,8 @@ export default function TeamQuotationNew() {
       };
       const r = await teamFetch(token, "/api/team/quotations", { method: "POST", body: JSON.stringify(payload) });
       if (!r.ok) { const e = await r.json(); throw new Error(e.error || "Save failed"); }
-      const created = await r.json();
+      const resp = await r.json();
+      const created = resp.quotation || resp; // backend returns {quotation, items}
 
       const rf = await teamFetch(token, `/api/team/quotations/${created.id}/finalize`, { method: "POST" });
       if (!rf.ok) { const e = await rf.json(); throw new Error(e.error || "Finalize failed"); }

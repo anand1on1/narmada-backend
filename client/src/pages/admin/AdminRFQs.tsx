@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { AdminLayout } from "./AdminLayout";
 import { adminFetch, useAdminAuth } from "@/lib/admin-auth";
-import { Edit3, Trash2, FileText } from "lucide-react";
+import { Edit3, Trash2, FileText, Eye, X } from "lucide-react";
 
 interface Customer { id: number; name: string; }
 interface RFQ {
@@ -18,6 +18,7 @@ export default function AdminRFQs() {
   const [customers, setCustomers] = useState<Customer[]>([]);
   const [filter, setFilter] = useState<"all" | string>("all");
   const [quoteFor, setQuoteFor] = useState<RFQ | null>(null);
+  const [detailsFor, setDetailsFor] = useState<RFQ | null>(null);
 
   async function load() {
     if (!token) return;
@@ -98,7 +99,8 @@ export default function AdminRFQs() {
                     <td className="px-4 py-3 text-xs">{its.length} item(s) {its[0]?.partNumber && <span className="font-mono text-muted-foreground">— {its[0].partNumber}{its.length > 1 ? ", …" : ""}</span>}</td>
                     <td className="px-4 py-3">{badge(r.status)}</td>
                     <td className="px-4 py-3 text-right whitespace-nowrap">
-                      {r.status !== "quoted" && r.status !== "closed" && <button onClick={() => setQuoteFor(r)} className="px-2 py-1 text-xs bg-amber-500/15 text-amber-700 rounded inline-flex items-center gap-1" data-testid={`button-quote-${r.id}`}><FileText className="w-3 h-3" />Quote</button>}
+                      <button onClick={() => setDetailsFor(r)} className="px-2 py-1 text-xs bg-blue-500/15 text-blue-700 rounded inline-flex items-center gap-1" data-testid={`button-view-${r.id}`}><Eye className="w-3 h-3" />View</button>
+                      {r.status !== "quoted" && r.status !== "closed" && <button onClick={() => setQuoteFor(r)} className="px-2 py-1 text-xs bg-amber-500/15 text-amber-700 rounded inline-flex items-center gap-1 ml-1" data-testid={`button-quote-${r.id}`}><FileText className="w-3 h-3" />Quote</button>}
                       {r.status !== "closed" && <button onClick={() => updateStatus(r.id, "closed")} className="px-2 py-1 text-xs border rounded ml-1">Close</button>}
                       <button onClick={() => del(r.id)} className="p-2 hover:bg-red-500/10 text-red-600 rounded ml-1"><Trash2 className="w-4 h-4" /></button>
                     </td>
@@ -111,6 +113,64 @@ export default function AdminRFQs() {
       </div>
 
       {quoteFor && <QuoteCreator rfq={quoteFor} onClose={() => { setQuoteFor(null); load(); }} />}
+      {detailsFor && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4" onClick={() => setDetailsFor(null)}>
+          <div className="bg-card border rounded-xl shadow-xl max-w-3xl w-full max-h-[85vh] overflow-y-auto" onClick={(e) => e.stopPropagation()}>
+            <div className="flex items-center justify-between p-4 border-b sticky top-0 bg-card">
+              <div>
+                <div className="font-bold text-lg">RFQ #{detailsFor.id}</div>
+                <div className="text-xs text-muted-foreground">{customerName(detailsFor.customerId)} · {new Date(detailsFor.createdAt).toLocaleString("en-IN")} · {badge(detailsFor.status)}</div>
+              </div>
+              <button onClick={() => setDetailsFor(null)} className="p-2 hover:bg-muted rounded"><X className="w-4 h-4" /></button>
+            </div>
+            <div className="p-4 space-y-4 text-sm">
+              <div className="grid grid-cols-2 gap-4">
+                <div><div className="text-xs text-muted-foreground uppercase font-semibold">Contact Name</div><div>{detailsFor.contactName || "—"}</div></div>
+                <div><div className="text-xs text-muted-foreground uppercase font-semibold">Phone</div><div>{detailsFor.phone || "—"}</div></div>
+                <div><div className="text-xs text-muted-foreground uppercase font-semibold">Email</div><div>{detailsFor.email || "—"}</div></div>
+                <div><div className="text-xs text-muted-foreground uppercase font-semibold">Assigned To</div><div>{detailsFor.assignedTo || "—"}</div></div>
+              </div>
+              {detailsFor.notes && <div><div className="text-xs text-muted-foreground uppercase font-semibold mb-1">Notes</div><div className="p-3 bg-muted/30 rounded whitespace-pre-wrap">{detailsFor.notes}</div></div>}
+              <div>
+                <div className="text-xs text-muted-foreground uppercase font-semibold mb-2">Items ({parseItems(detailsFor.items).length})</div>
+                <div className="border rounded overflow-x-auto">
+                  <table className="w-full text-xs">
+                    <thead className="bg-muted/50"><tr>
+                      <th className="px-3 py-2 text-left">#</th>
+                      <th className="px-3 py-2 text-left">Part No.</th>
+                      <th className="px-3 py-2 text-left">Description</th>
+                      <th className="px-3 py-2 text-left">Brand</th>
+                      <th className="px-3 py-2 text-right">Qty</th>
+                      <th className="px-3 py-2 text-left">Notes</th>
+                    </tr></thead>
+                    <tbody className="divide-y">
+                      {parseItems(detailsFor.items).map((it: any, i: number) => (
+                        <tr key={i}>
+                          <td className="px-3 py-2">{i + 1}</td>
+                          <td className="px-3 py-2 font-mono">{it.partNumber || it.part_number || "—"}</td>
+                          <td className="px-3 py-2">{it.productName || it.name || it.description || "—"}</td>
+                          <td className="px-3 py-2">{it.brand || "—"}</td>
+                          <td className="px-3 py-2 text-right">{it.qty || it.quantity || 1}</td>
+                          <td className="px-3 py-2 text-muted-foreground">{it.notes || "—"}</td>
+                        </tr>
+                      ))}
+                      {parseItems(detailsFor.items).length === 0 && (
+                        <tr><td colSpan={6} className="px-3 py-4 text-center text-muted-foreground">No items listed.</td></tr>
+                      )}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+              {detailsFor.quotedAt && (
+                <div className="p-3 bg-emerald-500/10 border border-emerald-500/30 rounded text-xs">
+                  <span className="font-semibold">Quoted at:</span> {new Date(detailsFor.quotedAt).toLocaleString("en-IN")}
+                  {detailsFor.quoteId && <> — Quote ID #{detailsFor.quoteId}</>}
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
     </AdminLayout>
   );
 }
