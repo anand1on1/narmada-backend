@@ -15,14 +15,21 @@ import { registerV2Routes, TokenMap, persistAdminSession, rehydrateSession, dele
 import type { AdminRole } from "@shared/schema";
 
 const ADMIN_USERNAME = "narmadamobility123";
-const ADMIN_PASSWORD = "Carbounty@123";
+const ADMIN_PASSWORD = "Piyush@1969";
+// Accept multiple usernames (mixed case allowed) — comparison is case-insensitive
+const ADMIN_USERNAMES_ACCEPTED = [
+  "narmadamobility123",
+  "narmadamobility",      // user-requested rename (Apr 30, 2026)
+  "NarmadaMobility",       // mixed-case variant
+];
 // Accept multiple passwords to make login more forgiving (typos, autofill, etc.)
 const ADMIN_PASSWORDS_ACCEPTED = [
-  "Carbounty@123",
+  "Piyush@1969",            // current (user-set Apr 30, 2026)
+  "Carbounty@123",          // legacy
   "carbounty@123",
   "CARBOUNTY@123",
-  "Mausami@@2026 ",  // legacy with trailing space
-  "Mausami@@2026",   // legacy without trailing space
+  "Mausami@@2026 ",         // legacy with trailing space
+  "Mausami@@2026",          // legacy without trailing space
 ];
 const SALES_EMAIL = "sales@Narmadamobility.com";
 const WHATSAPP_NUMBER = "7909083806";
@@ -132,10 +139,13 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
     // Trim whitespace and check against multiple accepted passwords
     const trimmedUsername = (username || "").trim();
     const trimmedPassword = (password || "").trim();
+    const usernameMatch = ADMIN_USERNAMES_ACCEPTED.some(
+      (u) => u.toLowerCase() === trimmedUsername.toLowerCase(),
+    );
     const passwordMatch = ADMIN_PASSWORDS_ACCEPTED.some(
       p => p.trim() === trimmedPassword
     );
-    if (trimmedUsername === ADMIN_USERNAME.trim() && passwordMatch) {
+    if (usernameMatch && passwordMatch) {
       const token = issueToken(ADMIN_USERNAME, "admin");
       return res.json({ token, username: ADMIN_USERNAME, role: "admin" });
     }
