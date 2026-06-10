@@ -17,8 +17,8 @@ export default function CustomerPayments() {
           customerFetch(token, "/api/customer/payments"),
           customerFetch(token, "/api/customer/banks"),
         ]);
-        if (pR.ok) setPayments(await pR.json());
-        if (bR.ok) setBanks(await bR.json());
+        if (pR.ok) { const _d = await pR.json(); setPayments(Array.isArray(_d) ? _d : []); }
+        if (bR.ok) { const _d = await bR.json(); setBanks(Array.isArray(_d) ? _d : []); }
       } finally { setLoading(false); }
     })();
   }, [token]);

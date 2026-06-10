@@ -23,7 +23,7 @@ export default function AdminPayments() {
     (async () => {
       if (!token) return;
       const r = await adminFetch(token, `/api/admin/customers`);
-      setCustomers(await r.json());
+      { const _d = await r.json(); setCustomers(Array.isArray(_d) ? _d : []); }
     })();
   }, [token]);
 
@@ -32,7 +32,7 @@ export default function AdminPayments() {
     const params = new URLSearchParams();
     if (filterCustomer) params.set("customer_id", String(filterCustomer));
     const r = await adminFetch(token, `/api/admin/payments?${params}`);
-    setPayments(await r.json());
+    { const _d = await r.json(); setPayments(Array.isArray(_d) ? _d : []); }
   }
   useEffect(() => { load(); }, [token, filterCustomer]); // eslint-disable-line
 

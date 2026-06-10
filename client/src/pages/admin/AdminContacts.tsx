@@ -13,7 +13,7 @@ export default function AdminContacts() {
   async function load() {
     if (!token) return;
     const r = await adminFetch(token, "/api/admin/contacts");
-    setContacts(await r.json());
+    { const _d = await r.json(); setContacts(Array.isArray(_d) ? _d : []); }
   }
   useEffect(() => { load(); }, [token]); // eslint-disable-line
 

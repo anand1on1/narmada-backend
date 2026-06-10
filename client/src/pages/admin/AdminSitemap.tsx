@@ -17,8 +17,15 @@ export default function AdminSitemap() {
 
   async function refresh() {
     if (!token) return;
-    const r = await adminFetch(token, "/api/admin/sitemap/status");
-    setStatus(await r.json());
+    try {
+      const r = await adminFetch(token, "/api/admin/sitemap/status");
+      const d = await r.json();
+      // Backend returns { last: { urlCount, generatedAt } }; tolerate a flat shape too.
+      const s = d?.last ?? d;
+      setStatus(s && typeof s.urlCount === "number" ? { urlCount: s.urlCount, generatedAt: s.generatedAt ?? null } : null);
+    } catch {
+      setStatus(null);
+    }
   }
 
   async function regenerate() {

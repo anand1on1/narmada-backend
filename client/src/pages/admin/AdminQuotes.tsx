@@ -27,13 +27,13 @@ export default function AdminQuotes() {
     const params = new URLSearchParams();
     if (filter !== "all") params.set("status", filter);
     const r = await adminFetch(token, `/api/admin/quotes?${params}`);
-    setItems(await r.json());
+    { const _d = await r.json(); setItems(Array.isArray(_d) ? _d : []); }
   }
   useEffect(() => {
     (async () => {
       if (!token) return;
       const r = await adminFetch(token, `/api/admin/customers`);
-      setCustomers(await r.json());
+      { const _d = await r.json(); setCustomers(Array.isArray(_d) ? _d : []); }
     })();
   }, [token]);
   useEffect(() => { load(); }, [token, filter]); // eslint-disable-line

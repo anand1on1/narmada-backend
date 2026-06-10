@@ -32,7 +32,7 @@ export default function AdminTeam() {
     if (!token) return;
     const r = await adminFetch(token, "/api/v2/admin/users");
     if (r.status === 403) { setForbidden(true); return; }
-    setUsers(await r.json());
+    { const _d = await r.json(); setUsers(Array.isArray(_d) ? _d : []); }
   }
   useEffect(() => { load(); }, [token]); // eslint-disable-line
 

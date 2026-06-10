@@ -245,3 +245,53 @@ function parsePartsJSON(text: string): ParsedPart[] {
     return [];
   }
 }
+
+export interface GeneratedPost {
+  title: string;
+  slug: string;
+  excerpt: string;
+  content: string;
+  metaTitle: string;
+  metaDescription: string;
+}
+
+/**
+ * Generate a blog/spotlight draft from a short topic prompt.
+ * Returns null when the API key is not configured so the caller can surface a clear message.
+ */
+export async function generateBlogPost(
+  topic: string,
+  type: "blog" | "spotlight" = "blog",
+): Promise<GeneratedPost | null> {
+  if (!CLAUDE_API_KEY || CLAUDE_API_KEY === "skip") return null;
+  const system = `You are an SEO content writer for Narmada Mobility, an automotive (commercial vehicle / truck & bus) spare-parts supplier in India.
+Write a ${type === "spotlight" ? "product spotlight" : "blog article"} for the given topic.
+Return ONLY valid JSON (no markdown fences) with keys:
+{"title": string, "slug": string (lowercase-hyphenated), "excerpt": string (<=160 chars),
+ "content": string (clean HTML using <h2>/<p>/<ul> — 400-700 words), "metaTitle": string (<=60 chars),
+ "metaDescription": string (<=155 chars)}`;
+  try {
+    const client = getClient();
+    const response = await client.messages.create({
+      model: MODEL,
+      max_tokens: 2048,
+      system,
+      messages: [{ role: "user", content: `Topic: ${topic}` }],
+    });
+    const text = response.content[0]?.type === "text" ? response.content[0].text : "";
+    const cleaned = text.replace(/```(?:json)?\n?/gi, "").trim();
+    const p = JSON.parse(cleaned);
+    const slugify = (s: string) => String(s || "").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
+    return {
+      title: String(p.title || topic),
+      slug: slugify(p.slug || p.title || topic),
+      excerpt: String(p.excerpt || ""),
+      content: String(p.content || ""),
+      metaTitle: String(p.metaTitle || p.title || topic),
+      metaDescription: String(p.metaDescription || p.excerpt || ""),
+    };
+  } catch (e: any) {
+    console.error("[claude] generateBlogPost error:", e?.message);
+    return null;
+  }
+}

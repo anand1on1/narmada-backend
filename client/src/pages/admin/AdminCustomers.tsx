@@ -43,7 +43,8 @@ export default function AdminCustomers() {
     const params = new URLSearchParams();
     if (q.trim()) params.set("q", q.trim());
     const r = await adminFetch(token, `/api/admin/customers?${params}`);
-    setItems(await r.json());
+    const d = await r.json();
+    setItems(Array.isArray(d) ? d : []);
   }
   useEffect(() => { load(); }, [token]); // eslint-disable-line
 
@@ -156,8 +157,9 @@ function CustomerEditor({ item, onChange, onClose, onSave, saving }: any) {
       adminFetch(token, `/api/admin/customers/${item.id}/emails`),
       adminFetch(token, `/api/admin/customers/${item.id}/addresses`),
     ]);
-    setEmails(await eR.json());
-    setAddrs(await aR.json());
+    const [eD, aD] = [await eR.json(), await aR.json()];
+    setEmails(Array.isArray(eD) ? eD : []);
+    setAddrs(Array.isArray(aD) ? aD : []);
   }
   useEffect(() => { loadAux(); }, [item.id, tab]); // eslint-disable-line
 

@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { AdminLayout } from "./AdminLayout";
 import { adminFetch, useAdminAuth } from "@/lib/admin-auth";
-import { Plus, Edit3, Trash2, Eye, EyeOff, FileText, Star } from "lucide-react";
+import { Plus, Edit3, Trash2, Eye, EyeOff, FileText, Star, Sparkles } from "lucide-react";
 
 interface Post {
   id: number;
@@ -33,11 +33,30 @@ export default function AdminBlog() {
   const [open, setOpen] = useState<Partial<Post> | null>(null);
   const [saving, setSaving] = useState(false);
   const [uploading, setUploading] = useState(false);
+  const [generating, setGenerating] = useState(false);
+
+  async function generateWithAi() {
+    if (!token) return;
+    const topic = prompt("Describe the blog topic (e.g. 'How to choose brake pads for Tata Prima trucks'):");
+    if (!topic || !topic.trim()) return;
+    setGenerating(true);
+    try {
+      const r = await adminFetch(token, "/api/admin/posts/ai-generate", {
+        method: "POST",
+        body: JSON.stringify({ topic: topic.trim(), type: filter === "spotlight" ? "spotlight" : "blog" }),
+      });
+      const d = await r.json();
+      if (!r.ok) { alert(d.error || "AI generation failed"); return; }
+      setOpen({ ...empty, type: filter === "spotlight" ? "spotlight" : "blog", ...d, published: false });
+    } catch (e: any) {
+      alert("AI generation failed. Please try again.");
+    } finally { setGenerating(false); }
+  }
 
   async function load() {
     if (!token) return;
     const r = await adminFetch(token, "/api/admin/posts");
-    setPosts(await r.json());
+    { const _d = await r.json(); setPosts(Array.isArray(_d) ? _d : []); }
   }
   useEffect(() => { load(); }, [token]); // eslint-disable-line
 
@@ -112,6 +131,14 @@ export default function AdminBlog() {
           </button>
         ))}
         <div className="flex-1" />
+        <button
+          onClick={generateWithAi}
+          disabled={generating}
+          className="px-4 py-2 border border-accent text-accent rounded-lg font-semibold text-sm inline-flex items-center gap-2 hover:bg-accent/10 disabled:opacity-50"
+          data-testid="button-ai-generate"
+        >
+          <Sparkles className="w-4 h-4" /> {generating ? "Generating…" : "Generate with AI"}
+        </button>
         <button
           onClick={() => setOpen({ ...empty })}
           className="px-4 py-2 bg-accent text-accent-foreground rounded-lg font-semibold text-sm inline-flex items-center gap-2"

@@ -19,11 +19,15 @@ interface AuditEntry {
 }
 
 interface AuditResponse {
-  logs: AuditEntry[];
+  rows?: AuditEntry[];
+  logs?: AuditEntry[];
   total: number;
-  page: number;
-  pages: number;
+  page?: number;
+  pages?: number;
+  pageSize?: number;
 }
+
+const AUDIT_PAGE_SIZE = 50;
 
 const ACTOR_TYPES = ["", "admin", "data_team", "customer"];
 const ACTIONS = [
@@ -47,7 +51,7 @@ export default function AdminAuditLog() {
   const params = new URLSearchParams();
   if (actor) params.set("actor", actor);
   if (action) params.set("action", action);
-  if (entity) params.set("entity", entity);
+  if (entity) params.set("entity_type", entity);
   if (dateFrom) params.set("from", dateFrom);
   if (dateTo) params.set("to", dateTo);
   params.set("page", String(page));
@@ -62,8 +66,9 @@ export default function AdminAuditLog() {
     enabled: !!token,
   });
 
-  const logs = data?.logs || [];
-  const totalPages = data?.pages || 1;
+  // Backend returns { rows, total }; tolerate legacy { logs, pages } too.
+  const logs = data?.rows ?? data?.logs ?? [];
+  const totalPages = data?.pages ?? Math.max(1, Math.ceil((data?.total ?? 0) / (data?.pageSize ?? AUDIT_PAGE_SIZE)));
 
   const actorBadge = (type: string) => {
     const map: Record<string, string> = {

@@ -36,7 +36,7 @@ export default function AdminPriceList() {
   async function load() {
     if (!token) return;
     const r = await adminFetch(token, "/api/admin/price-lists");
-    setLists(await r.json());
+    { const _d = await r.json(); setLists(Array.isArray(_d) ? _d : []); }
   }
   useEffect(() => { load(); }, [token]); // eslint-disable-line
 

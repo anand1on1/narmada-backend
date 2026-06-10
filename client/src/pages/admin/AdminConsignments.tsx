@@ -66,7 +66,7 @@ export default function AdminConsignments() {
     if (filter !== "all") params.set("status", filter);
     if (q.trim()) params.set("q", q.trim());
     const r = await adminFetch(token, `/api/admin/consignments?${params.toString()}`);
-    setItems(await r.json());
+    { const _d = await r.json(); setItems(Array.isArray(_d) ? _d : []); }
   }
   useEffect(() => { load(); }, [token, filter]); // eslint-disable-line
 

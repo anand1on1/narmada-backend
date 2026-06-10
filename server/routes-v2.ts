@@ -349,6 +349,18 @@ export function registerV2Routes(app: Express, ctx: V2Context) {
     triggerSitemapRegen(regenSitemap);
     res.json({ ok: true });
   });
+  // AI draft generator — returns a draft (NOT saved); admin reviews then saves via POST /api/admin/posts.
+  app.post("/api/admin/posts/ai-generate", requireAdminRole, async (req, res) => {
+    try {
+      const topic = String(req.body?.topic || "").trim();
+      const type = req.body?.type === "spotlight" ? "spotlight" : "blog";
+      if (!topic) return res.status(400).json({ error: "Topic is required" });
+      const { generateBlogPost } = await import("./claude-service");
+      const draft = await generateBlogPost(topic, type);
+      if (!draft) return res.status(503).json({ error: "AI generation unavailable (CLAUDE_API_KEY not configured)" });
+      res.json(draft);
+    } catch (e: any) { res.status(500).json({ error: e.message }); }
+  });
 
   // ============== PRICE LISTS ==============
   // Public — available brands
@@ -746,7 +758,8 @@ export function registerV2Routes(app: Express, ctx: V2Context) {
         return res.json({ ok: true, sent: true });
       }
       const code = await v2.generateOtp(email, "customer_login");
-      await sendGenericEmail({
+      // Fire-and-forget: never block the OTP response on SMTP latency/failure.
+      sendGenericEmail({
         to: email,
         subject: `Your Narmada Mobility login code: ${code}`,
         html: `<div style="font-family:system-ui,-apple-system,sans-serif;max-width:520px;margin:0 auto;padding:24px;">
@@ -759,7 +772,7 @@ export function registerV2Routes(app: Express, ctx: V2Context) {
             <p style="margin:16px 0 0;color:#6b7280;font-size:13px;">This code expires in 10 minutes. If you didn't request it, ignore this email.</p>
           </div>
         </div>`,
-      });
+      }).catch((e: any) => console.error("[email] OTP send error:", e?.message));
       res.json({ ok: true, sent: true });
     } catch (e: any) { res.status(500).json({ error: e.message }); }
   });
@@ -1528,7 +1541,8 @@ export function registerV2Routes(app: Express, ctx: V2Context) {
       const updated = await v2.updateQuotation(id, { status: "sent", pdfUrl });
       if (customer.phone) {
         const { sendQuoteSent } = await import("./whatsapp");
-        sendQuoteSent(customer.phone, customer.name, quotation.quoteNo, pdfUrl);
+        Promise.resolve(sendQuoteSent(customer.phone, customer.name, quotation.quoteNo, pdfUrl))
+          .catch((e: any) => console.error("[whatsapp] quote_sent dispatch error:", e?.message));
       }
       const teamUser = (req as any).teamUser;
       await v2.writeAuditLog({ actorType: "data_team", actorId: String(teamUser.id), action: "finalize_quotation", entityType: "quotation", entityId: String(id) });
@@ -1686,7 +1700,8 @@ export function registerV2Routes(app: Express, ctx: V2Context) {
       if (request.phone) {
         const otp = Math.floor(100000 + Math.random() * 900000).toString();
         const { sendOTP } = await import("./whatsapp");
-        sendOTP(request.phone, otp);
+        Promise.resolve(sendOTP(request.phone, otp))
+          .catch((e: any) => console.error("[whatsapp] approve OTP dispatch error:", e?.message));
       }
       await v2.writeAuditLog({ actorType: "admin", actorId: adminUser.username, action: "approve_account_request", entityType: "account_request", entityId: String(id) });
       res.json({ customer, login });

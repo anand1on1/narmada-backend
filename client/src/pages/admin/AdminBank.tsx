@@ -22,7 +22,7 @@ export default function AdminBank() {
   async function load() {
     if (!token) return;
     const r = await adminFetch(token, `/api/admin/bank-details`);
-    setItems(await r.json());
+    { const _d = await r.json(); setItems(Array.isArray(_d) ? _d : []); }
   }
   useEffect(() => { load(); }, [token]); // eslint-disable-line
 

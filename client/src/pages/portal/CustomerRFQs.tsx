@@ -11,7 +11,7 @@ export default function CustomerRFQs() {
   async function load() {
     if (!token) return;
     const r = await customerFetch(token, "/api/customer/rfqs");
-    if (r.ok) setItems(await r.json());
+    if (r.ok) { const _d = await r.json(); setItems(Array.isArray(_d) ? _d : []); }
   }
   useEffect(() => { load(); }, [token]); // eslint-disable-line
 
