@@ -15,6 +15,7 @@ interface NotificationEntry {
   body: string;
   status: string;
   errorMsg: string | null;
+  metaJson: string | null;
   sentAt: number;
 }
 
@@ -23,7 +24,7 @@ interface NotificationResponse {
 }
 
 const CHANNELS = ["", "whatsapp", "email"];
-const STATUSES = ["", "sent", "failed", "skipped"];
+const STATUSES = ["", "sent", "queued", "failed", "skipped"];
 
 export default function AdminNotificationLog() {
   const { token } = useAdminAuth();
@@ -63,6 +64,7 @@ export default function AdminNotificationLog() {
   const statusBadge = (s: string) => {
     const map: Record<string, string> = {
       sent: "bg-emerald-500/15 text-emerald-700",
+      queued: "bg-amber-500/15 text-amber-700",
       failed: "bg-red-500/15 text-red-600",
       skipped: "bg-muted text-muted-foreground",
     };
@@ -130,6 +132,7 @@ export default function AdminNotificationLog() {
                 <th className="px-4 py-3 font-semibold">Template/Subject</th>
                 <th className="px-4 py-3 font-semibold">Status</th>
                 <th className="px-4 py-3 font-semibold">Error</th>
+                <th className="px-4 py-3 font-semibold">Response</th>
               </tr>
             </thead>
             <tbody className="divide-y">
@@ -152,6 +155,16 @@ export default function AdminNotificationLog() {
                     </span>
                   </td>
                   <td className="px-4 py-3 text-xs text-red-600 max-w-xs break-words">{e.errorMsg || ""}</td>
+                  <td className="px-4 py-3 text-xs max-w-xs">
+                    {e.metaJson ? (
+                      <details>
+                        <summary className="cursor-pointer text-muted-foreground hover:text-foreground">view</summary>
+                        <pre className="mt-1 whitespace-pre-wrap break-all bg-muted rounded p-2 text-[10px]">{e.metaJson}</pre>
+                      </details>
+                    ) : (
+                      ""
+                    )}
+                  </td>
                 </tr>
               ))}
             </tbody>

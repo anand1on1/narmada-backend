@@ -1919,13 +1919,17 @@ export function registerV2Routes(app: Express, ctx: V2Context) {
   // -------- ADMIN: AUDIT LOGS (D6) --------
   app.get("/api/admin/audit-logs", requireAdminRole, async (req, res) => {
     try {
-      const actor = (req.query.actor as string) || undefined;
+      // The UI's "actor" filter is the actor TYPE (admin | data_team | customer),
+      // not the actor id — so it must map to actorType. actorId is a separate
+      // optional filter sent as `actor_id`.
+      const actorType = (req.query.actor as string) || undefined;
+      const actorId = (req.query.actor_id as string) || undefined;
       const action = (req.query.action as string) || undefined;
       const entityType = (req.query.entity_type as string) || undefined;
       const fromDate = (req.query.from as string) || undefined;
       const toDate = (req.query.to as string) || undefined;
       const page = req.query.page ? parseInt(req.query.page as string, 10) : 1;
-      res.json(await v2.listAuditLogs({ actorId: actor, action, entityType, fromDate, toDate, page }));
+      res.json(await v2.listAuditLogs({ actorType, actorId, action, entityType, fromDate, toDate, page }));
     } catch (e: any) { res.status(500).json({ error: e.message }); }
   });
 

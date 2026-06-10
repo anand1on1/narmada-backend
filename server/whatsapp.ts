@@ -30,7 +30,9 @@ function interpretAisensyError(body: string, campaignName: string): string {
 
 // Retry helper — 3 attempts with exponential backoff. On non-2xx, the thrown message is
 // already interpreted (plan/campaign) so callers and the notification log get an actionable string.
-async function postAisensy(payload: Record<string, unknown>, retries = 3): Promise<void> {
+// On HTTP 200 returns the raw response body text — AiSensy can still report a soft failure
+// (success:false / warnings / queued) inside a 200, so callers must inspect it.
+async function postAisensy(payload: Record<string, unknown>, retries = 3): Promise<string> {
   const campaignName = String((payload as any).campaignName ?? "");
   let lastErr: Error | null = null;
   for (let attempt = 1; attempt <= retries; attempt++) {
@@ -42,12 +44,12 @@ async function postAisensy(payload: Record<string, unknown>, retries = 3): Promi
         },
         body: JSON.stringify({ ...payload, apiKey: AISENSY_API_KEY }),
       });
+      const body = await res.text().catch(() => "");
       if (!res.ok) {
-        const body = await res.text().catch(() => "");
         const interpreted = interpretAisensyError(body, campaignName);
         throw new Error(interpreted);
       }
-      return; // success
+      return body; // success (may still contain a soft-failure payload)
     } catch (e: any) {
       lastErr = e;
       if (attempt < retries) {
@@ -58,14 +60,44 @@ async function postAisensy(payload: Record<string, unknown>, retries = 3): Promi
   throw lastErr!;
 }
 
-// Log to notification_log table
+// AiSensy returns HTTP 200 even when the message won't actually be delivered (template not
+// approved for the destination, destination not on the test-recipient list, plan/quota issues).
+// Inspect the 200 body and downgrade the logged status so the Notification Log reflects reality.
+function classifyAisensyResponse(raw: string): { status: "sent" | "queued" | "failed"; errorMsg?: string } {
+  if (!raw) return { status: "sent" };
+  let parsed: any = null;
+  try { parsed = JSON.parse(raw); } catch { /* non-JSON body — fall through to text checks */ }
+
+  if (parsed && typeof parsed === "object") {
+    if (parsed.success === false) {
+      return { status: "failed", errorMsg: String(parsed.error || parsed.message || "AiSensy success:false") };
+    }
+    const warnings = parsed.warnings ?? parsed.data?.warnings;
+    if (Array.isArray(warnings) && warnings.length) {
+      return { status: "queued", errorMsg: `AiSensy warnings: ${JSON.stringify(warnings).slice(0, 500)}` };
+    }
+    if (parsed.error) {
+      return { status: "failed", errorMsg: String(parsed.error) };
+    }
+  }
+  // Fall back to scanning the raw text for soft-failure signals.
+  if (/"?success"?\s*:\s*false/i.test(raw)) return { status: "failed", errorMsg: raw.slice(0, 500) };
+  if (/warning/i.test(raw)) return { status: "queued", errorMsg: raw.slice(0, 500) };
+  if (/\bqueued\b/i.test(raw)) return { status: "queued" };
+  if (/\berror\b/i.test(raw)) return { status: "failed", errorMsg: raw.slice(0, 500) };
+  return { status: "sent" };
+}
+
+// Log to notification_log table. metaJson always carries the raw provider response (truncated
+// to 4000 chars) for whatsapp rows so operators can see exactly what AiSensy returned.
 function logNotification(
   channel: "whatsapp",
   recipient: string,
   eventKey: string,
   body: string,
-  status: "sent" | "failed",
+  status: "sent" | "failed" | "queued",
   errorMsg?: string,
+  metaJson?: string,
 ) {
   try {
     db.insert(notificationLog)
@@ -78,12 +110,21 @@ function logNotification(
         body,
         status,
         errorMsg: errorMsg || null,
+        metaJson: metaJson ? metaJson.slice(0, 4000) : null,
         sentAt: Date.now(),
-      })
+      } as any)
       .run();
   } catch (e: any) {
     console.error("[whatsapp] log error:", e?.message);
   }
+}
+
+// Shared success-path finalizer: classify the AiSensy 200 body, then log with the real status
+// and the raw response in metaJson. Used by every send* function so behavior stays consistent.
+function logAisensyResult(recipient: string, templateName: string, body: string, raw: string) {
+  const { status, errorMsg } = classifyAisensyResponse(raw);
+  logNotification("whatsapp", recipient, templateName, body, status, errorMsg, raw);
+  return status;
 }
 
 // Normalize phone — ensure it is E.164 without leading +
@@ -104,7 +145,7 @@ export async function sendOTP(phone: string, otp: string): Promise<void> {
   const templateName = "narmada_otp_customer";
   const normalized = normalizePhone(phone);
   try {
-    await postAisensy({
+    const raw = await postAisensy({
       campaignName: templateName,
       destination: normalized,
       userName: "Narmada Mobility",
@@ -117,7 +158,7 @@ export async function sendOTP(phone: string, otp: string): Promise<void> {
       attributes: {},
       paramsFallbackValue: { FirstName: "Customer" },
     });
-    logNotification("whatsapp", normalized, templateName, `OTP: ${otp}`, "sent");
+    logAisensyResult(normalized, templateName, `OTP: ${otp}`, raw);
   } catch (e: any) {
     console.error(`[whatsapp] sendOTP failed for ${normalized}:`, e?.message);
     logNotification("whatsapp", normalized, templateName, `OTP: ${otp}`, "failed", e?.message);
@@ -138,7 +179,7 @@ export async function sendNewRFQAdmin(
   const normalized = normalizePhone(adminPhone);
   const body = `New RFQ from ${customerName}, parts: ${partsCount}, ID: ${rfqId}`;
   try {
-    await postAisensy({
+    const raw = await postAisensy({
       campaignName: templateName,
       destination: normalized,
       userName: "Narmada Mobility",
@@ -151,7 +192,7 @@ export async function sendNewRFQAdmin(
       attributes: {},
       paramsFallbackValue: { FirstName: "Admin" },
     });
-    logNotification("whatsapp", normalized, templateName, body, "sent");
+    logAisensyResult(normalized, templateName, body, raw);
   } catch (e: any) {
     console.error(`[whatsapp] sendNewRFQAdmin failed for ${normalized}:`, e?.message);
     logNotification("whatsapp", normalized, templateName, body, "failed", e?.message);
@@ -172,7 +213,7 @@ export async function sendQuoteSent(
   const normalized = normalizePhone(phone);
   const body = `Quotation ${quoteNo} sent to ${customerName}`;
   try {
-    await postAisensy({
+    const raw = await postAisensy({
       campaignName: templateName,
       destination: normalized,
       userName: "Narmada Mobility",
@@ -185,7 +226,7 @@ export async function sendQuoteSent(
       attributes: {},
       paramsFallbackValue: { FirstName: customerName },
     });
-    logNotification("whatsapp", normalized, templateName, body, "sent");
+    logAisensyResult(normalized, templateName, body, raw);
   } catch (e: any) {
     console.error(`[whatsapp] sendQuoteSent failed for ${normalized}:`, e?.message);
     logNotification("whatsapp", normalized, templateName, body, "failed", e?.message);
@@ -205,7 +246,7 @@ export async function sendPOApproved(
   const normalized = normalizePhone(phone);
   const body = `PO ${poNo} approved for ${customerName}`;
   try {
-    await postAisensy({
+    const raw = await postAisensy({
       campaignName: templateName,
       destination: normalized,
       userName: "Narmada Mobility",
@@ -218,7 +259,7 @@ export async function sendPOApproved(
       attributes: {},
       paramsFallbackValue: { FirstName: customerName },
     });
-    logNotification("whatsapp", normalized, templateName, body, "sent");
+    logAisensyResult(normalized, templateName, body, raw);
   } catch (e: any) {
     console.error(`[whatsapp] sendPOApproved failed for ${normalized}:`, e?.message);
     logNotification("whatsapp", normalized, templateName, body, "failed", e?.message);
@@ -242,7 +283,7 @@ export async function sendPaymentReceived(
   const normalized = normalizePhone(phone);
   const body = `Payment ₹${amount} via ${mode} on ${date} received from ${customerName}`;
   try {
-    await postAisensy({
+    const raw = await postAisensy({
       campaignName: templateName,
       destination: normalized,
       userName: "Narmada Mobility",
@@ -255,7 +296,7 @@ export async function sendPaymentReceived(
       attributes: {},
       paramsFallbackValue: { FirstName: customerName },
     });
-    logNotification("whatsapp", normalized, templateName, body, "sent");
+    logAisensyResult(normalized, templateName, body, raw);
   } catch (e: any) {
     console.error(`[whatsapp] sendPaymentReceived failed for ${normalized}:`, e?.message);
     logNotification("whatsapp", normalized, templateName, body, "failed", e?.message);
@@ -285,7 +326,7 @@ export async function sendConsignmentCreated(
   }
   logWa(templateName, normalized, "attempt");
   try {
-    await postAisensy({
+    const raw = await postAisensy({
       campaignName: templateName,
       destination: normalized,
       userName: "Narmada Mobility",
@@ -298,8 +339,8 @@ export async function sendConsignmentCreated(
       attributes: {},
       paramsFallbackValue: { FirstName: customerName },
     });
-    logWa(templateName, normalized, "sent");
-    logNotification("whatsapp", normalized, templateName, body, "sent");
+    const finalStatus = logAisensyResult(normalized, templateName, body, raw);
+    logWa(templateName, normalized, finalStatus);
   } catch (e: any) {
     console.error(`[whatsapp] sendConsignmentCreated failed for ${normalized}:`, e?.message);
     logWa(templateName, normalized, "failed");
@@ -324,7 +365,7 @@ export async function sendConsignmentInTransit(
   const normalized = normalizePhone(phone);
   const body = `Consignment ${orderNo} in transit via ${vehicle}, ETA ${etaDate}`;
   try {
-    await postAisensy({
+    const raw = await postAisensy({
       campaignName: templateName,
       destination: normalized,
       userName: "Narmada Mobility",
@@ -337,7 +378,7 @@ export async function sendConsignmentInTransit(
       attributes: {},
       paramsFallbackValue: { FirstName: customerName },
     });
-    logNotification("whatsapp", normalized, templateName, body, "sent");
+    logAisensyResult(normalized, templateName, body, raw);
   } catch (e: any) {
     console.error(`[whatsapp] sendConsignmentInTransit failed for ${normalized}:`, e?.message);
     logNotification("whatsapp", normalized, templateName, body, "failed", e?.message);
@@ -360,7 +401,7 @@ export async function sendConsignmentOutForDelivery(
   const normalized = normalizePhone(phone);
   const body = `Consignment ${orderNo} out for delivery to ${customerName}, driver: ${driver}`;
   try {
-    await postAisensy({
+    const raw = await postAisensy({
       campaignName: templateName,
       destination: normalized,
       userName: "Narmada Mobility",
@@ -373,7 +414,7 @@ export async function sendConsignmentOutForDelivery(
       attributes: {},
       paramsFallbackValue: { FirstName: customerName },
     });
-    logNotification("whatsapp", normalized, templateName, body, "sent");
+    logAisensyResult(normalized, templateName, body, raw);
   } catch (e: any) {
     console.error(`[whatsapp] sendConsignmentOutForDelivery failed for ${normalized}:`, e?.message);
     logNotification("whatsapp", normalized, templateName, body, "failed", e?.message);
@@ -396,7 +437,7 @@ export async function sendConsignmentDelivered(
   const normalized = normalizePhone(phone);
   const body = `Consignment ${orderNo} delivered to ${customerName}, received by ${receivedBy}`;
   try {
-    await postAisensy({
+    const raw = await postAisensy({
       campaignName: templateName,
       destination: normalized,
       userName: "Narmada Mobility",
@@ -409,7 +450,7 @@ export async function sendConsignmentDelivered(
       attributes: {},
       paramsFallbackValue: { FirstName: customerName },
     });
-    logNotification("whatsapp", normalized, templateName, body, "sent");
+    logAisensyResult(normalized, templateName, body, raw);
   } catch (e: any) {
     console.error(`[whatsapp] sendConsignmentDelivered failed for ${normalized}:`, e?.message);
     logNotification("whatsapp", normalized, templateName, body, "failed", e?.message);

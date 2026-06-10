@@ -8,6 +8,10 @@ import { useI18n } from "@/lib/i18n";
 export function PortalLayout({ children, title }: { children: ReactNode; title: string }) {
   const { token, customer, clear, ready } = useCustomerAuth();
   const [, navigate] = useLocation();
+  // All hooks must run unconditionally on every render. Calling useI18n() after
+  // the early returns below changed the hook count when `ready` flipped
+  // false->true (right after OTP verify), triggering React error #300.
+  const { t, lang, setLang } = useI18n();
 
   useEffect(() => {
     if (ready && !token) navigate("/portal");
@@ -19,8 +23,6 @@ export function PortalLayout({ children, title }: { children: ReactNode; title: 
     </div>;
   }
   if (!token) return null;
-
-  const { t, lang, setLang } = useI18n();
 
   const navItems = [
     { href: "/portal/dashboard", label: t("dashboard"), icon: LayoutDashboard },

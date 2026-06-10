@@ -29,6 +29,12 @@ interface AuditResponse {
 
 const AUDIT_PAGE_SIZE = 50;
 
+// Audit rows may store non-JSON or malformed strings in before/after. Pretty-print
+// when parseable, otherwise show the raw text — never throw during render.
+function prettyJson(raw: string): string {
+  try { return JSON.stringify(JSON.parse(raw), null, 2); } catch { return raw; }
+}
+
 const ACTOR_TYPES = ["", "admin", "data_team", "customer"];
 const ACTIONS = [
   "", "create", "update", "delete", "login", "logout", "approve", "reject", "finalize", "duplicate",
@@ -157,7 +163,7 @@ export default function AdminAuditLog() {
                   </td>
                   <td className="px-4 py-3">
                     <span className={`text-[10px] uppercase font-bold px-2 py-0.5 rounded ${actorBadge(e.actorType)}`}>
-                      {e.actorType.replace("_", " ")}
+                      {(e.actorType || "—").replace("_", " ")}
                     </span>
                     {e.actorId && <span className="ml-1 text-xs text-muted-foreground">#{e.actorId}</span>}
                   </td>
@@ -167,7 +173,7 @@ export default function AdminAuditLog() {
                     </span>
                   </td>
                   <td className="px-4 py-3 text-xs">
-                    <span className="font-medium">{e.entityType.replace(/_/g, " ")}</span>
+                    <span className="font-medium">{(e.entityType || "—").replace(/_/g, " ")}</span>
                     {e.entityId && <span className="text-muted-foreground"> #{e.entityId}</span>}
                   </td>
                   <td className="px-4 py-3 text-xs text-muted-foreground font-mono">{e.ip || "—"}</td>
@@ -216,7 +222,7 @@ export default function AdminAuditLog() {
                 <div>
                   <div className="text-xs font-bold uppercase tracking-wider mb-2 text-muted-foreground">Before</div>
                   <pre className="bg-muted rounded-lg p-3 text-xs overflow-x-auto whitespace-pre-wrap">
-                    {JSON.stringify(JSON.parse(viewEntry.beforeJson), null, 2)}
+                    {prettyJson(viewEntry.beforeJson)}
                   </pre>
                 </div>
               )}
@@ -224,7 +230,7 @@ export default function AdminAuditLog() {
                 <div>
                   <div className="text-xs font-bold uppercase tracking-wider mb-2 text-muted-foreground">After</div>
                   <pre className="bg-muted rounded-lg p-3 text-xs overflow-x-auto whitespace-pre-wrap">
-                    {JSON.stringify(JSON.parse(viewEntry.afterJson), null, 2)}
+                    {prettyJson(viewEntry.afterJson)}
                   </pre>
                 </div>
               )}

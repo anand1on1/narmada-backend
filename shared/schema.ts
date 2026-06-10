@@ -210,8 +210,9 @@ export const notificationLog = sqliteTable("notification_log", {
   recipient: text("recipient").notNull(),
   subject: text("subject"),
   body: text("body").notNull(),
-  status: text("status").notNull(),        // 'sent' | 'failed' | 'skipped'
+  status: text("status").notNull(),        // 'sent' | 'failed' | 'skipped' | 'queued'
   errorMsg: text("error_msg"),
+  metaJson: text("meta_json"),              // raw provider response (truncated) for delivery diagnostics
   sentAt: integer("sent_at").notNull().$defaultFn(() => Date.now()),
 });
 

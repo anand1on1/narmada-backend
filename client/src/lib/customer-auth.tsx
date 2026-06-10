@@ -49,19 +49,23 @@ export function CustomerAuthProvider({ children }: { children: ReactNode }) {
   }, []);
 
   useEffect(() => {
+    let mounted = true;
     if (!token) { setReady(true); return; }
     (async () => {
       try {
         const r = await fetch(apiUrl("/api/customer/me"), { headers: { "x-customer-token": token } });
+        if (!mounted) return;
         if (r.ok) {
           const j = await r.json();
+          if (!mounted) return;
           setCustomer(j);
           setReady(true);
         } else {
           clear();
         }
-      } catch { clear(); }
+      } catch { if (mounted) clear(); }
     })();
+    return () => { mounted = false; };
   }, [token, clear]);
 
   return <Ctx.Provider value={{ token, email, customer, setAuth, clear, ready }}>{children}</Ctx.Provider>;

@@ -173,6 +173,7 @@ CREATE TABLE IF NOT EXISTS notification_log (
   body TEXT NOT NULL,
   status TEXT NOT NULL,
   error_msg TEXT,
+  meta_json TEXT,
   sent_at INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_notif_log_sent_at ON notification_log(sent_at DESC);
@@ -540,6 +541,9 @@ CREATE TABLE IF NOT EXISTS account_requests (
 
 // Session C: ALTER customers to add customer_code
 try { sqlite.exec(`ALTER TABLE customers ADD COLUMN customer_code TEXT`); } catch {}
+
+// Bug-fix session: store raw provider response on whatsapp notification rows for delivery diagnostics (additive)
+try { sqlite.exec(`ALTER TABLE notification_log ADD COLUMN meta_json TEXT`); } catch {}
 
 // Seed default USD/INR rate if missing
 const existingRate = sqlite.prepare("SELECT value FROM settings WHERE key = ?").get("usd_inr_rate");

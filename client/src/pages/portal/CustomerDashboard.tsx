@@ -10,16 +10,19 @@ export default function CustomerDashboard() {
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
+    let mounted = true;
     (async () => {
       if (!token) return;
       try {
         const r = await customerFetch(token, "/api/customer/dashboard");
+        if (!mounted) return;
         if (r.ok) setData(await r.json());
         else console.error("[portal] dashboard load failed:", r.status);
       } catch (e) {
         console.error("[portal] dashboard load error:", e);
-      } finally { setLoading(false); }
+      } finally { if (mounted) setLoading(false); }
     })();
+    return () => { mounted = false; };
   }, [token]);
 
   function copy(s: string) { navigator.clipboard?.writeText(s); }

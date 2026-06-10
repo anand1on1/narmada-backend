@@ -33,6 +33,18 @@ export class ErrorBoundary extends Component<Props, State> {
     window.location.reload();
   };
 
+  // Escape hatch when a crash leaves the user stuck on an authed page: clear all
+  // portal/admin/team tokens and send them to the customer login. Operates on
+  // localStorage + hash so it works even if the React tree below is broken.
+  private logout = () => {
+    ["narmada_customer_token", "narmada_customer_email",
+     "narmada_admin_token", "narmada_team_token"].forEach((k) => {
+      try { localStorage.removeItem(k); } catch {}
+    });
+    window.location.hash = "#/portal";
+    window.location.reload();
+  };
+
   render() {
     if (!this.state.hasError) return this.props.children;
     return (
@@ -43,9 +55,10 @@ export class ErrorBoundary extends Component<Props, State> {
           {this.state.message && (
             <p className="text-xs text-muted-foreground/70 font-mono break-words mb-5">{this.state.message}</p>
           )}
-          <div className="flex justify-center gap-2">
+          <div className="flex justify-center gap-2 flex-wrap">
             <button onClick={this.goBack} className="px-4 py-2 border rounded-lg text-sm hover:bg-muted">Go back</button>
             <button onClick={this.reload} className="px-5 py-2 bg-accent text-accent-foreground rounded-lg text-sm font-semibold">Reload</button>
+            <button onClick={this.logout} className="px-4 py-2 border rounded-lg text-sm hover:bg-muted">Logout</button>
           </div>
         </div>
       </div>

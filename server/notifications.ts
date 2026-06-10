@@ -202,21 +202,11 @@ export async function sendNotification(eventKey: string, ctx: NotificationContex
         });
       }
     } else if (t.channel === "whatsapp") {
-      // WhatsApp API not configured yet (Phase 5). Log as skipped.
-      const body = renderTemplate(t.body, vars);
-      await v2.logNotification({
-        consignmentId: ctx.consignmentId ?? null,
-        customerId: ctx.customerId ?? null,
-        eventKey,
-        channel: "whatsapp",
-        recipient: ctx.customerPhone || "",
-        subject: null,
-        body,
-        status: "skipped",
-        errorMsg: ctx.customerPhone
-          ? "WhatsApp API not configured (use Send via WhatsApp button)"
-          : "no phone on customer",
-      });
+      // WhatsApp is now sent directly by the v2 functions in server/whatsapp.ts (called from
+      // routes-v2.ts), which log their own notification_log rows. This legacy template path no
+      // longer owns WhatsApp delivery — emitting a "skipped" row here just duplicated every
+      // WhatsApp entry in the Notification Log, so we return silently instead.
+      continue;
     }
   }
 }
