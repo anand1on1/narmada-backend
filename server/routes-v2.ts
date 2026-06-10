@@ -1869,6 +1869,7 @@ export function registerV2Routes(app: Express, ctx: V2Context) {
       const portalLoginUrl = `${process.env.APP_URL || "https://narmadamobility.com"}/#/portal`;
       const displayName = request.name || request.company || "there";
       sendGenericEmail({
+        event: "approval_welcome",
         to: request.email,
         subject: "Your Narmada Mobility account is approved",
         html: `<div style="font-family:system-ui,-apple-system,sans-serif;max-width:520px;margin:0 auto;padding:24px;">
@@ -1925,6 +1926,18 @@ export function registerV2Routes(app: Express, ctx: V2Context) {
       const toDate = (req.query.to as string) || undefined;
       const page = req.query.page ? parseInt(req.query.page as string, 10) : 1;
       res.json(await v2.listAuditLogs({ actorId: actor, action, entityType, fromDate, toDate, page }));
+    } catch (e: any) { res.status(500).json({ error: e.message }); }
+  });
+
+  // -------- ADMIN: NOTIFICATION LOG (WhatsApp/email delivery diagnostics) --------
+  app.get("/api/admin/notification-log", requireAdminRole, async (req, res) => {
+    try {
+      const reqLimit = req.query.limit ? parseInt(req.query.limit as string, 10) : 200;
+      const limit = Math.min(Math.max(Number.isFinite(reqLimit) ? reqLimit : 200, 1), 500);
+      const channel = (req.query.channel as string) || undefined;
+      const status = (req.query.status as string) || undefined;
+      const entries = await v2.listNotifications({ limit, channel, status });
+      res.json({ entries });
     } catch (e: any) { res.status(500).json({ error: e.message }); }
   });
 

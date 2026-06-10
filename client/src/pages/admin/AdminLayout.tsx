@@ -6,7 +6,7 @@ import {
   LayoutDashboard, Package, MessageSquare, Map, Settings, LogOut, ExternalLink,
   FileText, Tag, Truck, Users,
   UserSquare, Wallet, CreditCard, FileQuestion, FileSpreadsheet, ShoppingCart, Landmark,
-  Building2, UserCog, ScrollText, ClipboardList,
+  Building2, UserCog, ScrollText, ClipboardList, Bell,
 } from "lucide-react";
 
 // Session A V2: 4-role sidebar matrix.
@@ -20,7 +20,7 @@ const ROLE_PAGES: Record<AdminRole, Set<string>> = {
     "/admin/consignments", "/admin/contacts", "/admin/sitemap", "/admin/team", "/admin/settings",
     "/admin/customers", "/admin/ledger", "/admin/payments",
     "/admin/rfqs", "/admin/quotes", "/admin/purchase-orders", "/admin/bank",
-    "/admin/quoting-companies", "/admin/data-team", "/admin/audit-logs", "/admin/account-requests",
+    "/admin/quoting-companies", "/admin/data-team", "/admin/audit-logs", "/admin/notification-log", "/admin/account-requests",
   ]),
   logistics: new Set(["/admin/consignments"]),
   accounts: new Set([
@@ -73,6 +73,7 @@ export function AdminLayout({ children, title }: { children: ReactNode; title: s
     { href: "/admin/data-team", label: "Data Team", icon: UserCog },
     { href: "/admin/account-requests", label: "Account Requests", icon: ClipboardList },
     { href: "/admin/audit-logs", label: "Audit Log", icon: ScrollText },
+    { href: "/admin/notification-log", label: "Notification Log", icon: Bell },
     { href: "/admin/products", label: "Products", icon: Package },
     { href: "/admin/blog", label: "Blog", icon: FileText },
     { href: "/admin/price-lists", label: "Price Lists", icon: Tag },

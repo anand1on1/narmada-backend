@@ -33,13 +33,36 @@ export function renderTemplate(template: string, vars: Record<string, string>): 
   return template.replace(/\{(\w+)\}/g, (_, k) => vars[k] ?? "");
 }
 
-// Session B: generic email send (used for OTP, PO reminders, customer notifications)
+// Session B: generic email send (used for OTP, PO reminders, customer notifications).
+// `event` is a short label recorded in the notification log so the admin viewer can tell
+// approval-welcome mails apart from OTP/PO mails. Logging is fire-and-forget — it never throws.
 export async function sendGenericEmail(opts: {
-  to: string | string[]; cc?: string | string[]; subject: string; html: string; text?: string;
+  to: string | string[]; cc?: string | string[]; subject: string; html: string; text?: string; event?: string;
 }): Promise<{ ok: boolean; via: string; error?: string }> {
+  const event = opts.event || "generic";
+  const recipient = Array.isArray(opts.to) ? opts.to.join(",") : opts.to;
+  const logSafe = async (status: string, errorMsg: string | null) => {
+    try {
+      await v2.logNotification({
+        consignmentId: null,
+        customerId: null,
+        eventKey: event,
+        channel: "email",
+        recipient,
+        subject: opts.subject,
+        body: opts.text || opts.html,
+        status,
+        errorMsg,
+      });
+    } catch (e: any) {
+      console.error("[email] log error:", e?.message);
+    }
+  };
+
   const t = getTransporter();
   if (!t) {
-    console.log(`[email] SMTP not configured — skipping send to ${Array.isArray(opts.to) ? opts.to.join(",") : opts.to} (subject: ${opts.subject})`);
+    console.log(`[email] SMTP not configured — skipping send to ${recipient} (subject: ${opts.subject})`);
+    await logSafe("skipped", "SMTP not configured");
     return { ok: false, via: "smtp", error: "SMTP not configured" };
   }
   try {
@@ -51,9 +74,11 @@ export async function sendGenericEmail(opts: {
       html: opts.html,
       text: opts.text || opts.html.replace(/<[^>]+>/g, ""),
     });
+    await logSafe("sent", null);
     return { ok: true, via: "smtp" };
   } catch (e: any) {
     console.error("[email] send failed:", e?.message);
+    await logSafe("failed", e?.message || "send failed");
     return { ok: false, via: "smtp", error: e?.message };
   }
 }

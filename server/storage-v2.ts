@@ -267,6 +267,20 @@ export async function getNotificationLog(consignmentId: number): Promise<Notific
     .all();
 }
 
+export async function listNotifications(opts: {
+  limit?: number;
+  channel?: string;
+  status?: string;
+}): Promise<NotificationLog[]> {
+  const limit = Math.min(Math.max(opts.limit ?? 200, 1), 500);
+  const conds: any[] = [];
+  if (opts.channel) conds.push(eq(notificationLog.channel, opts.channel));
+  if (opts.status) conds.push(eq(notificationLog.status, opts.status));
+  let q: any = db.select().from(notificationLog);
+  if (conds.length) q = q.where(conds.length === 1 ? conds[0] : and(...conds));
+  return q.orderBy(desc(notificationLog.sentAt)).limit(limit).all();
+}
+
 // -------- DEFAULT TEMPLATES SEED (Phase 4) --------
 const DEFAULT_TEMPLATES = [
   {

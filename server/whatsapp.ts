@@ -14,8 +14,24 @@ function logWa(template: string, phone: string, status: string) {
   console.log(`[whatsapp] template=${template} to=${phone} status=${status}`);
 }
 
-// Retry helper — 3 attempts with exponential backoff
+// Translate an AiSensy error body into an actionable message and emit an operator-facing
+// console.warn. Returns the original body text if no special case matched.
+function interpretAisensyError(body: string, campaignName: string): string {
+  if (/No Plan active/i.test(body)) {
+    console.warn("[whatsapp] PLAN INACTIVE — AiSensy refusing sends. Upgrade plan at app.aisensy.com");
+    return "AISENSY_PLAN_INACTIVE: Upgrade plan at app.aisensy.com";
+  }
+  if (/Campaign does not exist/i.test(body)) {
+    console.warn(`[whatsapp] CAMPAIGN MISSING: ${campaignName} — create it at app.aisensy.com → Campaigns → New`);
+    return `AISENSY_CAMPAIGN_MISSING: Create campaign '${campaignName}' in AiSensy dashboard`;
+  }
+  return body;
+}
+
+// Retry helper — 3 attempts with exponential backoff. On non-2xx, the thrown message is
+// already interpreted (plan/campaign) so callers and the notification log get an actionable string.
 async function postAisensy(payload: Record<string, unknown>, retries = 3): Promise<void> {
+  const campaignName = String((payload as any).campaignName ?? "");
   let lastErr: Error | null = null;
   for (let attempt = 1; attempt <= retries; attempt++) {
     try {
@@ -28,7 +44,8 @@ async function postAisensy(payload: Record<string, unknown>, retries = 3): Promi
       });
       if (!res.ok) {
         const body = await res.text().catch(() => "");
-        throw new Error(`AiSensy HTTP ${res.status}: ${body}`);
+        const interpreted = interpretAisensyError(body, campaignName);
+        throw new Error(interpreted);
       }
       return; // success
     } catch (e: any) {

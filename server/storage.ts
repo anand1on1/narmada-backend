@@ -175,6 +175,7 @@ CREATE TABLE IF NOT EXISTS notification_log (
   error_msg TEXT,
   sent_at INTEGER NOT NULL
 );
+CREATE INDEX IF NOT EXISTS idx_notif_log_sent_at ON notification_log(sent_at DESC);
 
 -- Session A V2: admin_sessions (DB-backed auth, survives Render restarts)
 CREATE TABLE IF NOT EXISTS admin_sessions (

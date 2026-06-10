@@ -55,6 +55,7 @@ import AdminBank from "@/pages/admin/AdminBank";
 import AdminQuotingCompanies from "@/pages/admin/AdminQuotingCompanies";
 import AdminDataTeam from "@/pages/admin/AdminDataTeam";
 import AdminAuditLog from "@/pages/admin/AdminAuditLog";
+import AdminNotificationLog from "@/pages/admin/AdminNotificationLog";
 import AdminAccountRequests from "@/pages/admin/AdminAccountRequests";
 
 import { CustomerAuthProvider } from "@/lib/customer-auth";
@@ -142,6 +143,7 @@ function AppRouter() {
         <Route path="/admin/quoting-companies" component={AdminQuotingCompanies} />
         <Route path="/admin/data-team" component={AdminDataTeam} />
         <Route path="/admin/audit-logs" component={AdminAuditLog} />
+        <Route path="/admin/notification-log" component={AdminNotificationLog} />
         <Route path="/admin/account-requests" component={AdminAccountRequests} />
         <Route component={NotFound} />
       </Switch>
