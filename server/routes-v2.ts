@@ -238,6 +238,10 @@ export function registerV2Routes(app: Express, ctx: V2Context) {
       const token = randomBytes(32).toString("hex");
       tokenMap.set(token, info);
       await persistAdminSession(token, info);
+      Promise.resolve(v2.writeAuditLog({
+        actorType: "admin", actorId: info.username, action: "login",
+        ip: req.ip, userAgent: req.headers["user-agent"] as string,
+      })).catch((e: any) => console.error("[audit] login write failed:", e?.message));
       res.json({ token, user: info });
     } catch (e: any) {
       res.status(500).json({ error: e.message });
@@ -333,6 +337,10 @@ export function registerV2Routes(app: Express, ctx: V2Context) {
       const parsed = insertPostSchema.parse(body);
       const post = await v2.createPost(parsed);
       triggerSitemapRegen(regenSitemap);
+      Promise.resolve(v2.writeAuditLog({
+        actorType: "admin", actorId: (req as any).user?.username, action: "create_post",
+        entityType: "post", entityId: String(post.id), afterJson: JSON.stringify({ id: post.id, slug: post.slug }),
+      })).catch((e: any) => console.error("[audit] post create write failed:", e?.message));
       res.json(post);
     } catch (e: any) { res.status(400).json({ error: e.message, details: e.errors }); }
   });
@@ -341,12 +349,21 @@ export function registerV2Routes(app: Express, ctx: V2Context) {
       const id = parseInt(req.params.id as string, 10);
       const post = await v2.updatePost(id, normalizeDateFields(req.body || {}));
       triggerSitemapRegen(regenSitemap);
+      Promise.resolve(v2.writeAuditLog({
+        actorType: "admin", actorId: (req as any).user?.username, action: "update_post",
+        entityType: "post", entityId: String(id),
+      })).catch((e: any) => console.error("[audit] post update write failed:", e?.message));
       res.json(post);
     } catch (e: any) { res.status(400).json({ error: e.message }); }
   });
   app.delete("/api/admin/posts/:id", requireAdminRole, async (req, res) => {
-    await v2.deletePost(parseInt(req.params.id as string, 10));
+    const id = parseInt(req.params.id as string, 10);
+    await v2.deletePost(id);
     triggerSitemapRegen(regenSitemap);
+    Promise.resolve(v2.writeAuditLog({
+      actorType: "admin", actorId: (req as any).user?.username, action: "delete_post",
+      entityType: "post", entityId: String(id),
+    })).catch((e: any) => console.error("[audit] post delete write failed:", e?.message));
     res.json({ ok: true });
   });
   // AI draft generator — returns a draft (NOT saved); admin reviews then saves via POST /api/admin/posts.
@@ -524,6 +541,32 @@ export function registerV2Routes(app: Express, ctx: V2Context) {
         console.log(`[whatsapp] template=consignment_created_v2 to= status=skipped-no-phone`);
       }
 
+      // Auto-link consignment -> ledger (fire-and-forget). When a consignment with an
+      // invoice amount is booked against a known customer, post a DEBIT entry so the
+      // ledger stays in sync with dispatched invoices.
+      if (created.customerId && created.invoiceAmount && created.invoiceAmount > 0) {
+        const cid = created.customerId;
+        Promise.resolve(
+          v2.addLedgerEntry({
+            customerId: cid,
+            entryDate: created.dispatchDate || created.createdAt || Date.now(),
+            voucherType: "invoice",
+            voucherNo: created.invoiceNumber || created.docketNumber,
+            referenceId: created.id,
+            description: `Consignment ${created.docketNumber}${created.invoiceNumber ? ` / Invoice ${created.invoiceNumber}` : ""}`,
+            debitInr: created.invoiceAmount,
+            creditInr: 0,
+            createdBy: user.username,
+          }),
+        ).catch((e: any) => console.error("[ledger] auto-link consignment error:", e?.message));
+        console.log(`[ledger] auto-debit customerId=${cid} amount=${created.invoiceAmount} for consignment ${created.docketNumber}`);
+      }
+
+      Promise.resolve(v2.writeAuditLog({
+        actorType: "admin", actorId: user.username, action: "create_consignment",
+        entityType: "consignment", entityId: String(created.id), afterJson: JSON.stringify(created),
+      })).catch((e: any) => console.error("[audit] consignment create write failed:", e?.message));
+
       res.json(created);
     } catch (e: any) { res.status(400).json({ error: e.message, details: e.errors }); }
   });
@@ -583,11 +626,23 @@ export function registerV2Routes(app: Express, ctx: V2Context) {
           // Direct AiSensy WhatsApp template per status transition (fire-and-forget).
           // sendNotification() only logs the DB whatsapp template as 'skipped', so the
           // real WhatsApp dispatch must happen here — mirroring the create flow.
-          if (updated.customerPhone) {
-            const phone = updated.customerPhone;
+          // Phone fallback: old consignments may have an empty denormalized phone — look
+          // up the linked customer's phone so status updates still reach the customer.
+          let phone = updated.customerPhone || "";
+          if (!phone && updated.customerId) {
+            try {
+              const linked = await v2.getCustomer(updated.customerId);
+              if (linked?.phone) phone = linked.phone;
+            } catch (e: any) {
+              console.error("[whatsapp] consignment phone lookup error:", e?.message);
+            }
+          }
+          const templateName = `consignment_${body.status}_v2`;
+          if (phone) {
             const cname = updated.customerName || "Customer";
             const docket = updated.docketNumber;
             const orderNo = updated.invoiceNumber || updated.docketNumber;
+            console.log(`[whatsapp] dispatching ${templateName} to ${phone} for status ${body.status}`);
             import("./whatsapp")
               .then((wa) => {
                 if (body.status === "in_transit") {
@@ -599,11 +654,21 @@ export function registerV2Routes(app: Express, ctx: V2Context) {
                 }
               })
               .catch((e: any) => console.error(`[whatsapp] consignment ${body.status} dispatch error:`, e?.message));
-            console.log(`[whatsapp] template=consignment_${body.status}_v2 to=${phone} status=attempt`);
+            console.log(`[whatsapp] template=${templateName} to=${phone} status=attempt`);
           } else {
-            console.log(`[whatsapp] template=consignment_${body.status}_v2 to= status=skipped-no-phone`);
+            console.log(`[whatsapp] template=${templateName} to= status=skipped-no-phone`);
           }
         }
+      }
+
+      if (updated) {
+        const actor = (req as any).user as TokenInfo;
+        Promise.resolve(v2.writeAuditLog({
+          actorType: "admin", actorId: actor?.username, action: "update_consignment",
+          entityType: "consignment", entityId: String(id),
+          beforeJson: existing ? JSON.stringify({ status: oldStatus }) : undefined,
+          afterJson: JSON.stringify({ status: updated.status }),
+        })).catch((e: any) => console.error("[audit] consignment update write failed:", e?.message));
       }
 
       res.json(updated);
@@ -707,6 +772,10 @@ export function registerV2Routes(app: Express, ctx: V2Context) {
     try {
       const parsed = insertCustomerSchema.parse(req.body || {});
       const customer = await v2.createCustomer(parsed);
+      Promise.resolve(v2.writeAuditLog({
+        actorType: "admin", actorId: (req as any).user?.username, action: "create_customer",
+        entityType: "customer", entityId: String(customer.id), afterJson: JSON.stringify({ id: customer.id, name: customer.name }),
+      })).catch((e: any) => console.error("[audit] customer create write failed:", e?.message));
       res.json(customer);
     } catch (e: any) { res.status(400).json({ error: e.message, details: e.errors }); }
   });
@@ -809,9 +878,12 @@ export function registerV2Routes(app: Express, ctx: V2Context) {
         const customer = await v2.getCustomer(login.customerId);
         if (customer?.phone) {
           whatsappAttempted = true;
+          console.log(`[otp] dispatching WhatsApp OTP to customerId=${login.customerId} phone=${customer.phone}`);
           const { sendOTP } = await import("./whatsapp");
           Promise.resolve(sendOTP(customer.phone, code)).catch((e: any) =>
             console.error("[whatsapp] OTP send error:", e?.message));
+        } else {
+          console.log(`[otp] no phone on file for customerId=${login.customerId}, skipping whatsapp`);
         }
       } catch (e: any) {
         console.error("[otp] whatsapp lookup error:", e?.message);
@@ -958,6 +1030,11 @@ export function registerV2Routes(app: Express, ctx: V2Context) {
       const user = (req as any).user as TokenInfo;
       const parsed = insertLedgerEntrySchema.parse({ ...req.body, customerId: cid });
       const row = await v2.addLedgerEntry({ ...parsed, createdBy: user.username });
+      Promise.resolve(v2.writeAuditLog({
+        actorType: "admin", actorId: user.username, action: "create_ledger_entry",
+        entityType: "ledger_entry", entityId: String(row.id),
+        afterJson: JSON.stringify({ customerId: cid, debitInr: row.debitInr, creditInr: row.creditInr }),
+      })).catch((e: any) => console.error("[audit] ledger create write failed:", e?.message));
       res.json(row);
     } catch (e: any) { res.status(400).json({ error: e.message, details: e.errors }); }
   });
@@ -1307,6 +1384,32 @@ export function registerV2Routes(app: Express, ctx: V2Context) {
       const session = await v2.createDataTeamSession(user.id);
       await v2.touchDataTeamUserLogin(user.id);
       const { passwordHash: _ph, ...safeUser } = user;
+      res.json({ token: session.token, expiresAt: session.expiresAt, user: safeUser });
+    } catch (e: any) { res.status(500).json({ error: e.message }); }
+  });
+
+  // Admin SSO into the Data Team portal. An authenticated admin (x-admin-token / requireAuth)
+  // exchanges their admin session for a Data Team session, so admins can use the quotation
+  // wizard at /team/quotations/new without a separate Data Team password.
+  app.post("/api/team/login-as-admin", requireAuth, async (req, res) => {
+    try {
+      const adminUser = (req as any).user as TokenInfo;
+      const ssoUsername = adminUser.username;
+      let teamUser = await v2.getDataTeamUserByUsername(ssoUsername);
+      if (!teamUser) {
+        // Auto-provision a Data Team row for this admin. Password is random — login is via SSO only.
+        const randomPw = randomBytes(24).toString("hex");
+        teamUser = await v2.createDataTeamUser({
+          username: ssoUsername,
+          passwordHash: hashPassword(randomPw),
+          name: adminUser.displayName || ssoUsername,
+        });
+      }
+      if (!teamUser.active) return res.status(403).json({ error: "Team account disabled" });
+      const session = await v2.createDataTeamSession(teamUser.id);
+      await v2.touchDataTeamUserLogin(teamUser.id);
+      const { passwordHash: _ph, ...safeUser } = teamUser;
+      console.log(`[team] admin SSO login as ${ssoUsername} -> teamUserId=${teamUser.id}`);
       res.json({ token: session.token, expiresAt: session.expiresAt, user: safeUser });
     } catch (e: any) { res.status(500).json({ error: e.message }); }
   });

@@ -1,4 +1,5 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
+import { useParams } from "wouter";
 import { SeoHead } from "@/components/SeoHead";
 import { apiUrl } from "@/lib/queryClient";
 import { Search, Truck, MapPin, Calendar, Package, FileText, MessageCircle, CheckCircle2, Clock, AlertCircle } from "lucide-react";
@@ -26,16 +27,19 @@ const STEPS = [
 ];
 
 export default function TrackConsignment() {
-  const [q, setQ] = useState("");
+  const params = useParams<{ docket?: string }>();
+  const [q, setQ] = useState(params.docket || "");
   const [data, setData] = useState<TrackResult | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
 
-  async function track() {
-    if (!q.trim()) return;
+  async function track(docket?: string) {
+    const value = (docket ?? q).trim();
+    if (!value) return;
+    setQ(value);
     setLoading(true); setError(null); setData(null);
     try {
-      const r = await fetch(apiUrl(`/api/track/${encodeURIComponent(q.trim())}`));
+      const r = await fetch(apiUrl(`/api/track/${encodeURIComponent(value)}`));
       if (!r.ok) {
         if (r.status === 404) setError("notfound");
         else setError("server");
@@ -45,6 +49,11 @@ export default function TrackConsignment() {
     } catch { setError("network"); }
     finally { setLoading(false); }
   }
+
+  // Auto-lookup when arriving via /track-consignment/:docket (e.g. from email/WhatsApp link).
+  useEffect(() => {
+    if (params.docket) track(params.docket);
+  }, [params.docket]); // eslint-disable-line
 
   const activeIdx = data ? STEPS.findIndex((s) => s.key === data.status) : -1;
   const isCancelled = data?.status === "cancelled";
@@ -82,7 +91,7 @@ export default function TrackConsignment() {
                 data-testid="input-docket"
               />
             </div>
-            <button onClick={track} disabled={loading}
+            <button onClick={() => track()} disabled={loading}
               className="px-6 py-3.5 bg-accent text-accent-foreground rounded-xl font-bold uppercase tracking-wider text-sm disabled:opacity-60"
               data-testid="button-track">
               {loading ? "Searching…" : "Track"}

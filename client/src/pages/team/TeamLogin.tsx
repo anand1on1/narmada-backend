@@ -12,10 +12,43 @@ export default function TeamLogin() {
   const [password, setPassword] = useState("");
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
+  const [ssoTried, setSsoTried] = useState(false);
+  const [ssoBusy, setSsoBusy] = useState(false);
 
   useEffect(() => {
     if (ready && token) navigate("/team/dashboard");
   }, [ready, token, navigate]);
+
+  // Admin SSO: if an admin is already signed in, auto-provision a team session
+  // so "New Quotation" works without a second login. Falls back to the manual
+  // form if there's no admin token or the SSO call fails.
+  useEffect(() => {
+    if (!ready || token || ssoTried) return;
+    const adminToken = (() => {
+      try { return localStorage.getItem("narmada_admin_token") ?? sessionStorage.getItem("narmada_admin_token"); }
+      catch { return null; }
+    })();
+    if (!adminToken) { setSsoTried(true); return; }
+    setSsoTried(true);
+    setSsoBusy(true);
+    (async () => {
+      try {
+        const r = await fetch(apiUrl("/api/team/login-as-admin"), {
+          method: "POST",
+          headers: { "Content-Type": "application/json", "x-admin-token": adminToken, "Authorization": `Bearer ${adminToken}` },
+        });
+        const j = await r.json();
+        if (!r.ok) { setErr(j.error || null); return; }
+        setAuth(j.token, j.user);
+        setTimeout(() => navigate("/team/quotations/new"), 30);
+      } catch {
+        /* network — show manual form */
+      } finally {
+        setSsoBusy(false);
+      }
+    })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [ready, token, ssoTried]);
 
   async function login() {
     if (!username.trim() || !password.trim()) return;
@@ -35,6 +68,18 @@ export default function TeamLogin() {
     } finally {
       setBusy(false);
     }
+  }
+
+  if (ssoBusy) {
+    return (
+      <div className="min-h-screen flex items-center justify-center bg-slate-50 dark:bg-slate-950 p-4">
+        <div className="bg-card border rounded-2xl shadow-xl w-full max-w-md p-8 text-center">
+          <div className="inline-block mb-4"><Logo /></div>
+          <div className="text-sm font-semibold">Signing you in…</div>
+          <div className="text-xs text-muted-foreground mt-1">Using your admin session.</div>
+        </div>
+      </div>
+    );
   }
 
   return (

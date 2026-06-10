@@ -229,6 +229,10 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
       if (Array.isArray(body.compatibleModels)) body.compatibleModels = JSON.stringify(body.compatibleModels);
       const parsed = insertProductSchema.parse(body);
       const created = await storage.createProduct(parsed);
+      import("./storage-v2").then((v2) => v2.writeAuditLog({
+        actorType: "admin", actorId: (req as any).user?.username, action: "create_product",
+        entityType: "product", entityId: String(created.id), afterJson: JSON.stringify({ id: created.id, name: created.name }),
+      })).catch((e: any) => console.error("[audit] product create write failed:", e?.message));
       res.json(created);
     } catch (e: any) {
       res.status(400).json({ error: e.message || "Invalid payload", details: e.errors });

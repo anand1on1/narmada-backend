@@ -98,6 +98,7 @@ function PublicRoutes() {
         <Route path="/blog" component={BlogList} />
         <Route path="/blog/:slug" component={BlogDetail} />
         <Route path="/price-checker" component={PriceChecker} />
+        <Route path="/track-consignment/:docket" component={TrackConsignment} />
         <Route path="/track-consignment" component={TrackConsignment} />
         {/* Individual brand pages — MUST be before catch-all /:slug */}
         <Route path="/brand/:slug" component={BrandPage} />

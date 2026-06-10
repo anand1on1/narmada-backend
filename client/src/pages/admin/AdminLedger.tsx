@@ -91,6 +91,20 @@ export default function AdminLedger() {
   const totalDebit = entries.reduce((s, e) => s + (e.debitInr || 0), 0);
   const totalCredit = entries.reduce((s, e) => s + (e.creditInr || 0), 0);
 
+  if (customers.length === 0) {
+    return (
+      <AdminLayout title="Ledger">
+        <div className="bg-card border rounded-xl p-12 text-center" data-testid="ledger-no-customers">
+          <div className="text-lg font-semibold mb-2">No customers yet</div>
+          <p className="text-sm text-muted-foreground mb-5">Add a customer first — ledgers are kept per customer.</p>
+          <a href="#/admin/customers" className="inline-flex items-center gap-2 px-4 py-2 bg-accent text-accent-foreground rounded-lg font-semibold text-sm">
+            <Plus className="w-4 h-4" /> Go to Customers
+          </a>
+        </div>
+      </AdminLayout>
+    );
+  }
+
   return (
     <AdminLayout title="Ledger">
       <div className="flex gap-2 mb-4 flex-wrap items-center">
@@ -117,7 +131,9 @@ export default function AdminLedger() {
       )}
 
       <div className="bg-card border rounded-xl overflow-x-auto">
-        {entries.length === 0 ? (
+        {!customerId ? (
+          <div className="p-12 text-center text-muted-foreground" data-testid="ledger-select-prompt">Select a customer above to see their ledger.</div>
+        ) : entries.length === 0 ? (
           <div className="p-12 text-center text-muted-foreground">No ledger entries for this customer.</div>
         ) : (
           <table className="w-full text-sm">

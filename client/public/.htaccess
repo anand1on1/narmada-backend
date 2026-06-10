@@ -1,0 +1,23 @@
+<IfModule mod_rewrite.c>
+  RewriteEngine On
+  RewriteBase /
+
+  # Never rewrite real static files (sitemap, robots, assets, images, config).
+  RewriteCond %{REQUEST_URI} ^/sitemap\.xml$ [OR]
+  RewriteCond %{REQUEST_URI} ^/robots\.txt$
+  RewriteRule ^ - [L]
+
+  # Serve existing files/directories as-is.
+  RewriteCond %{REQUEST_FILENAME} -f [OR]
+  RewriteCond %{REQUEST_FILENAME} -d
+  RewriteRule ^ - [L]
+
+  # SPA fallback — everything else to index.html (app uses hash routing).
+  RewriteRule ^ index.html [L]
+</IfModule>
+
+# Correct content types.
+<IfModule mod_mime.c>
+  AddType application/xml .xml
+  AddType text/plain .txt
+</IfModule>
