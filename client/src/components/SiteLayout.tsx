@@ -3,7 +3,7 @@ import { useEffect, useState } from "react";
 import { Logo } from "./Logo";
 import { Button } from "@/components/ui/button";
 import { Sheet, SheetContent, SheetTrigger } from "@/components/ui/sheet";
-import { Menu, Phone, Mail, MapPin, MessageCircle, ChevronDown, Globe, ArrowUpRight } from "lucide-react";
+import { Menu, Phone, Mail, MapPin, MessageCircle, ChevronDown, Globe, ArrowUpRight, MapPinned, LogIn, UserPlus } from "lucide-react";
 import { BRANDS, BRAND_WALL } from "@/data/brands";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 import { whatsappLink } from "@/lib/utils-app";
@@ -91,9 +91,15 @@ export function SiteLayout({ children }: { children: React.ReactNode }) {
             {NAV.slice(2).map((n) => <NavLink key={n.to} {...n} />)}
           </nav>
 
-          <div className="hidden md:flex items-center gap-2">
-            <Button asChild variant="ghost" size="sm" className="text-[hsl(220_60%_12%)]/82 hover:text-[hsl(220_60%_12%)] hover:bg-[hsl(220_45%_20%)]/5" data-testid="btn-call">
-              <a href="tel:+917909083806"><Phone className="h-3.5 w-3.5 mr-1.5" /> Call</a>
+          <div className="hidden md:flex items-center gap-1.5">
+            <Button asChild variant="ghost" size="sm" className="text-[hsl(220_60%_12%)]/82 hover:text-[hsl(220_60%_12%)] hover:bg-[hsl(220_45%_20%)]/5" data-testid="btn-track">
+              <Link href="/track-consignment"><a><MapPinned className="h-3.5 w-3.5 mr-1.5" /> Track</a></Link>
+            </Button>
+            <Button asChild variant="ghost" size="sm" className="text-[hsl(220_60%_12%)]/82 hover:text-[hsl(220_60%_12%)] hover:bg-[hsl(220_45%_20%)]/5" data-testid="btn-login">
+              <Link href="/portal"><a><LogIn className="h-3.5 w-3.5 mr-1.5" /> Login</a></Link>
+            </Button>
+            <Button asChild variant="outline" size="sm" className="border-[hsl(220_45%_20%)]/15 text-[hsl(220_60%_12%)] hover:bg-[hsl(220_45%_20%)]/5" data-testid="btn-register">
+              <Link href="/portal/register"><a><UserPlus className="h-3.5 w-3.5 mr-1.5" /> Register</a></Link>
             </Button>
             <Button asChild size="sm" className="bg-[hsl(212_95%_55%)] hover:bg-[hsl(212_95%_50%)] text-[hsl(220_60%_12%)] font-semibold rounded-md shadow-none" data-testid="btn-quote">
               <Link href="/contact">Request a Quote</Link>
@@ -126,7 +132,18 @@ export function SiteLayout({ children }: { children: React.ReactNode }) {
                     </Link>
                   ))}
                 </div>
-                <Button asChild className="mt-5 bg-[hsl(212_95%_55%)] text-[hsl(220_60%_12%)] hover:bg-[hsl(212_95%_50%)] font-semibold" data-testid="btn-mobile-quote">
+                <div className="mt-4 grid grid-cols-3 gap-2">
+                  <Button asChild variant="outline" size="sm" className="border-[hsl(220_45%_20%)]/15 text-[hsl(220_60%_12%)]" data-testid="btn-mobile-track">
+                    <Link href="/track-consignment"><a onClick={() => setOpen(false)}><MapPinned className="h-3.5 w-3.5 mr-1" />Track</a></Link>
+                  </Button>
+                  <Button asChild variant="outline" size="sm" className="border-[hsl(220_45%_20%)]/15 text-[hsl(220_60%_12%)]" data-testid="btn-mobile-login">
+                    <Link href="/portal"><a onClick={() => setOpen(false)}><LogIn className="h-3.5 w-3.5 mr-1" />Login</a></Link>
+                  </Button>
+                  <Button asChild variant="outline" size="sm" className="border-[hsl(220_45%_20%)]/15 text-[hsl(220_60%_12%)]" data-testid="btn-mobile-register">
+                    <Link href="/portal/register"><a onClick={() => setOpen(false)}><UserPlus className="h-3.5 w-3.5 mr-1" />Register</a></Link>
+                  </Button>
+                </div>
+                <Button asChild className="mt-3 bg-[hsl(212_95%_55%)] text-[hsl(220_60%_12%)] hover:bg-[hsl(212_95%_50%)] font-semibold" data-testid="btn-mobile-quote">
                   <Link href="/contact"><a onClick={() => setOpen(false)}>Request a Quote</a></Link>
                 </Button>
               </div>
