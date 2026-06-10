@@ -12,6 +12,7 @@ interface Consignment {
   customerId?: number | null;
   customerName: string | null;
   customerPhone: string | null;
+  customerEmail?: string | null;
   bundlesCount: number | null;
   invoiceNumber: string | null;
   invoiceAmount: number | null;
@@ -28,10 +29,17 @@ const STATUSES: Consignment["status"][] = ["pending", "in_transit", "out_for_del
 
 const emptyConsignment: Partial<Consignment> = {
   docketNumber: "", carrier: "", origin: "Patna", destination: "",
-  customerName: "", customerPhone: "", bundlesCount: 1,
+  customerName: "", customerPhone: "", customerEmail: "", bundlesCount: 1,
   invoiceNumber: "", invoiceAmount: 0, dispatchDate: "", etaDate: "",
   deliveredDate: "", status: "pending", internalNotes: "",
 };
+
+interface CustomerOption {
+  id: number;
+  name: string;
+  phone: string | null;
+  email: string | null;
+}
 
 export default function AdminConsignments() {
   const { token } = useAdminAuth();
@@ -41,6 +49,29 @@ export default function AdminConsignments() {
   const [open, setOpen] = useState<Partial<Consignment> | null>(null);
   const [saving, setSaving] = useState(false);
   const [savingCustomer, setSavingCustomer] = useState(false);
+  const [customers, setCustomers] = useState<CustomerOption[]>([]);
+  const [pickerOpen, setPickerOpen] = useState(false);
+
+  async function loadCustomers() {
+    if (!token) return;
+    try {
+      const r = await adminFetch(token, "/api/admin/customers");
+      const _d = await r.json();
+      setCustomers(Array.isArray(_d) ? _d : []);
+    } catch { setCustomers([]); }
+  }
+  useEffect(() => { loadCustomers(); }, [token]); // eslint-disable-line
+
+  function selectCustomer(c: CustomerOption) {
+    setOpen((prev) => prev ? {
+      ...prev,
+      customerId: c.id,
+      customerName: c.name,
+      customerPhone: c.phone ?? "",
+      customerEmail: c.email ?? "",
+    } : prev);
+    setPickerOpen(false);
+  }
 
   async function saveAsCustomer() {
     if (!token || !open) return;
@@ -50,12 +81,18 @@ export default function AdminConsignments() {
     try {
       const r = await adminFetch(token, "/api/admin/customers", {
         method: "POST",
-        body: JSON.stringify({ name, phone: (open.customerPhone || "").trim() || null }),
+        body: JSON.stringify({
+          name,
+          phone: (open.customerPhone || "").trim() || null,
+          email: (open.customerEmail || "").trim() || null,
+        }),
       });
       const j = await r.json();
       if (!r.ok) { alert(j.error || "Could not create customer"); return; }
       // Link the new customer to this consignment.
-      setOpen((prev) => prev ? { ...prev, customerId: j.id, customerName: j.name, customerPhone: j.phone ?? prev.customerPhone } : prev);
+      setOpen((prev) => prev ? { ...prev, customerId: j.id, customerName: j.name, customerPhone: j.phone ?? prev.customerPhone, customerEmail: j.email ?? prev.customerEmail } : prev);
+      setPickerOpen(false);
+      await loadCustomers();
       alert(`Customer "${j.name}" created and linked.`);
     } finally { setSavingCustomer(false); }
   }
@@ -178,7 +215,7 @@ export default function AdminConsignments() {
           <div className="bg-card border rounded-2xl shadow-2xl w-full max-w-3xl max-h-[92vh] overflow-y-auto">
             <div className="sticky top-0 bg-card border-b px-6 py-4 flex items-center justify-between z-10">
               <h2 className="font-display text-xl font-bold">{open.id ? "Edit Consignment" : "New Consignment"}</h2>
-              <button onClick={() => setOpen(null)} className="px-3 py-1.5 hover:bg-muted rounded text-sm">Close</button>
+              <button onClick={() => { setOpen(null); setPickerOpen(false); }} className="px-3 py-1.5 hover:bg-muted rounded text-sm">Close</button>
             </div>
             <div className="p-6 space-y-4">
               <div className="grid sm:grid-cols-2 gap-4">
@@ -198,20 +235,74 @@ export default function AdminConsignments() {
                   <input value={open.destination || ""} onChange={(e) => setOpen({ ...open, destination: e.target.value })}
                     className="w-full border rounded-lg px-3 py-2 bg-background" data-testid="input-destination" />
                 </Field>
-                <Field label="Customer Name">
-                  <div className="flex gap-2">
-                    <input value={open.customerName || ""} onChange={(e) => setOpen({ ...open, customerName: e.target.value, customerId: null })}
-                      className="w-full border rounded-lg px-3 py-2 bg-background" data-testid="input-customer" />
-                    <button type="button" onClick={saveAsCustomer} disabled={savingCustomer || !(open.customerName || "").trim()}
-                      className="px-3 py-2 border rounded-lg text-xs font-semibold whitespace-nowrap disabled:opacity-50 hover:bg-muted"
-                      data-testid="button-save-customer" title="Create this customer in the customer master and link it">
-                      {savingCustomer ? "Saving…" : open.customerId ? "Linked ✓" : "+ Save customer"}
-                    </button>
+                <Field label="Customer">
+                  <div className="relative">
+                    <div className="flex items-center gap-2">
+                      <div className="relative flex-1">
+                        <input
+                          value={open.customerName || ""}
+                          onChange={(e) => { setOpen({ ...open, customerName: e.target.value, customerId: null }); setPickerOpen(true); }}
+                          onFocus={() => setPickerOpen(true)}
+                          placeholder="Search customers…"
+                          autoComplete="off"
+                          className="w-full border rounded-lg px-3 py-2 bg-background"
+                          data-testid="input-customer"
+                        />
+                        {open.customerId ? (
+                          <span className="absolute right-2 top-1/2 -translate-y-1/2 text-[10px] px-1.5 py-0.5 rounded bg-emerald-500/15 text-emerald-700 font-bold uppercase tracking-wider">✓ Linked</span>
+                        ) : null}
+                      </div>
+                    </div>
+                    {pickerOpen && (
+                      <div className="absolute z-20 mt-1 w-full bg-card border rounded-lg shadow-lg max-h-64 overflow-y-auto">
+                        {(() => {
+                          const term = (open.customerName || "").trim().toLowerCase();
+                          const matches = term
+                            ? customers.filter((c) =>
+                                c.name.toLowerCase().includes(term) ||
+                                (c.phone || "").toLowerCase().includes(term) ||
+                                (c.email || "").toLowerCase().includes(term))
+                            : customers;
+                          return (
+                            <>
+                              {matches.slice(0, 50).map((c) => (
+                                <button
+                                  key={c.id}
+                                  type="button"
+                                  onMouseDown={(e) => { e.preventDefault(); selectCustomer(c); }}
+                                  className="w-full text-left px-3 py-2 hover:bg-muted border-b last:border-b-0"
+                                  data-testid={`customer-option-${c.id}`}
+                                >
+                                  <div className="font-semibold text-sm">{c.name}</div>
+                                  <div className="text-xs text-muted-foreground">{[c.phone, c.email].filter(Boolean).join(" · ") || "no phone/email"}</div>
+                                </button>
+                              ))}
+                              {matches.length === 0 && (
+                                <div className="px-3 py-2 text-xs text-muted-foreground">No matching customers.</div>
+                              )}
+                              <button
+                                type="button"
+                                onMouseDown={(e) => { e.preventDefault(); saveAsCustomer(); }}
+                                disabled={savingCustomer || !(open.customerName || "").trim()}
+                                className="w-full text-left px-3 py-2 bg-muted/50 hover:bg-muted text-accent font-semibold text-sm disabled:opacity-50"
+                                data-testid="button-save-customer"
+                              >
+                                {savingCustomer ? "Creating…" : `+ Create new customer "${(open.customerName || "").trim() || "…"}"`}
+                              </button>
+                            </>
+                          );
+                        })()}
+                      </div>
+                    )}
                   </div>
                 </Field>
                 <Field label="Customer Phone">
                   <input value={open.customerPhone || ""} onChange={(e) => setOpen({ ...open, customerPhone: e.target.value })}
                     className="w-full border rounded-lg px-3 py-2 bg-background" data-testid="input-customer-phone" />
+                </Field>
+                <Field label="Customer Email">
+                  <input value={open.customerEmail || ""} onChange={(e) => setOpen({ ...open, customerEmail: e.target.value })}
+                    className="w-full border rounded-lg px-3 py-2 bg-background" data-testid="input-customer-email" />
                 </Field>
                 <Field label="Bundles">
                   <input type="number" value={open.bundlesCount ?? ""} onChange={(e) => setOpen({ ...open, bundlesCount: parseInt(e.target.value) || 0 })}
@@ -250,7 +341,7 @@ export default function AdminConsignments() {
               </Field>
             </div>
             <div className="sticky bottom-0 bg-card border-t px-6 py-4 flex justify-end gap-3">
-              <button onClick={() => setOpen(null)} className="px-4 py-2 border rounded-lg text-sm font-semibold">Cancel</button>
+              <button onClick={() => { setOpen(null); setPickerOpen(false); }} className="px-4 py-2 border rounded-lg text-sm font-semibold">Cancel</button>
               <button onClick={save} disabled={saving}
                 className="px-4 py-2 bg-accent text-accent-foreground rounded-lg font-semibold text-sm disabled:opacity-50"
                 data-testid="button-save-consignment">{saving ? "Saving…" : "Save"}</button>

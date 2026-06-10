@@ -29,7 +29,11 @@ export default function CustomerLogin() {
       });
       const j = await r.json();
       if (!r.ok) { setErr(j.error || "Failed"); return; }
-      setMsg("Code sent — check your email.");
+      const ch = j.channels || {};
+      const where: string[] = [];
+      if (ch.email) where.push("email");
+      if (ch.whatsapp) where.push("WhatsApp");
+      setMsg(where.length ? `Code sent via ${where.join(" and ")}.` : "Code sent — check your email.");
       setStep("code");
     } catch (e: any) { setErr(e.message); }
     finally { setBusy(false); }

@@ -579,6 +579,30 @@ export function registerV2Routes(app: Express, ctx: V2Context) {
             carrier: updated.carrier ?? undefined,
             trackingLink,
           }).catch((e: any) => console.error("[notifications] send error:", e.message));
+
+          // Direct AiSensy WhatsApp template per status transition (fire-and-forget).
+          // sendNotification() only logs the DB whatsapp template as 'skipped', so the
+          // real WhatsApp dispatch must happen here — mirroring the create flow.
+          if (updated.customerPhone) {
+            const phone = updated.customerPhone;
+            const cname = updated.customerName || "Customer";
+            const docket = updated.docketNumber;
+            const orderNo = updated.invoiceNumber || updated.docketNumber;
+            import("./whatsapp")
+              .then((wa) => {
+                if (body.status === "in_transit") {
+                  return wa.sendConsignmentInTransit(phone, cname, orderNo, updated.carrier || "", docket, fmtDate(updated.etaDate));
+                } else if (body.status === "out_for_delivery") {
+                  return wa.sendConsignmentOutForDelivery(phone, cname, orderNo, "", "");
+                } else if (body.status === "delivered") {
+                  return wa.sendConsignmentDelivered(phone, cname, orderNo, fmtDate(updated.deliveredDate), cname);
+                }
+              })
+              .catch((e: any) => console.error(`[whatsapp] consignment ${body.status} dispatch error:`, e?.message));
+            console.log(`[whatsapp] template=consignment_${body.status}_v2 to=${phone} status=attempt`);
+          } else {
+            console.log(`[whatsapp] template=consignment_${body.status}_v2 to= status=skipped-no-phone`);
+          }
         }
       }
 
@@ -758,7 +782,11 @@ export function registerV2Routes(app: Express, ctx: V2Context) {
         return res.json({ ok: true, sent: true });
       }
       const code = await v2.generateOtp(email, "customer_login");
-      // Fire-and-forget: never block the OTP response on SMTP latency/failure.
+
+      // EMAIL channel — fire-and-forget. sendGenericEmail returns ok:false when SMTP is not
+      // configured (see notifications.ts), so emailConfigured tells the frontend honestly
+      // whether email could even be attempted.
+      const emailConfigured = !!process.env.BREVO_SMTP_KEY;
       sendGenericEmail({
         to: email,
         subject: `Your Narmada Mobility login code: ${code}`,
@@ -773,7 +801,24 @@ export function registerV2Routes(app: Express, ctx: V2Context) {
           </div>
         </div>`,
       }).catch((e: any) => console.error("[email] OTP send error:", e?.message));
-      res.json({ ok: true, sent: true });
+
+      // WHATSAPP fallback channel — look up the customer's phone and fire OTP via AiSensy
+      // (fire-and-forget). This is the safety net for when SMTP is not configured.
+      let whatsappAttempted = false;
+      try {
+        const customer = await v2.getCustomer(login.customerId);
+        if (customer?.phone) {
+          whatsappAttempted = true;
+          const { sendOTP } = await import("./whatsapp");
+          Promise.resolve(sendOTP(customer.phone, code)).catch((e: any) =>
+            console.error("[whatsapp] OTP send error:", e?.message));
+        }
+      } catch (e: any) {
+        console.error("[otp] whatsapp lookup error:", e?.message);
+      }
+
+      console.log(`[otp] email-sent=${emailConfigured} whatsapp-sent=${whatsappAttempted}`);
+      res.json({ ok: true, sent: true, channels: { email: emailConfigured, whatsapp: whatsappAttempted } });
     } catch (e: any) { res.status(500).json({ error: e.message }); }
   });
 

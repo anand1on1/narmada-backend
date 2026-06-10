@@ -40,7 +40,7 @@ export async function sendGenericEmail(opts: {
   const t = getTransporter();
   if (!t) {
     console.log(`[email] SMTP not configured — skipping send to ${Array.isArray(opts.to) ? opts.to.join(",") : opts.to} (subject: ${opts.subject})`);
-    return { ok: false, via: "skipped" };
+    return { ok: false, via: "smtp", error: "SMTP not configured" };
   }
   try {
     await t.sendMail({
