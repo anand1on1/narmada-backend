@@ -9,6 +9,7 @@ interface Consignment {
   carrier: string | null;
   origin: string;
   destination: string;
+  customerId?: number | null;
   customerName: string | null;
   customerPhone: string | null;
   bundlesCount: number | null;
@@ -39,6 +40,25 @@ export default function AdminConsignments() {
   const [q, setQ] = useState("");
   const [open, setOpen] = useState<Partial<Consignment> | null>(null);
   const [saving, setSaving] = useState(false);
+  const [savingCustomer, setSavingCustomer] = useState(false);
+
+  async function saveAsCustomer() {
+    if (!token || !open) return;
+    const name = (open.customerName || "").trim();
+    if (!name) { alert("Enter a customer name first."); return; }
+    setSavingCustomer(true);
+    try {
+      const r = await adminFetch(token, "/api/admin/customers", {
+        method: "POST",
+        body: JSON.stringify({ name, phone: (open.customerPhone || "").trim() || null }),
+      });
+      const j = await r.json();
+      if (!r.ok) { alert(j.error || "Could not create customer"); return; }
+      // Link the new customer to this consignment.
+      setOpen((prev) => prev ? { ...prev, customerId: j.id, customerName: j.name, customerPhone: j.phone ?? prev.customerPhone } : prev);
+      alert(`Customer "${j.name}" created and linked.`);
+    } finally { setSavingCustomer(false); }
+  }
 
   async function load() {
     if (!token) return;
@@ -179,8 +199,15 @@ export default function AdminConsignments() {
                     className="w-full border rounded-lg px-3 py-2 bg-background" data-testid="input-destination" />
                 </Field>
                 <Field label="Customer Name">
-                  <input value={open.customerName || ""} onChange={(e) => setOpen({ ...open, customerName: e.target.value })}
-                    className="w-full border rounded-lg px-3 py-2 bg-background" data-testid="input-customer" />
+                  <div className="flex gap-2">
+                    <input value={open.customerName || ""} onChange={(e) => setOpen({ ...open, customerName: e.target.value, customerId: null })}
+                      className="w-full border rounded-lg px-3 py-2 bg-background" data-testid="input-customer" />
+                    <button type="button" onClick={saveAsCustomer} disabled={savingCustomer || !(open.customerName || "").trim()}
+                      className="px-3 py-2 border rounded-lg text-xs font-semibold whitespace-nowrap disabled:opacity-50 hover:bg-muted"
+                      data-testid="button-save-customer" title="Create this customer in the customer master and link it">
+                      {savingCustomer ? "Saving…" : open.customerId ? "Linked ✓" : "+ Save customer"}
+                    </button>
+                  </div>
                 </Field>
                 <Field label="Customer Phone">
                   <input value={open.customerPhone || ""} onChange={(e) => setOpen({ ...open, customerPhone: e.target.value })}

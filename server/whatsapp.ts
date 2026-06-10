@@ -9,6 +9,11 @@ import { notificationLog } from "@shared/schema";
 const AISENSY_API_URL = "https://backend.aisensy.com/campaign/t1/api/v2";
 const AISENSY_API_KEY = process.env.AISENSY_API_KEY || "";
 
+// Structured log so Render logs show whether a WhatsApp send was attempted and its outcome.
+function logWa(template: string, phone: string, status: string) {
+  console.log(`[whatsapp] template=${template} to=${phone} status=${status}`);
+}
+
 // Retry helper — 3 attempts with exponential backoff
 async function postAisensy(payload: Record<string, unknown>, retries = 3): Promise<void> {
   let lastErr: Error | null = null;
@@ -255,6 +260,13 @@ export async function sendConsignmentCreated(
   const templateName = "consignment_created_v2";
   const normalized = normalizePhone(phone);
   const body = `Consignment ${orderNo} created for ${customerName}, dispatching ${dispatchDate}`;
+  if (!normalized) { logWa(templateName, phone || "", "skipped-no-phone"); return; }
+  if (!AISENSY_API_KEY || AISENSY_API_KEY === "skip") {
+    logWa(templateName, normalized, "skipped-no-api-key");
+    logNotification("whatsapp", normalized, templateName, body, "failed", "AISENSY_API_KEY not configured");
+    return;
+  }
+  logWa(templateName, normalized, "attempt");
   try {
     await postAisensy({
       campaignName: templateName,
@@ -269,9 +281,11 @@ export async function sendConsignmentCreated(
       attributes: {},
       paramsFallbackValue: { FirstName: customerName },
     });
+    logWa(templateName, normalized, "sent");
     logNotification("whatsapp", normalized, templateName, body, "sent");
   } catch (e: any) {
     console.error(`[whatsapp] sendConsignmentCreated failed for ${normalized}:`, e?.message);
+    logWa(templateName, normalized, "failed");
     logNotification("whatsapp", normalized, templateName, body, "failed", e?.message);
   }
 }

@@ -120,6 +120,16 @@ export function AdminLayout({ children, title }: { children: ReactNode; title: s
         </nav>
 
         <div className="p-3 border-t space-y-1">
+          {effectiveRole === "admin" && (
+            <Link
+              href="/team/quotations/new"
+              className="flex items-center gap-3 px-3 py-2 text-sm text-muted-foreground hover:text-foreground"
+              data-testid="link-team-portal"
+              title="Opens the Quotation builder in the Team portal (requires a separate Data Team login)"
+            >
+              <ClipboardList className="w-4 h-4" /> New Quotation
+            </Link>
+          )}
           <Link
             href="/"
             className="flex items-center gap-3 px-3 py-2 text-sm text-muted-foreground hover:text-foreground"

@@ -495,6 +495,23 @@ export function registerV2Routes(app: Express, ctx: V2Context) {
         trackingLink,
       }).catch((e: any) => console.error("[notifications] send error:", e.message));
 
+      // Fire WhatsApp consignment_created_v2 (fire-and-forget — never blocks the response)
+      if (created.customerPhone) {
+        import("./whatsapp")
+          .then(({ sendConsignmentCreated }) =>
+            sendConsignmentCreated(
+              created.customerPhone!,
+              created.customerName || "Customer",
+              created.docketNumber,
+              created.bundlesCount != null ? `${created.bundlesCount} bundle(s)` : "",
+              fmtDateCreate(created.dispatchDate),
+            ),
+          )
+          .catch((e: any) => console.error("[whatsapp] consignment_created dispatch error:", e?.message));
+      } else {
+        console.log(`[whatsapp] template=consignment_created_v2 to= status=skipped-no-phone`);
+      }
+
       res.json(created);
     } catch (e: any) { res.status(400).json({ error: e.message, details: e.errors }); }
   });

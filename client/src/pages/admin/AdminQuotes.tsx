@@ -1,7 +1,8 @@
 import { useEffect, useState } from "react";
+import { useLocation } from "wouter";
 import { AdminLayout } from "./AdminLayout";
 import { adminFetch, useAdminAuth } from "@/lib/admin-auth";
-import { Trash2, Eye } from "lucide-react";
+import { Trash2, Eye, Plus } from "lucide-react";
 
 interface Customer { id: number; name: string; }
 interface Quote {
@@ -15,6 +16,7 @@ const STATUSES = ["sent", "accepted", "expired", "revised", "cancelled"];
 
 export default function AdminQuotes() {
   const { token } = useAdminAuth();
+  const [, navigate] = useLocation();
   const [items, setItems] = useState<Quote[]>([]);
   const [customers, setCustomers] = useState<Customer[]>([]);
   const [filter, setFilter] = useState<"all" | string>("all");
@@ -62,6 +64,18 @@ export default function AdminQuotes() {
         {STATUSES.map((s) => (
           <button key={s} onClick={() => setFilter(s)} className={`px-3 py-1.5 rounded-lg text-xs font-bold uppercase tracking-wider ${filter === s ? "bg-accent text-accent-foreground" : "bg-card border"}`}>{s}</button>
         ))}
+        <div className="flex-1" />
+        <button
+          onClick={() => navigate("/team/quotations/new")}
+          className="px-4 py-2 bg-accent text-accent-foreground rounded-lg font-semibold text-sm inline-flex items-center gap-2"
+          data-testid="button-new-quotation"
+          title="Opens the 5-step Quotation wizard in the Team portal (requires a separate Data Team login)"
+        >
+          <Plus className="w-4 h-4" /> New Quotation
+        </button>
+      </div>
+      <div className="mb-4 text-xs text-muted-foreground">
+        The full quotation builder lives in the Team portal. If prompted, sign in with your Data Team credentials (separate from this admin login).
       </div>
 
       <div className="bg-card border rounded-xl overflow-x-auto">

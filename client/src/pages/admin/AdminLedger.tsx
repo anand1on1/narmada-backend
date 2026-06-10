@@ -22,21 +22,35 @@ export default function AdminLedger() {
   useEffect(() => {
     (async () => {
       if (!token) return;
-      const r = await adminFetch(token, `/api/admin/customers`);
-      const list = await r.json();
-      setCustomers(list);
-      // Read ?customerId= from URL
-      const params = new URLSearchParams(window.location.hash.split("?")[1] || "");
-      const initial = params.get("customerId");
-      if (initial) setCustomerId(parseInt(initial, 10));
-      else if (list[0]) setCustomerId(list[0].id);
+      try {
+        const r = await adminFetch(token, `/api/admin/customers`);
+        const data = await r.json();
+        const list: Customer[] = Array.isArray(data) ? data : [];
+        setCustomers(list);
+        // Read ?customerId= from URL
+        const params = new URLSearchParams(window.location.hash.split("?")[1] || "");
+        const initial = params.get("customerId");
+        if (initial) setCustomerId(parseInt(initial, 10));
+        else if (list[0]) setCustomerId(list[0].id);
+      } catch (e) {
+        console.error("[ledger] failed to load customers", e);
+        setCustomers([]);
+      }
     })();
   }, [token]);
 
   async function loadEntries() {
     if (!token || !customerId) return;
-    const r = await adminFetch(token, `/api/admin/customers/${customerId}/ledger`);
-    setEntries(await r.json());
+    try {
+      const r = await adminFetch(token, `/api/admin/customers/${customerId}/ledger`);
+      const data = await r.json();
+      // Endpoint returns { entries, balanceInr }; older shapes may return a bare array.
+      const list = Array.isArray(data) ? data : (data?.entries ?? []);
+      setEntries(Array.isArray(list) ? list : []);
+    } catch (e) {
+      console.error("[ledger] failed to load entries", e);
+      setEntries([]);
+    }
   }
   useEffect(() => { loadEntries(); }, [customerId, token]); // eslint-disable-line
 
