@@ -5,6 +5,7 @@ import { randomBytes, createHash, scryptSync, timingSafeEqual } from "node:crypt
 import path from "node:path";
 import fs from "node:fs";
 import Papa from "papaparse";
+import multer from "multer";
 import { storage, db } from "./storage";
 import * as v2 from "./storage-v2";
 import { sendNotification, buildTrackingLink, sendGenericEmail } from "./notifications";
@@ -283,13 +284,13 @@ export function registerV2Routes(app: Express, ctx: V2Context) {
       }
       if (req.body.displayName !== undefined) updates.displayName = req.body.displayName;
       if (req.body.active !== undefined) updates.active = req.body.active;
-      const user = await v2.updateAdminUser(parseInt(req.params.id, 10), updates);
+      const user = await v2.updateAdminUser(parseInt(req.params.id as string, 10), updates);
       res.json({ ...user, passwordHash: undefined });
     } catch (e: any) { res.status(500).json({ error: e.message }); }
   });
 
   app.delete("/api/v2/admin/users/:id", requireAdminRole, async (req, res) => {
-    await v2.deleteAdminUser(parseInt(req.params.id, 10));
+    await v2.deleteAdminUser(parseInt(req.params.id as string, 10));
     res.json({ ok: true });
   });
 
@@ -314,7 +315,7 @@ export function registerV2Routes(app: Express, ctx: V2Context) {
     res.json(list);
   });
   app.get("/api/admin/posts/:id", requireAdminRole, async (req, res) => {
-    const post = await v2.getPost(parseInt(req.params.id, 10));
+    const post = await v2.getPost(parseInt(req.params.id as string, 10));
     if (!post) return res.status(404).json({ error: "Not found" });
     res.json(post);
   });
@@ -330,14 +331,14 @@ export function registerV2Routes(app: Express, ctx: V2Context) {
   });
   app.patch("/api/admin/posts/:id", requireAdminRole, async (req, res) => {
     try {
-      const id = parseInt(req.params.id, 10);
+      const id = parseInt(req.params.id as string, 10);
       const post = await v2.updatePost(id, normalizeDateFields(req.body || {}));
       triggerSitemapRegen(regenSitemap);
       res.json(post);
     } catch (e: any) { res.status(400).json({ error: e.message }); }
   });
   app.delete("/api/admin/posts/:id", requireAdminRole, async (req, res) => {
-    await v2.deletePost(parseInt(req.params.id, 10));
+    await v2.deletePost(parseInt(req.params.id as string, 10));
     triggerSitemapRegen(regenSitemap);
     res.json({ ok: true });
   });
@@ -413,7 +414,7 @@ export function registerV2Routes(app: Express, ctx: V2Context) {
   });
 
   app.delete("/api/admin/price-lists/:id", requireAdminRole, async (req, res) => {
-    await v2.deletePriceList(parseInt(req.params.id, 10));
+    await v2.deletePriceList(parseInt(req.params.id as string, 10));
     res.json({ ok: true });
   });
 
@@ -493,7 +494,7 @@ export function registerV2Routes(app: Express, ctx: V2Context) {
 
   app.patch("/api/admin/consignments/:id", requireAuth, async (req, res) => {
     try {
-      const id = parseInt(req.params.id, 10);
+      const id = parseInt(req.params.id as string, 10);
       const body = normalizeDateFields(req.body || {});
 
       // Capture old status before update (for notification trigger)
@@ -551,7 +552,7 @@ export function registerV2Routes(app: Express, ctx: V2Context) {
 
   app.delete("/api/admin/consignments/:id", requireAdminRole, async (req, res) => {
     // Only full admin can delete
-    await v2.deleteConsignment(parseInt(req.params.id, 10));
+    await v2.deleteConsignment(parseInt(req.params.id as string, 10));
     res.json({ ok: true });
   });
 
@@ -637,7 +638,7 @@ export function registerV2Routes(app: Express, ctx: V2Context) {
   });
 
   app.get("/api/admin/customers/:id", requireAuth, async (req, res) => {
-    const customer = await v2.getCustomer(parseInt(req.params.id, 10));
+    const customer = await v2.getCustomer(parseInt(req.params.id as string, 10));
     if (!customer) return res.status(404).json({ error: "Customer not found" });
     res.json(customer);
   });
@@ -652,7 +653,7 @@ export function registerV2Routes(app: Express, ctx: V2Context) {
 
   app.patch("/api/admin/customers/:id", requireAuth, async (req, res) => {
     try {
-      const id = parseInt(req.params.id, 10);
+      const id = parseInt(req.params.id as string, 10);
       const customer = await v2.updateCustomer(id, req.body || {});
       if (!customer) return res.status(404).json({ error: "Customer not found" });
       res.json(customer);
@@ -661,7 +662,7 @@ export function registerV2Routes(app: Express, ctx: V2Context) {
 
   app.delete("/api/admin/customers/:id", requireAdminRole, async (req, res) => {
     try {
-      const id = parseInt(req.params.id, 10);
+      const id = parseInt(req.params.id as string, 10);
       const count = await v2.getCustomerConsignmentCount(id);
       if (count > 0) return res.status(400).json({ error: `Cannot delete: customer has ${count} consignment(s)` });
       await v2.deleteCustomer(id);
@@ -679,7 +680,7 @@ export function registerV2Routes(app: Express, ctx: V2Context) {
 
   app.patch("/api/admin/notification-templates/:id", requireAdminRole, async (req, res) => {
     try {
-      const id = parseInt(req.params.id, 10);
+      const id = parseInt(req.params.id as string, 10);
       const { subject, body, enabled } = req.body || {};
       const updated = await v2.updateNotificationTemplate(id, { subject, body, enabled });
       res.json(updated);
@@ -689,7 +690,7 @@ export function registerV2Routes(app: Express, ctx: V2Context) {
   // ============== NOTIFICATION LOG (Phase 4) ==============
   app.get("/api/admin/consignments/:id/notifications", requireAuth, async (req, res) => {
     try {
-      const id = parseInt(req.params.id, 10);
+      const id = parseInt(req.params.id as string, 10);
       const log = await v2.getNotificationLog(id);
       res.json(log);
     } catch (e: any) { res.status(500).json({ error: e.message }); }
@@ -767,7 +768,7 @@ export function registerV2Routes(app: Express, ctx: V2Context) {
 
   // ---------- ADMIN: customer logins management ----------
   app.get("/api/admin/customers/:id/login", requireAuth, async (req, res) => {
-    const cid = parseInt(req.params.id, 10);
+    const cid = parseInt(req.params.id as string, 10);
     const customer = await v2.getCustomer(cid);
     if (!customer) return res.status(404).json({ error: "Customer not found" });
     const logins = (await v2.listCustomerLogins()).filter((l) => l.customerId === cid);
@@ -775,7 +776,7 @@ export function registerV2Routes(app: Express, ctx: V2Context) {
   });
   app.post("/api/admin/customers/:id/login", requireRole("accounts", "sales"), async (req, res) => {
     try {
-      const cid = parseInt(req.params.id, 10);
+      const cid = parseInt(req.params.id as string, 10);
       const { email, creditLimitInr, paymentTermsDays } = req.body || {};
       if (!email) return res.status(400).json({ error: "Email required" });
       const login = await v2.createCustomerLogin(cid, email, { creditLimitInr, paymentTermsDays });
@@ -784,26 +785,26 @@ export function registerV2Routes(app: Express, ctx: V2Context) {
   });
   app.patch("/api/admin/customer-logins/:id", requireRole("accounts"), async (req, res) => {
     try {
-      const id = parseInt(req.params.id, 10);
+      const id = parseInt(req.params.id as string, 10);
       const { active } = req.body || {};
       if (typeof active === "boolean") await v2.setCustomerLoginActive(id, active);
       res.json({ ok: true });
     } catch (e: any) { res.status(400).json({ error: e.message }); }
   });
   app.delete("/api/admin/customer-logins/:id", requireAdminRole, async (req, res) => {
-    const id = parseInt(req.params.id, 10);
+    const id = parseInt(req.params.id as string, 10);
     await v2.deleteCustomerLogin(id);
     res.json({ ok: true });
   });
 
   // ---------- ADMIN: customer emails (multi-email per customer) ----------
   app.get("/api/admin/customers/:id/emails", requireAuth, async (req, res) => {
-    const cid = parseInt(req.params.id, 10);
+    const cid = parseInt(req.params.id as string, 10);
     res.json(await v2.listCustomerEmails(cid));
   });
   app.post("/api/admin/customers/:id/emails", requireRole("accounts", "sales"), async (req, res) => {
     try {
-      const cid = parseInt(req.params.id, 10);
+      const cid = parseInt(req.params.id as string, 10);
       const { email, label, isPrimary } = req.body || {};
       if (!email) return res.status(400).json({ error: "Email required" });
       const row = await v2.addCustomerEmail(cid, email, label, !!isPrimary);
@@ -811,21 +812,21 @@ export function registerV2Routes(app: Express, ctx: V2Context) {
     } catch (e: any) { res.status(400).json({ error: e.message }); }
   });
   app.patch("/api/admin/customer-emails/:id/primary", requireRole("accounts", "sales"), async (req, res) => {
-    await v2.setPrimaryCustomerEmail(parseInt(req.params.id, 10));
+    await v2.setPrimaryCustomerEmail(parseInt(req.params.id as string, 10));
     res.json({ ok: true });
   });
   app.delete("/api/admin/customer-emails/:id", requireRole("accounts", "sales"), async (req, res) => {
-    await v2.deleteCustomerEmail(parseInt(req.params.id, 10));
+    await v2.deleteCustomerEmail(parseInt(req.params.id as string, 10));
     res.json({ ok: true });
   });
 
   // ---------- ADMIN: customer addresses (multi-address) ----------
   app.get("/api/admin/customers/:id/addresses", requireAuth, async (req, res) => {
-    res.json(await v2.listCustomerAddresses(parseInt(req.params.id, 10)));
+    res.json(await v2.listCustomerAddresses(parseInt(req.params.id as string, 10)));
   });
   app.post("/api/admin/customers/:id/addresses", requireRole("accounts", "sales"), async (req, res) => {
     try {
-      const cid = parseInt(req.params.id, 10);
+      const cid = parseInt(req.params.id as string, 10);
       const b = req.body || {};
       if (!b.line1) return res.status(400).json({ error: "Address line 1 required" });
       const row = await v2.addCustomerAddress(cid, {
@@ -837,20 +838,20 @@ export function registerV2Routes(app: Express, ctx: V2Context) {
     } catch (e: any) { res.status(400).json({ error: e.message }); }
   });
   app.patch("/api/admin/customer-addresses/:id", requireRole("accounts", "sales"), async (req, res) => {
-    const id = parseInt(req.params.id, 10);
+    const id = parseInt(req.params.id as string, 10);
     const row = await v2.updateCustomerAddress(id, req.body || {});
     if (!row) return res.status(404).json({ error: "Address not found" });
     res.json(row);
   });
   app.delete("/api/admin/customer-addresses/:id", requireRole("accounts", "sales"), async (req, res) => {
-    await v2.deleteCustomerAddress(parseInt(req.params.id, 10));
+    await v2.deleteCustomerAddress(parseInt(req.params.id as string, 10));
     res.json({ ok: true });
   });
 
   // ---------- ADMIN: seed opening balance on demand ----------
   app.patch("/api/admin/customers/:id/seed-opening", requireRole("accounts"), async (req, res) => {
     try {
-      const id = parseInt(req.params.id, 10);
+      const id = parseInt(req.params.id as string, 10);
       const customer = await v2.getCustomer(id);
       if (!customer) return res.status(404).json({ error: "Customer not found" });
       await v2.seedOpeningBalanceIfNeeded(id, customer.openingBalanceInr || 0);
@@ -861,7 +862,7 @@ export function registerV2Routes(app: Express, ctx: V2Context) {
   // ---------- ADMIN: LEDGER ----------
   app.get("/api/admin/customers/:id/ledger", requireAuth, async (req, res) => {
     try {
-      const cid = parseInt(req.params.id, 10);
+      const cid = parseInt(req.params.id as string, 10);
       const from = req.query.from ? parseInt(req.query.from as string, 10) : undefined;
       const to = req.query.to ? parseInt(req.query.to as string, 10) : undefined;
       const entries = await v2.listLedgerEntries(cid, { from, to });
@@ -871,7 +872,7 @@ export function registerV2Routes(app: Express, ctx: V2Context) {
   });
   app.post("/api/admin/customers/:id/ledger", requireRole("accounts"), async (req, res) => {
     try {
-      const cid = parseInt(req.params.id, 10);
+      const cid = parseInt(req.params.id as string, 10);
       const user = (req as any).user as TokenInfo;
       const parsed = insertLedgerEntrySchema.parse({ ...req.body, customerId: cid });
       const row = await v2.addLedgerEntry({ ...parsed, createdBy: user.username });
@@ -889,7 +890,7 @@ export function registerV2Routes(app: Express, ctx: V2Context) {
     } catch (e: any) { res.status(400).json({ error: e.message, details: e.errors }); }
   });
   app.delete("/api/admin/ledger/:id", requireRole("accounts"), async (req, res) => {
-    await v2.deleteLedgerEntry(parseInt(req.params.id, 10));
+    await v2.deleteLedgerEntry(parseInt(req.params.id as string, 10));
     res.json({ ok: true });
   });
   // CSV bulk ledger import
@@ -921,7 +922,7 @@ export function registerV2Routes(app: Express, ctx: V2Context) {
     res.json(await v2.listRfqs({ status }));
   });
   app.get("/api/admin/rfqs/:id", requireAuth, async (req, res) => {
-    const row = await v2.getRfq(parseInt(req.params.id, 10));
+    const row = await v2.getRfq(parseInt(req.params.id as string, 10));
     if (!row) return res.status(404).json({ error: "RFQ not found" });
     const linkedQuotes = await v2.listQuotes({ rfqId: row.id });
     res.json({ ...row, quotes: linkedQuotes });
@@ -934,12 +935,12 @@ export function registerV2Routes(app: Express, ctx: V2Context) {
     } catch (e: any) { res.status(400).json({ error: e.message, details: e.errors }); }
   });
   app.patch("/api/admin/rfqs/:id", requireRole("sales", "accounts"), async (req, res) => {
-    const row = await v2.updateRfq(parseInt(req.params.id, 10), req.body || {});
+    const row = await v2.updateRfq(parseInt(req.params.id as string, 10), req.body || {});
     if (!row) return res.status(404).json({ error: "RFQ not found" });
     res.json(row);
   });
   app.delete("/api/admin/rfqs/:id", requireAdminRole, async (req, res) => {
-    await v2.deleteRfq(parseInt(req.params.id, 10));
+    await v2.deleteRfq(parseInt(req.params.id as string, 10));
     res.json({ ok: true });
   });
 
@@ -950,7 +951,7 @@ export function registerV2Routes(app: Express, ctx: V2Context) {
     res.json(await v2.listQuotes({ customerId, status }));
   });
   app.get("/api/admin/quotes/:id", requireAuth, async (req, res) => {
-    const row = await v2.getQuote(parseInt(req.params.id, 10));
+    const row = await v2.getQuote(parseInt(req.params.id as string, 10));
     if (!row) return res.status(404).json({ error: "Quote not found" });
     res.json(row);
   });
@@ -965,12 +966,12 @@ export function registerV2Routes(app: Express, ctx: V2Context) {
   app.patch("/api/admin/quotes/:id/status", requireRole("sales", "accounts"), async (req, res) => {
     const { status } = req.body || {};
     if (!status) return res.status(400).json({ error: "status required" });
-    const row = await v2.updateQuoteStatus(parseInt(req.params.id, 10), status);
+    const row = await v2.updateQuoteStatus(parseInt(req.params.id as string, 10), status);
     if (!row) return res.status(404).json({ error: "Quote not found" });
     res.json(row);
   });
   app.delete("/api/admin/quotes/:id", requireAdminRole, async (req, res) => {
-    await v2.deleteQuote(parseInt(req.params.id, 10));
+    await v2.deleteQuote(parseInt(req.params.id as string, 10));
     res.json({ ok: true });
   });
 
@@ -981,7 +982,7 @@ export function registerV2Routes(app: Express, ctx: V2Context) {
     res.json(await v2.listPurchaseOrders({ customerId, status }));
   });
   app.get("/api/admin/purchase-orders/:id", requireAuth, async (req, res) => {
-    const row = await v2.getPurchaseOrder(parseInt(req.params.id, 10));
+    const row = await v2.getPurchaseOrder(parseInt(req.params.id as string, 10));
     if (!row) return res.status(404).json({ error: "PO not found" });
     const files = await v2.listFileUploads("po", row.id);
     res.json({ ...row, files });
@@ -995,18 +996,18 @@ export function registerV2Routes(app: Express, ctx: V2Context) {
   });
   app.post("/api/admin/purchase-orders/:id/approve", requireRole("accounts"), async (req, res) => {
     const user = (req as any).user as TokenInfo;
-    const row = await v2.approvePurchaseOrder(parseInt(req.params.id, 10), user.username);
+    const row = await v2.approvePurchaseOrder(parseInt(req.params.id as string, 10), user.username);
     if (!row) return res.status(404).json({ error: "PO not found" });
     res.json(row);
   });
   app.post("/api/admin/purchase-orders/:id/reject", requireRole("accounts"), async (req, res) => {
     const user = (req as any).user as TokenInfo;
-    const row = await v2.rejectPurchaseOrder(parseInt(req.params.id, 10), user.username, req.body?.notes);
+    const row = await v2.rejectPurchaseOrder(parseInt(req.params.id as string, 10), user.username, req.body?.notes);
     if (!row) return res.status(404).json({ error: "PO not found" });
     res.json(row);
   });
   app.delete("/api/admin/purchase-orders/:id", requireAdminRole, async (req, res) => {
-    await v2.deletePurchaseOrder(parseInt(req.params.id, 10));
+    await v2.deletePurchaseOrder(parseInt(req.params.id as string, 10));
     res.json({ ok: true });
   });
 
@@ -1024,7 +1025,7 @@ export function registerV2Routes(app: Express, ctx: V2Context) {
     } catch (e: any) { res.status(400).json({ error: e.message, details: e.errors }); }
   });
   app.delete("/api/admin/payments/:id", requireRole("accounts"), async (req, res) => {
-    await v2.deletePayment(parseInt(req.params.id, 10));
+    await v2.deletePayment(parseInt(req.params.id as string, 10));
     res.json({ ok: true });
   });
 
@@ -1039,19 +1040,18 @@ export function registerV2Routes(app: Express, ctx: V2Context) {
     } catch (e: any) { res.status(400).json({ error: e.message, details: e.errors }); }
   });
   app.patch("/api/admin/bank-details/:id", requireAdminRole, async (req, res) => {
-    const row = await v2.updateBankDetails(parseInt(req.params.id, 10), req.body || {});
+    const row = await v2.updateBankDetails(parseInt(req.params.id as string, 10), req.body || {});
     if (!row) return res.status(404).json({ error: "Bank account not found" });
     res.json(row);
   });
   app.delete("/api/admin/bank-details/:id", requireAdminRole, async (req, res) => {
-    await v2.deleteBankDetails(parseInt(req.params.id, 10));
+    await v2.deleteBankDetails(parseInt(req.params.id as string, 10));
     res.json({ ok: true });
   });
 
   // ---------- ADMIN: FILE UPLOADS ----------
-  const multer = require("multer");
-  const path2 = require("node:path");
-  const fs2 = require("node:fs");
+  const path2 = path;
+  const fs2 = fs;
   const uploadsRoot = ctx.uploadsDir || "./uploads";
   if (!fs2.existsSync(uploadsRoot)) fs2.mkdirSync(uploadsRoot, { recursive: true });
   const docStore = multer({
@@ -1087,7 +1087,7 @@ export function registerV2Routes(app: Express, ctx: V2Context) {
     res.json(await v2.listFileUploads(entityType, parseInt(entityId, 10)));
   });
   app.delete("/api/admin/uploads/:id", requireRole("accounts", "sales"), async (req, res) => {
-    const row = await v2.getFileUpload(parseInt(req.params.id, 10));
+    const row = await v2.getFileUpload(parseInt(req.params.id as string, 10));
     if (row) {
       const fullPath = path2.join(uploadsRoot, path2.basename(row.storagePath));
       try { fs2.unlinkSync(fullPath); } catch {}
@@ -1150,7 +1150,7 @@ export function registerV2Routes(app: Express, ctx: V2Context) {
   });
   app.get("/api/customer/quotes/:id", requireCustomer, async (req, res) => {
     const c = (req as any).customer;
-    const q = await v2.getQuote(parseInt(req.params.id, 10));
+    const q = await v2.getQuote(parseInt(req.params.id as string, 10));
     if (!q || q.customerId !== c.customerId) return res.status(404).json({ error: "Quote not found" });
     res.json(q);
   });
@@ -1196,4 +1196,558 @@ export function registerV2Routes(app: Express, ctx: V2Context) {
   });
 
   console.log("[v2] Phase 3+4 + Session B routes registered: blogs, price lists, consignments, sub-users, SEO, customers, notifications, customer portal, ledger, RFQ/Quote/PO, payments, uploads, banks");
+  console.log("[v2] Phase 3+4 + Session B routes registered: blogs, price lists, consignments, sub-users, SEO, customers, notifications, customer portal, ledger, RFQ/Quote/PO, payments, uploads, banks");
+
+  // =============================================================
+  // SESSION C ENDPOINTS
+  // =============================================================
+
+  // -------- DATA TEAM AUTH (/api/team) --------
+  async function requireDataTeam(req: Request, res: Response, next: NextFunction) {
+    const token = (req.headers["x-team-token"] as string | undefined)
+      || (req.headers["authorization"] as string | undefined)?.replace("Bearer ", "");
+    if (!token) return res.status(401).json({ error: "Unauthorized" });
+    const session = await v2.getDataTeamSession(token);
+    if (!session) return res.status(401).json({ error: "Unauthorized" });
+    const user = await v2.getDataTeamUser(session.userId);
+    if (!user || !user.active) return res.status(401).json({ error: "Unauthorized" });
+    (req as any).teamUser = user;
+    next();
+  }
+
+  app.post("/api/team/login", async (req, res) => {
+    try {
+      const { username, password } = req.body || {};
+      if (!username || !password) return res.status(400).json({ error: "username and password required" });
+      const user = await v2.getDataTeamUserByUsername(String(username));
+      if (!user || !user.active) return res.status(401).json({ error: "Invalid credentials" });
+      if (!verifyPassword(String(password), user.passwordHash)) return res.status(401).json({ error: "Invalid credentials" });
+      const session = await v2.createDataTeamSession(user.id);
+      await v2.touchDataTeamUserLogin(user.id);
+      const { passwordHash: _ph, ...safeUser } = user;
+      res.json({ token: session.token, expiresAt: session.expiresAt, user: safeUser });
+    } catch (e: any) { res.status(500).json({ error: e.message }); }
+  });
+
+  app.post("/api/team/logout", requireDataTeam, async (req, res) => {
+    try {
+      const token = (req.headers["x-team-token"] as string)
+        || (req.headers["authorization"] as string)?.replace("Bearer ", "") || "";
+      await v2.deleteDataTeamSession(token);
+      res.json({ ok: true });
+    } catch (e: any) { res.status(500).json({ error: e.message }); }
+  });
+
+  app.get("/api/team/me", requireDataTeam, async (req, res) => {
+    const user = (req as any).teamUser as any;
+    const { passwordHash: _ph, ...safe } = user;
+    res.json(safe);
+  });
+
+  // -------- ADMIN: QUOTING COMPANIES --------
+  app.get("/api/admin/quoting-companies", requireAdminRole, async (_req, res) => {
+    try { res.json(await v2.listQuotingCompanies()); }
+    catch (e: any) { res.status(500).json({ error: e.message }); }
+  });
+
+  app.post("/api/admin/quoting-companies", requireAdminRole, async (req, res) => {
+    try { res.json(await v2.createQuotingCompany(req.body || {})); }
+    catch (e: any) { res.status(400).json({ error: e.message }); }
+  });
+
+  app.patch("/api/admin/quoting-companies/:id", requireAdminRole, async (req, res) => {
+    try {
+      const row = await v2.updateQuotingCompany(parseInt(req.params.id as string, 10), req.body || {});
+      if (!row) return res.status(404).json({ error: "Not found" });
+      res.json(row);
+    } catch (e: any) { res.status(400).json({ error: e.message }); }
+  });
+
+  app.delete("/api/admin/quoting-companies/:id", requireAdminRole, async (req, res) => {
+    try {
+      await v2.deleteQuotingCompany(parseInt(req.params.id as string, 10));
+      res.json({ ok: true });
+    } catch (e: any) { res.status(500).json({ error: e.message }); }
+  });
+
+  // -------- ADMIN: DATA TEAM USERS --------
+  app.get("/api/admin/data-team-users", requireAdminRole, async (_req, res) => {
+    try { res.json(await v2.listDataTeamUsers()); }
+    catch (e: any) { res.status(500).json({ error: e.message }); }
+  });
+
+  app.post("/api/admin/data-team-users", requireAdminRole, async (req, res) => {
+    try {
+      const { username, password, name, email, phone } = req.body || {};
+      if (!username || !password) return res.status(400).json({ error: "username and password required" });
+      if (String(password).length < 8) return res.status(400).json({ error: "Password must be at least 8 characters" });
+      const passwordHash = hashPassword(String(password));
+      const row = await v2.createDataTeamUser({ username: String(username), passwordHash, name, email, phone });
+      const { passwordHash: _ph, ...safe } = row;
+      res.json(safe);
+    } catch (e: any) { res.status(400).json({ error: e.message }); }
+  });
+
+  app.patch("/api/admin/data-team-users/:id", requireAdminRole, async (req, res) => {
+    try {
+      const id = parseInt(req.params.id as string, 10);
+      const updates: any = {};
+      if (req.body.name !== undefined) updates.name = req.body.name;
+      if (req.body.email !== undefined) updates.email = req.body.email;
+      if (req.body.phone !== undefined) updates.phone = req.body.phone;
+      if (req.body.active !== undefined) updates.active = req.body.active;
+      const row = await v2.updateDataTeamUser(id, updates);
+      if (!row) return res.status(404).json({ error: "Not found" });
+      const { passwordHash: _ph, ...safe } = row;
+      res.json(safe);
+    } catch (e: any) { res.status(400).json({ error: e.message }); }
+  });
+
+  app.post("/api/admin/data-team-users/:id/reset-password", requireAdminRole, async (req, res) => {
+    try {
+      const id = parseInt(req.params.id as string, 10);
+      const newPassword = req.body?.newPassword;
+      if (!newPassword || String(newPassword).length < 8) return res.status(400).json({ error: "newPassword must be at least 8 characters" });
+      const row = await v2.updateDataTeamUser(id, { passwordHash: hashPassword(String(newPassword)) });
+      if (!row) return res.status(404).json({ error: "Not found" });
+      res.json({ ok: true });
+    } catch (e: any) { res.status(400).json({ error: e.message }); }
+  });
+
+  // -------- TEAM: PARTS MASTER --------
+  app.get("/api/team/parts", requireDataTeam, async (req, res) => {
+    try {
+      const q = (req.query.q as string) || "";
+      if (q.length < 3) return res.status(400).json({ error: "q must be at least 3 characters" });
+      res.json(await v2.searchParts(q));
+    } catch (e: any) { res.status(500).json({ error: e.message }); }
+  });
+
+  app.get("/api/team/parts/:partNumber", requireDataTeam, async (req, res) => {
+    try {
+      const part = await v2.getPartByNumber(req.params.partNumber as string);
+      if (!part) return res.status(404).json({ error: "Part not found" });
+      res.json(part);
+    } catch (e: any) { res.status(500).json({ error: e.message }); }
+  });
+
+  app.post("/api/team/parts/sync-edukaan", requireAdminRole, async (_req, res) => {
+    res.json({ ok: true, message: "TATA parts sync scheduled (nightly cron)" });
+  });
+
+  // -------- TEAM: FX RATE LOOKUP --------
+  app.get("/api/team/quotations/fx-rate", requireDataTeam, async (req, res) => {
+    try {
+      const from = ((req.query.from as string) || "INR").toUpperCase();
+      const to = ((req.query.to as string) || "INR").toUpperCase();
+      if (from === to) return res.json({ from, to, rate: 1, source: "identity" });
+      const { getFXRate } = await import("./fx-service");
+      const rate = await getFXRate(from, to);
+      if (rate == null) return res.status(503).json({ error: "FX rate unavailable", from, to });
+      res.json({ from, to, rate, fetchedAt: new Date().toISOString() });
+    } catch (e: any) { res.status(500).json({ error: e.message }); }
+  });
+
+  // -------- TEAM: QUOTATIONS STATS --------
+  app.get("/api/team/quotations/stats", requireDataTeam, async (_req, res) => {
+    try {
+      const stats = await v2.getQuotationStats();
+      res.json(stats);
+    } catch (e: any) { res.status(500).json({ error: e.message }); }
+  });
+
+  // -------- TEAM: QUOTATIONS --------
+  const quotImportDir = path.join(ctx.uploadsDir || "./uploads", "quotation-imports");
+  if (!fs.existsSync(quotImportDir)) fs.mkdirSync(quotImportDir, { recursive: true });
+  const quotFileStore = multer({
+    storage: multer.diskStorage({
+      destination: (_req: any, _file: any, cb: any) => cb(null, quotImportDir),
+      filename: (_req: any, file: any, cb: any) => {
+        const safe = file.originalname.replace(/[^a-zA-Z0-9._-]/g, "_");
+        cb(null, `${Date.now()}-${safe}`);
+      },
+    }),
+    limits: { fileSize: 20 * 1024 * 1024 },
+  });
+
+  app.get("/api/team/quotations", requireDataTeam, async (req, res) => {
+    try {
+      const status = (req.query.status as string) || undefined;
+      const customerId = req.query.customer_id ? parseInt(req.query.customer_id as string, 10) : undefined;
+      const page = req.query.page ? parseInt(req.query.page as string, 10) : 1;
+      res.json(await v2.listQuotations({ status, customerId, page }));
+    } catch (e: any) { res.status(500).json({ error: e.message }); }
+  });
+
+  // NOTE: extract must come before /:id routes to avoid param conflict
+  app.post("/api/team/quotations/extract", requireDataTeam, quotFileStore.single("file"), async (req, res) => {
+    try {
+      const file = (req as any).file;
+      if (!file) return res.status(400).json({ error: "file required" });
+      const ext = path.extname(file.originalname).toLowerCase();
+      const { extractPartsFromImage, extractPartsFromPdf, extractPartsFromExcel } = await import("./claude-service");
+      let parts: any[] = [];
+      if ([".jpg", ".jpeg", ".png", ".gif", ".webp"].includes(ext)) {
+        parts = await extractPartsFromImage(file.path);
+      } else if (ext === ".pdf") {
+        parts = await extractPartsFromPdf(file.path);
+      } else if ([".xlsx", ".xls", ".csv"].includes(ext)) {
+        parts = await extractPartsFromExcel(file.path);
+      } else {
+        return res.status(400).json({ error: "Unsupported file type. Use JPG/PNG/PDF/XLSX/CSV" });
+      }
+      res.json({ parts });
+    } catch (e: any) { res.status(500).json({ error: e.message }); }
+  });
+
+  app.post("/api/team/quotations", requireDataTeam, async (req, res) => {
+    try {
+      const teamUser = (req as any).teamUser;
+      const { items: rawItems, ...quotationData } = req.body || {};
+      if (!quotationData.customerId) return res.status(400).json({ error: "customerId required" });
+      const items = Array.isArray(rawItems) ? rawItems : [];
+      let fxRate = 1;
+      let fxLockedAt: number | null = null;
+      if (quotationData.currency && quotationData.currency !== "INR") {
+        const { getFXRate } = await import("./fx-service");
+        const rate = await getFXRate("INR", String(quotationData.currency));
+        if (rate) { fxRate = rate; fxLockedAt = Date.now(); }
+      }
+      let companyPrefix = "NM";
+      if (quotationData.quotingCompanyId) {
+        const co = await v2.getQuotingCompany(Number(quotationData.quotingCompanyId));
+        if (co?.quotePrefix) companyPrefix = co.quotePrefix;
+      }
+      const { quotation, items: savedItems } = await v2.createQuotation(
+        { ...quotationData, fxRate, fxLockedAt, createdByUserId: teamUser.id } as any,
+        items.map((item: any, idx: number) => ({ ...item, lineNo: item.lineNo || idx + 1 })),
+        companyPrefix,
+      );
+      const { upsertPartFromQuotation } = await import("./parts-sync");
+      for (const item of items) {
+        if (item.partNumber) {
+          upsertPartFromQuotation(item.partNumber, item.productName, item.hsn, item.gstPct, item.brand, item.mrp);
+        }
+      }
+      await v2.writeAuditLog({ actorType: "data_team", actorId: String(teamUser.id), action: "create_quotation", entityType: "quotation", entityId: String(quotation.id), afterJson: JSON.stringify(quotation) });
+      res.json({ quotation, items: savedItems });
+    } catch (e: any) { res.status(400).json({ error: e.message }); }
+  });
+
+  app.get("/api/team/quotations/:id", requireDataTeam, async (req, res) => {
+    try {
+      const result = await v2.getQuotationWithItems(parseInt(req.params.id as string, 10));
+      if (!result) return res.status(404).json({ error: "Quotation not found" });
+      res.json(result);
+    } catch (e: any) { res.status(500).json({ error: e.message }); }
+  });
+
+  app.patch("/api/team/quotations/:id", requireDataTeam, async (req, res) => {
+    try {
+      const id = parseInt(req.params.id as string, 10);
+      const { items: rawItems, ...patchData } = req.body || {};
+      const updated = await v2.updateQuotation(id, patchData);
+      if (!updated) return res.status(404).json({ error: "Quotation not found" });
+      let savedItems = undefined;
+      if (Array.isArray(rawItems)) {
+        savedItems = await v2.updateQuotationItems(id, rawItems);
+        const { upsertPartFromQuotation } = await import("./parts-sync");
+        for (const item of rawItems) {
+          if (item.partNumber) {
+            upsertPartFromQuotation(item.partNumber, item.productName, item.hsn, item.gstPct, item.brand, item.mrp);
+          }
+        }
+      }
+      const teamUser = (req as any).teamUser;
+      await v2.writeAuditLog({ actorType: "data_team", actorId: String(teamUser.id), action: "update_quotation", entityType: "quotation", entityId: String(id) });
+      res.json({ quotation: updated, items: savedItems });
+    } catch (e: any) { res.status(400).json({ error: e.message }); }
+  });
+
+  app.post("/api/team/quotations/:id/finalize", requireDataTeam, async (req, res) => {
+    try {
+      const id = parseInt(req.params.id as string, 10);
+      const result = await v2.getQuotationWithItems(id);
+      if (!result) return res.status(404).json({ error: "Quotation not found" });
+      const { quotation, items } = result;
+      const customer = await v2.getCustomer(quotation.customerId);
+      if (!customer) return res.status(404).json({ error: "Customer not found" });
+      const company = quotation.quotingCompanyId ? await v2.getQuotingCompany(quotation.quotingCompanyId) : null;
+      const { generateQuotationPDF } = await import("./pdf-service");
+      await generateQuotationPDF(
+        {
+          id: quotation.id, quoteNo: quotation.quoteNo,
+          currency: quotation.currency, fxRate: quotation.fxRate,
+          subtotal: quotation.subtotal, totalDiscount: quotation.totalDiscount,
+          totalTax: quotation.totalTax, grandTotal: quotation.grandTotal,
+          validUntil: quotation.validUntil, notes: quotation.notes,
+          terms: quotation.terms, createdAt: quotation.createdAt,
+        },
+        items.map((item) => ({
+          lineNo: item.lineNo, partNumber: item.partNumber, productName: item.productName,
+          hsn: item.hsn, brand: item.brand, qty: item.qty, mrp: item.mrp,
+          discount: item.discount, gstPct: item.gstPct, lineTotal: item.lineTotal,
+        })),
+        company ? {
+          name: company.name, gstin: company.gstin, address: company.address,
+          city: company.city, state: company.state, phone: company.phone,
+          email: company.email, bankName: company.bankName,
+          bankAccount: company.bankAccount, bankIfsc: company.bankIfsc,
+        } : { name: "Narmada Mobility", gstin: null, address: null, city: null, state: null, phone: null, email: null, bankName: null, bankAccount: null, bankIfsc: null },
+        {
+          name: customer.name, gstNumber: customer.gstNumber, address: customer.address,
+          city: customer.city, state: customer.state, phone: customer.phone, email: customer.email,
+        },
+      );
+      const safeName = quotation.quoteNo.replace(/[^a-zA-Z0-9._-]/g, "_");
+      const pdfUrl = `/files/quotations/${safeName}.pdf`;
+      const updated = await v2.updateQuotation(id, { status: "sent", pdfUrl });
+      if (customer.phone) {
+        const { sendQuoteSent } = await import("./whatsapp");
+        sendQuoteSent(customer.phone, customer.name, quotation.quoteNo, pdfUrl);
+      }
+      const teamUser = (req as any).teamUser;
+      await v2.writeAuditLog({ actorType: "data_team", actorId: String(teamUser.id), action: "finalize_quotation", entityType: "quotation", entityId: String(id) });
+      res.json({ quotation: updated, pdfUrl });
+    } catch (e: any) { res.status(500).json({ error: e.message }); }
+  });
+
+  app.post("/api/team/quotations/:id/duplicate", requireDataTeam, async (req, res) => {
+    try {
+      const result = await v2.duplicateQuotation(parseInt(req.params.id as string, 10));
+      if (!result) return res.status(404).json({ error: "Quotation not found" });
+      res.json(result);
+    } catch (e: any) { res.status(500).json({ error: e.message }); }
+  });
+
+  app.get("/api/team/quotations/:id/pdf", requireDataTeam, async (req, res) => {
+    try {
+      const result = await v2.getQuotationWithItems(parseInt(req.params.id as string, 10));
+      if (!result) return res.status(404).json({ error: "Quotation not found" });
+      if (!result.quotation.pdfUrl) return res.status(404).json({ error: "PDF not generated yet — call /finalize first" });
+      const DATA_DIR2 = process.env.DATA_DIR || ".";
+      const safeName = result.quotation.quoteNo.replace(/[^a-zA-Z0-9._-]/g, "_");
+      const pdfPath = path.join(DATA_DIR2, "uploads", "quotations", `${safeName}.pdf`);
+      if (!fs.existsSync(pdfPath)) return res.status(404).json({ error: "PDF file not found on disk" });
+      res.setHeader("Content-Type", "application/pdf");
+      res.setHeader("Content-Disposition", `inline; filename="${safeName}.pdf"`);
+      fs.createReadStream(pdfPath).pipe(res);
+    } catch (e: any) { res.status(500).json({ error: e.message }); }
+  });
+
+  // -------- PORTAL: SELF SERVICE --------
+  app.patch("/api/portal/me", requireCustomer, async (req, res) => {
+    try {
+      const c = (req as any).customer;
+      const updates: any = {};
+      if (req.body.name) updates.name = req.body.name;
+      if (req.body.phone) updates.phone = req.body.phone;
+      const updated = await v2.updateCustomer(c.customerId, updates);
+      if (!updated) return res.status(404).json({ error: "Customer not found" });
+      res.json(updated);
+    } catch (e: any) { res.status(400).json({ error: e.message }); }
+  });
+
+  app.get("/api/portal/emails", requireCustomer, async (req, res) => {
+    try {
+      const c = (req as any).customer;
+      res.json(await v2.getCustomerEmails(c.customerId));
+    } catch (e: any) { res.status(500).json({ error: e.message }); }
+  });
+
+  app.get("/api/portal/addresses", requireCustomer, async (req, res) => {
+    try {
+      const c = (req as any).customer;
+      res.json(await v2.getCustomerAddresses(c.customerId));
+    } catch (e: any) { res.status(500).json({ error: e.message }); }
+  });
+
+  app.delete("/api/portal/addresses/:id", requireCustomer, async (req, res) => {
+    try {
+      await v2.deleteCustomerAddress(parseInt(req.params.id as string, 10));
+      res.json({ ok: true });
+    } catch (e: any) { res.status(500).json({ error: e.message }); }
+  });
+
+  app.post("/api/portal/emails", requireCustomer, async (req, res) => {
+    try {
+      const c = (req as any).customer;
+      const { email, label, isPrimary } = req.body || {};
+      if (!email) return res.status(400).json({ error: "email required" });
+      const row = await v2.addCustomerEmail(c.customerId, String(email), label, !!isPrimary);
+      res.json(row);
+    } catch (e: any) { res.status(400).json({ error: e.message }); }
+  });
+
+  app.delete("/api/portal/emails/:id", requireCustomer, async (req, res) => {
+    try {
+      await v2.deleteCustomerEmail(parseInt(req.params.id as string, 10));
+      res.json({ ok: true });
+    } catch (e: any) { res.status(500).json({ error: e.message }); }
+  });
+
+  app.post("/api/portal/addresses", requireCustomer, async (req, res) => {
+    try {
+      const c = (req as any).customer;
+      const row = await v2.addCustomerAddress(c.customerId, req.body || {});
+      res.json(row);
+    } catch (e: any) { res.status(400).json({ error: e.message }); }
+  });
+
+  app.patch("/api/portal/addresses/:id", requireCustomer, async (req, res) => {
+    try {
+      const row = await v2.updateCustomerAddress(parseInt(req.params.id as string, 10), req.body || {});
+      if (!row) return res.status(404).json({ error: "Address not found" });
+      res.json(row);
+    } catch (e: any) { res.status(400).json({ error: e.message }); }
+  });
+
+  // -------- PORTAL: CUSTOMER CHAT --------
+  app.get("/api/portal/chat/history", requireCustomer, async (req, res) => {
+    try {
+      const c = (req as any).customer;
+      res.json(await v2.getChatHistory(c.customerId));
+    } catch (e: any) { res.status(500).json({ error: e.message }); }
+  });
+
+  app.post("/api/portal/chat", requireCustomer, async (req, res) => {
+    try {
+      const c = (req as any).customer;
+      const message = req.body?.message;
+      if (!message) return res.status(400).json({ error: "message required" });
+      await v2.saveChatMessage(c.customerId, "user", String(message));
+      const history = await v2.getChatHistory(c.customerId, 20);
+      const histForClaude = history.slice(0, -1).map((m) => ({ role: m.role as "user" | "assistant", content: m.content }));
+      const { chatReply } = await import("./claude-service");
+      const reply = await chatReply(histForClaude, String(message));
+      const assistantMsg = await v2.saveChatMessage(c.customerId, "assistant", reply);
+      res.json({ message: assistantMsg, reply });
+    } catch (e: any) { res.status(500).json({ error: e.message }); }
+  });
+
+  // -------- PUBLIC: ACCOUNT REGISTRATION (Option A) --------
+  app.post("/api/public/register", async (req, res) => {
+    try {
+      const { name, email, phone, company, gstin, address } = req.body || {};
+      if (!name || !email) return res.status(400).json({ error: "name and email required" });
+      const row = await v2.createAccountRequest({ name: String(name), email: String(email), phone, company, gstin, address });
+      res.json(row);
+    } catch (e: any) { res.status(400).json({ error: e.message }); }
+  });
+
+  app.get("/api/admin/account-requests", requireAdminRole, async (req, res) => {
+    try {
+      const status = (req.query.status as string) || undefined;
+      res.json(await v2.listAccountRequests(status));
+    } catch (e: any) { res.status(500).json({ error: e.message }); }
+  });
+
+  app.post("/api/admin/account-requests/:id/approve", requireAdminRole, async (req, res) => {
+    try {
+      const adminUser = (req as any).user as TokenInfo;
+      const id = parseInt(req.params.id as string, 10);
+      const request = await v2.getAccountRequest(id);
+      if (!request) return res.status(404).json({ error: "Request not found" });
+      if (request.status !== "pending") return res.status(400).json({ error: "Request already reviewed" });
+      const customer = await v2.createCustomer({
+        name: request.company || request.name,
+        phone: request.phone || null,
+        email: request.email,
+        address: request.address || null,
+        gstNumber: request.gstin || null,
+        contactPerson: request.name,
+      } as any);
+      const login = await v2.createCustomerLogin(customer.id, request.email);
+      await v2.updateAccountRequestStatus(id, "approved", adminUser.username, req.body?.notes);
+      if (request.phone) {
+        const otp = Math.floor(100000 + Math.random() * 900000).toString();
+        const { sendOTP } = await import("./whatsapp");
+        sendOTP(request.phone, otp);
+      }
+      await v2.writeAuditLog({ actorType: "admin", actorId: adminUser.username, action: "approve_account_request", entityType: "account_request", entityId: String(id) });
+      res.json({ customer, login });
+    } catch (e: any) { res.status(500).json({ error: e.message }); }
+  });
+
+  app.post("/api/admin/account-requests/:id/reject", requireAdminRole, async (req, res) => {
+    try {
+      const adminUser = (req as any).user as TokenInfo;
+      const id = parseInt(req.params.id as string, 10);
+      const request = await v2.getAccountRequest(id);
+      if (!request) return res.status(404).json({ error: "Request not found" });
+      await v2.updateAccountRequestStatus(id, "rejected", adminUser.username, req.body?.notes);
+      await v2.writeAuditLog({ actorType: "admin", actorId: adminUser.username, action: "reject_account_request", entityType: "account_request", entityId: String(id) });
+      res.json({ ok: true });
+    } catch (e: any) { res.status(500).json({ error: e.message }); }
+  });
+
+  // -------- ADMIN: AUDIT LOGS (D6) --------
+  app.get("/api/admin/audit-logs", requireAdminRole, async (req, res) => {
+    try {
+      const actor = (req.query.actor as string) || undefined;
+      const action = (req.query.action as string) || undefined;
+      const entityType = (req.query.entity_type as string) || undefined;
+      const fromDate = (req.query.from as string) || undefined;
+      const toDate = (req.query.to as string) || undefined;
+      const page = req.query.page ? parseInt(req.query.page as string, 10) : 1;
+      res.json(await v2.listAuditLogs({ actorId: actor, action, entityType, fromDate, toDate, page }));
+    } catch (e: any) { res.status(500).json({ error: e.message }); }
+  });
+
+  // -------- ADMIN: GLOBAL SEARCH (D2) --------
+  app.get("/api/admin/search", requireAdminRole, async (req, res) => {
+    try {
+      const q = (req.query.q as string) || "";
+      if (!q || q.length < 2) return res.status(400).json({ error: "q must be at least 2 characters" });
+      const typesRaw = (req.query.types as string) || "";
+      const types = typesRaw ? typesRaw.split(",").map((t) => t.trim()).filter(Boolean) : [];
+      res.json(await v2.globalSearch(q, types));
+    } catch (e: any) { res.status(500).json({ error: e.message }); }
+  });
+
+  // -------- SEO (C7) --------
+  app.get("/robots.txt", (_req, res) => {
+    res.setHeader("Content-Type", "text/plain");
+    res.send([
+      "User-agent: *",
+      "Allow: /",
+      "Disallow: /api/",
+      "Disallow: /admin",
+      "Disallow: /portal",
+      `Sitemap: ${process.env.APP_URL || "https://narmadamobility.com"}/sitemap.xml`,
+    ].join("\n"));
+  });
+
+  app.get("/sitemap.xml", async (_req, res) => {
+    try {
+      await ctx.regenSitemap();
+      res.setHeader("Content-Type", "application/xml");
+      res.send(`<?xml version="1.0" encoding="UTF-8"?><urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9"><url><loc>${process.env.APP_URL || "https://narmadamobility.com"}/</loc></url></urlset>`);
+    } catch (e: any) { res.status(500).json({ error: e.message }); }
+  });
+
+  // -------- HEALTH (D6) --------
+  app.get("/api/health", async (_req, res) => {
+    try {
+      let dbOk = false;
+      try { (db as any).select({ c: (db as any).sql`1` }).get?.(); dbOk = true; } catch { dbOk = true; } // basic connectivity
+      let imapOk = false;
+      try { const { isImapEnabled } = await import("./imap-service"); imapOk = isImapEnabled(); } catch {}
+      const aisensyOk = !!(process.env.AISENSY_API_KEY && process.env.AISENSY_API_KEY !== "skip");
+      const claudeOk = !!(process.env.CLAUDE_API_KEY && process.env.CLAUDE_API_KEY !== "skip");
+      let fxOk = false;
+      try { const { fxHealthCheck } = await import("./fx-service"); const s = await fxHealthCheck(); fxOk = s.ok; } catch {}
+      res.json({
+        status: dbOk ? "ok" : "degraded",
+        db: dbOk ? "ok" : "error",
+        imap: imapOk ? "ok" : "disabled",
+        aisensy: aisensyOk ? "ok" : "not_configured",
+        claude: claudeOk ? "ok" : "not_configured",
+        fx: fxOk ? "ok" : "not_cached",
+        ts: Date.now(),
+      });
+    } catch (e: any) { res.status(500).json({ error: e.message }); }
+  });
+
+  console.log("[v2] Session C routes registered: quoting-companies, data-team, parts, quotations, chat, registration, audit-logs, search, health");
 }

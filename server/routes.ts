@@ -226,7 +226,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
   });
   app.patch("/api/admin/products/:id", requireAdmin, async (req, res) => {
     try {
-      const id = parseInt(req.params.id, 10);
+      const id = parseInt(req.params.id as string, 10);
       const body = { ...req.body };
       if (Array.isArray(body.imageUrls)) body.imageUrls = JSON.stringify(body.imageUrls);
       if (Array.isArray(body.compatibleModels)) body.compatibleModels = JSON.stringify(body.compatibleModels);
@@ -236,7 +236,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
     } catch (e: any) { res.status(400).json({ error: e.message }); }
   });
   app.delete("/api/admin/products/:id", requireAdmin, async (req, res) => {
-    await storage.deleteProduct(parseInt(req.params.id, 10));
+    await storage.deleteProduct(parseInt(req.params.id as string, 10));
     res.json({ ok: true });
   });
 
@@ -286,7 +286,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
   });
   app.get("/api/admin/contacts", requireAdmin, async (_req, res) => res.json(await storage.listContacts()));
   app.patch("/api/admin/contacts/:id", requireAdmin, async (req, res) => {
-    await storage.updateContactStatus(parseInt(req.params.id, 10), req.body.status || "replied");
+    await storage.updateContactStatus(parseInt(req.params.id as string, 10), req.body.status || "replied");
     res.json({ ok: true });
   });
 

@@ -132,6 +132,24 @@ app.use((req, res, next) => {
     },
   );
 
+  // ---- Session C: Start IMAP polling ----
+  try {
+    const { startImapPolling } = await import("./imap-service");
+    startImapPolling();
+  } catch (e: any) {
+    log(`[imap] Failed to start polling: ${e?.message}`);
+  }
+
+  // ---- Session C: Nightly parts_master TATA sync placeholder ----
+  const PARTS_SYNC_INTERVAL_MS = 24 * 60 * 60 * 1000; // 24 hours
+  setInterval(async () => {
+    try {
+      log("[parts-cron] Nightly TATA parts sync placeholder — not yet implemented");
+    } catch (e: any) {
+      log(`[parts-cron] Error: ${e?.message}`);
+    }
+  }, PARTS_SYNC_INTERVAL_MS);
+
   // ---- PO reminder cron (daily check for POs > 3 days pending) ----
   const PO_REMINDER_INTERVAL_MS = 24 * 60 * 60 * 1000; // 24 hours
   const PO_STALE_DAYS = 3;
@@ -150,7 +168,7 @@ app.use((req, res, next) => {
       for (const po of stale) {
         const cust = po.customerId ? await getCustomer(po.customerId) : null;
         const ageDays = Math.floor((Date.now() - (po.createdAt || Date.now())) / 86400000);
-        rows.push(`<tr><td>${po.poNumber || po.id}</td><td>${cust?.name || "-"}</td><td>\u20b9${po.totalInr || 0}</td><td>${ageDays}d</td><td>${po.reminderCount || 0}</td></tr>`);
+        rows.push(`<tr><td>${po.customerPoNumber || po.id}</td><td>${cust?.name || "-"}</td><td>\u20b9${po.totalInr || 0}</td><td>${ageDays}d</td><td>${po.reminderCount || 0}</td></tr>`);
         await incrementPoReminder(po.id);
       }
       const html = `<h3>Stale Purchase Orders (>${PO_STALE_DAYS} days pending)</h3>

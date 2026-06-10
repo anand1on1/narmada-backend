@@ -365,6 +365,13 @@ export async function updateCustomerAddress(id: number, data: Partial<Omit<Custo
 export async function deleteCustomerAddress(id: number): Promise<void> {
   db.delete(customerAddresses).where(eq(customerAddresses.id, id)).run();
 }
+// Portal aliases (routes-v2 patched endpoints)
+export async function getCustomerEmails(customerId: number): Promise<CustomerEmail[]> {
+  return listCustomerEmails(customerId);
+}
+export async function getCustomerAddresses(customerId: number): Promise<CustomerAddress[]> {
+  return listCustomerAddresses(customerId);
+}
 
 // ---------- CUSTOMER LOGINS + OTP + SESSIONS (customer portal auth) ----------
 const CUSTOMER_SESSION_TTL_MS = 30 * 24 * 60 * 60 * 1000; // 30 days
@@ -727,4 +734,428 @@ export async function getSessionBCounts() {
     pendingPos,
     totalReceivableInr: (totalReceivable?.d || 0) - (totalReceivable?.c || 0),
   };
+}
+
+// =============================================================
+// SESSION C STORAGE METHODS
+// =============================================================
+
+import {
+  quotingCompanies, dataTeamUsers, dataTeamSessions, partsMaster,
+  quotations, quotationItems, auditLogs, emailInbox, fxRates,
+  customerChatMessages, accountRequests,
+} from "@shared/schema";
+import type {
+  QuotingCompany, InsertQuotingCompany,
+  DataTeamUser, DataTeamSession,
+  PartsMaster, InsertPartsMaster,
+  Quotation, InsertQuotation,
+  QuotationItem, InsertQuotationItem,
+  AuditLog, EmailInboxRow, FxRate,
+  CustomerChatMessage,
+  AccountRequest, InsertAccountRequest,
+} from "@shared/schema";
+
+// -------- QUOTING COMPANIES --------
+export async function listQuotingCompanies(activeOnly = false): Promise<QuotingCompany[]> {
+  if (activeOnly) {
+    return db.select().from(quotingCompanies).where(eq(quotingCompanies.active, true)).orderBy(quotingCompanies.name).all();
+  }
+  return db.select().from(quotingCompanies).orderBy(quotingCompanies.name).all();
+}
+export async function getQuotingCompany(id: number): Promise<QuotingCompany | undefined> {
+  return db.select().from(quotingCompanies).where(eq(quotingCompanies.id, id)).get();
+}
+export async function createQuotingCompany(data: InsertQuotingCompany): Promise<QuotingCompany> {
+  return db.insert(quotingCompanies).values({ ...data, createdAt: Date.now() } as any).returning().get();
+}
+export async function updateQuotingCompany(id: number, data: Partial<InsertQuotingCompany>): Promise<QuotingCompany | undefined> {
+  return db.update(quotingCompanies).set(data).where(eq(quotingCompanies.id, id)).returning().get();
+}
+export async function deleteQuotingCompany(id: number): Promise<void> {
+  db.delete(quotingCompanies).where(eq(quotingCompanies.id, id)).run();
+}
+
+// -------- DATA TEAM USERS --------
+const DATA_TEAM_SESSION_TTL_MS = 30 * 24 * 60 * 60 * 1000; // 30 days
+
+export async function listDataTeamUsers(): Promise<Omit<DataTeamUser, "passwordHash">[]> {
+  const rows = db.select().from(dataTeamUsers).orderBy(desc(dataTeamUsers.createdAt)).all();
+  return rows.map(({ passwordHash: _ph, ...rest }) => rest);
+}
+export async function getDataTeamUser(id: number): Promise<DataTeamUser | undefined> {
+  return db.select().from(dataTeamUsers).where(eq(dataTeamUsers.id, id)).get();
+}
+export async function getDataTeamUserByUsername(username: string): Promise<DataTeamUser | undefined> {
+  return db.select().from(dataTeamUsers).where(eq(dataTeamUsers.username, username)).get();
+}
+export async function createDataTeamUser(data: {
+  username: string;
+  passwordHash: string;
+  name?: string;
+  email?: string;
+  phone?: string;
+}): Promise<DataTeamUser> {
+  return db.insert(dataTeamUsers).values({
+    username: data.username,
+    passwordHash: data.passwordHash,
+    name: data.name || null,
+    email: data.email || null,
+    phone: data.phone || null,
+    role: "data_team",
+    active: true,
+    createdAt: Date.now(),
+  } as any).returning().get();
+}
+export async function updateDataTeamUser(id: number, data: Partial<DataTeamUser>): Promise<DataTeamUser | undefined> {
+  const { id: _id, createdAt: _ca, ...rest } = data as any;
+  return db.update(dataTeamUsers).set(rest).where(eq(dataTeamUsers.id, id)).returning().get();
+}
+export async function createDataTeamSession(userId: number): Promise<DataTeamSession> {
+  const token = randomBytes(32).toString("hex");
+  const now = Date.now();
+  return db.insert(dataTeamSessions).values({
+    userId,
+    token,
+    expiresAt: now + DATA_TEAM_SESSION_TTL_MS,
+    createdAt: now,
+  }).returning().get();
+}
+export async function getDataTeamSession(token: string): Promise<DataTeamSession | undefined> {
+  const row = db.select().from(dataTeamSessions).where(eq(dataTeamSessions.token, token)).get();
+  if (!row) return undefined;
+  if (row.expiresAt < Date.now()) {
+    db.delete(dataTeamSessions).where(eq(dataTeamSessions.token, token)).run();
+    return undefined;
+  }
+  return row;
+}
+export async function deleteDataTeamSession(token: string): Promise<void> {
+  db.delete(dataTeamSessions).where(eq(dataTeamSessions.token, token)).run();
+}
+export async function touchDataTeamUserLogin(id: number): Promise<void> {
+  db.update(dataTeamUsers).set({ lastLogin: Date.now() }).where(eq(dataTeamUsers.id, id)).run();
+}
+
+// -------- PARTS MASTER --------
+export async function searchParts(q: string, limit = 20): Promise<PartsMaster[]> {
+  if (!q || q.length < 3) return [];
+  const searchQ = `%${q.toLowerCase()}%`;
+  return db.select().from(partsMaster)
+    .where(or(
+      like(partsMaster.searchText, searchQ),
+      like(partsMaster.partNumber, searchQ),
+      like(partsMaster.name, searchQ),
+    ))
+    .orderBy(desc(partsMaster.useCount))
+    .limit(limit)
+    .all();
+}
+export async function getPartByNumber(partNumber: string): Promise<PartsMaster | undefined> {
+  return db.select().from(partsMaster).where(eq(partsMaster.partNumber, partNumber.trim())).get();
+}
+export async function listParts(opts: { limit?: number; offset?: number } = {}): Promise<PartsMaster[]> {
+  let q: any = db.select().from(partsMaster).orderBy(desc(partsMaster.useCount), desc(partsMaster.lastUpdated));
+  if (opts.limit) q = q.limit(opts.limit);
+  if (opts.offset) q = q.offset(opts.offset);
+  return q.all();
+}
+
+// -------- QUOTATIONS --------
+function generateQuotationNo(prefix = "NM"): string {
+  const d = new Date();
+  const yyyymm = `${d.getFullYear()}${String(d.getMonth() + 1).padStart(2, "0")}`;
+  const pfx = `${prefix}-${yyyymm}-`;
+  const row = db.select({ c: sql<number>`COUNT(*)` }).from(quotations).where(like(quotations.quoteNo, `${pfx}%`)).get();
+  const next = ((row?.c as number) || 0) + 1;
+  return `${pfx}${String(next).padStart(4, "0")}`;
+}
+
+export async function listQuotations(opts: {
+  status?: string;
+  customerId?: number;
+  createdByUserId?: number;
+  page?: number;
+  limit?: number;
+} = {}): Promise<{ rows: Quotation[]; total: number }> {
+  const conds: any[] = [];
+  if (opts.status) conds.push(eq(quotations.status, opts.status));
+  if (opts.customerId) conds.push(eq(quotations.customerId, opts.customerId));
+  if (opts.createdByUserId) conds.push(eq(quotations.createdByUserId, opts.createdByUserId));
+
+  let q: any = db.select().from(quotations);
+  let countQ: any = db.select({ c: sql<number>`COUNT(*)` }).from(quotations);
+  if (conds.length) {
+    const where = conds.length === 1 ? conds[0] : and(...conds);
+    q = q.where(where);
+    countQ = countQ.where(where);
+  }
+  const total = (countQ.get()?.c as number) || 0;
+  const limit = opts.limit || 20;
+  const offset = ((opts.page || 1) - 1) * limit;
+  q = q.orderBy(desc(quotations.createdAt)).limit(limit).offset(offset);
+  return { rows: q.all(), total };
+}
+export async function getQuotation(id: number): Promise<Quotation | undefined> {
+  return db.select().from(quotations).where(eq(quotations.id, id)).get();
+}
+export async function getQuotationWithItems(id: number): Promise<{ quotation: Quotation; items: QuotationItem[] } | undefined> {
+  const quotation = await getQuotation(id);
+  if (!quotation) return undefined;
+  const items = db.select().from(quotationItems).where(eq(quotationItems.quotationId, id)).orderBy(quotationItems.lineNo).all();
+  return { quotation, items };
+}
+export async function createQuotation(
+  data: InsertQuotation,
+  items: Omit<InsertQuotationItem, "quotationId">[],
+  companyPrefix?: string,
+): Promise<{ quotation: Quotation; items: QuotationItem[] }> {
+  const quoteNo = generateQuotationNo(companyPrefix || "NM");
+  const now = Date.now();
+  const quotation = db.insert(quotations).values({
+    ...data,
+    quoteNo,
+    status: data.status || "draft",
+    createdAt: now,
+    updatedAt: now,
+  } as any).returning().get();
+
+  const savedItems: QuotationItem[] = [];
+  for (const item of items) {
+    const saved = db.insert(quotationItems).values({
+      ...item,
+      quotationId: quotation.id,
+      createdAt: now,
+    } as any).returning().get();
+    savedItems.push(saved);
+  }
+
+  return { quotation, items: savedItems };
+}
+export async function updateQuotation(id: number, data: Partial<Quotation>): Promise<Quotation | undefined> {
+  const { id: _id, createdAt: _ca, quoteNo: _qn, ...rest } = data as any;
+  return db.update(quotations).set({ ...rest, updatedAt: Date.now() }).where(eq(quotations.id, id)).returning().get();
+}
+export async function updateQuotationItems(quotationId: number, items: Omit<InsertQuotationItem, "quotationId">[]): Promise<QuotationItem[]> {
+  // Delete existing items and re-insert
+  db.delete(quotationItems).where(eq(quotationItems.quotationId, quotationId)).run();
+  const now = Date.now();
+  const saved: QuotationItem[] = [];
+  for (const item of items) {
+    const s = db.insert(quotationItems).values({ ...item, quotationId, createdAt: now } as any).returning().get();
+    saved.push(s);
+  }
+  return saved;
+}
+export async function deleteQuotation(id: number): Promise<void> {
+  db.delete(quotationItems).where(eq(quotationItems.quotationId, id)).run();
+  db.delete(quotations).where(eq(quotations.id, id)).run();
+}
+export async function duplicateQuotation(id: number): Promise<{ quotation: Quotation; items: QuotationItem[] } | undefined> {
+  const result = await getQuotationWithItems(id);
+  if (!result) return undefined;
+  const { quotation, items } = result;
+  const newItems = items.map((item) => {
+    const { id: _id, quotationId: _qi, createdAt: _ca, ...rest } = item;
+    return rest;
+  });
+  return createQuotation(
+    {
+      quotingCompanyId: quotation.quotingCompanyId,
+      customerId: quotation.customerId,
+      status: "draft",
+      currency: quotation.currency,
+      fxRate: quotation.fxRate,
+      subtotal: quotation.subtotal,
+      totalDiscount: quotation.totalDiscount,
+      totalTax: quotation.totalTax,
+      grandTotal: quotation.grandTotal,
+      validUntil: quotation.validUntil,
+      notes: quotation.notes,
+      terms: quotation.terms,
+      createdByUserId: quotation.createdByUserId,
+    } as InsertQuotation,
+    newItems,
+  );
+}
+
+// -------- AUDIT LOGS --------
+export async function writeAuditLog(data: {
+  actorType: string;
+  actorId?: string;
+  action: string;
+  entityType?: string;
+  entityId?: string;
+  beforeJson?: string;
+  afterJson?: string;
+  ip?: string;
+  userAgent?: string;
+}): Promise<void> {
+  try {
+    db.insert(auditLogs).values({ ...data, createdAt: Date.now() } as any).run();
+  } catch (e: any) {
+    console.error("[audit] write error:", e?.message);
+  }
+}
+export async function listAuditLogs(opts: {
+  actorType?: string;
+  actorId?: string;
+  action?: string;
+  entityType?: string;
+  fromDate?: string;
+  toDate?: string;
+  page?: number;
+  pageSize?: number;
+  limit?: number;
+} = {}): Promise<{ rows: AuditLog[]; total: number }> {
+  const conds: any[] = [];
+  if (opts.actorType) conds.push(eq(auditLogs.actorType, opts.actorType));
+  if (opts.actorId) conds.push(eq(auditLogs.actorId, opts.actorId));
+  if (opts.action) conds.push(like(auditLogs.action, `%${opts.action}%`));
+  if (opts.entityType) conds.push(eq(auditLogs.entityType, opts.entityType));
+  if (opts.fromDate) {
+    const t = Date.parse(opts.fromDate);
+    if (!Number.isNaN(t)) conds.push(gte(auditLogs.createdAt, t));
+  }
+  if (opts.toDate) {
+    const t = Date.parse(opts.toDate);
+    if (!Number.isNaN(t)) conds.push(lte(auditLogs.createdAt, t));
+  }
+
+  let q: any = db.select().from(auditLogs);
+  let cq: any = db.select({ c: sql<number>`COUNT(*)` }).from(auditLogs);
+  if (conds.length) {
+    const where = conds.length === 1 ? conds[0] : and(...conds);
+    q = q.where(where);
+    cq = cq.where(where);
+  }
+  const total = (cq.get()?.c as number) || 0;
+  const limit = opts.pageSize || opts.limit || 50;
+  const offset = ((opts.page || 1) - 1) * limit;
+  q = q.orderBy(desc(auditLogs.createdAt)).limit(limit).offset(offset);
+  return { rows: q.all(), total };
+}
+
+// -------- QUOTATION STATS --------
+export async function getQuotationStats(): Promise<{ total: number; drafts: number; sentThisMonth: number; accepted: number }> {
+  const total = (db.select({ c: sql<number>`COUNT(*)` }).from(quotations).get()?.c as number) || 0;
+  const drafts = (db.select({ c: sql<number>`COUNT(*)` }).from(quotations).where(eq(quotations.status, "draft")).get()?.c as number) || 0;
+  const accepted = (db.select({ c: sql<number>`COUNT(*)` }).from(quotations).where(eq(quotations.status, "accepted")).get()?.c as number) || 0;
+  const now = new Date();
+  const monthStart = new Date(now.getFullYear(), now.getMonth(), 1).getTime();
+  const sentThisMonth = (db.select({ c: sql<number>`COUNT(*)` }).from(quotations)
+    .where(and(eq(quotations.status, "sent"), gte(quotations.createdAt, monthStart))).get()?.c as number) || 0;
+  return { total, drafts, sentThisMonth, accepted };
+}
+
+// -------- EMAIL INBOX --------
+export async function listEmailInbox(opts: { processed?: boolean; limit?: number } = {}): Promise<EmailInboxRow[]> {
+  const conds: any[] = [];
+  if (opts.processed !== undefined) conds.push(eq(emailInbox.processed, opts.processed));
+  let q: any = db.select().from(emailInbox);
+  if (conds.length) q = q.where(conds[0]);
+  q = q.orderBy(desc(emailInbox.receivedAt));
+  if (opts.limit) q = q.limit(opts.limit);
+  return q.all();
+}
+export async function getEmailInboxRow(id: number): Promise<EmailInboxRow | undefined> {
+  return db.select().from(emailInbox).where(eq(emailInbox.id, id)).get();
+}
+export async function markEmailProcessed(id: number, rfqId?: number): Promise<void> {
+  db.update(emailInbox).set({ processed: true, processedAt: Date.now(), rfqId: rfqId || null }).where(eq(emailInbox.id, id)).run();
+}
+
+// -------- CUSTOMER CHAT --------
+export async function getChatHistory(customerId: number, limit = 50): Promise<CustomerChatMessage[]> {
+  return db.select().from(customerChatMessages)
+    .where(eq(customerChatMessages.customerId, customerId))
+    .orderBy(customerChatMessages.createdAt)
+    .limit(limit)
+    .all();
+}
+export async function saveChatMessage(customerId: number, role: "user" | "assistant", content: string): Promise<CustomerChatMessage> {
+  return db.insert(customerChatMessages).values({
+    customerId,
+    role,
+    content,
+    createdAt: Date.now(),
+  }).returning().get();
+}
+
+// -------- ACCOUNT REQUESTS --------
+export async function listAccountRequests(status?: string): Promise<AccountRequest[]> {
+  if (status) {
+    return db.select().from(accountRequests).where(eq(accountRequests.status, status)).orderBy(desc(accountRequests.createdAt)).all();
+  }
+  return db.select().from(accountRequests).orderBy(desc(accountRequests.createdAt)).all();
+}
+export async function getAccountRequest(id: number): Promise<AccountRequest | undefined> {
+  return db.select().from(accountRequests).where(eq(accountRequests.id, id)).get();
+}
+export async function createAccountRequest(data: InsertAccountRequest): Promise<AccountRequest> {
+  return db.insert(accountRequests).values({ ...data, status: "pending", createdAt: Date.now() } as any).returning().get();
+}
+export async function updateAccountRequestStatus(
+  id: number,
+  status: "approved" | "rejected",
+  reviewedByAdminId: string,
+  reviewNotes?: string,
+): Promise<AccountRequest | undefined> {
+  return db.update(accountRequests)
+    .set({ status, reviewedByAdminId, reviewNotes: reviewNotes || null, reviewedAt: Date.now() })
+    .where(eq(accountRequests.id, id))
+    .returning()
+    .get();
+}
+
+// -------- FX RATES (storage for cache) --------
+export async function getCachedFxRate(from: string, to: string, maxAgeMs: number): Promise<FxRate | undefined> {
+  const minFetchedAt = Date.now() - maxAgeMs;
+  return db.select().from(fxRates)
+    .where(and(eq(fxRates.baseCurrency, from.toUpperCase()), eq(fxRates.targetCurrency, to.toUpperCase()), gte(fxRates.fetchedAt, minFetchedAt)))
+    .orderBy(desc(fxRates.fetchedAt))
+    .get();
+}
+
+// -------- ADMIN SEARCH (D2) --------
+export async function globalSearch(q: string, types: string[]): Promise<Record<string, any[]>> {
+  if (!q || q.trim().length < 2) return {};
+  const like_ = `%${q}%`;
+  const result: Record<string, any[]> = {};
+
+  if (!types.length || types.includes("customers")) {
+    result.customers = db.select().from(customers).where(
+      or(like(customers.name, like_), like(customers.phone, like_), like(customers.email, like_))
+    ).limit(10).all();
+  }
+  if (!types.length || types.includes("quotations")) {
+    result.quotations = db.select().from(quotations).where(
+      or(like(quotations.quoteNo, like_))
+    ).limit(10).all();
+  }
+  if (!types.length || types.includes("rfqs")) {
+    result.rfqs = db.select().from(rfqs).where(
+      or(like(rfqs.notes, like_), like(rfqs.contactName, like_))
+    ).limit(10).all();
+  }
+  if (!types.length || types.includes("pos")) {
+    result.pos = db.select().from(purchaseOrders).where(
+      or(like(purchaseOrders.customerPoNumber, like_))
+    ).limit(10).all();
+  }
+  if (!types.length || types.includes("products")) {
+    result.products = db.select().from(partsMaster).where(
+      or(like(partsMaster.name, like_), like(partsMaster.partNumber, like_))
+    ).limit(10).all();
+  }
+
+  return result;
+}
+
+// Alias functions that index.ts uses for PO reminder
+export async function getStalePurchaseOrders(days: number): Promise<PurchaseOrder[]> {
+  return listPendingPurchaseOrdersOlderThan(days);
+}
+export async function incrementPoReminder(id: number): Promise<void> {
+  return bumpPoReminder(id);
 }

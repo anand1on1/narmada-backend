@@ -179,6 +179,7 @@ export const customers = sqliteTable("customers", {
   paymentTermsDays: integer("payment_terms_days").default(0),
   contactPerson: text("contact_person"),
   companyPan: text("company_pan"),
+  customerCode: text("customer_code"),  // NM/CUS/0001 style, optional unique
 });
 
 export const insertCustomerSchema = createInsertSchema(customers).omit({ id: true, createdAt: true });
@@ -445,3 +446,198 @@ export const bankDetails = sqliteTable("bank_details", {
 export const insertBankDetailsSchema = createInsertSchema(bankDetails).omit({ id: true, createdAt: true });
 export type InsertBankDetails = z.infer<typeof insertBankDetailsSchema>;
 export type BankDetails = typeof bankDetails.$inferSelect;
+
+// =============================================================
+// SESSION C: Quoting Module + Data Team + Parts Master + Chat + Audit
+// =============================================================
+
+// -------- QUOTING COMPANIES --------
+export const quotingCompanies = sqliteTable("quoting_companies", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  name: text("name").notNull(),
+  gstin: text("gstin"),
+  pan: text("pan"),
+  address: text("address"),
+  city: text("city"),
+  state: text("state"),
+  pincode: text("pincode"),
+  phone: text("phone"),
+  email: text("email"),
+  bankName: text("bank_name"),
+  bankAccount: text("bank_account"),
+  bankIfsc: text("bank_ifsc"),
+  bankBranch: text("bank_branch"),
+  logoUrl: text("logo_url"),
+  signatureUrl: text("signature_url"),
+  quotePrefix: text("quote_prefix").default("NM"),
+  defaultTerms: text("default_terms"),
+  active: integer("active", { mode: "boolean" }).default(true),
+  createdAt: integer("created_at").notNull().$defaultFn(() => Date.now()),
+});
+export const insertQuotingCompanySchema = createInsertSchema(quotingCompanies).omit({ id: true, createdAt: true });
+export type InsertQuotingCompany = z.infer<typeof insertQuotingCompanySchema>;
+export type QuotingCompany = typeof quotingCompanies.$inferSelect;
+
+// -------- DATA TEAM USERS --------
+export const dataTeamUsers = sqliteTable("data_team_users", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  username: text("username").notNull().unique(),
+  passwordHash: text("password_hash").notNull(),
+  name: text("name"),
+  email: text("email"),
+  phone: text("phone"),
+  role: text("role").notNull().default("data_team"),
+  active: integer("active", { mode: "boolean" }).default(true),
+  lastLogin: integer("last_login"),
+  createdAt: integer("created_at").notNull().$defaultFn(() => Date.now()),
+});
+export type DataTeamUser = typeof dataTeamUsers.$inferSelect;
+
+// -------- DATA TEAM SESSIONS --------
+export const dataTeamSessions = sqliteTable("data_team_sessions", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  userId: integer("user_id").notNull(),
+  token: text("token").notNull().unique(),
+  expiresAt: integer("expires_at").notNull(),
+  createdAt: integer("created_at").notNull().$defaultFn(() => Date.now()),
+});
+export type DataTeamSession = typeof dataTeamSessions.$inferSelect;
+
+// -------- PARTS MASTER --------
+export const partsMaster = sqliteTable("parts_master", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  partNumber: text("part_number").notNull().unique(),
+  name: text("name").notNull(),
+  hsn: text("hsn"),
+  gstRate: real("gst_rate"),
+  brand: text("brand"),
+  lastMrp: real("last_mrp"),
+  lastSource: text("last_source"),   // manual | import | edukaan
+  lastUpdated: integer("last_updated"),
+  searchText: text("search_text"),   // lowercased partNumber+name for LIKE
+  useCount: integer("use_count").default(0),
+  createdAt: integer("created_at").notNull().$defaultFn(() => Date.now()),
+});
+export const insertPartsMasterSchema = createInsertSchema(partsMaster).omit({ id: true, createdAt: true });
+export type InsertPartsMaster = z.infer<typeof insertPartsMasterSchema>;
+export type PartsMaster = typeof partsMaster.$inferSelect;
+
+// -------- QUOTATIONS --------
+export const quotations = sqliteTable("quotations", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  quoteNo: text("quote_no").notNull().unique(),
+  quotingCompanyId: integer("quoting_company_id"),
+  customerId: integer("customer_id").notNull(),
+  status: text("status").notNull().default("draft"),   // draft | sent | accepted | expired
+  currency: text("currency").notNull().default("INR"), // INR | USD | EUR | AED
+  fxRate: real("fx_rate").default(1),
+  fxLockedAt: integer("fx_locked_at"),
+  subtotal: real("subtotal").default(0),
+  totalDiscount: real("total_discount").default(0),
+  totalTax: real("total_tax").default(0),
+  grandTotal: real("grand_total").default(0),
+  validUntil: integer("valid_until"),
+  notes: text("notes"),
+  terms: text("terms"),
+  createdByUserId: integer("created_by_user_id"),
+  pdfUrl: text("pdf_url"),
+  createdAt: integer("created_at").notNull().$defaultFn(() => Date.now()),
+  updatedAt: integer("updated_at").notNull().$defaultFn(() => Date.now()),
+});
+export const insertQuotationSchema = createInsertSchema(quotations).omit({ id: true, createdAt: true, updatedAt: true, quoteNo: true });
+export type InsertQuotation = z.infer<typeof insertQuotationSchema>;
+export type Quotation = typeof quotations.$inferSelect;
+
+// -------- QUOTATION ITEMS --------
+export const quotationItems = sqliteTable("quotation_items", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  quotationId: integer("quotation_id").notNull(),
+  lineNo: integer("line_no").notNull().default(1),
+  partNumber: text("part_number"),
+  productName: text("product_name").notNull(),
+  hsn: text("hsn"),
+  brand: text("brand"),
+  qty: real("qty").notNull().default(1),
+  mrp: real("mrp").notNull().default(0),
+  discount: real("discount").default(0),   // percentage
+  gstPct: real("gst_pct").default(18),
+  lineTotal: real("line_total").default(0),
+  source: text("source").default("manual"), // manual | import | edukaan
+  createdAt: integer("created_at").notNull().$defaultFn(() => Date.now()),
+});
+export const insertQuotationItemSchema = createInsertSchema(quotationItems).omit({ id: true, createdAt: true });
+export type InsertQuotationItem = z.infer<typeof insertQuotationItemSchema>;
+export type QuotationItem = typeof quotationItems.$inferSelect;
+
+// -------- AUDIT LOGS --------
+export const auditLogs = sqliteTable("audit_logs", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  actorType: text("actor_type").notNull(),  // admin | data_team | customer
+  actorId: text("actor_id"),
+  action: text("action").notNull(),
+  entityType: text("entity_type"),
+  entityId: text("entity_id"),
+  beforeJson: text("before_json"),
+  afterJson: text("after_json"),
+  ip: text("ip"),
+  userAgent: text("user_agent"),
+  createdAt: integer("created_at").notNull().$defaultFn(() => Date.now()),
+});
+export type AuditLog = typeof auditLogs.$inferSelect;
+
+// -------- EMAIL INBOX --------
+export const emailInbox = sqliteTable("email_inbox", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  messageId: text("message_id").notNull().unique(),
+  fromEmail: text("from_email"),
+  toEmail: text("to_email"),
+  subject: text("subject"),
+  bodyText: text("body_text"),
+  bodyHtml: text("body_html"),
+  receivedAt: integer("received_at"),
+  processed: integer("processed", { mode: "boolean" }).default(false),
+  processedAt: integer("processed_at"),
+  rfqId: integer("rfq_id"),
+  customerId: integer("customer_id"),
+  error: text("error"),
+});
+export type EmailInboxRow = typeof emailInbox.$inferSelect;
+
+// -------- FX RATES --------
+export const fxRates = sqliteTable("fx_rates", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  baseCurrency: text("base_currency").notNull(),
+  targetCurrency: text("target_currency").notNull(),
+  rate: real("rate").notNull(),
+  fetchedAt: integer("fetched_at").notNull().$defaultFn(() => Date.now()),
+});
+export type FxRate = typeof fxRates.$inferSelect;
+
+// -------- CUSTOMER CHAT MESSAGES --------
+export const customerChatMessages = sqliteTable("customer_chat_messages", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  customerId: integer("customer_id").notNull(),
+  role: text("role").notNull(),    // user | assistant
+  content: text("content").notNull(),
+  createdAt: integer("created_at").notNull().$defaultFn(() => Date.now()),
+});
+export type CustomerChatMessage = typeof customerChatMessages.$inferSelect;
+
+// -------- ACCOUNT REQUESTS (public registration) --------
+export const accountRequests = sqliteTable("account_requests", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  name: text("name").notNull(),
+  email: text("email").notNull(),
+  phone: text("phone"),
+  company: text("company"),
+  gstin: text("gstin"),
+  address: text("address"),
+  status: text("status").notNull().default("pending"),  // pending | approved | rejected
+  reviewedByAdminId: text("reviewed_by_admin_id"),
+  reviewNotes: text("review_notes"),
+  createdAt: integer("created_at").notNull().$defaultFn(() => Date.now()),
+  reviewedAt: integer("reviewed_at"),
+});
+export const insertAccountRequestSchema = createInsertSchema(accountRequests).omit({ id: true, createdAt: true, reviewedAt: true, status: true });
+export type InsertAccountRequest = z.infer<typeof insertAccountRequestSchema>;
+export type AccountRequest = typeof accountRequests.$inferSelect;

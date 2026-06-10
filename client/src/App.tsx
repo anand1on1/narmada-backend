@@ -50,6 +50,11 @@ import AdminRFQs from "@/pages/admin/AdminRFQs";
 import AdminQuotes from "@/pages/admin/AdminQuotes";
 import AdminPOs from "@/pages/admin/AdminPOs";
 import AdminBank from "@/pages/admin/AdminBank";
+// Session C — new admin pages
+import AdminQuotingCompanies from "@/pages/admin/AdminQuotingCompanies";
+import AdminDataTeam from "@/pages/admin/AdminDataTeam";
+import AdminAuditLog from "@/pages/admin/AdminAuditLog";
+import AdminAccountRequests from "@/pages/admin/AdminAccountRequests";
 
 import { CustomerAuthProvider } from "@/lib/customer-auth";
 import CustomerLogin from "@/pages/portal/CustomerLogin";
@@ -59,6 +64,20 @@ import CustomerRFQs from "@/pages/portal/CustomerRFQs";
 import CustomerQuotes from "@/pages/portal/CustomerQuotes";
 import CustomerPOs from "@/pages/portal/CustomerPOs";
 import CustomerPayments from "@/pages/portal/CustomerPayments";
+// Session C — new portal pages
+import PortalProfile from "@/pages/portal/PortalProfile";
+import PortalChat from "@/pages/portal/PortalChat";
+import PortalRegister from "@/pages/portal/PortalRegister";
+
+// Session C — Team portal
+import { TeamAuthProvider } from "@/lib/team-auth";
+import TeamLogin from "@/pages/team/TeamLogin";
+import TeamDashboard from "@/pages/team/TeamDashboard";
+import TeamQuotations from "@/pages/team/TeamQuotations";
+import TeamQuotationNew from "@/pages/team/TeamQuotationNew";
+import TeamQuotationEdit from "@/pages/team/TeamQuotationEdit";
+import TeamParts from "@/pages/team/TeamParts";
+import TeamCustomers from "@/pages/team/TeamCustomers";
 
 import NotFound from "@/pages/not-found";
 
@@ -113,6 +132,11 @@ function AppRouter() {
         <Route path="/admin/quotes" component={AdminQuotes} />
         <Route path="/admin/purchase-orders" component={AdminPOs} />
         <Route path="/admin/bank" component={AdminBank} />
+        {/* Session C — new admin routes */}
+        <Route path="/admin/quoting-companies" component={AdminQuotingCompanies} />
+        <Route path="/admin/data-team" component={AdminDataTeam} />
+        <Route path="/admin/audit-logs" component={AdminAuditLog} />
+        <Route path="/admin/account-requests" component={AdminAccountRequests} />
         <Route component={NotFound} />
       </Switch>
     );
@@ -121,12 +145,32 @@ function AppRouter() {
     return (
       <Switch>
         <Route path="/portal" component={CustomerLogin} />
+        {/* Session C — public register route (no auth required, before other portal routes) */}
+        <Route path="/portal/register" component={PortalRegister} />
         <Route path="/portal/dashboard" component={CustomerDashboard} />
         <Route path="/portal/ledger" component={CustomerLedger} />
         <Route path="/portal/rfqs" component={CustomerRFQs} />
         <Route path="/portal/quotes" component={CustomerQuotes} />
         <Route path="/portal/purchase-orders" component={CustomerPOs} />
         <Route path="/portal/payments" component={CustomerPayments} />
+        {/* Session C — new portal routes */}
+        <Route path="/portal/profile" component={PortalProfile} />
+        <Route path="/portal/chat" component={PortalChat} />
+        <Route component={NotFound} />
+      </Switch>
+    );
+  }
+  if (location.startsWith("/team")) {
+    return (
+      <Switch>
+        <Route path="/team" component={TeamLogin} />
+        <Route path="/team/login" component={TeamLogin} />
+        <Route path="/team/dashboard" component={TeamDashboard} />
+        <Route path="/team/quotations/new" component={TeamQuotationNew} />
+        <Route path="/team/quotations/:id" component={TeamQuotationEdit} />
+        <Route path="/team/quotations" component={TeamQuotations} />
+        <Route path="/team/customers" component={TeamCustomers} />
+        <Route path="/team/parts" component={TeamParts} />
         <Route component={NotFound} />
       </Switch>
     );
@@ -140,10 +184,12 @@ function App() {
       <TooltipProvider>
         <AdminAuthProvider>
           <CustomerAuthProvider>
-            <Toaster />
-            <Router hook={useHashLocation}>
-              <AppRouter />
-            </Router>
+            <TeamAuthProvider>
+              <Toaster />
+              <Router hook={useHashLocation}>
+                <AppRouter />
+              </Router>
+            </TeamAuthProvider>
           </CustomerAuthProvider>
         </AdminAuthProvider>
       </TooltipProvider>

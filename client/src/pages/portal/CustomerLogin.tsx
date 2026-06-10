@@ -1,5 +1,5 @@
 import { useState, useEffect } from "react";
-import { useLocation } from "wouter";
+import { useLocation, Link } from "wouter";
 import { apiUrl } from "@/lib/queryClient";
 import { useCustomerAuth } from "@/lib/customer-auth";
 import { Logo } from "@/components/Logo";
@@ -76,7 +76,8 @@ export default function CustomerLogin() {
               {busy ? "Sending..." : "Send Code"}
             </button>
             <div className="text-xs text-muted-foreground text-center">
-              Don't have access? Contact <a href="mailto:sales@Narmadamobility.com" className="underline">sales@Narmadamobility.com</a>.
+              Don't have an account?{" "}
+              <Link href="/portal/register"><a className="underline font-semibold text-accent">Request access</a></Link>
             </div>
           </div>
         ) : (

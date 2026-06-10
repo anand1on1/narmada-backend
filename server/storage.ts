@@ -377,6 +377,169 @@ try { sqlite.exec(`ALTER TABLE purchase_orders ADD COLUMN quote_id INTEGER`); } 
 try { sqlite.exec(`ALTER TABLE purchase_orders ADD COLUMN gst_inr REAL DEFAULT 0`); } catch {}
 try { sqlite.exec(`ALTER TABLE purchase_orders ADD COLUMN subtotal_inr REAL DEFAULT 0`); } catch {}
 
+// Session C: New tables
+sqlite.exec(`
+CREATE TABLE IF NOT EXISTS quoting_companies (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  name TEXT NOT NULL,
+  gstin TEXT,
+  pan TEXT,
+  address TEXT,
+  city TEXT,
+  state TEXT,
+  pincode TEXT,
+  phone TEXT,
+  email TEXT,
+  bank_name TEXT,
+  bank_account TEXT,
+  bank_ifsc TEXT,
+  bank_branch TEXT,
+  logo_url TEXT,
+  signature_url TEXT,
+  quote_prefix TEXT DEFAULT 'NM',
+  default_terms TEXT,
+  active INTEGER DEFAULT 1,
+  created_at INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS data_team_users (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  username TEXT NOT NULL UNIQUE,
+  password_hash TEXT NOT NULL,
+  name TEXT,
+  email TEXT,
+  phone TEXT,
+  role TEXT NOT NULL DEFAULT 'data_team',
+  active INTEGER DEFAULT 1,
+  last_login INTEGER,
+  created_at INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS data_team_sessions (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  user_id INTEGER NOT NULL,
+  token TEXT NOT NULL UNIQUE,
+  expires_at INTEGER NOT NULL,
+  created_at INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS parts_master (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  part_number TEXT NOT NULL UNIQUE,
+  name TEXT NOT NULL,
+  hsn TEXT,
+  gst_rate REAL,
+  brand TEXT,
+  last_mrp REAL,
+  last_source TEXT,
+  last_updated INTEGER,
+  search_text TEXT,
+  use_count INTEGER DEFAULT 0,
+  created_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_parts_search ON parts_master(search_text);
+CREATE TABLE IF NOT EXISTS quotations (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  quote_no TEXT NOT NULL UNIQUE,
+  quoting_company_id INTEGER,
+  customer_id INTEGER NOT NULL,
+  status TEXT NOT NULL DEFAULT 'draft',
+  currency TEXT NOT NULL DEFAULT 'INR',
+  fx_rate REAL DEFAULT 1,
+  fx_locked_at INTEGER,
+  subtotal REAL DEFAULT 0,
+  total_discount REAL DEFAULT 0,
+  total_tax REAL DEFAULT 0,
+  grand_total REAL DEFAULT 0,
+  valid_until INTEGER,
+  notes TEXT,
+  terms TEXT,
+  created_by_user_id INTEGER,
+  pdf_url TEXT,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_quotations_customer ON quotations(customer_id);
+CREATE INDEX IF NOT EXISTS idx_quotations_status ON quotations(status);
+CREATE TABLE IF NOT EXISTS quotation_items (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  quotation_id INTEGER NOT NULL,
+  line_no INTEGER NOT NULL DEFAULT 1,
+  part_number TEXT,
+  product_name TEXT NOT NULL,
+  hsn TEXT,
+  brand TEXT,
+  qty REAL NOT NULL DEFAULT 1,
+  mrp REAL NOT NULL DEFAULT 0,
+  discount REAL DEFAULT 0,
+  gst_pct REAL DEFAULT 18,
+  line_total REAL DEFAULT 0,
+  source TEXT DEFAULT 'manual',
+  created_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_quotation_items_quot ON quotation_items(quotation_id);
+CREATE TABLE IF NOT EXISTS audit_logs (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  actor_type TEXT NOT NULL,
+  actor_id TEXT,
+  action TEXT NOT NULL,
+  entity_type TEXT,
+  entity_id TEXT,
+  before_json TEXT,
+  after_json TEXT,
+  ip TEXT,
+  user_agent TEXT,
+  created_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_audit_actor ON audit_logs(actor_type, actor_id);
+CREATE INDEX IF NOT EXISTS idx_audit_entity ON audit_logs(entity_type, entity_id);
+CREATE TABLE IF NOT EXISTS email_inbox (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  message_id TEXT NOT NULL UNIQUE,
+  from_email TEXT,
+  to_email TEXT,
+  subject TEXT,
+  body_text TEXT,
+  body_html TEXT,
+  received_at INTEGER,
+  processed INTEGER DEFAULT 0,
+  processed_at INTEGER,
+  rfq_id INTEGER,
+  customer_id INTEGER,
+  error TEXT
+);
+CREATE TABLE IF NOT EXISTS fx_rates (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  base_currency TEXT NOT NULL,
+  target_currency TEXT NOT NULL,
+  rate REAL NOT NULL,
+  fetched_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_fx_rates_pair ON fx_rates(base_currency, target_currency, fetched_at);
+CREATE TABLE IF NOT EXISTS customer_chat_messages (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  customer_id INTEGER NOT NULL,
+  role TEXT NOT NULL,
+  content TEXT NOT NULL,
+  created_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_chat_customer ON customer_chat_messages(customer_id);
+CREATE TABLE IF NOT EXISTS account_requests (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  name TEXT NOT NULL,
+  email TEXT NOT NULL,
+  phone TEXT,
+  company TEXT,
+  gstin TEXT,
+  address TEXT,
+  status TEXT NOT NULL DEFAULT 'pending',
+  reviewed_by_admin_id TEXT,
+  review_notes TEXT,
+  created_at INTEGER NOT NULL,
+  reviewed_at INTEGER
+);
+`);
+
+// Session C: ALTER customers to add customer_code
+try { sqlite.exec(`ALTER TABLE customers ADD COLUMN customer_code TEXT`); } catch {}
+
 // Seed default USD/INR rate if missing
 const existingRate = sqlite.prepare("SELECT value FROM settings WHERE key = ?").get("usd_inr_rate");
 if (!existingRate) {
