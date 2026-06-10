@@ -24,7 +24,7 @@ app.use((req, res, next) => {
     res.setHeader("Access-Control-Allow-Methods", "GET,POST,PUT,PATCH,DELETE,OPTIONS");
     res.setHeader(
       "Access-Control-Allow-Headers",
-      "Content-Type, Authorization, X-Requested-With, x-admin-token",
+      "Content-Type, Authorization, X-Requested-With, x-admin-token, x-customer-token, x-team-token",
     );
   }
   if (req.method === "OPTIONS") {

@@ -56,8 +56,15 @@ export default function AdminLedger() {
 
   async function save() {
     if (!token || !customerId || !open) return;
+    // Convert UI date string (YYYY-MM-DD) → epoch ms timestamp for backend
+    const payload = {
+      ...open,
+      entryDate: typeof open.entryDate === "string" ? new Date(open.entryDate).getTime() : open.entryDate,
+      debitInr: Number(open.debitInr) || 0,
+      creditInr: Number(open.creditInr) || 0,
+    };
     const r = await adminFetch(token, `/api/admin/customers/${customerId}/ledger`, {
-      method: "POST", body: JSON.stringify(open),
+      method: "POST", body: JSON.stringify(payload),
     });
     if (!r.ok) { alert((await r.json()).error || "Failed"); return; }
     setOpen(null); loadEntries();
