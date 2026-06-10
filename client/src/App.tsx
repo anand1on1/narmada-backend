@@ -43,6 +43,22 @@ import AdminBlog from "@/pages/admin/AdminBlog";
 import AdminPriceList from "@/pages/admin/AdminPriceList";
 import AdminConsignments from "@/pages/admin/AdminConsignments";
 import AdminTeam from "@/pages/admin/AdminTeam";
+import AdminCustomers from "@/pages/admin/AdminCustomers";
+import AdminLedger from "@/pages/admin/AdminLedger";
+import AdminPayments from "@/pages/admin/AdminPayments";
+import AdminRFQs from "@/pages/admin/AdminRFQs";
+import AdminQuotes from "@/pages/admin/AdminQuotes";
+import AdminPOs from "@/pages/admin/AdminPOs";
+import AdminBank from "@/pages/admin/AdminBank";
+
+import { CustomerAuthProvider } from "@/lib/customer-auth";
+import CustomerLogin from "@/pages/portal/CustomerLogin";
+import CustomerDashboard from "@/pages/portal/CustomerDashboard";
+import CustomerLedger from "@/pages/portal/CustomerLedger";
+import CustomerRFQs from "@/pages/portal/CustomerRFQs";
+import CustomerQuotes from "@/pages/portal/CustomerQuotes";
+import CustomerPOs from "@/pages/portal/CustomerPOs";
+import CustomerPayments from "@/pages/portal/CustomerPayments";
 
 import NotFound from "@/pages/not-found";
 
@@ -90,6 +106,27 @@ function AppRouter() {
         <Route path="/admin/price-lists" component={AdminPriceList} />
         <Route path="/admin/consignments" component={AdminConsignments} />
         <Route path="/admin/team" component={AdminTeam} />
+        <Route path="/admin/customers" component={AdminCustomers} />
+        <Route path="/admin/ledger" component={AdminLedger} />
+        <Route path="/admin/payments" component={AdminPayments} />
+        <Route path="/admin/rfqs" component={AdminRFQs} />
+        <Route path="/admin/quotes" component={AdminQuotes} />
+        <Route path="/admin/purchase-orders" component={AdminPOs} />
+        <Route path="/admin/bank" component={AdminBank} />
+        <Route component={NotFound} />
+      </Switch>
+    );
+  }
+  if (location.startsWith("/portal")) {
+    return (
+      <Switch>
+        <Route path="/portal" component={CustomerLogin} />
+        <Route path="/portal/dashboard" component={CustomerDashboard} />
+        <Route path="/portal/ledger" component={CustomerLedger} />
+        <Route path="/portal/rfqs" component={CustomerRFQs} />
+        <Route path="/portal/quotes" component={CustomerQuotes} />
+        <Route path="/portal/purchase-orders" component={CustomerPOs} />
+        <Route path="/portal/payments" component={CustomerPayments} />
         <Route component={NotFound} />
       </Switch>
     );
@@ -102,10 +139,12 @@ function App() {
     <QueryClientProvider client={queryClient}>
       <TooltipProvider>
         <AdminAuthProvider>
-          <Toaster />
-          <Router hook={useHashLocation}>
-            <AppRouter />
-          </Router>
+          <CustomerAuthProvider>
+            <Toaster />
+            <Router hook={useHashLocation}>
+              <AppRouter />
+            </Router>
+          </CustomerAuthProvider>
         </AdminAuthProvider>
       </TooltipProvider>
     </QueryClientProvider>

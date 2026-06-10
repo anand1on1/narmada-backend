@@ -336,11 +336,46 @@ CREATE TABLE IF NOT EXISTS bank_details (
   active INTEGER NOT NULL DEFAULT 1,
   created_at INTEGER NOT NULL
 );
+
+-- Session B: quotes table (RFQ -> Quote -> PO 3-state flow)
+CREATE TABLE IF NOT EXISTS quotes (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  quote_no TEXT NOT NULL UNIQUE,
+  rfq_id INTEGER,
+  customer_id INTEGER NOT NULL,
+  items TEXT NOT NULL,
+  subtotal_inr REAL NOT NULL DEFAULT 0,
+  gst_inr REAL NOT NULL DEFAULT 0,
+  total_inr REAL NOT NULL DEFAULT 0,
+  valid_until INTEGER,
+  status TEXT NOT NULL DEFAULT 'sent',
+  notes TEXT,
+  terms TEXT,
+  created_by TEXT,
+  created_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_quotes_customer ON quotes(customer_id);
+CREATE INDEX IF NOT EXISTS idx_quotes_rfq ON quotes(rfq_id);
 `);
 
 // Phase 4: Add new columns to consignments if not present (idempotent)
 try { sqlite.exec(`ALTER TABLE consignments ADD COLUMN customer_id INTEGER`); } catch {}
 try { sqlite.exec(`ALTER TABLE consignments ADD COLUMN customer_email TEXT`); } catch {}
+
+// Session B: Extend customers with credit/opening balance/contact person/payment terms (additive)
+try { sqlite.exec(`ALTER TABLE customers ADD COLUMN credit_limit_inr REAL DEFAULT 0`); } catch {}
+try { sqlite.exec(`ALTER TABLE customers ADD COLUMN opening_balance_inr REAL DEFAULT 0`); } catch {}
+try { sqlite.exec(`ALTER TABLE customers ADD COLUMN payment_terms_days INTEGER DEFAULT 0`); } catch {}
+try { sqlite.exec(`ALTER TABLE customers ADD COLUMN contact_person TEXT`); } catch {}
+try { sqlite.exec(`ALTER TABLE customers ADD COLUMN company_pan TEXT`); } catch {}
+
+// Session B: Link RFQ to quote (after quote is created)
+try { sqlite.exec(`ALTER TABLE rfqs ADD COLUMN quote_id INTEGER`); } catch {}
+
+// Session B: Link PO to quote (when customer accepts a quote and issues PO)
+try { sqlite.exec(`ALTER TABLE purchase_orders ADD COLUMN quote_id INTEGER`); } catch {}
+try { sqlite.exec(`ALTER TABLE purchase_orders ADD COLUMN gst_inr REAL DEFAULT 0`); } catch {}
+try { sqlite.exec(`ALTER TABLE purchase_orders ADD COLUMN subtotal_inr REAL DEFAULT 0`); } catch {}
 
 // Seed default USD/INR rate if missing
 const existingRate = sqlite.prepare("SELECT value FROM settings WHERE key = ?").get("usd_inr_rate");

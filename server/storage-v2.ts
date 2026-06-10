@@ -4,13 +4,20 @@ import { db } from "./storage";
 import {
   posts, priceLists, priceItems, consignments, adminUsers,
   customers, notificationTemplates, notificationLog,
+  customerEmails, customerAddresses, customerLogins, customerSessions, otpCodes,
+  ledgerEntries, rfqs, quotes, purchaseOrders, paymentRecords, fileUploads, bankDetails,
 } from "@shared/schema";
 import type {
   Post, InsertPost, PriceList, InsertPriceList, PriceItem,
   Consignment, InsertConsignment, AdminUser,
   Customer, InsertCustomer, NotificationTemplate, NotificationLog,
+  CustomerEmail, CustomerAddress, CustomerLogin, CustomerSession, OtpCode,
+  LedgerEntry, InsertLedgerEntry, Rfq, InsertRfq, Quote, InsertQuote,
+  PurchaseOrder, InsertPurchaseOrder, PaymentRecord, InsertPaymentRecord,
+  FileUpload, BankDetails, InsertBankDetails,
 } from "@shared/schema";
-import { eq, desc, and, like, or, sql } from "drizzle-orm";
+import { eq, desc, and, like, or, sql, gte, lte } from "drizzle-orm";
+import { randomBytes, createHash } from "node:crypto";
 import Database from "better-sqlite3";
 import { join } from "node:path";
 
@@ -319,3 +326,405 @@ const DEFAULT_TEMPLATES = [
     console.error("[storage-v2] Failed to seed default templates:", e.message);
   }
 })();
+
+
+// =============================================================
+// SESSION B HELPERS
+// =============================================================
+
+// ---------- CUSTOMER EMAILS ----------
+export async function listCustomerEmails(customerId: number): Promise<CustomerEmail[]> {
+  return db.select().from(customerEmails).where(eq(customerEmails.customerId, customerId)).orderBy(desc(customerEmails.isPrimary), desc(customerEmails.createdAt)).all();
+}
+export async function addCustomerEmail(customerId: number, email: string, label?: string, isPrimary = false): Promise<CustomerEmail> {
+  if (isPrimary) {
+    db.update(customerEmails).set({ isPrimary: false }).where(eq(customerEmails.customerId, customerId)).run();
+  }
+  return db.insert(customerEmails).values({ customerId, email: email.trim().toLowerCase(), label, isPrimary, createdAt: Date.now() }).returning().get();
+}
+export async function deleteCustomerEmail(id: number): Promise<void> {
+  db.delete(customerEmails).where(eq(customerEmails.id, id)).run();
+}
+export async function setPrimaryCustomerEmail(id: number): Promise<void> {
+  const row = db.select().from(customerEmails).where(eq(customerEmails.id, id)).get();
+  if (!row) return;
+  db.update(customerEmails).set({ isPrimary: false }).where(eq(customerEmails.customerId, row.customerId)).run();
+  db.update(customerEmails).set({ isPrimary: true }).where(eq(customerEmails.id, id)).run();
+}
+
+// ---------- CUSTOMER ADDRESSES ----------
+export async function listCustomerAddresses(customerId: number): Promise<CustomerAddress[]> {
+  return db.select().from(customerAddresses).where(eq(customerAddresses.customerId, customerId)).orderBy(desc(customerAddresses.createdAt)).all();
+}
+export async function addCustomerAddress(customerId: number, data: Omit<CustomerAddress, "id" | "customerId" | "createdAt">): Promise<CustomerAddress> {
+  return db.insert(customerAddresses).values({ ...data, customerId, createdAt: Date.now() }).returning().get();
+}
+export async function updateCustomerAddress(id: number, data: Partial<Omit<CustomerAddress, "id" | "customerId" | "createdAt">>): Promise<CustomerAddress | undefined> {
+  return db.update(customerAddresses).set(data).where(eq(customerAddresses.id, id)).returning().get();
+}
+export async function deleteCustomerAddress(id: number): Promise<void> {
+  db.delete(customerAddresses).where(eq(customerAddresses.id, id)).run();
+}
+
+// ---------- CUSTOMER LOGINS + OTP + SESSIONS (customer portal auth) ----------
+const CUSTOMER_SESSION_TTL_MS = 30 * 24 * 60 * 60 * 1000; // 30 days
+const OTP_TTL_MS = 10 * 60 * 1000; // 10 minutes
+
+export async function getCustomerLoginByEmail(email: string): Promise<CustomerLogin | undefined> {
+  const normalized = email.trim().toLowerCase();
+  return db.select().from(customerLogins).where(eq(customerLogins.email, normalized)).get();
+}
+export async function listCustomerLogins(): Promise<CustomerLogin[]> {
+  return db.select().from(customerLogins).orderBy(desc(customerLogins.createdAt)).all();
+}
+export async function createCustomerLogin(customerId: number, email: string, opts: { creditLimitInr?: number; paymentTermsDays?: number } = {}): Promise<CustomerLogin> {
+  const normalized = email.trim().toLowerCase();
+  const existing = await getCustomerLoginByEmail(normalized);
+  if (existing) {
+    // Already exists -> update if pointed at different customer (rare). Return existing.
+    return existing;
+  }
+  return db.insert(customerLogins).values({
+    customerId,
+    email: normalized,
+    creditLimitInr: opts.creditLimitInr ?? 0,
+    paymentTermsDays: opts.paymentTermsDays ?? 0,
+    active: true,
+    createdAt: Date.now(),
+  }).returning().get();
+}
+export async function setCustomerLoginActive(id: number, active: boolean): Promise<void> {
+  db.update(customerLogins).set({ active }).where(eq(customerLogins.id, id)).run();
+}
+export async function deleteCustomerLogin(id: number): Promise<void> {
+  db.delete(customerLogins).where(eq(customerLogins.id, id)).run();
+}
+
+export async function generateOtp(email: string, purpose = "customer_login"): Promise<string> {
+  const normalized = email.trim().toLowerCase();
+  const code = String(Math.floor(100000 + Math.random() * 900000));
+  const now = Date.now();
+  // Invalidate prior unused OTPs for the same email+purpose
+  db.update(otpCodes).set({ used: true }).where(and(eq(otpCodes.email, normalized), eq(otpCodes.purpose, purpose), eq(otpCodes.used, false))!).run();
+  db.insert(otpCodes).values({
+    email: normalized, code, purpose, used: false,
+    createdAt: now, expiresAt: now + OTP_TTL_MS,
+  }).run();
+  return code;
+}
+export async function verifyOtp(email: string, code: string, purpose = "customer_login"): Promise<boolean> {
+  const normalized = email.trim().toLowerCase();
+  const now = Date.now();
+  const row = db.select().from(otpCodes)
+    .where(and(eq(otpCodes.email, normalized), eq(otpCodes.code, code.trim()), eq(otpCodes.purpose, purpose), eq(otpCodes.used, false))!)
+    .orderBy(desc(otpCodes.createdAt))
+    .get();
+  if (!row) return false;
+  if (row.expiresAt < now) return false;
+  db.update(otpCodes).set({ used: true }).where(eq(otpCodes.id, row.id)).run();
+  return true;
+}
+
+export async function createCustomerSession(customerId: number, email: string): Promise<CustomerSession> {
+  const token = randomBytes(32).toString("hex");
+  const now = Date.now();
+  return db.insert(customerSessions).values({
+    token, customerId, email: email.trim().toLowerCase(),
+    createdAt: now, lastSeenAt: now, expiresAt: now + CUSTOMER_SESSION_TTL_MS,
+  }).returning().get();
+}
+export async function getCustomerSession(token: string): Promise<CustomerSession | undefined> {
+  if (!token) return undefined;
+  const now = Date.now();
+  const row = db.select().from(customerSessions).where(eq(customerSessions.token, token)).get();
+  if (!row) return undefined;
+  if (row.expiresAt < now) {
+    db.delete(customerSessions).where(eq(customerSessions.token, token)).run();
+    return undefined;
+  }
+  // Sliding refresh: extend if older than 1 day since last seen
+  if (now - row.lastSeenAt > 24 * 60 * 60 * 1000) {
+    db.update(customerSessions).set({ lastSeenAt: now, expiresAt: now + CUSTOMER_SESSION_TTL_MS }).where(eq(customerSessions.token, token)).run();
+  }
+  return row;
+}
+export async function deleteCustomerSession(token: string): Promise<void> {
+  db.delete(customerSessions).where(eq(customerSessions.token, token)).run();
+}
+
+// ---------- LEDGER ENTRIES ----------
+function recomputeLedgerBalance(customerId: number): void {
+  // Recompute running balance for ALL entries of this customer in chronological order.
+  // Cheap for the volumes Narmada will see; safe and authoritative.
+  const all = db.select().from(ledgerEntries).where(eq(ledgerEntries.customerId, customerId)).orderBy(ledgerEntries.entryDate, ledgerEntries.id).all();
+  let bal = 0;
+  for (const e of all) {
+    bal += (e.debitInr || 0) - (e.creditInr || 0);
+    db.update(ledgerEntries).set({ balanceInr: bal }).where(eq(ledgerEntries.id, e.id)).run();
+  }
+}
+
+export async function listLedgerEntries(customerId: number, opts: { from?: number; to?: number; limit?: number } = {}): Promise<LedgerEntry[]> {
+  const conds: any[] = [eq(ledgerEntries.customerId, customerId)];
+  if (opts.from) conds.push(gte(ledgerEntries.entryDate, opts.from));
+  if (opts.to) conds.push(lte(ledgerEntries.entryDate, opts.to));
+  let q: any = db.select().from(ledgerEntries).where(and(...conds)!).orderBy(ledgerEntries.entryDate, ledgerEntries.id);
+  if (opts.limit) q = q.limit(opts.limit);
+  return q.all();
+}
+export async function getLedgerBalance(customerId: number): Promise<number> {
+  const row = db.select({
+    debit: sql<number>`COALESCE(SUM(${ledgerEntries.debitInr}), 0)`,
+    credit: sql<number>`COALESCE(SUM(${ledgerEntries.creditInr}), 0)`,
+  }).from(ledgerEntries).where(eq(ledgerEntries.customerId, customerId)).get();
+  return (row?.debit || 0) - (row?.credit || 0);
+}
+export async function addLedgerEntry(data: InsertLedgerEntry & { createdBy?: string }): Promise<LedgerEntry> {
+  const row = db.insert(ledgerEntries).values({ ...data, createdAt: Date.now() }).returning().get();
+  recomputeLedgerBalance(data.customerId);
+  return db.select().from(ledgerEntries).where(eq(ledgerEntries.id, row.id)).get()!;
+}
+export async function bulkAddLedgerEntries(entries: (InsertLedgerEntry & { createdBy?: string })[]): Promise<number> {
+  if (!entries.length) return 0;
+  const now = Date.now();
+  const customerIds = new Set<number>();
+  const insert = db.insert(ledgerEntries);
+  for (const e of entries) {
+    insert.values({ ...e, createdAt: now }).run();
+    customerIds.add(e.customerId);
+  }
+  customerIds.forEach((cid) => recomputeLedgerBalance(cid));
+  return entries.length;
+}
+export async function deleteLedgerEntry(id: number): Promise<void> {
+  const row = db.select().from(ledgerEntries).where(eq(ledgerEntries.id, id)).get();
+  if (!row) return;
+  db.delete(ledgerEntries).where(eq(ledgerEntries.id, id)).run();
+  recomputeLedgerBalance(row.customerId);
+}
+export async function seedOpeningBalanceIfNeeded(customerId: number, openingBalanceInr: number): Promise<void> {
+  if (!openingBalanceInr || openingBalanceInr === 0) return;
+  const existing = db.select().from(ledgerEntries)
+    .where(and(eq(ledgerEntries.customerId, customerId), eq(ledgerEntries.voucherType, "opening"))!)
+    .get();
+  if (existing) return; // already seeded
+  await addLedgerEntry({
+    customerId,
+    entryDate: Date.now(),
+    voucherType: "opening",
+    voucherNo: "OB",
+    description: "Opening balance",
+    debitInr: openingBalanceInr > 0 ? openingBalanceInr : 0,
+    creditInr: openingBalanceInr < 0 ? Math.abs(openingBalanceInr) : 0,
+    referenceId: null,
+    createdBy: "system",
+  } as any);
+}
+
+// ---------- RFQS ----------
+export async function listRfqs(opts: { status?: string; customerId?: number; limit?: number } = {}): Promise<Rfq[]> {
+  const conds: any[] = [];
+  if (opts.status) conds.push(eq(rfqs.status, opts.status));
+  if (opts.customerId) conds.push(eq(rfqs.customerId, opts.customerId));
+  let q: any = db.select().from(rfqs);
+  if (conds.length) q = q.where(conds.length === 1 ? conds[0] : and(...conds));
+  q = q.orderBy(desc(rfqs.createdAt));
+  if (opts.limit) q = q.limit(opts.limit);
+  return q.all();
+}
+export async function getRfq(id: number): Promise<Rfq | undefined> {
+  return db.select().from(rfqs).where(eq(rfqs.id, id)).get();
+}
+export async function createRfq(data: InsertRfq): Promise<Rfq> {
+  return db.insert(rfqs).values({ ...data, status: "open", createdAt: Date.now() } as any).returning().get();
+}
+export async function updateRfq(id: number, patch: Partial<Rfq>): Promise<Rfq | undefined> {
+  return db.update(rfqs).set(patch).where(eq(rfqs.id, id)).returning().get();
+}
+export async function deleteRfq(id: number): Promise<void> {
+  db.delete(rfqs).where(eq(rfqs.id, id)).run();
+}
+
+// ---------- QUOTES ----------
+function generateQuoteNo(): string {
+  // Format: QT-YYYYMM-XXXX (count-based per month)
+  const d = new Date();
+  const yyyymm = `${d.getFullYear()}${String(d.getMonth() + 1).padStart(2, "0")}`;
+  const prefix = `QT-${yyyymm}-`;
+  const row = db.select({ c: sql<number>`COUNT(*)` }).from(quotes).where(like(quotes.quoteNo, `${prefix}%`)).get();
+  const next = ((row?.c as number) || 0) + 1;
+  return `${prefix}${String(next).padStart(4, "0")}`;
+}
+export async function listQuotes(opts: { customerId?: number; rfqId?: number; status?: string; limit?: number } = {}): Promise<Quote[]> {
+  const conds: any[] = [];
+  if (opts.customerId) conds.push(eq(quotes.customerId, opts.customerId));
+  if (opts.rfqId) conds.push(eq(quotes.rfqId, opts.rfqId));
+  if (opts.status) conds.push(eq(quotes.status, opts.status));
+  let q: any = db.select().from(quotes);
+  if (conds.length) q = q.where(conds.length === 1 ? conds[0] : and(...conds));
+  q = q.orderBy(desc(quotes.createdAt));
+  if (opts.limit) q = q.limit(opts.limit);
+  return q.all();
+}
+export async function getQuote(id: number): Promise<Quote | undefined> {
+  return db.select().from(quotes).where(eq(quotes.id, id)).get();
+}
+export async function createQuote(data: InsertQuote & { createdBy?: string }): Promise<Quote> {
+  const quoteNo = generateQuoteNo();
+  const quote = db.insert(quotes).values({ ...data, quoteNo, status: "sent", createdAt: Date.now() } as any).returning().get();
+  // If this quote is linked to an RFQ, mark RFQ as quoted + link
+  if (data.rfqId) {
+    db.update(rfqs).set({ status: "quoted", quotedAt: Date.now(), quoteId: quote.id }).where(eq(rfqs.id, data.rfqId)).run();
+  }
+  return quote;
+}
+export async function updateQuoteStatus(id: number, status: string): Promise<Quote | undefined> {
+  return db.update(quotes).set({ status }).where(eq(quotes.id, id)).returning().get();
+}
+export async function deleteQuote(id: number): Promise<void> {
+  db.delete(quotes).where(eq(quotes.id, id)).run();
+}
+
+// ---------- PURCHASE ORDERS ----------
+export async function listPurchaseOrders(opts: { customerId?: number; status?: string; limit?: number } = {}): Promise<PurchaseOrder[]> {
+  const conds: any[] = [];
+  if (opts.customerId) conds.push(eq(purchaseOrders.customerId, opts.customerId));
+  if (opts.status) conds.push(eq(purchaseOrders.status, opts.status));
+  let q: any = db.select().from(purchaseOrders);
+  if (conds.length) q = q.where(conds.length === 1 ? conds[0] : and(...conds));
+  q = q.orderBy(desc(purchaseOrders.createdAt));
+  if (opts.limit) q = q.limit(opts.limit);
+  return q.all();
+}
+export async function getPurchaseOrder(id: number): Promise<PurchaseOrder | undefined> {
+  return db.select().from(purchaseOrders).where(eq(purchaseOrders.id, id)).get();
+}
+export async function createPurchaseOrder(data: InsertPurchaseOrder): Promise<PurchaseOrder> {
+  return db.insert(purchaseOrders).values({ ...data, status: "pending", reminderCount: 0, createdAt: Date.now() } as any).returning().get();
+}
+export async function approvePurchaseOrder(id: number, approvedBy: string): Promise<PurchaseOrder | undefined> {
+  const po = db.update(purchaseOrders).set({ status: "approved", approvedAt: Date.now(), approvedBy }).where(eq(purchaseOrders.id, id)).returning().get();
+  if (po) {
+    // Auto-post invoice entry to ledger as debit (amount customer owes us)
+    await addLedgerEntry({
+      customerId: po.customerId,
+      entryDate: Date.now(),
+      voucherType: "invoice",
+      voucherNo: po.customerPoNumber,
+      referenceId: po.id,
+      description: `Invoice against PO ${po.customerPoNumber}`,
+      debitInr: po.totalInr,
+      creditInr: 0,
+      createdBy: approvedBy,
+    } as any);
+  }
+  return po;
+}
+export async function rejectPurchaseOrder(id: number, approvedBy: string, notes?: string): Promise<PurchaseOrder | undefined> {
+  return db.update(purchaseOrders).set({ status: "rejected", approvedAt: Date.now(), approvedBy, notes: notes || null }).where(eq(purchaseOrders.id, id)).returning().get();
+}
+export async function deletePurchaseOrder(id: number): Promise<void> {
+  db.delete(purchaseOrders).where(eq(purchaseOrders.id, id)).run();
+}
+export async function listPendingPurchaseOrdersOlderThan(days: number): Promise<PurchaseOrder[]> {
+  const cutoff = Date.now() - days * 24 * 60 * 60 * 1000;
+  return db.select().from(purchaseOrders)
+    .where(and(eq(purchaseOrders.status, "pending"), lte(purchaseOrders.createdAt, cutoff))!)
+    .all();
+}
+export async function bumpPoReminder(id: number): Promise<void> {
+  const po = db.select().from(purchaseOrders).where(eq(purchaseOrders.id, id)).get();
+  if (!po) return;
+  db.update(purchaseOrders).set({ reminderCount: (po.reminderCount || 0) + 1, lastRemindedAt: Date.now() }).where(eq(purchaseOrders.id, id)).run();
+}
+
+// ---------- PAYMENT RECORDS ----------
+export async function listPayments(opts: { customerId?: number; from?: number; to?: number; limit?: number } = {}): Promise<PaymentRecord[]> {
+  const conds: any[] = [];
+  if (opts.customerId) conds.push(eq(paymentRecords.customerId, opts.customerId));
+  if (opts.from) conds.push(gte(paymentRecords.paymentDate, opts.from));
+  if (opts.to) conds.push(lte(paymentRecords.paymentDate, opts.to));
+  let q: any = db.select().from(paymentRecords);
+  if (conds.length) q = q.where(conds.length === 1 ? conds[0] : and(...conds));
+  q = q.orderBy(desc(paymentRecords.paymentDate));
+  if (opts.limit) q = q.limit(opts.limit);
+  return q.all();
+}
+export async function recordPayment(data: InsertPaymentRecord): Promise<PaymentRecord> {
+  const row = db.insert(paymentRecords).values({ ...data, createdAt: Date.now() }).returning().get();
+  // Auto-post credit entry to ledger
+  await addLedgerEntry({
+    customerId: row.customerId,
+    entryDate: row.paymentDate,
+    voucherType: "payment",
+    voucherNo: row.referenceNo || `PAY-${row.id}`,
+    referenceId: row.id,
+    description: `Payment received (${row.paymentMode.toUpperCase()})`,
+    debitInr: 0,
+    creditInr: row.amountInr,
+    createdBy: row.recordedBy || null,
+  } as any);
+  return row;
+}
+export async function deletePayment(id: number): Promise<void> {
+  const row = db.select().from(paymentRecords).where(eq(paymentRecords.id, id)).get();
+  if (!row) return;
+  db.delete(paymentRecords).where(eq(paymentRecords.id, id)).run();
+  // Remove matching ledger entry
+  db.delete(ledgerEntries).where(and(eq(ledgerEntries.voucherType, "payment"), eq(ledgerEntries.referenceId, id))!).run();
+  recomputeLedgerBalance(row.customerId);
+}
+
+// ---------- FILE UPLOADS ----------
+export async function addFileUpload(data: Omit<FileUpload, "id" | "createdAt">): Promise<FileUpload> {
+  return db.insert(fileUploads).values({ ...data, createdAt: Date.now() }).returning().get();
+}
+export async function listFileUploads(entityType: string, entityId: number): Promise<FileUpload[]> {
+  return db.select().from(fileUploads).where(and(eq(fileUploads.entityType, entityType), eq(fileUploads.entityId, entityId))!).orderBy(desc(fileUploads.createdAt)).all();
+}
+export async function getFileUpload(id: number): Promise<FileUpload | undefined> {
+  return db.select().from(fileUploads).where(eq(fileUploads.id, id)).get();
+}
+export async function deleteFileUpload(id: number): Promise<void> {
+  db.delete(fileUploads).where(eq(fileUploads.id, id)).run();
+}
+
+// ---------- BANK DETAILS ----------
+export async function listBankDetails(activeOnly = true): Promise<BankDetails[]> {
+  if (activeOnly) {
+    return db.select().from(bankDetails).where(eq(bankDetails.active, true)).orderBy(desc(bankDetails.isDefault), desc(bankDetails.createdAt)).all();
+  }
+  return db.select().from(bankDetails).orderBy(desc(bankDetails.isDefault), desc(bankDetails.createdAt)).all();
+}
+export async function getDefaultBank(): Promise<BankDetails | undefined> {
+  return db.select().from(bankDetails).where(and(eq(bankDetails.isDefault, true), eq(bankDetails.active, true))!).get();
+}
+export async function createBankDetails(data: InsertBankDetails): Promise<BankDetails> {
+  if (data.isDefault) {
+    db.update(bankDetails).set({ isDefault: false }).run();
+  }
+  return db.insert(bankDetails).values({ ...data, createdAt: Date.now() }).returning().get();
+}
+export async function updateBankDetails(id: number, data: Partial<InsertBankDetails>): Promise<BankDetails | undefined> {
+  if (data.isDefault) {
+    db.update(bankDetails).set({ isDefault: false }).run();
+  }
+  return db.update(bankDetails).set(data).where(eq(bankDetails.id, id)).returning().get();
+}
+export async function deleteBankDetails(id: number): Promise<void> {
+  db.delete(bankDetails).where(eq(bankDetails.id, id)).run();
+}
+
+// ---------- COUNTS FOR DASHBOARDS ----------
+export async function getSessionBCounts() {
+  const customerCount = db.select({ c: sql<number>`COUNT(*)` }).from(customers).get()?.c || 0;
+  const openRfqs = db.select({ c: sql<number>`COUNT(*)` }).from(rfqs).where(eq(rfqs.status, "open")).get()?.c || 0;
+  const pendingPos = db.select({ c: sql<number>`COUNT(*)` }).from(purchaseOrders).where(eq(purchaseOrders.status, "pending")).get()?.c || 0;
+  const totalReceivable = db.select({ d: sql<number>`COALESCE(SUM(${ledgerEntries.debitInr}),0)`, c: sql<number>`COALESCE(SUM(${ledgerEntries.creditInr}),0)` }).from(ledgerEntries).get();
+  return {
+    customers: customerCount,
+    openRfqs,
+    pendingPos,
+    totalReceivableInr: (totalReceivable?.d || 0) - (totalReceivable?.c || 0),
+  };
+}

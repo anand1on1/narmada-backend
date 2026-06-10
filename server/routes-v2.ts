@@ -7,10 +7,12 @@ import fs from "node:fs";
 import Papa from "papaparse";
 import { storage, db } from "./storage";
 import * as v2 from "./storage-v2";
-import { sendNotification, buildTrackingLink } from "./notifications";
+import { sendNotification, buildTrackingLink, sendGenericEmail } from "./notifications";
 import {
   insertPostSchema, insertConsignmentSchema, insertPriceListSchema,
   insertCustomerSchema,
+  insertLedgerEntrySchema, insertRfqSchema, insertQuoteSchema,
+  insertPurchaseOrderSchema, insertPaymentRecordSchema, insertBankDetailsSchema,
   adminSessions,
 } from "@shared/schema";
 import type { AdminUser, AdminRole } from "@shared/schema";
@@ -693,5 +695,505 @@ export function registerV2Routes(app: Express, ctx: V2Context) {
     } catch (e: any) { res.status(500).json({ error: e.message }); }
   });
 
-  console.log("[v2] Phase 3+4 routes registered: blogs, price lists, consignments, sub-users, SEO helpers, customers, notifications");
+  // =============================================================
+  // SESSION B: customer portal auth + ledger + RFQ/Quote/PO + payments + file uploads + bank
+  // =============================================================
+
+  // ---------- Customer auth middleware (separate from admin) ----------
+  async function requireCustomer(req: Request, res: Response, next: NextFunction) {
+    const token = req.headers["x-customer-token"] as string | undefined;
+    if (!token) return res.status(401).json({ error: "Customer login required" });
+    const session = await v2.getCustomerSession(token);
+    if (!session) return res.status(401).json({ error: "Session expired — please log in again" });
+    const login = await v2.getCustomerLoginByEmail(session.email);
+    if (!login || !login.active) return res.status(403).json({ error: "Login disabled" });
+    (req as any).customer = { customerId: session.customerId, email: session.email, loginId: login.id };
+    next();
+  }
+
+  // ---------- CUSTOMER AUTH (OTP only) ----------
+  app.post("/api/customer/request-otp", async (req, res) => {
+    try {
+      const { email } = req.body || {};
+      if (!email || typeof email !== "string") return res.status(400).json({ error: "Email required" });
+      const login = await v2.getCustomerLoginByEmail(email);
+      if (!login || !login.active) {
+        return res.json({ ok: true, sent: true });
+      }
+      const code = await v2.generateOtp(email, "customer_login");
+      await sendGenericEmail({
+        to: email,
+        subject: `Your Narmada Mobility login code: ${code}`,
+        html: `<div style="font-family:system-ui,-apple-system,sans-serif;max-width:520px;margin:0 auto;padding:24px;">
+          <div style="background:#001a4d;color:white;padding:18px;border-radius:8px 8px 0 0;">
+            <h2 style="margin:0;font-size:18px;">Narmada Mobility — Customer Portal</h2>
+          </div>
+          <div style="border:1px solid #e5e7eb;border-top:none;padding:24px;border-radius:0 0 8px 8px;">
+            <p style="margin:0 0 12px;color:#374151;">Your one-time login code is:</p>
+            <div style="font-size:32px;font-weight:700;letter-spacing:6px;color:#001a4d;background:#f3f4f6;padding:16px;border-radius:6px;text-align:center;">${code}</div>
+            <p style="margin:16px 0 0;color:#6b7280;font-size:13px;">This code expires in 10 minutes. If you didn't request it, ignore this email.</p>
+          </div>
+        </div>`,
+      });
+      res.json({ ok: true, sent: true });
+    } catch (e: any) { res.status(500).json({ error: e.message }); }
+  });
+
+  app.post("/api/customer/verify-otp", async (req, res) => {
+    try {
+      const { email, code } = req.body || {};
+      if (!email || !code) return res.status(400).json({ error: "Email and code required" });
+      const login = await v2.getCustomerLoginByEmail(email);
+      if (!login || !login.active) return res.status(401).json({ error: "Invalid email or code" });
+      const ok = await v2.verifyOtp(email, String(code), "customer_login");
+      if (!ok) return res.status(401).json({ error: "Invalid or expired code" });
+      const session = await v2.createCustomerSession(login.customerId, login.email);
+      res.json({ ok: true, token: session.token, expiresAt: session.expiresAt });
+    } catch (e: any) { res.status(500).json({ error: e.message }); }
+  });
+
+  app.post("/api/customer/logout", requireCustomer, async (req, res) => {
+    const token = req.headers["x-customer-token"] as string;
+    await v2.deleteCustomerSession(token);
+    res.json({ ok: true });
+  });
+
+  app.get("/api/customer/me", requireCustomer, async (req, res) => {
+    const ctx = (req as any).customer as { customerId: number; email: string };
+    const customer = await v2.getCustomer(ctx.customerId);
+    if (!customer) return res.status(404).json({ error: "Customer not found" });
+    res.json({ ...customer, loginEmail: ctx.email });
+  });
+
+  // ---------- ADMIN: customer logins management ----------
+  app.get("/api/admin/customers/:id/login", requireAuth, async (req, res) => {
+    const cid = parseInt(req.params.id, 10);
+    const customer = await v2.getCustomer(cid);
+    if (!customer) return res.status(404).json({ error: "Customer not found" });
+    const logins = (await v2.listCustomerLogins()).filter((l) => l.customerId === cid);
+    res.json(logins);
+  });
+  app.post("/api/admin/customers/:id/login", requireRole("accounts", "sales"), async (req, res) => {
+    try {
+      const cid = parseInt(req.params.id, 10);
+      const { email, creditLimitInr, paymentTermsDays } = req.body || {};
+      if (!email) return res.status(400).json({ error: "Email required" });
+      const login = await v2.createCustomerLogin(cid, email, { creditLimitInr, paymentTermsDays });
+      res.json(login);
+    } catch (e: any) { res.status(400).json({ error: e.message }); }
+  });
+  app.patch("/api/admin/customer-logins/:id", requireRole("accounts"), async (req, res) => {
+    try {
+      const id = parseInt(req.params.id, 10);
+      const { active } = req.body || {};
+      if (typeof active === "boolean") await v2.setCustomerLoginActive(id, active);
+      res.json({ ok: true });
+    } catch (e: any) { res.status(400).json({ error: e.message }); }
+  });
+  app.delete("/api/admin/customer-logins/:id", requireAdminRole, async (req, res) => {
+    const id = parseInt(req.params.id, 10);
+    await v2.deleteCustomerLogin(id);
+    res.json({ ok: true });
+  });
+
+  // ---------- ADMIN: customer emails (multi-email per customer) ----------
+  app.get("/api/admin/customers/:id/emails", requireAuth, async (req, res) => {
+    const cid = parseInt(req.params.id, 10);
+    res.json(await v2.listCustomerEmails(cid));
+  });
+  app.post("/api/admin/customers/:id/emails", requireRole("accounts", "sales"), async (req, res) => {
+    try {
+      const cid = parseInt(req.params.id, 10);
+      const { email, label, isPrimary } = req.body || {};
+      if (!email) return res.status(400).json({ error: "Email required" });
+      const row = await v2.addCustomerEmail(cid, email, label, !!isPrimary);
+      res.json(row);
+    } catch (e: any) { res.status(400).json({ error: e.message }); }
+  });
+  app.patch("/api/admin/customer-emails/:id/primary", requireRole("accounts", "sales"), async (req, res) => {
+    await v2.setPrimaryCustomerEmail(parseInt(req.params.id, 10));
+    res.json({ ok: true });
+  });
+  app.delete("/api/admin/customer-emails/:id", requireRole("accounts", "sales"), async (req, res) => {
+    await v2.deleteCustomerEmail(parseInt(req.params.id, 10));
+    res.json({ ok: true });
+  });
+
+  // ---------- ADMIN: customer addresses (multi-address) ----------
+  app.get("/api/admin/customers/:id/addresses", requireAuth, async (req, res) => {
+    res.json(await v2.listCustomerAddresses(parseInt(req.params.id, 10)));
+  });
+  app.post("/api/admin/customers/:id/addresses", requireRole("accounts", "sales"), async (req, res) => {
+    try {
+      const cid = parseInt(req.params.id, 10);
+      const b = req.body || {};
+      if (!b.line1) return res.status(400).json({ error: "Address line 1 required" });
+      const row = await v2.addCustomerAddress(cid, {
+        label: b.label, line1: b.line1, line2: b.line2, city: b.city, state: b.state,
+        pincode: b.pincode, country: b.country || "India", gstin: b.gstin,
+        isBilling: !!b.isBilling, isShipping: !!b.isShipping,
+      });
+      res.json(row);
+    } catch (e: any) { res.status(400).json({ error: e.message }); }
+  });
+  app.patch("/api/admin/customer-addresses/:id", requireRole("accounts", "sales"), async (req, res) => {
+    const id = parseInt(req.params.id, 10);
+    const row = await v2.updateCustomerAddress(id, req.body || {});
+    if (!row) return res.status(404).json({ error: "Address not found" });
+    res.json(row);
+  });
+  app.delete("/api/admin/customer-addresses/:id", requireRole("accounts", "sales"), async (req, res) => {
+    await v2.deleteCustomerAddress(parseInt(req.params.id, 10));
+    res.json({ ok: true });
+  });
+
+  // ---------- ADMIN: seed opening balance on demand ----------
+  app.patch("/api/admin/customers/:id/seed-opening", requireRole("accounts"), async (req, res) => {
+    try {
+      const id = parseInt(req.params.id, 10);
+      const customer = await v2.getCustomer(id);
+      if (!customer) return res.status(404).json({ error: "Customer not found" });
+      await v2.seedOpeningBalanceIfNeeded(id, customer.openingBalanceInr || 0);
+      res.json({ ok: true });
+    } catch (e: any) { res.status(500).json({ error: e.message }); }
+  });
+
+  // ---------- ADMIN: LEDGER ----------
+  app.get("/api/admin/customers/:id/ledger", requireAuth, async (req, res) => {
+    try {
+      const cid = parseInt(req.params.id, 10);
+      const from = req.query.from ? parseInt(req.query.from as string, 10) : undefined;
+      const to = req.query.to ? parseInt(req.query.to as string, 10) : undefined;
+      const entries = await v2.listLedgerEntries(cid, { from, to });
+      const balance = await v2.getLedgerBalance(cid);
+      res.json({ entries, balanceInr: balance });
+    } catch (e: any) { res.status(500).json({ error: e.message }); }
+  });
+  app.post("/api/admin/customers/:id/ledger", requireRole("accounts"), async (req, res) => {
+    try {
+      const cid = parseInt(req.params.id, 10);
+      const user = (req as any).user as TokenInfo;
+      const parsed = insertLedgerEntrySchema.parse({ ...req.body, customerId: cid });
+      const row = await v2.addLedgerEntry({ ...parsed, createdBy: user.username });
+      res.json(row);
+    } catch (e: any) { res.status(400).json({ error: e.message, details: e.errors }); }
+  });
+  app.post("/api/admin/ledger/bulk", requireRole("accounts"), async (req, res) => {
+    try {
+      const user = (req as any).user as TokenInfo;
+      const { entries } = req.body || {};
+      if (!Array.isArray(entries)) return res.status(400).json({ error: "entries array required" });
+      const cleaned = entries.map((e: any) => insertLedgerEntrySchema.parse(e));
+      const inserted = await v2.bulkAddLedgerEntries(cleaned.map((e: any) => ({ ...e, createdBy: user.username })));
+      res.json({ ok: true, inserted });
+    } catch (e: any) { res.status(400).json({ error: e.message, details: e.errors }); }
+  });
+  app.delete("/api/admin/ledger/:id", requireRole("accounts"), async (req, res) => {
+    await v2.deleteLedgerEntry(parseInt(req.params.id, 10));
+    res.json({ ok: true });
+  });
+  // CSV bulk ledger import
+  app.post("/api/admin/ledger/import-csv", requireRole("accounts"), async (req, res) => {
+    try {
+      const user = (req as any).user as TokenInfo;
+      const { csv } = req.body || {};
+      if (!csv || typeof csv !== "string") return res.status(400).json({ error: "csv string required" });
+      const parsed = Papa.parse(csv.trim(), { header: true, skipEmptyLines: true });
+      const rows = (parsed.data as any[]).map((r) => ({
+        customerId: parseInt(r.customer_id || r.customerId, 10),
+        entryDate: r.entry_date ? new Date(r.entry_date).getTime() : Date.now(),
+        voucherType: (r.voucher_type || r.voucherType || "adjustment").toString().trim(),
+        voucherNo: (r.voucher_no || r.voucherNo || "").toString().trim() || null,
+        description: (r.description || "").toString(),
+        debitInr: parseFloat(r.debit_inr || r.debit || "0") || 0,
+        creditInr: parseFloat(r.credit_inr || r.credit || "0") || 0,
+        referenceId: null,
+        createdBy: user.username,
+      })).filter((r) => Number.isFinite(r.customerId));
+      const inserted = await v2.bulkAddLedgerEntries(rows as any);
+      res.json({ ok: true, inserted, skipped: (parsed.data as any[]).length - inserted });
+    } catch (e: any) { res.status(400).json({ error: e.message }); }
+  });
+
+  // ---------- ADMIN: RFQs ----------
+  app.get("/api/admin/rfqs", requireAuth, async (req, res) => {
+    const status = req.query.status as string | undefined;
+    res.json(await v2.listRfqs({ status }));
+  });
+  app.get("/api/admin/rfqs/:id", requireAuth, async (req, res) => {
+    const row = await v2.getRfq(parseInt(req.params.id, 10));
+    if (!row) return res.status(404).json({ error: "RFQ not found" });
+    const linkedQuotes = await v2.listQuotes({ rfqId: row.id });
+    res.json({ ...row, quotes: linkedQuotes });
+  });
+  app.post("/api/admin/rfqs", requireRole("sales", "accounts"), async (req, res) => {
+    try {
+      const parsed = insertRfqSchema.parse(req.body || {});
+      const row = await v2.createRfq(parsed);
+      res.json(row);
+    } catch (e: any) { res.status(400).json({ error: e.message, details: e.errors }); }
+  });
+  app.patch("/api/admin/rfqs/:id", requireRole("sales", "accounts"), async (req, res) => {
+    const row = await v2.updateRfq(parseInt(req.params.id, 10), req.body || {});
+    if (!row) return res.status(404).json({ error: "RFQ not found" });
+    res.json(row);
+  });
+  app.delete("/api/admin/rfqs/:id", requireAdminRole, async (req, res) => {
+    await v2.deleteRfq(parseInt(req.params.id, 10));
+    res.json({ ok: true });
+  });
+
+  // ---------- ADMIN: QUOTES ----------
+  app.get("/api/admin/quotes", requireAuth, async (req, res) => {
+    const customerId = req.query.customer_id ? parseInt(req.query.customer_id as string, 10) : undefined;
+    const status = req.query.status as string | undefined;
+    res.json(await v2.listQuotes({ customerId, status }));
+  });
+  app.get("/api/admin/quotes/:id", requireAuth, async (req, res) => {
+    const row = await v2.getQuote(parseInt(req.params.id, 10));
+    if (!row) return res.status(404).json({ error: "Quote not found" });
+    res.json(row);
+  });
+  app.post("/api/admin/quotes", requireRole("sales", "accounts"), async (req, res) => {
+    try {
+      const user = (req as any).user as TokenInfo;
+      const parsed = insertQuoteSchema.parse(req.body || {});
+      const row = await v2.createQuote({ ...parsed, createdBy: user.username });
+      res.json(row);
+    } catch (e: any) { res.status(400).json({ error: e.message, details: e.errors }); }
+  });
+  app.patch("/api/admin/quotes/:id/status", requireRole("sales", "accounts"), async (req, res) => {
+    const { status } = req.body || {};
+    if (!status) return res.status(400).json({ error: "status required" });
+    const row = await v2.updateQuoteStatus(parseInt(req.params.id, 10), status);
+    if (!row) return res.status(404).json({ error: "Quote not found" });
+    res.json(row);
+  });
+  app.delete("/api/admin/quotes/:id", requireAdminRole, async (req, res) => {
+    await v2.deleteQuote(parseInt(req.params.id, 10));
+    res.json({ ok: true });
+  });
+
+  // ---------- ADMIN: PURCHASE ORDERS ----------
+  app.get("/api/admin/purchase-orders", requireAuth, async (req, res) => {
+    const customerId = req.query.customer_id ? parseInt(req.query.customer_id as string, 10) : undefined;
+    const status = req.query.status as string | undefined;
+    res.json(await v2.listPurchaseOrders({ customerId, status }));
+  });
+  app.get("/api/admin/purchase-orders/:id", requireAuth, async (req, res) => {
+    const row = await v2.getPurchaseOrder(parseInt(req.params.id, 10));
+    if (!row) return res.status(404).json({ error: "PO not found" });
+    const files = await v2.listFileUploads("po", row.id);
+    res.json({ ...row, files });
+  });
+  app.post("/api/admin/purchase-orders", requireRole("sales", "accounts"), async (req, res) => {
+    try {
+      const parsed = insertPurchaseOrderSchema.parse(req.body || {});
+      const row = await v2.createPurchaseOrder(parsed);
+      res.json(row);
+    } catch (e: any) { res.status(400).json({ error: e.message, details: e.errors }); }
+  });
+  app.post("/api/admin/purchase-orders/:id/approve", requireRole("accounts"), async (req, res) => {
+    const user = (req as any).user as TokenInfo;
+    const row = await v2.approvePurchaseOrder(parseInt(req.params.id, 10), user.username);
+    if (!row) return res.status(404).json({ error: "PO not found" });
+    res.json(row);
+  });
+  app.post("/api/admin/purchase-orders/:id/reject", requireRole("accounts"), async (req, res) => {
+    const user = (req as any).user as TokenInfo;
+    const row = await v2.rejectPurchaseOrder(parseInt(req.params.id, 10), user.username, req.body?.notes);
+    if (!row) return res.status(404).json({ error: "PO not found" });
+    res.json(row);
+  });
+  app.delete("/api/admin/purchase-orders/:id", requireAdminRole, async (req, res) => {
+    await v2.deletePurchaseOrder(parseInt(req.params.id, 10));
+    res.json({ ok: true });
+  });
+
+  // ---------- ADMIN: PAYMENTS ----------
+  app.get("/api/admin/payments", requireAuth, async (req, res) => {
+    const customerId = req.query.customer_id ? parseInt(req.query.customer_id as string, 10) : undefined;
+    res.json(await v2.listPayments({ customerId }));
+  });
+  app.post("/api/admin/payments", requireRole("accounts"), async (req, res) => {
+    try {
+      const user = (req as any).user as TokenInfo;
+      const parsed = insertPaymentRecordSchema.parse({ ...req.body, recordedBy: user.username });
+      const row = await v2.recordPayment(parsed);
+      res.json(row);
+    } catch (e: any) { res.status(400).json({ error: e.message, details: e.errors }); }
+  });
+  app.delete("/api/admin/payments/:id", requireRole("accounts"), async (req, res) => {
+    await v2.deletePayment(parseInt(req.params.id, 10));
+    res.json({ ok: true });
+  });
+
+  // ---------- ADMIN: BANK DETAILS ----------
+  app.get("/api/admin/bank-details", requireAuth, async (_req, res) => {
+    res.json(await v2.listBankDetails(false));
+  });
+  app.post("/api/admin/bank-details", requireAdminRole, async (req, res) => {
+    try {
+      const parsed = insertBankDetailsSchema.parse(req.body || {});
+      res.json(await v2.createBankDetails(parsed));
+    } catch (e: any) { res.status(400).json({ error: e.message, details: e.errors }); }
+  });
+  app.patch("/api/admin/bank-details/:id", requireAdminRole, async (req, res) => {
+    const row = await v2.updateBankDetails(parseInt(req.params.id, 10), req.body || {});
+    if (!row) return res.status(404).json({ error: "Bank account not found" });
+    res.json(row);
+  });
+  app.delete("/api/admin/bank-details/:id", requireAdminRole, async (req, res) => {
+    await v2.deleteBankDetails(parseInt(req.params.id, 10));
+    res.json({ ok: true });
+  });
+
+  // ---------- ADMIN: FILE UPLOADS ----------
+  const multer = require("multer");
+  const path2 = require("node:path");
+  const fs2 = require("node:fs");
+  const uploadsRoot = ctx.uploadsDir || "./uploads";
+  if (!fs2.existsSync(uploadsRoot)) fs2.mkdirSync(uploadsRoot, { recursive: true });
+  const docStore = multer({
+    storage: multer.diskStorage({
+      destination: (_req: any, _file: any, cb: any) => cb(null, uploadsRoot),
+      filename: (_req: any, file: any, cb: any) => {
+        const ts = Date.now();
+        const safe = file.originalname.replace(/[^a-zA-Z0-9._-]/g, "_");
+        cb(null, `${ts}-${safe}`);
+      },
+    }),
+    limits: { fileSize: 15 * 1024 * 1024 },
+  });
+  app.post("/api/admin/uploads", requireAuth, docStore.single("file"), async (req, res) => {
+    try {
+      const user = (req as any).user as TokenInfo;
+      const file = (req as any).file;
+      if (!file) return res.status(400).json({ error: "file required" });
+      const { entityType, entityId, fileKind } = req.body || {};
+      if (!entityType || !entityId || !fileKind) return res.status(400).json({ error: "entityType, entityId, fileKind required" });
+      const row = await v2.addFileUpload({
+        entityType, entityId: parseInt(entityId, 10), fileKind,
+        filename: file.originalname, mimeType: file.mimetype, sizeBytes: file.size,
+        storagePath: `/files/${path2.basename(file.path)}`,
+        uploadedBy: user.username,
+      });
+      res.json(row);
+    } catch (e: any) { res.status(400).json({ error: e.message }); }
+  });
+  app.get("/api/admin/uploads", requireAuth, async (req, res) => {
+    const { entityType, entityId } = req.query as any;
+    if (!entityType || !entityId) return res.status(400).json({ error: "entityType+entityId required" });
+    res.json(await v2.listFileUploads(entityType, parseInt(entityId, 10)));
+  });
+  app.delete("/api/admin/uploads/:id", requireRole("accounts", "sales"), async (req, res) => {
+    const row = await v2.getFileUpload(parseInt(req.params.id, 10));
+    if (row) {
+      const fullPath = path2.join(uploadsRoot, path2.basename(row.storagePath));
+      try { fs2.unlinkSync(fullPath); } catch {}
+      await v2.deleteFileUpload(row.id);
+    }
+    res.json({ ok: true });
+  });
+  app.get("/files/:name", (req, res) => {
+    const safe = path2.basename(req.params.name);
+    const full = path2.join(uploadsRoot, safe);
+    if (!fs2.existsSync(full)) return res.status(404).end();
+    res.sendFile(path2.resolve(full));
+  });
+
+  // ---------- ADMIN: DASHBOARD COUNTS ----------
+  app.get("/api/admin/session-b-counts", requireAuth, async (_req, res) => {
+    res.json(await v2.getSessionBCounts());
+  });
+
+  // =============================================================
+  // CUSTOMER PORTAL endpoints
+  // =============================================================
+  app.get("/api/customer/dashboard", requireCustomer, async (req, res) => {
+    const c = (req as any).customer;
+    const balance = await v2.getLedgerBalance(c.customerId);
+    const recentLedger = await v2.listLedgerEntries(c.customerId, { limit: 10 });
+    const openRfqs = await v2.listRfqs({ customerId: c.customerId, status: "open" });
+    const pendingPos = await v2.listPurchaseOrders({ customerId: c.customerId, status: "pending" });
+    const recentPayments = await v2.listPayments({ customerId: c.customerId, limit: 5 });
+    const banks = await v2.listBankDetails(true);
+    res.json({ balanceInr: balance, recentLedger, openRfqs, pendingPos, recentPayments, banks });
+  });
+  app.get("/api/customer/ledger", requireCustomer, async (req, res) => {
+    const c = (req as any).customer;
+    const entries = await v2.listLedgerEntries(c.customerId);
+    const balance = await v2.getLedgerBalance(c.customerId);
+    res.json({ entries, balanceInr: balance });
+  });
+  app.get("/api/customer/rfqs", requireCustomer, async (req, res) => {
+    const c = (req as any).customer;
+    res.json(await v2.listRfqs({ customerId: c.customerId }));
+  });
+  app.post("/api/customer/rfqs", requireCustomer, async (req, res) => {
+    try {
+      const c = (req as any).customer;
+      const customer = await v2.getCustomer(c.customerId);
+      const parsed = insertRfqSchema.parse({
+        ...req.body,
+        customerId: c.customerId,
+        contactName: req.body?.contactName || customer?.contactPerson || customer?.name,
+        email: c.email,
+      });
+      const row = await v2.createRfq(parsed);
+      res.json(row);
+    } catch (e: any) { res.status(400).json({ error: e.message, details: e.errors }); }
+  });
+  app.get("/api/customer/quotes", requireCustomer, async (req, res) => {
+    const c = (req as any).customer;
+    res.json(await v2.listQuotes({ customerId: c.customerId }));
+  });
+  app.get("/api/customer/quotes/:id", requireCustomer, async (req, res) => {
+    const c = (req as any).customer;
+    const q = await v2.getQuote(parseInt(req.params.id, 10));
+    if (!q || q.customerId !== c.customerId) return res.status(404).json({ error: "Quote not found" });
+    res.json(q);
+  });
+  app.get("/api/customer/purchase-orders", requireCustomer, async (req, res) => {
+    const c = (req as any).customer;
+    res.json(await v2.listPurchaseOrders({ customerId: c.customerId }));
+  });
+  app.post("/api/customer/purchase-orders", requireCustomer, async (req, res) => {
+    try {
+      const c = (req as any).customer;
+      const parsed = insertPurchaseOrderSchema.parse({
+        ...req.body,
+        customerId: c.customerId,
+      });
+      const row = await v2.createPurchaseOrder(parsed);
+      res.json(row);
+    } catch (e: any) { res.status(400).json({ error: e.message, details: e.errors }); }
+  });
+  app.get("/api/customer/payments", requireCustomer, async (req, res) => {
+    const c = (req as any).customer;
+    res.json(await v2.listPayments({ customerId: c.customerId }));
+  });
+  app.get("/api/customer/banks", requireCustomer, async (_req, res) => {
+    res.json(await v2.listBankDetails(true));
+  });
+  app.post("/api/customer/uploads", requireCustomer, docStore.single("file"), async (req, res) => {
+    try {
+      const c = (req as any).customer;
+      const file = (req as any).file;
+      if (!file) return res.status(400).json({ error: "file required" });
+      const { entityType, entityId, fileKind } = req.body || {};
+      if (entityType !== "po") return res.status(403).json({ error: "Customers can only upload PO documents" });
+      const po = await v2.getPurchaseOrder(parseInt(entityId, 10));
+      if (!po || po.customerId !== c.customerId) return res.status(404).json({ error: "PO not found" });
+      const row = await v2.addFileUpload({
+        entityType: "po", entityId: po.id, fileKind: fileKind || "po_pdf",
+        filename: file.originalname, mimeType: file.mimetype, sizeBytes: file.size,
+        storagePath: `/files/${path2.basename(file.path)}`,
+        uploadedBy: `customer:${c.email}`,
+      });
+      res.json(row);
+    } catch (e: any) { res.status(400).json({ error: e.message }); }
+  });
+
+  console.log("[v2] Phase 3+4 + Session B routes registered: blogs, price lists, consignments, sub-users, SEO, customers, notifications, customer portal, ledger, RFQ/Quote/PO, payments, uploads, banks");
 }

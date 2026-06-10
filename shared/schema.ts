@@ -161,7 +161,7 @@ export const insertConsignmentSchema = createInsertSchema(consignments).omit({
 export type InsertConsignment = z.infer<typeof insertConsignmentSchema>;
 export type Consignment = typeof consignments.$inferSelect;
 
-// -------- CUSTOMERS (Phase 4) --------
+// -------- CUSTOMERS (Phase 4 + Session B extensions) --------
 export const customers = sqliteTable("customers", {
   id: integer("id").primaryKey({ autoIncrement: true }),
   name: text("name").notNull(),
@@ -174,6 +174,11 @@ export const customers = sqliteTable("customers", {
   gstNumber: text("gst_number"),
   notes: text("notes"),
   createdAt: integer("created_at").notNull().$defaultFn(() => Date.now()),
+  creditLimitInr: real("credit_limit_inr").default(0),
+  openingBalanceInr: real("opening_balance_inr").default(0),
+  paymentTermsDays: integer("payment_terms_days").default(0),
+  contactPerson: text("contact_person"),
+  companyPan: text("company_pan"),
 });
 
 export const insertCustomerSchema = createInsertSchema(customers).omit({ id: true, createdAt: true });
@@ -237,3 +242,206 @@ export const adminSessions = sqliteTable("admin_sessions", {
   expiresAt: integer("expires_at").notNull(),  // 30 days from creation; refreshed on use
 });
 export type AdminSession = typeof adminSessions.$inferSelect;
+
+
+// =============================================================
+// SESSION B: Customer portal, ledger, RFQ/Quote/PO, payments
+// =============================================================
+
+// -------- CUSTOMER EMAILS (multi-email per customer; all CC'd) --------
+export const customerEmails = sqliteTable("customer_emails", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  customerId: integer("customer_id").notNull(),
+  email: text("email").notNull(),
+  isPrimary: integer("is_primary", { mode: "boolean" }).notNull().default(false),
+  label: text("label"),
+  createdAt: integer("created_at").notNull(),
+});
+export type CustomerEmail = typeof customerEmails.$inferSelect;
+
+// -------- CUSTOMER ADDRESSES (multi-address: billing/shipping) --------
+export const customerAddresses = sqliteTable("customer_addresses", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  customerId: integer("customer_id").notNull(),
+  label: text("label"),
+  line1: text("line1").notNull(),
+  line2: text("line2"),
+  city: text("city"),
+  state: text("state"),
+  pincode: text("pincode"),
+  country: text("country").default("India"),
+  gstin: text("gstin"),
+  isBilling: integer("is_billing", { mode: "boolean" }).notNull().default(false),
+  isShipping: integer("is_shipping", { mode: "boolean" }).notNull().default(false),
+  createdAt: integer("created_at").notNull(),
+});
+export type CustomerAddress = typeof customerAddresses.$inferSelect;
+
+// -------- CUSTOMER LOGINS (one login per company) --------
+export const customerLogins = sqliteTable("customer_logins", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  customerId: integer("customer_id").notNull(),
+  email: text("email").notNull().unique(),
+  passwordHash: text("password_hash"),
+  creditLimitInr: real("credit_limit_inr").default(0),
+  paymentTermsDays: integer("payment_terms_days").default(0),
+  active: integer("active", { mode: "boolean" }).notNull().default(true),
+  createdAt: integer("created_at").notNull(),
+});
+export type CustomerLogin = typeof customerLogins.$inferSelect;
+
+// -------- CUSTOMER SESSIONS (30-day token, OTP-issued) --------
+export const customerSessions = sqliteTable("customer_sessions", {
+  token: text("token").primaryKey(),
+  customerId: integer("customer_id").notNull(),
+  email: text("email").notNull(),
+  createdAt: integer("created_at").notNull(),
+  lastSeenAt: integer("last_seen_at").notNull(),
+  expiresAt: integer("expires_at").notNull(),
+});
+export type CustomerSession = typeof customerSessions.$inferSelect;
+
+// -------- OTP CODES (email-only, 6-digit, 10-minute expiry) --------
+export const otpCodes = sqliteTable("otp_codes", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  email: text("email").notNull(),
+  code: text("code").notNull(),
+  purpose: text("purpose").notNull(),
+  used: integer("used", { mode: "boolean" }).notNull().default(false),
+  createdAt: integer("created_at").notNull(),
+  expiresAt: integer("expires_at").notNull(),
+});
+export type OtpCode = typeof otpCodes.$inferSelect;
+
+// -------- LEDGER ENTRIES --------
+export const ledgerEntries = sqliteTable("ledger_entries", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  customerId: integer("customer_id").notNull(),
+  entryDate: integer("entry_date").notNull(),
+  voucherType: text("voucher_type").notNull(),
+  voucherNo: text("voucher_no"),
+  referenceId: integer("reference_id"),
+  description: text("description"),
+  debitInr: real("debit_inr").notNull().default(0),
+  creditInr: real("credit_inr").notNull().default(0),
+  balanceInr: real("balance_inr"),
+  createdBy: text("created_by"),
+  createdAt: integer("created_at").notNull(),
+});
+export const insertLedgerEntrySchema = createInsertSchema(ledgerEntries).omit({ id: true, createdAt: true, balanceInr: true });
+export type InsertLedgerEntry = z.infer<typeof insertLedgerEntrySchema>;
+export type LedgerEntry = typeof ledgerEntries.$inferSelect;
+
+// -------- RFQ --------
+export const rfqs = sqliteTable("rfqs", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  customerId: integer("customer_id"),
+  contactName: text("contact_name"),
+  email: text("email"),
+  phone: text("phone"),
+  items: text("items").notNull(),
+  notes: text("notes"),
+  status: text("status").notNull().default("open"),
+  assignedTo: text("assigned_to"),
+  quotedAt: integer("quoted_at"),
+  quoteId: integer("quote_id"),
+  createdAt: integer("created_at").notNull(),
+});
+export const insertRfqSchema = createInsertSchema(rfqs).omit({ id: true, createdAt: true, quotedAt: true, quoteId: true, status: true });
+export type InsertRfq = z.infer<typeof insertRfqSchema>;
+export type Rfq = typeof rfqs.$inferSelect;
+
+// -------- QUOTES --------
+export const quotes = sqliteTable("quotes", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  quoteNo: text("quote_no").notNull().unique(),
+  rfqId: integer("rfq_id"),
+  customerId: integer("customer_id").notNull(),
+  items: text("items").notNull(),
+  subtotalInr: real("subtotal_inr").notNull().default(0),
+  gstInr: real("gst_inr").notNull().default(0),
+  totalInr: real("total_inr").notNull().default(0),
+  validUntil: integer("valid_until"),
+  status: text("status").notNull().default("sent"),
+  notes: text("notes"),
+  terms: text("terms"),
+  createdBy: text("created_by"),
+  createdAt: integer("created_at").notNull(),
+});
+export const insertQuoteSchema = createInsertSchema(quotes).omit({ id: true, createdAt: true, quoteNo: true, status: true });
+export type InsertQuote = z.infer<typeof insertQuoteSchema>;
+export type Quote = typeof quotes.$inferSelect;
+
+// -------- PURCHASE ORDERS --------
+export const purchaseOrders = sqliteTable("purchase_orders", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  customerId: integer("customer_id").notNull(),
+  customerPoNumber: text("customer_po_number").notNull(),
+  rfqId: integer("rfq_id"),
+  quoteId: integer("quote_id"),
+  items: text("items").notNull(),
+  subtotalInr: real("subtotal_inr").default(0),
+  gstInr: real("gst_inr").default(0),
+  totalInr: real("total_inr").notNull().default(0),
+  status: text("status").notNull().default("pending"),
+  reminderCount: integer("reminder_count").notNull().default(0),
+  lastRemindedAt: integer("last_reminded_at"),
+  approvedAt: integer("approved_at"),
+  approvedBy: text("approved_by"),
+  notes: text("notes"),
+  createdAt: integer("created_at").notNull(),
+});
+export const insertPurchaseOrderSchema = createInsertSchema(purchaseOrders).omit({
+  id: true, createdAt: true, status: true, reminderCount: true, lastRemindedAt: true, approvedAt: true, approvedBy: true,
+});
+export type InsertPurchaseOrder = z.infer<typeof insertPurchaseOrderSchema>;
+export type PurchaseOrder = typeof purchaseOrders.$inferSelect;
+
+// -------- PAYMENT RECORDS --------
+export const paymentRecords = sqliteTable("payment_records", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  customerId: integer("customer_id").notNull(),
+  amountInr: real("amount_inr").notNull(),
+  paymentMode: text("payment_mode").notNull(),
+  referenceNo: text("reference_no"),
+  paymentDate: integer("payment_date").notNull(),
+  notes: text("notes"),
+  recordedBy: text("recorded_by"),
+  createdAt: integer("created_at").notNull(),
+});
+export const insertPaymentRecordSchema = createInsertSchema(paymentRecords).omit({ id: true, createdAt: true });
+export type InsertPaymentRecord = z.infer<typeof insertPaymentRecordSchema>;
+export type PaymentRecord = typeof paymentRecords.$inferSelect;
+
+// -------- FILE UPLOADS (polymorphic) --------
+export const fileUploads = sqliteTable("file_uploads", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  entityType: text("entity_type").notNull(),
+  entityId: integer("entity_id").notNull(),
+  fileKind: text("file_kind").notNull(),
+  filename: text("filename").notNull(),
+  mimeType: text("mime_type"),
+  sizeBytes: integer("size_bytes"),
+  storagePath: text("storage_path").notNull(),
+  uploadedBy: text("uploaded_by"),
+  createdAt: integer("created_at").notNull(),
+});
+export type FileUpload = typeof fileUploads.$inferSelect;
+
+// -------- BANK DETAILS --------
+export const bankDetails = sqliteTable("bank_details", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  label: text("label").notNull(),
+  accountName: text("account_name").notNull(),
+  accountNo: text("account_no").notNull(),
+  ifsc: text("ifsc").notNull(),
+  bankName: text("bank_name").notNull(),
+  branch: text("branch"),
+  accountType: text("account_type"),
+  isDefault: integer("is_default", { mode: "boolean" }).notNull().default(false),
+  active: integer("active", { mode: "boolean" }).notNull().default(true),
+  createdAt: integer("created_at").notNull(),
+});
+export const insertBankDetailsSchema = createInsertSchema(bankDetails).omit({ id: true, createdAt: true });
+export type InsertBankDetails = z.infer<typeof insertBankDetailsSchema>;
+export type BankDetails = typeof bankDetails.$inferSelect;

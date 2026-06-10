@@ -33,6 +33,31 @@ export function renderTemplate(template: string, vars: Record<string, string>): 
   return template.replace(/\{(\w+)\}/g, (_, k) => vars[k] ?? "");
 }
 
+// Session B: generic email send (used for OTP, PO reminders, customer notifications)
+export async function sendGenericEmail(opts: {
+  to: string | string[]; cc?: string | string[]; subject: string; html: string; text?: string;
+}): Promise<{ ok: boolean; via: string; error?: string }> {
+  const t = getTransporter();
+  if (!t) {
+    console.log(`[email] SMTP not configured — skipping send to ${Array.isArray(opts.to) ? opts.to.join(",") : opts.to} (subject: ${opts.subject})`);
+    return { ok: false, via: "skipped" };
+  }
+  try {
+    await t.sendMail({
+      from: `${SENDER_NAME} <${SENDER_EMAIL}>`,
+      to: opts.to,
+      cc: opts.cc,
+      subject: opts.subject,
+      html: opts.html,
+      text: opts.text || opts.html.replace(/<[^>]+>/g, ""),
+    });
+    return { ok: true, via: "smtp" };
+  } catch (e: any) {
+    console.error("[email] send failed:", e?.message);
+    return { ok: false, via: "smtp", error: e?.message };
+  }
+}
+
 export interface NotificationContext {
   consignmentId?: number;
   customerId?: number;

@@ -23,22 +23,13 @@ export default function AdminLogin() {
         setError("Invalid credentials");
         return;
       }
-      setAuth(data.token, data.username);
-      // Fetch role to determine post-login redirect destination.
+      // Session A V2: pass role + displayName so context tracks them and we don't need a 2nd fetch
+      const role = (data.role || "admin") as "admin" | "logistics" | "accounts" | "sales";
+      setAuth(data.token, data.username, role, data.displayName || data.username);
+      // Per-role redirect destination
       let redirectPath = '/admin/dashboard';
-      try {
-        const meRes = await fetch('/api/v2/me', {
-          headers: { 'x-admin-token': data.token },
-        });
-        if (meRes.ok) {
-          const me = await meRes.json();
-          if (me?.role === 'logistics') {
-            redirectPath = '/admin/consignments';
-          }
-        }
-      } catch {
-        // Ignore — fall back to dashboard. Primary admin (env credentials) is role admin.
-      }
+      if (role === 'logistics') redirectPath = '/admin/consignments';
+      // (accounts and sales land on dashboard — Session B will add their dedicated pages)
       // Defer navigation so React commits the auth state first.
       setTimeout(() => {
         window.location.hash = redirectPath;

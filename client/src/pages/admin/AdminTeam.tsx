@@ -1,22 +1,29 @@
 import { useEffect, useState } from "react";
 import { AdminLayout } from "./AdminLayout";
-import { adminFetch, useAdminAuth } from "@/lib/admin-auth";
-import { Plus, Edit3, Trash2, ShieldCheck, Truck, KeyRound } from "lucide-react";
+import { adminFetch, useAdminAuth, AdminRole } from "@/lib/admin-auth";
+import { Plus, Edit3, Trash2, ShieldCheck, Truck, KeyRound, Calculator, Briefcase } from "lucide-react";
 
 interface AdminUser {
   id: number;
   username: string;
-  role: "admin" | "logistics";
+  role: AdminRole;
   displayName: string | null;
   active: boolean;
   createdAt: string;
 }
 
+const ROLE_META: Record<AdminRole, { label: string; desc: string; icon: any; badge: string }> = {
+  admin:     { label: "Admin",     desc: "Full access",              icon: ShieldCheck, badge: "bg-purple-500/15 text-purple-700" },
+  logistics: { label: "Logistics", desc: "Consignments only",        icon: Truck,       badge: "bg-blue-500/15 text-blue-700" },
+  accounts:  { label: "Accounts",  desc: "Dashboard + consignments", icon: Calculator,  badge: "bg-emerald-500/15 text-emerald-700" },
+  sales:     { label: "Sales",     desc: "Price lists + products",   icon: Briefcase,   badge: "bg-amber-500/15 text-amber-700" },
+};
+
 export default function AdminTeam() {
   const { token } = useAdminAuth();
   const [users, setUsers] = useState<AdminUser[]>([]);
   const [open, setOpen] = useState<{
-    id?: number; username: string; password: string; role: "admin" | "logistics"; displayName: string; active: boolean;
+    id?: number; username: string; password: string; role: AdminRole; displayName: string; active: boolean;
   } | null>(null);
   const [saving, setSaving] = useState(false);
   const [forbidden, setForbidden] = useState(false);
@@ -72,7 +79,7 @@ export default function AdminTeam() {
       <div className="flex items-center justify-between mb-4">
         <div>
           <p className="text-sm text-muted-foreground">
-            Create sub-users with limited access. <span className="font-semibold">Logistics</span> users can only manage consignments — they cannot see products, prices, or contacts.
+            Create sub-users with limited access. Roles: <span className="font-semibold">Admin</span> (full), <span className="font-semibold">Logistics</span> (consignments), <span className="font-semibold">Accounts</span> (dashboard + consignments), <span className="font-semibold">Sales</span> (price lists + products + contacts).
           </p>
         </div>
         <button onClick={() => setOpen({ username: "", password: "", role: "logistics", displayName: "", active: true })}
@@ -103,9 +110,15 @@ export default function AdminTeam() {
                   <td className="px-5 py-3 font-mono font-semibold">{u.username}</td>
                   <td className="px-5 py-3">{u.displayName || "—"}</td>
                   <td className="px-5 py-3">
-                    <span className={`inline-flex items-center gap-1.5 text-[10px] px-2 py-0.5 rounded uppercase tracking-wider font-bold ${u.role === "admin" ? "bg-purple-500/15 text-purple-700" : "bg-blue-500/15 text-blue-700"}`}>
-                      {u.role === "admin" ? <ShieldCheck className="w-3 h-3" /> : <Truck className="w-3 h-3" />} {u.role}
-                    </span>
+                    {(() => {
+                      const meta = ROLE_META[u.role] || ROLE_META.admin;
+                      const Icon = meta.icon;
+                      return (
+                        <span className={`inline-flex items-center gap-1.5 text-[10px] px-2 py-0.5 rounded uppercase tracking-wider font-bold ${meta.badge}`}>
+                          <Icon className="w-3 h-3" /> {u.role}
+                        </span>
+                      );
+                    })()}
                   </td>
                   <td className="px-5 py-3">
                     {u.active ? (
@@ -152,10 +165,12 @@ export default function AdminTeam() {
                   className="w-full border rounded-lg px-3 py-2 bg-background" data-testid="input-display-name" />
               </Field>
               <Field label="Role">
-                <select value={open.role} onChange={(e) => setOpen({ ...open, role: e.target.value as any })}
+                <select value={open.role} onChange={(e) => setOpen({ ...open, role: e.target.value as AdminRole })}
                   className="w-full border rounded-lg px-3 py-2 bg-background" data-testid="select-role">
-                  <option value="logistics">Logistics (consignments only)</option>
-                  <option value="admin">Admin (full access)</option>
+                  <option value="logistics">Logistics — consignments only</option>
+                  <option value="accounts">Accounts — dashboard + consignments (read)</option>
+                  <option value="sales">Sales — price lists + products + contacts</option>
+                  <option value="admin">Admin — full access</option>
                 </select>
               </Field>
               {open.id && (

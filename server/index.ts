@@ -131,4 +131,47 @@ app.use((req, res, next) => {
       log(`serving on port ${port}`);
     },
   );
+
+  // ---- PO reminder cron (daily check for POs > 3 days pending) ----
+  const PO_REMINDER_INTERVAL_MS = 24 * 60 * 60 * 1000; // 24 hours
+  const PO_STALE_DAYS = 3;
+  const ADMIN_REMINDER_EMAIL = process.env.ADMIN_REMINDER_EMAIL || process.env.SALES_EMAIL || "sales@Narmadamobility.com";
+
+  async function runPoReminderCheck() {
+    try {
+      const { getStalePurchaseOrders, incrementPoReminder, getCustomer } = await import("./storage-v2");
+      const { sendGenericEmail } = await import("./notifications");
+      const stale = await getStalePurchaseOrders(PO_STALE_DAYS);
+      if (!stale || stale.length === 0) {
+        log(`[po-reminder] No stale POs (>${PO_STALE_DAYS}d pending)`);
+        return;
+      }
+      const rows: string[] = [];
+      for (const po of stale) {
+        const cust = po.customerId ? await getCustomer(po.customerId) : null;
+        const ageDays = Math.floor((Date.now() - (po.createdAt || Date.now())) / 86400000);
+        rows.push(`<tr><td>${po.poNumber || po.id}</td><td>${cust?.name || "-"}</td><td>\u20b9${po.totalInr || 0}</td><td>${ageDays}d</td><td>${po.reminderCount || 0}</td></tr>`);
+        await incrementPoReminder(po.id);
+      }
+      const html = `<h3>Stale Purchase Orders (>${PO_STALE_DAYS} days pending)</h3>
+<table border="1" cellpadding="6" style="border-collapse:collapse">
+<tr><th>PO #</th><th>Customer</th><th>Amount</th><th>Age</th><th>Reminders</th></tr>
+${rows.join("\n")}
+</table>
+<p>Please review and approve/reject in the admin panel.</p>`;
+      await sendGenericEmail({
+        to: ADMIN_REMINDER_EMAIL,
+        subject: `[Narmada] ${stale.length} stale PO(s) need attention`,
+        html,
+        text: `${stale.length} POs are pending more than ${PO_STALE_DAYS} days. Review in admin panel.`,
+      });
+      log(`[po-reminder] Sent reminder for ${stale.length} stale POs`);
+    } catch (e: any) {
+      log(`[po-reminder] Error: ${e?.message || e}`);
+    }
+  }
+
+  // Run once 60s after startup, then every 24h
+  setTimeout(runPoReminderCheck, 60_000);
+  setInterval(runPoReminderCheck, PO_REMINDER_INTERVAL_MS);
 })();
