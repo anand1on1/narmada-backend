@@ -5,14 +5,16 @@ import { randomBytes, createHash, scryptSync, timingSafeEqual } from "node:crypt
 import path from "node:path";
 import fs from "node:fs";
 import Papa from "papaparse";
-import { storage } from "./storage";
+import { storage, db } from "./storage";
 import * as v2 from "./storage-v2";
 import { sendNotification, buildTrackingLink } from "./notifications";
 import {
   insertPostSchema, insertConsignmentSchema, insertPriceListSchema,
   insertCustomerSchema,
+  adminSessions,
 } from "@shared/schema";
-import type { AdminUser } from "@shared/schema";
+import type { AdminUser, AdminRole } from "@shared/schema";
+import { eq } from "drizzle-orm";
 
 // ============================================================================
 // AUTH / SESSIONS (Phase 3)
@@ -22,10 +24,57 @@ import type { AdminUser } from "@shared/schema";
 
 export interface TokenInfo {
   username: string;
-  role: "admin" | "logistics";
+  role: AdminRole;  // admin | logistics | accounts | sales
   displayName?: string;
 }
 export type TokenMap = Map<string, TokenInfo>;
+const VALID_ROLES: AdminRole[] = ["admin", "logistics", "accounts", "sales"];
+
+// Session A V2: DB-backed admin session helpers (token survives Render restarts)
+const SESSION_TTL_MS = 30 * 24 * 60 * 60 * 1000; // 30 days
+export async function persistAdminSession(token: string, info: TokenInfo) {
+  const now = Date.now();
+  try {
+    db.insert(adminSessions).values({
+      token,
+      username: info.username,
+      role: info.role,
+      displayName: info.displayName,
+      createdAt: now,
+      lastSeenAt: now,
+      expiresAt: now + SESSION_TTL_MS,
+    }).run();
+  } catch (e: any) {
+    console.error("[admin-session] persist failed:", e?.message);
+  }
+}
+export function rehydrateSession(tokenMap: TokenMap, token: string): TokenInfo | null {
+  try {
+    const row = db.select().from(adminSessions).where(eq(adminSessions.token, token)).get();
+    if (!row) return null;
+    if (row.expiresAt < Date.now()) {
+      db.delete(adminSessions).where(eq(adminSessions.token, token)).run();
+      return null;
+    }
+    const info: TokenInfo = {
+      username: row.username,
+      role: row.role as AdminRole,
+      displayName: row.displayName || undefined,
+    };
+    tokenMap.set(token, info);
+    try {
+      db.update(adminSessions).set({ lastSeenAt: Date.now() })
+        .where(eq(adminSessions.token, token)).run();
+    } catch {}
+    return info;
+  } catch (e: any) {
+    console.error("[admin-session] rehydrate failed:", e?.message);
+    return null;
+  }
+}
+export function deleteAdminSession(token: string) {
+  try { db.delete(adminSessions).where(eq(adminSessions.token, token)).run(); } catch {}
+}
 
 // Password hashing helpers (scrypt with random salt)
 export function hashPassword(plain: string): string {
@@ -116,20 +165,38 @@ export interface V2Context {
 export function registerV2Routes(app: Express, ctx: V2Context) {
   const { tokenMap, primaryAdminUsername, primaryAdminPassword, regenSitemap } = ctx;
 
-  // Middleware: require any logged-in admin user
+  // Middleware: require any logged-in admin user.
+  // Session A V2: if token not in memory, try to rehydrate from admin_sessions table
+  // so logins survive Render restarts.
   function requireAuth(req: Request, res: Response, next: NextFunction) {
     const token = req.headers["x-admin-token"] as string | undefined;
-    if (!token || !tokenMap.has(token)) return res.status(401).json({ error: "Unauthorized" });
-    (req as any).user = tokenMap.get(token);
+    if (!token) return res.status(401).json({ error: "Unauthorized" });
+    let info = tokenMap.get(token);
+    if (!info) {
+      const rehydrated = rehydrateSession(tokenMap, token);
+      if (!rehydrated) return res.status(401).json({ error: "Unauthorized" });
+      info = rehydrated;
+    }
+    (req as any).user = info;
     next();
   }
-  // Middleware: require admin role specifically (logistics not allowed)
+  // Middleware: require admin role specifically (other roles not allowed)
   function requireAdminRole(req: Request, res: Response, next: NextFunction) {
     requireAuth(req, res, () => {
       const u = (req as any).user as TokenInfo;
       if (u.role !== "admin") return res.status(403).json({ error: "Admin role required" });
       next();
     });
+  }
+  // Middleware factory: require one of the specified roles. Admin always passes.
+  function requireRole(...roles: AdminRole[]) {
+    return (req: Request, res: Response, next: NextFunction) => {
+      requireAuth(req, res, () => {
+        const u = (req as any).user as TokenInfo;
+        if (u.role === "admin" || roles.includes(u.role)) return next();
+        return res.status(403).json({ error: `Role ${roles.join("/")} required` });
+      });
+    };
   }
 
   // ============== LOGIN (extended — supports primary admin OR DB users) ==============
@@ -151,7 +218,7 @@ export function registerV2Routes(app: Express, ctx: V2Context) {
         if (user && user.active && verifyPassword(password, user.passwordHash)) {
           info = {
             username: user.username,
-            role: user.role as "admin" | "logistics",
+            role: (VALID_ROLES.includes(user.role as AdminRole) ? user.role : "admin") as AdminRole,
             displayName: user.displayName || user.username,
           };
         }
@@ -160,6 +227,7 @@ export function registerV2Routes(app: Express, ctx: V2Context) {
       if (!info) return res.status(401).json({ error: "Invalid credentials" });
       const token = randomBytes(32).toString("hex");
       tokenMap.set(token, info);
+      await persistAdminSession(token, info);
       res.json({ token, user: info });
     } catch (e: any) {
       res.status(500).json({ error: e.message });
@@ -169,6 +237,7 @@ export function registerV2Routes(app: Express, ctx: V2Context) {
   app.post("/api/v2/logout", requireAuth, (req, res) => {
     const token = req.headers["x-admin-token"] as string;
     tokenMap.delete(token);
+    deleteAdminSession(token);
     res.json({ ok: true });
   });
 
@@ -187,7 +256,7 @@ export function registerV2Routes(app: Express, ctx: V2Context) {
     try {
       const { username, password, role, displayName } = req.body || {};
       if (!username || !password) return res.status(400).json({ error: "username and password required" });
-      if (!["admin", "logistics"].includes(role)) return res.status(400).json({ error: "role must be admin or logistics" });
+      if (!VALID_ROLES.includes(role)) return res.status(400).json({ error: `role must be one of: ${VALID_ROLES.join(", ")}` });
       if (password.length < 8) return res.status(400).json({ error: "Password must be at least 8 characters" });
       if (username === primaryAdminUsername) return res.status(400).json({ error: "This username is reserved" });
       const existing = await v2.getAdminUserByUsername(username);
@@ -206,7 +275,10 @@ export function registerV2Routes(app: Express, ctx: V2Context) {
         if (req.body.password.length < 8) return res.status(400).json({ error: "Password must be at least 8 characters" });
         updates.passwordHash = hashPassword(req.body.password);
       }
-      if (req.body.role) updates.role = req.body.role;
+      if (req.body.role) {
+        if (!VALID_ROLES.includes(req.body.role)) return res.status(400).json({ error: `role must be one of: ${VALID_ROLES.join(", ")}` });
+        updates.role = req.body.role;
+      }
       if (req.body.displayName !== undefined) updates.displayName = req.body.displayName;
       if (req.body.active !== undefined) updates.active = req.body.active;
       const user = await v2.updateAdminUser(parseInt(req.params.id, 10), updates);

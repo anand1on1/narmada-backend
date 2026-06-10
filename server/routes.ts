@@ -11,7 +11,8 @@ import fs from "node:fs";
 import Papa from "papaparse";
 import { sendContactEmail } from "./email";
 import { registerBulkRoutes } from "./bulk";
-import { registerV2Routes, TokenMap } from "./routes-v2";
+import { registerV2Routes, TokenMap, persistAdminSession, rehydrateSession, deleteAdminSession } from "./routes-v2";
+import type { AdminRole } from "@shared/schema";
 
 const ADMIN_USERNAME = "narmadamobility123";
 const ADMIN_PASSWORD = "Carbounty@123";
@@ -91,16 +92,24 @@ function buildSitemapUrls(allProducts: Awaited<ReturnType<typeof storage.listPro
 // endpoints only check token presence (effectively admin-equivalent since old
 // system only had one user).
 const adminTokens: TokenMap = new Map();
-function issueToken(username: string, role: "admin" | "logistics" = "admin"): string {
+function issueToken(username: string, role: AdminRole = "admin", displayName?: string): string {
   const t = randomBytes(32).toString("hex");
-  adminTokens.set(t, { username, role });
+  const info = { username, role, displayName };
+  adminTokens.set(t, info);
+  // Session A V2: persist to DB so token survives Render restarts
+  persistAdminSession(t, info).catch(() => {});
   return t;
 }
 function requireAdmin(req: Request, res: Response, next: NextFunction) {
   const token = (req.headers["x-admin-token"] as string) || "";
-  const info = adminTokens.get(token);
+  let info = adminTokens.get(token);
+  // Session A V2: try DB rehydration if not in memory
+  if (!info && token) {
+    const rehydrated = rehydrateSession(adminTokens, token);
+    if (rehydrated) info = rehydrated;
+  }
   if (!info) return res.status(401).json({ error: "Unauthorized" });
-  // Legacy endpoints: only "admin" role is allowed (logistics users use v2 endpoints)
+  // Legacy endpoints: only "admin" role is allowed (other roles use v2 endpoints)
   if (info.role !== "admin") return res.status(403).json({ error: "Admin role required" });
   (req as any).user = info;
   next();
@@ -136,9 +145,9 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
       const { verifyPassword } = await import("./routes-v2");
       const user = await v2.getAdminUserByUsername(username);
       if (user && user.active && verifyPassword(password, user.passwordHash)) {
-        const role = (user.role as "admin" | "logistics");
-        const token = randomBytes(32).toString("hex");
-        adminTokens.set(token, { username: user.username, role, displayName: user.displayName || undefined });
+        const validRoles: AdminRole[] = ["admin", "logistics", "accounts", "sales"];
+        const role = (validRoles.includes(user.role as AdminRole) ? user.role : "admin") as AdminRole;
+        const token = issueToken(user.username, role, user.displayName || undefined);
         return res.json({ token, username: user.username, role, displayName: user.displayName });
       }
     } catch (e) { console.error("DB user check failed:", e); }
@@ -146,12 +155,19 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
   });
   app.post("/api/admin/logout", (req, res) => {
     const token = req.headers["x-admin-token"] as string;
-    if (token) adminTokens.delete(token);
+    if (token) {
+      adminTokens.delete(token);
+      deleteAdminSession(token);
+    }
     res.json({ ok: true });
   });
   app.get("/api/admin/me", (req, res) => {
     const token = (req.headers["x-admin-token"] as string) || "";
-    const info = adminTokens.get(token);
+    let info = adminTokens.get(token);
+    if (!info && token) {
+      const rehydrated = rehydrateSession(adminTokens, token);
+      if (rehydrated) info = rehydrated;
+    }
     if (!info) return res.status(401).json({ error: "Unauthorized" });
     res.json({ ok: true, username: info.username, role: info.role, displayName: info.displayName });
   });

@@ -211,14 +211,29 @@ export const notificationLog = sqliteTable("notification_log", {
 
 export type NotificationLog = typeof notificationLog.$inferSelect;
 
-// -------- ADMIN USERS (multi-role) --------
+// -------- ADMIN USERS (multi-role — Session A V2) --------
+// Roles: admin (full access) | logistics (consignments only) | accounts (ledger/payments/customers) | sales (customers/RFQ/pricelist)
 export const adminUsers = sqliteTable("admin_users", {
   id: integer("id").primaryKey({ autoIncrement: true }),
   username: text("username").notNull().unique(),
   passwordHash: text("password_hash").notNull(),
-  role: text("role").notNull().default("admin"),   // admin | logistics
+  role: text("role").notNull().default("admin"),   // admin | logistics | accounts | sales
   displayName: text("display_name"),
   active: integer("active", { mode: "boolean" }).default(true),
   createdAt: integer("created_at").notNull(),
 });
 export type AdminUser = typeof adminUsers.$inferSelect;
+export type AdminRole = "admin" | "logistics" | "accounts" | "sales";
+
+// -------- ADMIN SESSIONS (Session A V2) --------
+// DB-backed sessions survive Render restarts. Token map in memory is rehydrated from this table.
+export const adminSessions = sqliteTable("admin_sessions", {
+  token: text("token").primaryKey(),
+  username: text("username").notNull(),
+  role: text("role").notNull(),
+  displayName: text("display_name"),
+  createdAt: integer("created_at").notNull(),
+  lastSeenAt: integer("last_seen_at").notNull(),
+  expiresAt: integer("expires_at").notNull(),  // 30 days from creation; refreshed on use
+});
+export type AdminSession = typeof adminSessions.$inferSelect;

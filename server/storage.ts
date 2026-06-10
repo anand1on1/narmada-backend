@@ -175,6 +175,167 @@ CREATE TABLE IF NOT EXISTS notification_log (
   error_msg TEXT,
   sent_at INTEGER NOT NULL
 );
+
+-- Session A V2: admin_sessions (DB-backed auth, survives Render restarts)
+CREATE TABLE IF NOT EXISTS admin_sessions (
+  token TEXT PRIMARY KEY,
+  username TEXT NOT NULL,
+  role TEXT NOT NULL,
+  display_name TEXT,
+  created_at INTEGER NOT NULL,
+  last_seen_at INTEGER NOT NULL,
+  expires_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_admin_sessions_expires ON admin_sessions(expires_at);
+
+-- Session B foundation (additive stubs — no logic yet)
+CREATE TABLE IF NOT EXISTS customer_emails (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  customer_id INTEGER NOT NULL,
+  email TEXT NOT NULL,
+  is_primary INTEGER NOT NULL DEFAULT 0,
+  label TEXT,
+  created_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_customer_emails_customer ON customer_emails(customer_id);
+
+CREATE TABLE IF NOT EXISTS customer_addresses (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  customer_id INTEGER NOT NULL,
+  label TEXT,
+  line1 TEXT NOT NULL,
+  line2 TEXT,
+  city TEXT,
+  state TEXT,
+  pincode TEXT,
+  country TEXT DEFAULT 'India',
+  gstin TEXT,
+  is_billing INTEGER NOT NULL DEFAULT 0,
+  is_shipping INTEGER NOT NULL DEFAULT 0,
+  created_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_customer_addresses_customer ON customer_addresses(customer_id);
+
+CREATE TABLE IF NOT EXISTS customer_logins (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  customer_id INTEGER NOT NULL,
+  email TEXT NOT NULL UNIQUE,
+  password_hash TEXT,
+  credit_limit_inr REAL DEFAULT 0,
+  payment_terms_days INTEGER DEFAULT 0,
+  active INTEGER NOT NULL DEFAULT 1,
+  created_at INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS customer_sessions (
+  token TEXT PRIMARY KEY,
+  customer_id INTEGER NOT NULL,
+  email TEXT NOT NULL,
+  created_at INTEGER NOT NULL,
+  last_seen_at INTEGER NOT NULL,
+  expires_at INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS otp_codes (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  email TEXT NOT NULL,
+  code TEXT NOT NULL,
+  purpose TEXT NOT NULL,
+  used INTEGER NOT NULL DEFAULT 0,
+  created_at INTEGER NOT NULL,
+  expires_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_otp_email_purpose ON otp_codes(email, purpose);
+
+CREATE TABLE IF NOT EXISTS ledger_entries (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  customer_id INTEGER NOT NULL,
+  entry_date INTEGER NOT NULL,
+  voucher_type TEXT NOT NULL,
+  voucher_no TEXT,
+  reference_id INTEGER,
+  description TEXT,
+  debit_inr REAL NOT NULL DEFAULT 0,
+  credit_inr REAL NOT NULL DEFAULT 0,
+  balance_inr REAL,
+  created_by TEXT,
+  created_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_ledger_customer_date ON ledger_entries(customer_id, entry_date);
+
+CREATE TABLE IF NOT EXISTS rfqs (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  customer_id INTEGER,
+  contact_name TEXT,
+  email TEXT,
+  phone TEXT,
+  items TEXT NOT NULL,
+  notes TEXT,
+  status TEXT NOT NULL DEFAULT 'open',
+  assigned_to TEXT,
+  quoted_at INTEGER,
+  created_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_rfqs_status ON rfqs(status);
+
+CREATE TABLE IF NOT EXISTS purchase_orders (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  customer_id INTEGER NOT NULL,
+  customer_po_number TEXT NOT NULL,
+  rfq_id INTEGER,
+  items TEXT NOT NULL,
+  total_inr REAL NOT NULL DEFAULT 0,
+  status TEXT NOT NULL DEFAULT 'pending',
+  reminder_count INTEGER NOT NULL DEFAULT 0,
+  last_reminded_at INTEGER,
+  approved_at INTEGER,
+  approved_by TEXT,
+  notes TEXT,
+  created_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_po_status ON purchase_orders(status);
+CREATE INDEX IF NOT EXISTS idx_po_customer ON purchase_orders(customer_id);
+
+CREATE TABLE IF NOT EXISTS payment_records (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  customer_id INTEGER NOT NULL,
+  amount_inr REAL NOT NULL,
+  payment_mode TEXT NOT NULL,
+  reference_no TEXT,
+  payment_date INTEGER NOT NULL,
+  notes TEXT,
+  recorded_by TEXT,
+  created_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_payments_customer ON payment_records(customer_id);
+
+CREATE TABLE IF NOT EXISTS file_uploads (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  entity_type TEXT NOT NULL,
+  entity_id INTEGER NOT NULL,
+  file_kind TEXT NOT NULL,
+  filename TEXT NOT NULL,
+  mime_type TEXT,
+  size_bytes INTEGER,
+  storage_path TEXT NOT NULL,
+  uploaded_by TEXT,
+  created_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_uploads_entity ON file_uploads(entity_type, entity_id);
+
+CREATE TABLE IF NOT EXISTS bank_details (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  label TEXT NOT NULL,
+  account_name TEXT NOT NULL,
+  account_no TEXT NOT NULL,
+  ifsc TEXT NOT NULL,
+  bank_name TEXT NOT NULL,
+  branch TEXT,
+  account_type TEXT,
+  is_default INTEGER NOT NULL DEFAULT 0,
+  active INTEGER NOT NULL DEFAULT 1,
+  created_at INTEGER NOT NULL
+);
 `);
 
 // Phase 4: Add new columns to consignments if not present (idempotent)
@@ -186,6 +347,28 @@ const existingRate = sqlite.prepare("SELECT value FROM settings WHERE key = ?").
 if (!existingRate) {
   sqlite.prepare("INSERT INTO settings (key, value) VALUES (?, ?)").run("usd_inr_rate", "83.5");
 }
+
+// Seed default ICICI bank details if no rows exist (Session A V2)
+const bankRow = sqlite.prepare("SELECT id FROM bank_details LIMIT 1").get();
+if (!bankRow) {
+  sqlite.prepare(`INSERT INTO bank_details
+    (label, account_name, account_no, ifsc, bank_name, branch, account_type, is_default, active, created_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, 1, 1, ?)`).run(
+    "ICICI Primary",
+    "NARMADA MOBILITY PRIVATE LIMITED",
+    "625905053961",
+    "ICIC0006259",
+    "ICICI Bank",
+    "Exhibition Road, Shahi Bhawan, Patna - 800001",
+    "Current",
+    Date.now()
+  );
+}
+
+// Cleanup expired admin sessions on boot (Session A V2)
+try {
+  sqlite.prepare("DELETE FROM admin_sessions WHERE expires_at < ?").run(Date.now());
+} catch {}
 
 export const db = drizzle(sqlite);
 
