@@ -1627,9 +1627,40 @@ export function registerV2Routes(app: Express, ctx: V2Context) {
         const c = await v2.getCustomer(cid as number);
         if (c) custMap[cid as number] = c.name;
       }
-      const quotations = rows.map((r: any) => ({
-        ...r,
-        customerName: custMap[r.customerId] || null,
+      // For any quote whose stored grandTotal is 0/null, compute it live from its items
+      // (mirrors the PDF service fallback so the list view never shows ₹0 for a real quote).
+      const quotations = await Promise.all(rows.map(async (r: any) => {
+        let grandTotal = r.grandTotal;
+        let subtotal = r.subtotal;
+        let totalTax = r.totalTax;
+        let totalDiscount = r.totalDiscount;
+        if (!grandTotal || grandTotal <= 0) {
+          try {
+            const wi = await v2.getQuotationWithItems(r.id);
+            if (wi && wi.items.length > 0) {
+              let sub = 0, disc = 0, tax = 0, grand = 0;
+              for (const it of wi.items) {
+                const lineGross = (it.qty || 0) * (it.mrp || 0);
+                const lineDisc = lineGross * ((it.discount || 0) / 100);
+                const lineNet = lineGross - lineDisc;
+                const lineTax = lineNet * ((it.gstPct || 0) / 100);
+                sub += lineGross;
+                disc += lineDisc;
+                tax += lineTax;
+                grand += lineNet + lineTax;
+              }
+              subtotal = Math.round(sub * 100) / 100;
+              totalDiscount = Math.round(disc * 100) / 100;
+              totalTax = Math.round(tax * 100) / 100;
+              grandTotal = Math.round(grand * 100) / 100;
+            }
+          } catch { /* ignore — fall back to stored values */ }
+        }
+        return {
+          ...r,
+          subtotal, totalDiscount, totalTax, grandTotal,
+          customerName: custMap[r.customerId] || null,
+        };
       }));
       res.json({ quotations, total, pages: Math.ceil(total / limit) });
     } catch (e: any) { res.status(500).json({ error: e.message }); }
