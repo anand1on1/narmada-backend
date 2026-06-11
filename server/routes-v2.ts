@@ -1820,15 +1820,52 @@ export function registerV2Routes(app: Express, ctx: V2Context) {
     try {
       const result = await v2.getQuotationWithItems(parseInt(req.params.id as string, 10));
       if (!result) return res.status(404).json({ error: "Quotation not found" });
-      if (!result.quotation.pdfUrl) return res.status(404).json({ error: "PDF not generated yet — call /finalize first" });
       const DATA_DIR2 = process.env.DATA_DIR || ".";
       const safeName = result.quotation.quoteNo.replace(/[^a-zA-Z0-9._-]/g, "_");
       const pdfPath = path.join(DATA_DIR2, "uploads", "quotations", `${safeName}.pdf`);
-      if (!fs.existsSync(pdfPath)) return res.status(404).json({ error: "PDF file not found on disk" });
+
+      // If PDF doesn't exist (draft quotation OR finalized but file lost), generate on-demand.
+      if (!fs.existsSync(pdfPath)) {
+        const { quotation, items } = result;
+        const customer = await v2.getCustomer(quotation.customerId);
+        if (!customer) return res.status(404).json({ error: "Customer not found for this quotation" });
+        const company = quotation.quotingCompanyId ? await v2.getQuotingCompany(quotation.quotingCompanyId) : null;
+        const { generateQuotationPDF } = await import("./pdf-service");
+        await generateQuotationPDF(
+          {
+            id: quotation.id, quoteNo: quotation.quoteNo,
+            currency: quotation.currency, fxRate: quotation.fxRate,
+            subtotal: quotation.subtotal, totalDiscount: quotation.totalDiscount,
+            totalTax: quotation.totalTax, grandTotal: quotation.grandTotal,
+            validUntil: quotation.validUntil, notes: quotation.notes,
+            terms: quotation.terms, createdAt: quotation.createdAt,
+          },
+          items.map((item) => ({
+            lineNo: item.lineNo, partNumber: item.partNumber, productName: item.productName,
+            hsn: item.hsn, brand: item.brand, qty: item.qty, mrp: item.mrp,
+            discount: item.discount, gstPct: item.gstPct, lineTotal: item.lineTotal,
+          })),
+          company ? {
+            name: company.name, gstin: company.gstin, address: company.address,
+            city: company.city, state: company.state, phone: company.phone,
+            email: company.email, bankName: company.bankName,
+            bankAccount: company.bankAccount, bankIfsc: company.bankIfsc,
+          } : { name: "Narmada Mobility", gstin: null, address: null, city: null, state: null, phone: null, email: null, bankName: null, bankAccount: null, bankIfsc: null },
+          {
+            name: customer.name, gstNumber: customer.gstNumber, address: customer.address,
+            city: customer.city, state: customer.state, phone: customer.phone, email: customer.email,
+          },
+        );
+      }
+
+      if (!fs.existsSync(pdfPath)) return res.status(404).json({ error: "PDF could not be generated" });
       res.setHeader("Content-Type", "application/pdf");
       res.setHeader("Content-Disposition", `inline; filename="${safeName}.pdf"`);
       fs.createReadStream(pdfPath).pipe(res);
-    } catch (e: any) { res.status(500).json({ error: e.message }); }
+    } catch (e: any) {
+      console.error("[PDF] generation error:", e);
+      res.status(500).json({ error: e.message || "PDF generation failed" });
+    }
   });
 
   // -------- PORTAL: SELF SERVICE --------

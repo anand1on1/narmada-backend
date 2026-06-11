@@ -79,7 +79,12 @@ export default function TeamQuotationEdit() {
     queryFn: async () => {
       const r = await teamFetch(token, `/api/team/quotations/${id}`);
       if (!r.ok) throw new Error("Failed to load");
-      return r.json();
+      const resp = await r.json();
+      // Backend returns { quotation, items } — flatten so the page can use a single object.
+      if (resp && resp.quotation) {
+        return { ...resp.quotation, items: resp.items || [] };
+      }
+      return resp;
     },
     enabled: !!token && !!id,
   });
@@ -279,20 +284,20 @@ export default function TeamQuotationEdit() {
 
       {/* Items table */}
       <div className="overflow-x-auto border rounded-xl mb-4">
-        <table className="w-full text-xs">
+        <table className="w-full text-sm">
           <thead>
             <tr className="bg-muted/60 text-left">
-              <th className="px-2 py-2 w-8">#</th>
-              <th className="px-2 py-2 min-w-[120px]">Part No</th>
-              <th className="px-2 py-2 min-w-[160px]">Name</th>
-              <th className="px-2 py-2 w-20">HSN</th>
-              <th className="px-2 py-2 w-24">Brand</th>
-              <th className="px-2 py-2 w-20 min-w-0">Qty</th>
-              <th className="px-2 py-2 w-24 min-w-0">MRP</th>
-              <th className="px-2 py-2 w-20 min-w-0">Disc%</th>
-              <th className="px-2 py-2 w-20 min-w-0">GST%</th>
-              <th className="px-2 py-2 w-24 text-right min-w-0">Total</th>
-              {canEdit && <th className="px-2 py-2 w-8"></th>}
+              <th className="px-3 py-2 w-10">#</th>
+              <th className="px-3 py-2 min-w-[160px]">Part No</th>
+              <th className="px-3 py-2 min-w-[220px]">Name</th>
+              <th className="px-3 py-2 min-w-[110px]">HSN</th>
+              <th className="px-3 py-2 min-w-[130px]">Brand</th>
+              <th className="px-3 py-2 min-w-[90px]">Qty</th>
+              <th className="px-3 py-2 min-w-[120px]">MRP</th>
+              <th className="px-3 py-2 min-w-[100px]">Disc%</th>
+              <th className="px-3 py-2 min-w-[90px]">GST%</th>
+              <th className="px-3 py-2 min-w-[120px] text-right">Total</th>
+              {canEdit && <th className="px-2 py-2 w-10"></th>}
             </tr>
           </thead>
           <tbody className="divide-y">
