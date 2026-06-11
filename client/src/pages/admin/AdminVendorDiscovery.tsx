@@ -37,7 +37,7 @@ export default function AdminVendorDiscovery() {
   return (
     <AdminLayout title="AI Vendor Discovery">
       <div className="bg-card border rounded-xl p-5 shadow-sm mb-6">
-        <p className="text-sm text-muted-foreground mb-3">Find new suppliers/manufacturers via AI web search (Perplexity).</p>
+        <p className="text-sm text-muted-foreground mb-3">Find new sellers / manufacturers via AI web search (Perplexity).</p>
         <div className="flex gap-2">
           <input value={query} onChange={(e) => setQuery(e.target.value)} onKeyDown={(e) => e.key === "Enter" && query.trim() && search.mutate()}
             placeholder="e.g. brake pad manufacturers for Tata trucks in Delhi NCR"
