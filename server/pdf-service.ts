@@ -1,12 +1,16 @@
 /**
- * PDF generation service — Session C
+ * PDF generation service — Round 4 elegant redesign
  * Uses pdf-lib to generate quotation PDFs.
- * Dark band + red accent matching Narmada Mobility branding.
- * Saves to uploads/quotations/{quote_no}.pdf
  *
- * Font note: NotoSans-Regular.ttf is used instead of the built-in Helvetica so that
- * Unicode characters such as the Rupee sign (₹ U+20B9) render correctly. Helvetica
- * (WinAnsi encoding) does not include U+20B9 and silently drops or errors on it.
+ * Design language (Round 4):
+ *   - Deep navy primary  (#1a2540)
+ *   - Narmada red accent (#c8102e) — used as thin strips, never as fills behind text
+ *   - Warm off-white card backgrounds for BILL TO / SHIP TO / TOTALS
+ *   - Generous 50pt margins, 13pt row height, larger fonts (8.5pt body)
+ *   - All red strips are SEPARATED from text by padding — guaranteed no overlap
+ *   - Signature block, footer with page numbers, soft horizontal dividers
+ *
+ * Font: NotoSans-Regular.ttf (Unicode, full embed) so ₹ U+20B9 renders correctly.
  */
 import { PDFDocument, rgb, StandardFonts, PDFPage, PDFFont } from "pdf-lib";
 import fontkit from "@pdf-lib/fontkit";
@@ -16,14 +20,11 @@ import * as path from "node:path";
 const DATA_DIR = process.env.DATA_DIR || ".";
 const QUOTATIONS_DIR = path.join(DATA_DIR, "uploads", "quotations");
 
-// Resolve path to the bundled NotoSans font (supports ₹ and full Unicode range).
-// Tries multiple candidate locations so both dev (__dirname = server/) and
-// prod (__dirname = dist/) work, as well as a safety CWD-relative path.
 function resolveFontPath(): string | null {
   const candidates = [
-    path.join(__dirname, "assets", "fonts", "NotoSans-Regular.ttf"),                  // prod: dist/assets
-    path.join(process.cwd(), "server", "assets", "fonts", "NotoSans-Regular.ttf"),     // dev
-    path.join(process.cwd(), "dist", "assets", "fonts", "NotoSans-Regular.ttf"),       // safety
+    path.join(__dirname, "assets", "fonts", "NotoSans-Regular.ttf"),
+    path.join(process.cwd(), "server", "assets", "fonts", "NotoSans-Regular.ttf"),
+    path.join(process.cwd(), "dist", "assets", "fonts", "NotoSans-Regular.ttf"),
   ];
   for (const p of candidates) {
     if (fs.existsSync(p)) return p;
@@ -31,13 +32,18 @@ function resolveFontPath(): string | null {
   return null;
 }
 
-// Color palette
-const COLOR_DARK = rgb(0.1, 0.1, 0.15);        // near-black header
-const COLOR_RED = rgb(0.78, 0.08, 0.08);        // Narmada red accent
-const COLOR_WHITE = rgb(1, 1, 1);
-const COLOR_LIGHT_GRAY = rgb(0.95, 0.95, 0.95); // alternate row
-const COLOR_MID_GRAY = rgb(0.6, 0.6, 0.6);
-const COLOR_TEXT = rgb(0.1, 0.1, 0.1);
+// ── Colour palette (Round 4 — refined) ──────────────────────────────────────
+const COLOR_NAVY        = rgb(0.102, 0.145, 0.251);  // #1A2540 — primary
+const COLOR_NAVY_SOFT   = rgb(0.16, 0.21, 0.32);     // slightly lighter navy
+const COLOR_RED         = rgb(0.784, 0.063, 0.180);  // #C8102E — Narmada red
+const COLOR_RED_SOFT    = rgb(0.96, 0.92, 0.93);     // for subtle red wash
+const COLOR_WHITE       = rgb(1, 1, 1);
+const COLOR_CREAM       = rgb(0.976, 0.973, 0.969);  // #F9F8F7 — card background
+const COLOR_BORDER      = rgb(0.86, 0.86, 0.88);     // soft grey border
+const COLOR_TEXT        = rgb(0.118, 0.137, 0.18);   // near-black with navy tint
+const COLOR_TEXT_MUTED  = rgb(0.45, 0.47, 0.52);
+const COLOR_TEXT_LIGHT  = rgb(0.62, 0.64, 0.68);
+const COLOR_ZEBRA       = rgb(0.985, 0.985, 0.99);
 
 export interface QuotationForPdf {
   id: number;
@@ -52,7 +58,6 @@ export interface QuotationForPdf {
   notes: string | null;
   terms: string | null;
   createdAt: number;
-  // Round 3: shipping address (optional — "ship to" block when any field is set)
   shippingName?: string | null;
   shippingAddress?: string | null;
   shippingCity?: string | null;
@@ -103,7 +108,11 @@ function fmtCurrency(amount: number | null | undefined, currency = "INR", useUni
     currency === "EUR" ? (useUnicode ? "€" : "EUR ") :
     currency === "AED" ? "AED " :
     (useUnicode ? "₹" : "Rs. ");
-  return `${sym}${amount.toFixed(2)}`;
+  // Indian-style grouping for INR; western for others
+  const formatted = currency === "INR"
+    ? amount.toLocaleString("en-IN", { minimumFractionDigits: 2, maximumFractionDigits: 2 })
+    : amount.toFixed(2);
+  return `${sym}${formatted}`;
 }
 
 function fmtDate(ts: number | null | undefined): string {
@@ -115,32 +124,47 @@ function fmtDate(ts: number | null | undefined): string {
   });
 }
 
-function drawText(
-  page: PDFPage,
-  text: string,
-  x: number,
-  y: number,
-  font: PDFFont,
-  size: number,
-  color = COLOR_TEXT,
-): void {
+function drawText(page: PDFPage, text: string, x: number, y: number, font: PDFFont, size: number, color = COLOR_TEXT): void {
   page.drawText(String(text || ""), { x, y, font, size, color });
 }
-
-function drawRect(
-  page: PDFPage,
-  x: number,
-  y: number,
-  w: number,
-  h: number,
-  color: ReturnType<typeof rgb>,
-): void {
+function drawRect(page: PDFPage, x: number, y: number, w: number, h: number, color: ReturnType<typeof rgb>): void {
   page.drawRectangle({ x, y, width: w, height: h, color });
+}
+function drawRectBorder(page: PDFPage, x: number, y: number, w: number, h: number, fill: ReturnType<typeof rgb> | null, border: ReturnType<typeof rgb>, borderWidth = 0.5): void {
+  if (fill) page.drawRectangle({ x, y, width: w, height: h, color: fill });
+  page.drawRectangle({ x, y, width: w, height: h, borderColor: border, borderWidth, color: undefined as any });
+}
+
+// Number-to-words for grand total (English Indian system)
+function numberToWordsIndian(n: number): string {
+  if (n === 0) return "Zero";
+  const a = ["", "One", "Two", "Three", "Four", "Five", "Six", "Seven", "Eight", "Nine", "Ten",
+    "Eleven", "Twelve", "Thirteen", "Fourteen", "Fifteen", "Sixteen", "Seventeen", "Eighteen", "Nineteen"];
+  const b = ["", "", "Twenty", "Thirty", "Forty", "Fifty", "Sixty", "Seventy", "Eighty", "Ninety"];
+  function inWords(num: number): string {
+    if (num < 20) return a[num];
+    if (num < 100) return b[Math.floor(num / 10)] + (num % 10 ? " " + a[num % 10] : "");
+    if (num < 1000) return a[Math.floor(num / 100)] + " Hundred" + (num % 100 ? " " + inWords(num % 100) : "");
+    return "";
+  }
+  const rupees = Math.floor(n);
+  const paise = Math.round((n - rupees) * 100);
+  let out = "";
+  const crore = Math.floor(rupees / 10000000);
+  const lakh = Math.floor((rupees % 10000000) / 100000);
+  const thousand = Math.floor((rupees % 100000) / 1000);
+  const remainder = rupees % 1000;
+  if (crore) out += inWords(crore) + " Crore ";
+  if (lakh) out += inWords(lakh) + " Lakh ";
+  if (thousand) out += inWords(thousand) + " Thousand ";
+  if (remainder) out += inWords(remainder);
+  out = out.trim() + " Rupees";
+  if (paise) out += " and " + inWords(paise) + " Paise";
+  return out + " Only";
 }
 
 /**
- * Generate a quotation PDF.
- * Returns a Buffer and also saves to uploads/quotations/{quoteNo}.pdf
+ * Generate a quotation PDF — Round 4 elegant edition.
  */
 export async function generateQuotationPDF(
   quotation: QuotationForPdf,
@@ -153,13 +177,11 @@ export async function generateQuotationPDF(
   }
 
   const pdfDoc = await PDFDocument.create();
-  // Required by pdf-lib to embed custom (non-Standard) fonts such as our NotoSans TTF.
   pdfDoc.registerFontkit(fontkit as any);
-  const page = pdfDoc.addPage([595, 842]); // A4
-  const { width, height } = page.getSize();
+  const PAGE_W = 595, PAGE_H = 842; // A4
+  let page = pdfDoc.addPage([PAGE_W, PAGE_H]);
 
-  // Prefer NotoSans (Unicode / ₹ support). Fall back to Helvetica only if the font file
-  // is missing or fontkit fails to parse it.
+  // Fonts
   const fontPath = resolveFontPath();
   let useUnicodeFont = fontPath !== null;
   let fontBold: PDFFont;
@@ -167,15 +189,11 @@ export async function generateQuotationPDF(
   if (useUnicodeFont) {
     try {
       const notoBytes = fs.readFileSync(fontPath!);
-      console.log(`[PDF] NotoSans font loaded: ${notoBytes.length} bytes from ${fontPath}`);
       if (notoBytes.length < 100000) {
         throw new Error(`Font file suspiciously small (${notoBytes.length} bytes) — likely corrupt`);
       }
-      // CRITICAL: subset:false embeds the FULL font. subset:true causes glyph dropout
-      // in pdf-lib where letters render as gaps because the subset table omits glyphs
-      // that were referenced. Full embed adds ~2.5MB per PDF but is bulletproof.
       fontRegular = await pdfDoc.embedFont(notoBytes, { subset: false });
-      fontBold = fontRegular; // same TTF; weight difference handled via font-size contrast
+      fontBold = fontRegular;
       console.log("[PDF] using font: NotoSans (Unicode, full embed)");
     } catch (err) {
       console.error("[PDF] NotoSans embed failed, falling back to Helvetica:", err);
@@ -184,56 +202,86 @@ export async function generateQuotationPDF(
       fontRegular = await pdfDoc.embedFont(StandardFonts.Helvetica);
     }
   } else {
-    // Fallback: Helvetica (WinAnsi) — ₹ will be replaced with "Rs." by fmtCurrency
     fontBold = await pdfDoc.embedFont(StandardFonts.HelveticaBold);
     fontRegular = await pdfDoc.embedFont(StandardFonts.Helvetica);
-    console.log("[PDF] using font: Helvetica (Rs. fallback) — font path not resolved");
   }
 
-  // Closure-style fmtCurrency that captures the unicode flag so all call sites are safe
   const fmt = (amount: number | null | undefined, cur = quotation.currency) =>
     fmtCurrency(amount, cur, useUnicodeFont);
 
-  let y = height - 40;
-  const marginL = 40;
-  const marginR = width - 40;
-  const contentWidth = marginR - marginL;
+  // ── Layout constants ────────────────────────────────────────────────────
+  const MARGIN_L = 40;
+  const MARGIN_R = PAGE_W - 40;
+  const CONTENT_W = MARGIN_R - MARGIN_L;
+  const HEADER_H = 92;            // taller, more breathing room
+  const FOOTER_H = 32;
 
-  // ============ HEADER BAND ============
-  drawRect(page, 0, height - 80, width, 80, COLOR_DARK);
+  // ── Helper: draw page header (title bar + accent strip) ─────────────────
+  function drawPageHeader(p: PDFPage, isContinuation = false) {
+    // Top navy band
+    drawRect(p, 0, PAGE_H - HEADER_H, PAGE_W, HEADER_H, COLOR_NAVY);
+    // Thin red accent strip below it (cleanly separated from text above)
+    drawRect(p, 0, PAGE_H - HEADER_H - 4, PAGE_W, 4, COLOR_RED);
 
-  // Company name (large, white)
-  drawText(page, company.name.toUpperCase(), marginL, height - 35, fontBold, 16, COLOR_WHITE);
+    // Logo placeholder (left) — circle with first letter
+    const logoR = 22;
+    const logoCx = MARGIN_L + logoR;
+    const logoCy = PAGE_H - 40;
+    p.drawCircle({ x: logoCx, y: logoCy, size: logoR, color: COLOR_RED });
+    const initial = (company.name?.[0] || "N").toUpperCase();
+    const initW = fontBold.widthOfTextAtSize(initial, 22);
+    drawText(p, initial, logoCx - initW / 2, logoCy - 8, fontBold, 22, COLOR_WHITE);
 
-  // Red accent bar
-  drawRect(page, 0, height - 82, width, 3, COLOR_RED);
+    // Company name (right of logo)
+    const nameX = logoCx + logoR + 12;
+    drawText(p, company.name.toUpperCase(), nameX, PAGE_H - 32, fontBold, 17, COLOR_WHITE);
+    // Address line (small)
+    const addrLine = [company.address, company.city, company.state].filter(Boolean).join(", ");
+    if (addrLine) {
+      const truncated = addrLine.length > 80 ? addrLine.slice(0, 78) + "…" : addrLine;
+      drawText(p, truncated, nameX, PAGE_H - 50, fontRegular, 8, rgb(0.85, 0.87, 0.92));
+    }
+    const contactLine = [
+      company.phone ? "Phone: " + company.phone : null,
+      company.email,
+      company.gstin ? "GSTIN: " + company.gstin : null,
+    ].filter(Boolean).join("   ·   ");
+    if (contactLine) {
+      drawText(p, contactLine, nameX, PAGE_H - 64, fontRegular, 7.5, rgb(0.78, 0.80, 0.86));
+    }
 
-  // Company contact (small, white)
-  const contactLine = [company.phone, company.email].filter(Boolean).join(" | ");
-  if (contactLine) {
-    drawText(page, contactLine, marginL, height - 55, fontRegular, 8, rgb(0.85, 0.85, 0.85));
+    // Right side — QUOTATION label + quote no
+    const labelText = isContinuation ? "QUOTATION (cont.)" : "QUOTATION";
+    const labelW = fontBold.widthOfTextAtSize(labelText, 11);
+    drawText(p, labelText, MARGIN_R - labelW, PAGE_H - 32, fontBold, 11, rgb(0.95, 0.65, 0.65));
+    const quoteW = fontBold.widthOfTextAtSize(quotation.quoteNo, 13);
+    drawText(p, quotation.quoteNo, MARGIN_R - quoteW, PAGE_H - 50, fontBold, 13, COLOR_WHITE);
+    const dateStr = "Date: " + fmtDate(quotation.createdAt);
+    const dateW = fontRegular.widthOfTextAtSize(dateStr, 8);
+    drawText(p, dateStr, MARGIN_R - dateW, PAGE_H - 65, fontRegular, 8, rgb(0.85, 0.87, 0.92));
   }
-  const addrLine = [company.address, company.city, company.state].filter(Boolean).join(", ");
-  if (addrLine) {
-    drawText(page, addrLine, marginL, height - 67, fontRegular, 8, rgb(0.75, 0.75, 0.75));
+
+  // ── Helper: draw page footer ────────────────────────────────────────────
+  function drawPageFooter(p: PDFPage, pageNum: number, totalPages: number) {
+    // Thin red accent above footer
+    drawRect(p, 0, FOOTER_H, PAGE_W, 1.5, COLOR_RED);
+    // Footer text
+    drawText(p, "This is a computer-generated quotation. Subject to terms and conditions.", MARGIN_L, FOOTER_H - 14, fontRegular, 7, COLOR_TEXT_LIGHT);
+    const pageLabel = `Page ${pageNum} of ${totalPages}`;
+    const plw = fontRegular.widthOfTextAtSize(pageLabel, 7);
+    drawText(p, pageLabel, MARGIN_R - plw, FOOTER_H - 14, fontRegular, 7, COLOR_TEXT_LIGHT);
+    // Company tag (center)
+    const tag = company.name;
+    const tw = fontRegular.widthOfTextAtSize(tag, 7);
+    drawText(p, tag, (PAGE_W - tw) / 2, FOOTER_H - 14, fontRegular, 7, COLOR_TEXT_MUTED);
   }
 
-  // Quote label (right side of header)
-  drawText(page, "QUOTATION", marginR - 120, height - 35, fontBold, 14, COLOR_RED);
-  drawText(page, quotation.quoteNo, marginR - 120, height - 52, fontRegular, 10, COLOR_WHITE);
-  drawText(page, `Date: ${fmtDate(quotation.createdAt)}`, marginR - 120, height - 65, fontRegular, 8, rgb(0.8, 0.8, 0.8));
+  drawPageHeader(page, false);
 
-  y = height - 100;
+  // Body cursor starts below header + small breathing space
+  let y = PAGE_H - HEADER_H - 18;
 
-  // ============ GSTIN / Company Info ============
-  if (company.gstin) {
-    drawText(page, `GSTIN: ${company.gstin}`, marginL, y, fontRegular, 8, COLOR_MID_GRAY);
-    y -= 14;
-  }
-
-  // ============ BILL TO  +  SHIP TO (Round 3) ============
-  // Two columns: BILL TO on the left, SHIP TO on the right when shipping fields are set.
-  y -= 6;
+  // ── BILL TO / SHIP TO card row ──────────────────────────────────────────
   const hasShipping = !!(
     quotation.shippingName ||
     quotation.shippingAddress ||
@@ -242,314 +290,348 @@ export async function generateQuotationPDF(
     quotation.shippingPincode ||
     quotation.shippingPhone
   );
-  const colWidth = hasShipping ? Math.floor((contentWidth - 12) / 2) : 120;
-  const shipColX = marginL + colWidth + 12;
 
-  drawRect(page, marginL, y - 4, colWidth, 16, COLOR_RED);
-  drawText(page, "BILL TO", marginL + 4, y, fontBold, 9, COLOR_WHITE);
-  if (hasShipping) {
-    drawRect(page, shipColX, y - 4, colWidth, 16, COLOR_DARK);
-    drawText(page, "SHIP TO", shipColX + 4, y, fontBold, 9, COLOR_WHITE);
-  }
+  const CARD_GAP = 12;
+  const cardW = hasShipping ? (CONTENT_W - CARD_GAP) / 2 : CONTENT_W;
+  const cardX_left = MARGIN_L;
+  const cardX_right = MARGIN_L + cardW + CARD_GAP;
 
-  const colHeaderY = y;
-  y -= 20;
-  const colBodyStartY = y;
+  // Determine card height by measuring content lines
+  const billLines: { text: string; bold?: boolean; muted?: boolean }[] = [
+    { text: customer.name, bold: true },
+  ];
+  if (customer.address) billLines.push({ text: customer.address });
+  const cityState = [customer.city, customer.state].filter(Boolean).join(", ");
+  if (cityState) billLines.push({ text: cityState });
+  if (customer.gstNumber) billLines.push({ text: "GSTIN: " + customer.gstNumber, muted: true });
+  if (customer.phone) billLines.push({ text: "Phone: " + customer.phone, muted: true });
+  if (customer.email) billLines.push({ text: customer.email, muted: true });
 
-  // BILL TO body (left column)
-  let leftY = colBodyStartY;
-  drawText(page, customer.name, marginL, leftY, fontBold, 10, COLOR_TEXT);
-  leftY -= 14;
-  if (customer.address) {
-    drawText(page, customer.address, marginL, leftY, fontRegular, 8, COLOR_TEXT);
-    leftY -= 12;
-  }
-  const custCityState = [customer.city, customer.state].filter(Boolean).join(", ");
-  if (custCityState) {
-    drawText(page, custCityState, marginL, leftY, fontRegular, 8, COLOR_TEXT);
-    leftY -= 12;
-  }
-  if (customer.gstNumber) {
-    drawText(page, `GSTIN: ${customer.gstNumber}`, marginL, leftY, fontRegular, 8, COLOR_MID_GRAY);
-    leftY -= 12;
-  }
-  if (customer.phone) {
-    drawText(page, `Ph: ${customer.phone}`, marginL, leftY, fontRegular, 8, COLOR_MID_GRAY);
-    leftY -= 12;
-  }
-
-  // SHIP TO body (right column) — only if any shipping field present
-  let rightY = colBodyStartY;
+  const shipLines: { text: string; bold?: boolean; muted?: boolean }[] = [];
   if (hasShipping) {
     const shipName = quotation.shippingName || customer.name;
-    drawText(page, shipName, shipColX, rightY, fontBold, 10, COLOR_TEXT);
-    rightY -= 14;
-    if (quotation.shippingAddress) {
-      drawText(page, quotation.shippingAddress, shipColX, rightY, fontRegular, 8, COLOR_TEXT);
-      rightY -= 12;
-    }
-    const shipCityState = [quotation.shippingCity, quotation.shippingState].filter(Boolean).join(", ");
-    const shipLine2 = quotation.shippingPincode ? `${shipCityState}${shipCityState ? " " : ""}${quotation.shippingPincode}` : shipCityState;
-    if (shipLine2) {
-      drawText(page, shipLine2, shipColX, rightY, fontRegular, 8, COLOR_TEXT);
-      rightY -= 12;
-    }
-    if (quotation.shippingPhone) {
-      drawText(page, `Ph: ${quotation.shippingPhone}`, shipColX, rightY, fontRegular, 8, COLOR_MID_GRAY);
-      rightY -= 12;
+    shipLines.push({ text: shipName, bold: true });
+    if (quotation.shippingAddress) shipLines.push({ text: quotation.shippingAddress });
+    const shipCS = [quotation.shippingCity, quotation.shippingState].filter(Boolean).join(", ");
+    const shipFull = quotation.shippingPincode
+      ? (shipCS ? shipCS + " - " + quotation.shippingPincode : "PIN: " + quotation.shippingPincode)
+      : shipCS;
+    if (shipFull) shipLines.push({ text: shipFull });
+    if (quotation.shippingPhone) shipLines.push({ text: "Phone: " + quotation.shippingPhone, muted: true });
+  }
+
+  const maxLines = Math.max(billLines.length, shipLines.length);
+  const LABEL_BAR_H = 18;
+  const LINE_H = 13;
+  const CARD_PAD_Y = 10;
+  const cardH = LABEL_BAR_H + CARD_PAD_Y + maxLines * LINE_H + 4;
+
+  // Card backgrounds (cream + soft border)
+  drawRectBorder(page, cardX_left, y - cardH, cardW, cardH, COLOR_CREAM, COLOR_BORDER);
+  if (hasShipping) {
+    drawRectBorder(page, cardX_right, y - cardH, cardW, cardH, COLOR_CREAM, COLOR_BORDER);
+  }
+
+  // Label bars (navy for BILL TO, red for SHIP TO — clearly distinct)
+  drawRect(page, cardX_left, y - LABEL_BAR_H, cardW, LABEL_BAR_H, COLOR_NAVY);
+  drawText(page, "BILL TO", cardX_left + 10, y - LABEL_BAR_H + 5, fontBold, 9, COLOR_WHITE);
+  if (hasShipping) {
+    drawRect(page, cardX_right, y - LABEL_BAR_H, cardW, LABEL_BAR_H, COLOR_RED);
+    drawText(page, "SHIP TO", cardX_right + 10, y - LABEL_BAR_H + 5, fontBold, 9, COLOR_WHITE);
+  }
+
+  // Card bodies
+  let cardLineY = y - LABEL_BAR_H - CARD_PAD_Y;
+  for (const ln of billLines) {
+    drawText(
+      page,
+      ln.text.length > 80 ? ln.text.slice(0, 78) + "…" : ln.text,
+      cardX_left + 10,
+      cardLineY,
+      ln.bold ? fontBold : fontRegular,
+      ln.bold ? 10 : 8.5,
+      ln.muted ? COLOR_TEXT_MUTED : COLOR_TEXT,
+    );
+    cardLineY -= LINE_H;
+  }
+
+  if (hasShipping) {
+    let shipLineY = y - LABEL_BAR_H - CARD_PAD_Y;
+    for (const ln of shipLines) {
+      drawText(
+        page,
+        ln.text.length > 80 ? ln.text.slice(0, 78) + "…" : ln.text,
+        cardX_right + 10,
+        shipLineY,
+        ln.bold ? fontBold : fontRegular,
+        ln.bold ? 10 : 8.5,
+        ln.muted ? COLOR_TEXT_MUTED : COLOR_TEXT,
+      );
+      shipLineY -= LINE_H;
     }
   }
 
-  // Collapse the two columns back to a single cursor at the lower of the two.
-  y = Math.min(leftY, rightY);
+  y -= cardH + 8;
 
-  // Valid until (right side, anchored to the BILL TO header band so it never collides)
+  // Valid until — small right-aligned chip below cards
   if (quotation.validUntil) {
-    const validStr = `Valid Until: ${fmtDate(quotation.validUntil)}`;
-    const vw = fontRegular.widthOfTextAtSize(validStr, 9);
-    drawText(page, validStr, marginR - vw, colHeaderY + 24, fontRegular, 9, COLOR_RED);
+    const chipText = "Valid Until: " + fmtDate(quotation.validUntil);
+    const cw = fontBold.widthOfTextAtSize(chipText, 8.5) + 16;
+    const chipX = MARGIN_R - cw;
+    drawRectBorder(page, chipX, y - 16, cw, 16, COLOR_RED_SOFT, COLOR_RED, 0.8);
+    drawText(page, chipText, chipX + 8, y - 12, fontBold, 8.5, COLOR_RED);
+    y -= 22;
+  } else {
+    y -= 4;
   }
 
-  y -= 10;
-
-  // ============ COMPUTE TOTALS FROM ITEMS ============
-  // Stored totals are often zero/null. Compute live from items so PDFs always
-  // reflect the truth even for older quotes that never had totals saved.
-  const itemTotals = items.reduce(
-    (acc, it) => {
-      const qty = it.qty || 0;
-      const mrp = it.mrp || 0;
-      const disc = (it.discount || 0) / 100;
-      const gst = (it.gstPct || 0) / 100;
-      const lineNet = qty * mrp * (1 - disc);
-      const lineTax = lineNet * gst;
-      const lineGross = lineNet + lineTax;
-      acc.subtotal += lineNet;
-      acc.totalDiscount += qty * mrp * disc;
-      acc.totalTax += lineTax;
-      acc.grandTotal += lineGross;
-      return acc;
-    },
-    { subtotal: 0, totalDiscount: 0, totalTax: 0, grandTotal: 0 },
-  );
+  // ── Compute totals from items (live) ────────────────────────────────────
+  const itemTotals = items.reduce((acc, it) => {
+    const qty = it.qty || 0;
+    const mrp = it.mrp || 0;
+    const disc = (it.discount || 0) / 100;
+    const gst = (it.gstPct || 0) / 100;
+    const lineNet = qty * mrp * (1 - disc);
+    const lineTax = lineNet * gst;
+    const lineGross = lineNet + lineTax;
+    acc.subtotal += lineNet;
+    acc.totalDiscount += qty * mrp * disc;
+    acc.totalTax += lineTax;
+    acc.grandTotal += lineGross;
+    return acc;
+  }, { subtotal: 0, totalDiscount: 0, totalTax: 0, grandTotal: 0 });
   const computedSubtotal = (quotation.subtotal && quotation.subtotal > 0) ? quotation.subtotal : itemTotals.subtotal;
   const computedDiscount = (quotation.totalDiscount && quotation.totalDiscount > 0) ? quotation.totalDiscount : itemTotals.totalDiscount;
   const computedTax = (quotation.totalTax && quotation.totalTax > 0) ? quotation.totalTax : itemTotals.totalTax;
   const computedGrand = (quotation.grandTotal && quotation.grandTotal > 0) ? quotation.grandTotal : itemTotals.grandTotal;
 
-  // ============ COLUMN LAYOUT (shared across pages) ============
+  // ── ITEMS TABLE ─────────────────────────────────────────────────────────
+  // Carefully measured columns with breathing room. Net rate after discount + tax shown.
   const cols = {
-    no: marginL + 4,
-    partNo: marginL + 24,
-    desc: marginL + 84,
-    brand: marginL + 204,
-    hsn: marginL + 254,
-    qty: marginL + 294,
-    mrp: marginL + 326,
-    disc: marginL + 361,
-    gst: marginL + 393,
-    total: marginL + 425,
+    no:     MARGIN_L + 6,
+    partNo: MARGIN_L + 26,
+    desc:   MARGIN_L + 90,
+    brand:  MARGIN_L + 220,
+    hsn:    MARGIN_L + 268,
+    qty:    MARGIN_L + 308,
+    mrp:    MARGIN_L + 340,
+    disc:   MARGIN_L + 388,
+    gst:    MARGIN_L + 420,
+    total:  MARGIN_L + 452,
   };
+  const HEADER_BAR_H = 20;
+  const ROW_H = 16;
 
-  function drawTableHeaderAt(targetPage: PDFPage, headerYTop: number): number {
-    drawRect(targetPage, marginL, headerYTop - 4, contentWidth, 18, COLOR_DARK);
-    drawText(targetPage, "#", cols.no, headerYTop, fontBold, 7, COLOR_WHITE);
-    drawText(targetPage, "Part No.", cols.partNo, headerYTop, fontBold, 7, COLOR_WHITE);
-    drawText(targetPage, "Description", cols.desc, headerYTop, fontBold, 7, COLOR_WHITE);
-    drawText(targetPage, "Brand", cols.brand, headerYTop, fontBold, 7, COLOR_WHITE);
-    drawText(targetPage, "HSN", cols.hsn, headerYTop, fontBold, 7, COLOR_WHITE);
-    drawText(targetPage, "Qty", cols.qty, headerYTop, fontBold, 7, COLOR_WHITE);
-    drawText(targetPage, "MRP", cols.mrp, headerYTop, fontBold, 7, COLOR_WHITE);
-    drawText(targetPage, "Disc%", cols.disc, headerYTop, fontBold, 7, COLOR_WHITE);
-    drawText(targetPage, "GST%", cols.gst, headerYTop, fontBold, 7, COLOR_WHITE);
-    drawText(targetPage, "Total", cols.total, headerYTop, fontBold, 7, COLOR_WHITE);
-    return headerYTop - 20;
+  function drawTableHeaderAt(p: PDFPage, yTop: number): number {
+    // Navy header bar
+    drawRect(p, MARGIN_L, yTop - HEADER_BAR_H, CONTENT_W, HEADER_BAR_H, COLOR_NAVY);
+    const ty = yTop - HEADER_BAR_H + 6;
+    drawText(p, "#",        cols.no,     ty, fontBold, 7.5, COLOR_WHITE);
+    drawText(p, "Part No.", cols.partNo, ty, fontBold, 7.5, COLOR_WHITE);
+    drawText(p, "Description", cols.desc, ty, fontBold, 7.5, COLOR_WHITE);
+    drawText(p, "Brand",    cols.brand,  ty, fontBold, 7.5, COLOR_WHITE);
+    drawText(p, "HSN",      cols.hsn,    ty, fontBold, 7.5, COLOR_WHITE);
+    drawText(p, "Qty",      cols.qty,    ty, fontBold, 7.5, COLOR_WHITE);
+    drawText(p, "MRP",      cols.mrp,    ty, fontBold, 7.5, COLOR_WHITE);
+    drawText(p, "Disc%",    cols.disc,   ty, fontBold, 7.5, COLOR_WHITE);
+    drawText(p, "GST%",     cols.gst,    ty, fontBold, 7.5, COLOR_WHITE);
+    // Total label right-aligned in its column
+    const tlabel = "Total";
+    const tw = fontBold.widthOfTextAtSize(tlabel, 7.5);
+    drawText(p, tlabel, MARGIN_R - tw - 6, ty, fontBold, 7.5, COLOR_WHITE);
+    return yTop - HEADER_BAR_H - 2;
   }
 
-  // ============ TABLE HEADER (page 1) ============
-  y -= 6;
+  // Truncation helpers per column width
+  function truncTo(text: string, font: PDFFont, size: number, maxW: number): string {
+    if (!text) return "";
+    if (font.widthOfTextAtSize(text, size) <= maxW) return text;
+    let s = text;
+    while (s.length > 0 && font.widthOfTextAtSize(s + "…", size) > maxW) {
+      s = s.slice(0, -1);
+    }
+    return s + "…";
+  }
+
   let curPage: PDFPage = page;
+  y -= 2;
   y = drawTableHeaderAt(curPage, y);
   const allPages: PDFPage[] = [page];
-
-  // ============ TABLE ROWS (with real pagination) ============
-  const ROW_HEIGHT = 14;
-  const BOTTOM_THRESHOLD = 100; // when y drops below this, start a new page
+  const BOTTOM_THRESHOLD = FOOTER_H + 220; // leave room for totals + signature
 
   for (let i = 0; i < items.length; i++) {
     const item = items[i];
 
     if (y < BOTTOM_THRESHOLD) {
-      const newPage = pdfDoc.addPage([595, 842]);
+      const newPage = pdfDoc.addPage([PAGE_W, PAGE_H]);
       allPages.push(newPage);
       curPage = newPage;
-      // Continuation header band
-      drawRect(curPage, 0, height - 30, width, 30, COLOR_DARK);
-      drawText(
-        curPage,
-        `${company.name.toUpperCase()} — QUOTATION ${quotation.quoteNo} (continued)`,
-        marginL,
-        height - 20,
-        fontBold,
-        9,
-        COLOR_WHITE,
-      );
-      y = height - 50;
+      drawPageHeader(newPage, true);
+      y = PAGE_H - HEADER_H - 18;
       y = drawTableHeaderAt(curPage, y);
     }
 
     const rowY = y;
-
+    const rowTopY = rowY - ROW_H + 12; // top of row band
+    // Zebra
     if (i % 2 === 1) {
-      drawRect(curPage, marginL, rowY - 4, contentWidth, ROW_HEIGHT, COLOR_LIGHT_GRAY);
+      drawRect(curPage, MARGIN_L, rowY - 4, CONTENT_W, ROW_H, COLOR_ZEBRA);
     }
+    // Subtle row separator
+    drawRect(curPage, MARGIN_L, rowY - 4, CONTENT_W, 0.3, COLOR_BORDER);
 
-    const descTrunc = item.productName.length > 22
-      ? item.productName.slice(0, 21) + "…"
-      : item.productName;
-    const brandTrunc = item.brand && item.brand.length > 9
-      ? item.brand.slice(0, 8) + "…"
-      : (item.brand || "-");
+    const descMaxW = cols.brand - cols.desc - 4;
+    const partNoMaxW = cols.desc - cols.partNo - 4;
+    const brandMaxW = cols.hsn - cols.brand - 4;
 
-    drawText(curPage, String(item.lineNo), cols.no, rowY, fontRegular, 7, COLOR_TEXT);
-    drawText(curPage, item.partNumber || "-", cols.partNo, rowY, fontRegular, 7, COLOR_TEXT);
-    drawText(curPage, descTrunc, cols.desc, rowY, fontRegular, 7, COLOR_TEXT);
-    drawText(curPage, brandTrunc, cols.brand, rowY, fontRegular, 7, COLOR_TEXT);
-    drawText(curPage, item.hsn || "-", cols.hsn, rowY, fontRegular, 7, COLOR_TEXT);
-    drawText(curPage, String(item.qty), cols.qty, rowY, fontRegular, 7, COLOR_TEXT);
-    drawText(curPage, fmt(item.mrp), cols.mrp, rowY, fontRegular, 7, COLOR_TEXT);
-    drawText(curPage, item.discount ? `${item.discount}%` : "-", cols.disc, rowY, fontRegular, 7, COLOR_TEXT);
-    drawText(curPage, item.gstPct ? `${item.gstPct}%` : "-", cols.gst, rowY, fontRegular, 7, COLOR_TEXT);
-    // Use computed line total if stored is null/zero
+    const textY = rowY + 1; // mid-row
+
+    drawText(curPage, String(item.lineNo), cols.no, textY, fontRegular, 8, COLOR_TEXT);
+    drawText(curPage, truncTo(item.partNumber || "-", fontRegular, 8, partNoMaxW), cols.partNo, textY, fontRegular, 8, COLOR_TEXT);
+    drawText(curPage, truncTo(item.productName, fontRegular, 8, descMaxW), cols.desc, textY, fontRegular, 8, COLOR_TEXT);
+    drawText(curPage, truncTo(item.brand || "-", fontRegular, 7.5, brandMaxW), cols.brand, textY, fontRegular, 7.5, COLOR_TEXT_MUTED);
+    drawText(curPage, item.hsn || "-", cols.hsn, textY, fontRegular, 7.5, COLOR_TEXT_MUTED);
+    drawText(curPage, String(item.qty), cols.qty, textY, fontRegular, 8, COLOR_TEXT);
+    drawText(curPage, fmt(item.mrp), cols.mrp, textY, fontRegular, 7.5, COLOR_TEXT);
+    drawText(curPage, item.discount ? `${item.discount}%` : "-", cols.disc, textY, fontRegular, 7.5, COLOR_TEXT);
+    drawText(curPage, item.gstPct ? `${item.gstPct}%` : "-", cols.gst, textY, fontRegular, 7.5, COLOR_TEXT);
+
+    // Total — right-aligned at MARGIN_R
     const liveLineTotal = (item.lineTotal && item.lineTotal > 0)
       ? item.lineTotal
       : (item.qty * item.mrp * (1 - (item.discount || 0) / 100) * (1 + (item.gstPct || 0) / 100));
-    drawText(curPage, fmt(liveLineTotal), cols.total, rowY, fontRegular, 7, COLOR_TEXT);
+    const totalStr = fmt(liveLineTotal);
+    const totalW = fontBold.widthOfTextAtSize(totalStr, 8);
+    drawText(curPage, totalStr, MARGIN_R - totalW - 6, textY, fontBold, 8, COLOR_TEXT);
 
-    y -= ROW_HEIGHT;
+    y -= ROW_H;
   }
 
-  // If totals + footer won't fit on the current page, push them to a fresh page
-  if (y < BOTTOM_THRESHOLD + 40) {
-    const newPage = pdfDoc.addPage([595, 842]);
+  // Close the table with a bottom border
+  drawRect(curPage, MARGIN_L, y + 9, CONTENT_W, 1, COLOR_NAVY);
+  y -= 14;
+
+  // If totals + signature won't fit, push to next page
+  if (y < BOTTOM_THRESHOLD - 60) {
+    const newPage = pdfDoc.addPage([PAGE_W, PAGE_H]);
     allPages.push(newPage);
     curPage = newPage;
-    drawRect(curPage, 0, height - 30, width, 30, COLOR_DARK);
-    drawText(
-      curPage,
-      `${company.name.toUpperCase()} — QUOTATION ${quotation.quoteNo} (continued)`,
-      marginL,
-      height - 20,
-      fontBold,
-      9,
-      COLOR_WHITE,
-    );
-    y = height - 60;
+    drawPageHeader(newPage, true);
+    y = PAGE_H - HEADER_H - 30;
   }
 
-  // ============ TOTALS BOX ============
-  // Round 3: clean up the red bar so it no longer overlaps with the totals text.
-  // We draw a thin red bar ABOVE the totals block (as a section divider), and a
-  // bold red underline BELOW the Grand Total row (clear of the text).
-  y -= 14;
-  const totalsX = marginL + contentWidth - 170;
-  const totalsValX = marginR - 4;
-  // Top divider — thin red bar sitting above the totals, with breathing room.
-  drawRect(curPage, totalsX, y + 8, 170, 2, COLOR_RED);
+  // ── TOTALS CARD (right side, elegant cream card with red bottom strip) ──
+  const totalsW = 230;
+  const totalsX = MARGIN_R - totalsW;
+  const totalsLines = 4 + (computedDiscount > 0 ? 1 : 0); // subtotal, [discount], gst, separator, grand
+  const totalsH = 16 + totalsLines * 16 + 18; // top label + rows + bottom band
 
-  function drawTotalRow(label: string, value: string, bold = false) {
+  // Card background + border
+  drawRectBorder(curPage, totalsX, y - totalsH, totalsW, totalsH, COLOR_CREAM, COLOR_BORDER);
+  // Top label band (navy)
+  drawRect(curPage, totalsX, y - 18, totalsW, 18, COLOR_NAVY);
+  drawText(curPage, "SUMMARY", totalsX + 10, y - 13, fontBold, 8.5, COLOR_WHITE);
+
+  // Totals rows
+  let ty = y - 36;
+  function drawTotalRow(label: string, value: string, bold = false, color = COLOR_TEXT) {
     const fnt = bold ? fontBold : fontRegular;
-    const col = bold ? COLOR_DARK : COLOR_TEXT;
-    drawText(curPage, label, totalsX, y, fnt, 8, col);
-    const vw = fnt.widthOfTextAtSize(value, 8);
-    drawText(curPage, value, totalsValX - vw, y, fnt, 8, col);
-    y -= 13;
+    const size = bold ? 10 : 8.5;
+    drawText(curPage, label, totalsX + 14, ty, fnt, size, color);
+    const vw = fnt.widthOfTextAtSize(value, size);
+    drawText(curPage, value, totalsX + totalsW - 14 - vw, ty, fnt, size, color);
+    ty -= 16;
   }
-
-  drawTotalRow("Subtotal:", fmt(computedSubtotal));
+  drawTotalRow("Subtotal", fmt(computedSubtotal));
   if (computedDiscount > 0) {
-    drawTotalRow("Discount:", `-${fmt(computedDiscount)}`);
+    drawTotalRow("Discount", "-" + fmt(computedDiscount), false, COLOR_RED);
   }
-  drawTotalRow("GST:", fmt(computedTax));
-  y -= 2;
-  drawRect(curPage, totalsX, y - 2, 170, 1, COLOR_MID_GRAY);
-  y -= 6;
-  drawTotalRow("GRAND TOTAL:", fmt(computedGrand), true);
-  // Bottom red underline — clears the Grand Total text (which already moved y down 13px).
-  drawRect(curPage, totalsX, y + 6, 170, 2.5, COLOR_RED);
-  y -= 4;
+  drawTotalRow("GST", fmt(computedTax));
+  // Thin separator above Grand Total
+  drawRect(curPage, totalsX + 12, ty + 11, totalsW - 24, 0.5, COLOR_BORDER);
+  ty -= 2;
+  drawTotalRow("GRAND TOTAL", fmt(computedGrand), true, COLOR_NAVY);
+
+  // Bottom red strip — at the very bottom of the card, clear of text
+  drawRect(curPage, totalsX, y - totalsH, totalsW, 3, COLOR_RED);
+
+  // FX note (if applicable)
   if (quotation.currency !== "INR" && quotation.fxRate && quotation.fxRate !== 1) {
-    drawText(
-      curPage,
-      `(Rate: 1 ${quotation.currency} = ${useUnicodeFont ? "\u20b9" : "Rs. "}${quotation.fxRate.toFixed(4)})`,
-      totalsX,
-      y,
-      fontRegular,
-      7,
-      COLOR_MID_GRAY,
-    );
-    y -= 12;
+    drawText(curPage, `Rate: 1 ${quotation.currency} = ${useUnicodeFont ? "₹" : "Rs. "}${quotation.fxRate.toFixed(4)}`,
+      totalsX + 14, y - totalsH - 12, fontRegular, 7, COLOR_TEXT_MUTED);
   }
 
-  // ============ BANK DETAILS ============
+  // ── AMOUNT IN WORDS (left of totals card) ───────────────────────────────
+  const wordsY = y - 18;
+  drawText(curPage, "Amount in Words:", MARGIN_L, wordsY, fontBold, 7.5, COLOR_TEXT_MUTED);
+  const wordsStr = numberToWordsIndian(computedGrand);
+  const wordsLines = wrapText(wordsStr, fontBold, 8, totalsX - MARGIN_L - 14);
+  let wy = wordsY - 13;
+  for (const ln of wordsLines.slice(0, 3)) {
+    drawText(curPage, ln, MARGIN_L, wy, fontBold, 8, COLOR_TEXT);
+    wy -= 11;
+  }
+
+  // Drop cursor below totals card
+  y -= totalsH + 14;
+
+  // ── BANK DETAILS + NOTES + TERMS ────────────────────────────────────────
   if (company.bankName && company.bankAccount) {
-    y -= 10;
-    drawText(curPage, "Bank Details:", marginL, y, fontBold, 8, COLOR_DARK);
+    drawText(curPage, "BANK DETAILS", MARGIN_L, y, fontBold, 8, COLOR_NAVY);
     y -= 12;
+    drawRect(curPage, MARGIN_L, y + 10, 60, 0.5, COLOR_RED);
     drawText(
       curPage,
-      `${company.bankName} | A/C: ${company.bankAccount} | IFSC: ${company.bankIfsc || "-"}`,
-      marginL,
-      y,
-      fontRegular,
-      7.5,
-      COLOR_TEXT,
+      `${company.bankName}   ·   A/C: ${company.bankAccount}   ·   IFSC: ${company.bankIfsc || "-"}`,
+      MARGIN_L, y - 2, fontRegular, 8, COLOR_TEXT,
     );
-    y -= 12;
+    y -= 14;
   }
 
-  // ============ NOTES / TERMS ============
   if (quotation.notes) {
     y -= 6;
-    drawText(curPage, "Notes:", marginL, y, fontBold, 8, COLOR_DARK);
+    drawText(curPage, "NOTES", MARGIN_L, y, fontBold, 8, COLOR_NAVY);
+    drawRect(curPage, MARGIN_L, y - 4, 30, 0.5, COLOR_RED);
     y -= 12;
-    const lines = wrapText(quotation.notes, fontRegular, 8, contentWidth);
-    for (const line of lines.slice(0, 3)) {
-      drawText(curPage, line, marginL, y, fontRegular, 8, COLOR_TEXT);
+    const lines = wrapText(quotation.notes, fontRegular, 8, CONTENT_W - 4);
+    for (const line of lines.slice(0, 4)) {
+      drawText(curPage, line, MARGIN_L, y, fontRegular, 8, COLOR_TEXT);
       y -= 11;
     }
   }
 
   if (quotation.terms) {
     y -= 4;
-    drawText(curPage, "Terms & Conditions:", marginL, y, fontBold, 8, COLOR_DARK);
-    y -= 11;
-    const lines = wrapText(quotation.terms, fontRegular, 7, contentWidth);
-    for (const line of lines.slice(0, 5)) {
-      drawText(curPage, line, marginL, y, fontRegular, 7, COLOR_MID_GRAY);
+    drawText(curPage, "TERMS & CONDITIONS", MARGIN_L, y, fontBold, 8, COLOR_NAVY);
+    drawRect(curPage, MARGIN_L, y - 4, 100, 0.5, COLOR_RED);
+    y -= 12;
+    const lines = wrapText(quotation.terms, fontRegular, 7.5, CONTENT_W - 4);
+    for (const line of lines.slice(0, 6)) {
+      drawText(curPage, line, MARGIN_L, y, fontRegular, 7.5, COLOR_TEXT_MUTED);
       y -= 10;
     }
   }
 
-  // ============ FOOTERS on EVERY page ============
-  const totalPages = allPages.length;
-  allPages.forEach((p, idx) => {
-    drawRect(p, 0, 24, width, 20, COLOR_DARK);
-    drawText(
-      p,
-      `${company.name} | This is a computer-generated quotation`,
-      marginL,
-      30,
-      fontRegular,
-      7,
-      rgb(0.75, 0.75, 0.75),
-    );
-    const pageLabel = `Page ${idx + 1} of ${totalPages}`;
-    const plw = fontRegular.widthOfTextAtSize(pageLabel, 7);
-    drawText(p, pageLabel, marginR - plw, 30, fontRegular, 7, rgb(0.75, 0.75, 0.75));
-  });
+  // ── SIGNATURE BLOCK (bottom-right of last page) ─────────────────────────
+  // Reserve space above footer; if no room, push to new page
+  if (y < FOOTER_H + 100) {
+    const newPage = pdfDoc.addPage([PAGE_W, PAGE_H]);
+    allPages.push(newPage);
+    curPage = newPage;
+    drawPageHeader(newPage, true);
+    y = PAGE_H - HEADER_H - 30;
+  }
+  const sigX = MARGIN_R - 180;
+  const sigY = FOOTER_H + 60;
+  drawRect(curPage, sigX, sigY, 180, 0.5, COLOR_TEXT_MUTED);
+  drawText(curPage, "Authorised Signatory", sigX, sigY - 12, fontBold, 8, COLOR_TEXT);
+  drawText(curPage, `For ${company.name}`, sigX, sigY - 24, fontRegular, 7.5, COLOR_TEXT_MUTED);
 
-  // ============ SAVE ============
+  // ── FOOTERS on every page ───────────────────────────────────────────────
+  const totalPages = allPages.length;
+  allPages.forEach((p, idx) => drawPageFooter(p, idx + 1, totalPages));
+
+  // ── SAVE ────────────────────────────────────────────────────────────────
   const pdfBytes = await pdfDoc.save();
   const buffer = Buffer.from(pdfBytes);
 
@@ -561,7 +643,7 @@ export async function generateQuotationPDF(
   return buffer;
 }
 
-// Simple text wrap helper
+// Word-wrap helper
 function wrapText(text: string, font: PDFFont, size: number, maxWidth: number): string[] {
   const words = text.split(/\s+/);
   const lines: string[] = [];

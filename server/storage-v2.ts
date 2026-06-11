@@ -879,6 +879,152 @@ export async function touchDataTeamUserLogin(id: number): Promise<void> {
 }
 
 // -------- PARTS MASTER --------
+
+// Round 4: enriched parts master row — adds brand/last-customer/last-discount/last-quoted-at by
+// joining the latest matching quotation_items row per (partNumber, brand) combo. Used by the
+// Parts Master page (TeamParts) and by Procurement when sourcing a part.
+export interface EnrichedPartsMasterRow {
+  id: number;
+  partNumber: string;
+  name: string;
+  brand: string | null;
+  hsn: string | null;
+  gstRate: number | null;
+  lastMrp: number | null;
+  lastSource: string | null;
+  lastUpdated: number | null;
+  useCount: number | null;
+  // enrichment
+  lastDiscount: number | null;
+  lastCustomerName: string | null;
+  lastCustomerCode: string | null;
+  lastQuotedAt: number | null;
+  totalQuotesCount: number;
+}
+
+export function searchPartsEnriched(q: string, limit = 50): EnrichedPartsMasterRow[] {
+  if (!q || q.length < 3) return [];
+  const term = q.toLowerCase();
+  const likeTerm = `%${term}%`;
+  const rows = sqlite.prepare(`
+    SELECT
+      pm.id              AS id,
+      pm.part_number     AS partNumber,
+      pm.name            AS name,
+      pm.brand           AS brand,
+      pm.hsn             AS hsn,
+      pm.gst_rate        AS gstRate,
+      pm.last_mrp        AS lastMrp,
+      pm.last_source     AS lastSource,
+      pm.last_updated    AS lastUpdated,
+      pm.use_count       AS useCount,
+      (
+        SELECT qi.discount
+        FROM quotation_items qi
+        WHERE LOWER(qi.part_number) = LOWER(pm.part_number)
+        ORDER BY qi.created_at DESC LIMIT 1
+      ) AS lastDiscount,
+      (
+        SELECT c.name
+        FROM quotation_items qi
+        LEFT JOIN quotations q ON q.id = qi.quotation_id
+        LEFT JOIN customers c ON c.id = q.customer_id
+        WHERE LOWER(qi.part_number) = LOWER(pm.part_number)
+        ORDER BY qi.created_at DESC LIMIT 1
+      ) AS lastCustomerName,
+      (
+        SELECT c.code
+        FROM quotation_items qi
+        LEFT JOIN quotations q ON q.id = qi.quotation_id
+        LEFT JOIN customers c ON c.id = q.customer_id
+        WHERE LOWER(qi.part_number) = LOWER(pm.part_number)
+        ORDER BY qi.created_at DESC LIMIT 1
+      ) AS lastCustomerCode,
+      (
+        SELECT q.created_at
+        FROM quotation_items qi
+        LEFT JOIN quotations q ON q.id = qi.quotation_id
+        WHERE LOWER(qi.part_number) = LOWER(pm.part_number)
+        ORDER BY qi.created_at DESC LIMIT 1
+      ) AS lastQuotedAt,
+      (
+        SELECT COUNT(*)
+        FROM quotation_items qi
+        WHERE LOWER(qi.part_number) = LOWER(pm.part_number)
+      ) AS totalQuotesCount
+    FROM parts_master pm
+    WHERE LOWER(pm.search_text) LIKE ?
+       OR LOWER(pm.part_number) LIKE ?
+       OR LOWER(pm.name) LIKE ?
+       OR LOWER(COALESCE(pm.brand, '')) LIKE ?
+    ORDER BY pm.use_count DESC, pm.last_updated DESC
+    LIMIT ?
+  `).all(likeTerm, likeTerm, likeTerm, likeTerm, limit) as any[];
+  return rows.map((r) => ({
+    id: r.id,
+    partNumber: r.partNumber,
+    name: r.name,
+    brand: r.brand || null,
+    hsn: r.hsn || null,
+    gstRate: r.gstRate != null ? Number(r.gstRate) : null,
+    lastMrp: r.lastMrp != null ? Number(r.lastMrp) : null,
+    lastSource: r.lastSource || null,
+    lastUpdated: r.lastUpdated ? Number(r.lastUpdated) : null,
+    useCount: r.useCount != null ? Number(r.useCount) : 0,
+    lastDiscount: r.lastDiscount != null ? Number(r.lastDiscount) : null,
+    lastCustomerName: r.lastCustomerName || null,
+    lastCustomerCode: r.lastCustomerCode || null,
+    lastQuotedAt: r.lastQuotedAt ? Number(r.lastQuotedAt) : null,
+    totalQuotesCount: Number(r.totalQuotesCount || 0),
+  }));
+}
+
+// Per-part quote history (used by the "Show history" expander on the Parts Master page).
+export interface PartQuoteHistoryRow {
+  quotationId: number;
+  quoteNo: string;
+  customerName: string | null;
+  customerCode: string | null;
+  brand: string | null;
+  mrp: number | null;
+  discount: number | null;
+  qty: number | null;
+  quotedAt: number | null;
+}
+
+export function getPartQuoteHistory(partNumber: string, limit = 10): PartQuoteHistoryRow[] {
+  if (!partNumber) return [];
+  const rows = sqlite.prepare(`
+    SELECT
+      q.id              AS quotationId,
+      q.quote_no        AS quoteNo,
+      c.name            AS customerName,
+      c.code            AS customerCode,
+      qi.brand          AS brand,
+      qi.mrp            AS mrp,
+      qi.discount       AS discount,
+      qi.qty            AS qty,
+      q.created_at      AS quotedAt
+    FROM quotation_items qi
+    LEFT JOIN quotations q ON q.id = qi.quotation_id
+    LEFT JOIN customers c ON c.id = q.customer_id
+    WHERE LOWER(qi.part_number) = LOWER(?)
+    ORDER BY q.created_at DESC
+    LIMIT ?
+  `).all(partNumber.trim(), limit) as any[];
+  return rows.map((r) => ({
+    quotationId: Number(r.quotationId),
+    quoteNo: r.quoteNo || "",
+    customerName: r.customerName || null,
+    customerCode: r.customerCode || null,
+    brand: r.brand || null,
+    mrp: r.mrp != null ? Number(r.mrp) : null,
+    discount: r.discount != null ? Number(r.discount) : null,
+    qty: r.qty != null ? Number(r.qty) : null,
+    quotedAt: r.quotedAt ? Number(r.quotedAt) : null,
+  }));
+}
+
 export async function searchParts(q: string, limit = 20): Promise<PartsMaster[]> {
   if (!q || q.length < 3) return [];
   const searchQ = `%${q.toLowerCase()}%`;
@@ -916,6 +1062,9 @@ export async function listQuotations(opts: {
   status?: string;
   customerId?: number;
   createdByUserId?: number;
+  fromDate?: number; // unix ms
+  toDate?: number;   // unix ms
+  q?: string;        // search quote_no or notes
   page?: number;
   limit?: number;
 } = {}): Promise<{ rows: Quotation[]; total: number }> {
@@ -923,6 +1072,12 @@ export async function listQuotations(opts: {
   if (opts.status) conds.push(eq(quotations.status, opts.status));
   if (opts.customerId) conds.push(eq(quotations.customerId, opts.customerId));
   if (opts.createdByUserId) conds.push(eq(quotations.createdByUserId, opts.createdByUserId));
+  if (opts.fromDate) conds.push(sql`${quotations.createdAt} >= ${opts.fromDate}`);
+  if (opts.toDate) conds.push(sql`${quotations.createdAt} <= ${opts.toDate}`);
+  if (opts.q && opts.q.trim()) {
+    const term = `%${opts.q.trim().toLowerCase()}%`;
+    conds.push(sql`(LOWER(${quotations.quoteNo}) LIKE ${term} OR LOWER(COALESCE(${quotations.notes}, '')) LIKE ${term})`);
+  }
 
   let q: any = db.select().from(quotations);
   let countQ: any = db.select({ c: sql<number>`COUNT(*)` }).from(quotations);

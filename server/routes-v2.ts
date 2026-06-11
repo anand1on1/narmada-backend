@@ -1610,7 +1610,17 @@ export function registerV2Routes(app: Express, ctx: V2Context) {
     try {
       const q = (req.query.q as string) || "";
       if (q.length < 3) return res.status(400).json({ error: "q must be at least 3 characters" });
-      res.json(await v2.searchParts(q));
+      // Round 4: enriched view — includes brand / last-customer / last-discount / last-quoted-at
+      res.json(v2.searchPartsEnriched(q, 50));
+    } catch (e: any) { res.status(500).json({ error: e.message }); }
+  });
+
+  // Round 4: per-part quote history expander
+  app.get("/api/team/parts/:partNumber/history", requireDataTeam, async (req, res) => {
+    try {
+      const partNumber = decodeURIComponent(req.params.partNumber as string);
+      const limit = req.query.limit ? Math.min(parseInt(req.query.limit as string, 10), 25) : 10;
+      res.json(v2.getPartQuoteHistory(partNumber, limit));
     } catch (e: any) { res.status(500).json({ error: e.message }); }
   });
 
@@ -1665,9 +1675,17 @@ export function registerV2Routes(app: Express, ctx: V2Context) {
     try {
       const status = (req.query.status as string) || undefined;
       const customerId = req.query.customer_id ? parseInt(req.query.customer_id as string, 10) : undefined;
+      const fromDate = req.query.from ? new Date(req.query.from as string).getTime() : undefined;
+      const toDate = req.query.to ? (() => {
+        const d = new Date(req.query.to as string);
+        // end-of-day so user picks an inclusive range
+        d.setHours(23, 59, 59, 999);
+        return d.getTime();
+      })() : undefined;
+      const qStr = (req.query.q as string) || undefined;
       const page = req.query.page ? parseInt(req.query.page as string, 10) : 1;
       const limit = 20;
-      const { rows, total } = await v2.listQuotations({ status, customerId, page, limit });
+      const { rows, total } = await v2.listQuotations({ status, customerId, fromDate, toDate, q: qStr, page, limit });
       // Enrich rows with customerName by batching customer lookup
       const custIds = Array.from(new Set(rows.map((r: any) => r.customerId).filter(Boolean)));
       const custMap: Record<number, string> = {};
