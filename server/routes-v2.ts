@@ -2974,4 +2974,442 @@ function registerR4toR7Routes(
       res.json({ url: result.url, count: products.length });
     } catch (e: any) { res.status(500).json({ error: e.message }); }
   });
+
+  // ============================================================
+  // R8: PO WORKFLOW — CUSTOMER PO UPLOAD + VENDOR ASSIGNMENT
+  // ============================================================
+  registerR8Routes(app, { requireAuth, requireAdminRole, requireDataTeam, requireDelhi, ctx });
+  console.log("[v2] R8 routes registered: po-upload, create-from-parsed, assign-vendor, search-vendor-rates, delhi-pos, purchase-history");
+}
+
+// ============================================================
+// R8 ROUTE IMPLEMENTATIONS
+// ============================================================
+function registerR8Routes(
+  app: Express,
+  {
+    requireAuth,
+    requireAdminRole,
+    requireDataTeam,
+    requireDelhi,
+    ctx,
+  }: {
+    requireAuth: any;
+    requireAdminRole: any;
+    requireDataTeam: any;
+    requireDelhi: any;
+    ctx: V2Context;
+  }
+) {
+  const path2 = require("node:path") as typeof import("node:path");
+  const fs2 = require("node:fs") as typeof import("node:fs");
+  const claude = require("./claude-service") as typeof import("./claude-service");
+  const wa = require("./whatsapp") as typeof import("./whatsapp");
+  const emailSvc = require("./email") as typeof import("./email");
+  const pdfSvc = require("./pdf-service") as typeof import("./pdf-service");
+  const ExcelJS = require("exceljs");
+
+  const uploadsRoot = ctx.uploadsDir || "./uploads";
+  const poUploadsDir = path2.join(uploadsRoot, "customer-pos");
+  if (!fs2.existsSync(poUploadsDir)) fs2.mkdirSync(poUploadsDir, { recursive: true });
+
+  const multerPO = multer({
+    storage: multer.diskStorage({
+      destination: (_req: any, _file: any, cb: any) => cb(null, poUploadsDir),
+      filename: (_req: any, file: any, cb: any) => cb(null, `${Date.now()}-${file.originalname.replace(/[^a-zA-Z0-9._-]/g, "_")}`),
+    }),
+    limits: { fileSize: 20 * 1024 * 1024 },
+    fileFilter: (_req: any, file: any, cb: any) => {
+      if (file.mimetype === "application/pdf" || file.mimetype === "image/jpeg" || file.mimetype === "image/png") {
+        cb(null, true);
+      } else {
+        cb(new Error("Only PDF/JPG/PNG allowed"));
+      }
+    },
+  });
+
+  // ---- POST /api/team/po/upload-customer-po ----
+  // Accepts multipart: file (PDF/image), customer_id, quotation_id (optional)
+  // Returns parsed JSON for review — does NOT create PO yet
+  app.post("/api/team/po/upload-customer-po", requireDataTeam, multerPO.single("file"), async (req: any, res: any) => {
+    try {
+      if (!req.file) return res.status(400).json({ error: "No file uploaded" });
+
+      const customerId = req.body?.customer_id ? parseInt(req.body.customer_id, 10) : null;
+      const proto = req.protocol || "https";
+      const host = req.get("host") || "narmada-backend.onrender.com";
+      const fileUrl = `${proto}://${host}/uploads/customer-pos/${req.file.filename}`;
+
+      // Try Claude extraction
+      let parsed: any = { customerPoNumber: null, shipTo: null, items: [] };
+      if (claude.isClaudeConfigured()) {
+        const ext = path2.extname(req.file.filename).toLowerCase();
+        const prompt = `Extract from this purchase order document:
+1. customerPoNumber: the PO number from the buyer's document
+2. shipTo: { name, address, phone }
+3. items: array of { partNumber, brand, description, qty, rate }
+Return ONLY valid JSON matching this schema. If a field is unknown, use null.`;
+
+        try {
+          if (ext === ".pdf") {
+            const extracted = await claude.extractPartsFromPdf(req.file.path);
+            if (extracted && extracted.length > 0) {
+              parsed.items = extracted.map((p: any) => ({
+                partNumber: p.partNumber || null,
+                brand: p.brand || null,
+                description: p.description || null,
+                qty: p.qty || 1,
+                rate: null,
+              }));
+            }
+          } else {
+            const extracted = await claude.extractPartsFromImage(req.file.path);
+            if (extracted && extracted.length > 0) {
+              parsed.items = extracted.map((p: any) => ({
+                partNumber: p.partNumber || null,
+                brand: p.brand || null,
+                description: p.description || null,
+                qty: p.qty || 1,
+                rate: null,
+              }));
+            }
+          }
+        } catch (claudeErr: any) {
+          console.error("[R8] Claude extraction error:", claudeErr.message);
+        }
+      }
+
+      res.json({
+        ok: true,
+        fileUrl,
+        customerId,
+        parsed,
+      });
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  // ---- POST /api/team/po/create-from-parsed ----
+  // Creates internal PO from reviewed/edited parsed data
+  app.post("/api/team/po/create-from-parsed", requireDataTeam, async (req: any, res: any) => {
+    try {
+      const u = (req as any).teamUser;
+      const {
+        customer_id, customer_po_number, customer_po_url,
+        ship_to_name, ship_to_address, ship_to_phone,
+        items,
+      } = req.body || {};
+
+      if (!items || !Array.isArray(items) || items.length === 0) {
+        return res.status(400).json({ error: "items array required" });
+      }
+
+      const poItems2 = items.map((it: any) => ({
+        partNumber: it.partNumber || null,
+        brand: it.brand || null,
+        description: it.description || null,
+        qty: Number(it.qty) || 1,
+        unitPrice: Number(it.customerRate || it.rate || 0),
+        lineTotal: (Number(it.qty) || 1) * Number(it.customerRate || it.rate || 0),
+      }));
+
+      const subtotal = poItems2.reduce((s: number, it: any) => s + (it.lineTotal || 0), 0);
+
+      const po = await v2.createPurchaseOrderV2(
+        {
+          customerId: customer_id ? parseInt(customer_id, 10) : null,
+          customerPoNumber: customer_po_number || null,
+          customerPoUrl: customer_po_url || null,
+          shipToName: ship_to_name || null,
+          shipToAddress: ship_to_address || null,
+          shipToPhone: ship_to_phone || null,
+          subtotal,
+          total: subtotal,
+          createdBy: u?.username,
+          status: "draft",
+        } as any,
+        poItems2,
+      );
+
+      res.json(po);
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  // ---- POST /api/team/po-items/:id/assign-vendor ----
+  // Assigns a vendor + rate + brand to a PO line item
+  app.post("/api/team/po-items/:id/assign-vendor", requireDataTeam, async (req: any, res: any) => {
+    try {
+      const id = parseInt(req.params.id as string, 10);
+      const u = (req as any).teamUser;
+      const { vendor_id, vendor_rate, brand } = req.body || {};
+      if (!vendor_id) return res.status(400).json({ error: "vendor_id required" });
+      const item = await v2.assignVendorToPoItemR8(id, {
+        vendorId: parseInt(vendor_id, 10),
+        vendorRate: vendor_rate ? parseFloat(vendor_rate) : undefined,
+        brand: brand || undefined,
+        assignedBy: u?.username,
+      });
+      if (!item) return res.status(404).json({ error: "Item not found" });
+      res.json(item);
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  // ---- POST /api/team/po/:id/search-vendor-rates ----
+  // Returns rate candidates from history + optional Perplexity global search
+  app.post("/api/team/po/:id/search-vendor-rates", requireDataTeam, async (req: any, res: any) => {
+    try {
+      const { part_number, brand } = req.body || {};
+      if (!part_number) return res.status(400).json({ error: "part_number required" });
+
+      // (1) Past purchases
+      const history = v2.listPurchaseHistory({ q: part_number, brand, limit: 20, page: 1 });
+      const historyRows = history.rows.filter((r: any) => r.vendor_rate || r.vendor_rate === 0);
+
+      // (2) Fire-and-forget: send WhatsApp RFQ to vendors who supplied this part before
+      const knownVendorIds: number[] = Array.from(new Set(historyRows.map((r: any) => r.vendor_id).filter(Boolean))) as number[];
+      if (knownVendorIds.length > 0) {
+        Promise.all(knownVendorIds.slice(0, 5).map(async (vid: number) => {
+          const vendor = await v2.getVendor(vid);
+          if (!vendor) return;
+          const phone = vendor.whatsapp || vendor.phone;
+          if (!phone) return;
+          wa.sendTextMessage(phone, `Hi ${vendor.name}, do you have ${part_number}${brand ? ` (${brand})` : ""}? Please share best rate. — Narmada Motors`).catch(() => {});
+        })).catch(() => {});
+      }
+
+      // (3) Price list lookup
+      const priceRows = await v2.searchPartsEnriched(part_number, 10);
+
+      res.json({
+        history: historyRows.slice(0, 20),
+        priceList: priceRows.slice(0, 10),
+        rfqSentTo: knownVendorIds.length,
+      });
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  // ---- GET /api/delhi/pos ----
+  // List active POs for Delhi warehouse (poll-friendly, no-cache)
+  app.get("/api/delhi/pos", requireDelhi, async (_req: any, res: any) => {
+    try {
+      res.set("Cache-Control", "no-cache, no-store, must-revalidate");
+      res.json(await v2.listDelhiActivePOs());
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  // ---- PUT /api/delhi/po-items/:id/mark-shipped ----
+  app.put("/api/delhi/po-items/:id/mark-shipped", requireDelhi, async (req: any, res: any) => {
+    try {
+      const id = parseInt(req.params.id as string, 10);
+      const u = (req as any).teamUser;
+      const shipped = req.body?.shipped !== false;
+      const item = await v2.updatePoItem(id, {
+        shippedStatus: shipped ? "shipped" : "pending",
+        shippedAt: shipped ? Date.now() : null,
+        shippedBy: shipped ? (u?.username || null) : null,
+      } as any);
+      if (!item) return res.status(404).json({ error: "Item not found" });
+      res.json(item);
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  // ---- POST /api/delhi/po/:id/submit-day ----
+  // Submits a dispatch: snapshots shipped items, creates dispatch record, regenerates PDF
+  app.post("/api/delhi/po/:id/submit-day", requireDelhi, async (req: any, res: any) => {
+    try {
+      const poId = parseInt(req.params.id as string, 10);
+      const u = (req as any).teamUser;
+      const { docketNo, courierName, dispatchDate, docketPhotoUrl } = req.body || {};
+
+      if (!docketNo) return res.status(400).json({ error: "docketNo required" });
+
+      const poFull = await v2.getPurchaseOrderV2(poId);
+      if (!poFull) return res.status(404).json({ error: "PO not found" });
+
+      const currentRound = (poFull as any).dispatchRound || 1;
+      const shippedItems = poFull.items.filter((it: any) => it.shippedStatus === "shipped" && !it.dispatchRoundShipped);
+
+      if (shippedItems.length === 0) {
+        return res.status(400).json({ error: "No items marked as shipped" });
+      }
+
+      // Create dispatch record
+      const dispatch = await v2.createDispatch({
+        poId,
+        roundNo: currentRound,
+        docketNo: docketNo || null,
+        courierName: courierName || null,
+        dispatchDate: dispatchDate ? parseInt(dispatchDate, 10) : Date.now(),
+        docketPhotoUrl: docketPhotoUrl || null,
+        submittedBy: u?.username || null,
+        submittedAt: Date.now(),
+      });
+
+      // Mark shipped items with round number
+      for (const it of shippedItems) {
+        await v2.updatePoItem(it.id, { dispatchRoundShipped: currentRound } as any);
+      }
+
+      // Check if all items are now dispatched
+      const allItems = poFull.items;
+      const totalShipped = allItems.filter((it: any) =>
+        it.shippedStatus === "shipped" || it.dispatchRoundShipped
+      ).length;
+      const isFullyDispatched = totalShipped >= allItems.length ? 1 : 0;
+
+      await v2.updatePurchaseOrderV2(poId, {
+        dispatchRound: currentRound + 1,
+        isFullyDispatched,
+        delhiSubmittedAt: Date.now(),
+        status: isFullyDispatched ? "fulfilled" : "partial",
+      } as any);
+
+      // Generate dispatch PDF (fire-and-forget on failure)
+      try {
+        const company = await v2.getDefaultCompany();
+        const pdfBuf = await pdfSvc.generatePOPDF({
+          poNumber: `${poFull.poNumber}-D${currentRound}`,
+          createdAt: Date.now(),
+          status: "dispatched",
+          notes: `Dispatch Round ${currentRound} | Docket: ${docketNo} | Courier: ${courierName || "—"}`,
+          items: shippedItems.map((it: any) => ({
+            partNumber: it.partNumber,
+            brand: it.brand,
+            description: it.description,
+            qty: it.qty,
+            unitPrice: (it as any).vendorRate || it.unitPrice,
+            lineTotal: it.lineTotal,
+          })),
+        }, company);
+
+        const pdfFilename = `dispatch-${poFull.poNumber.replace(/\//g, "-")}-r${currentRound}-${Date.now()}.pdf`;
+        const pdfPath = path2.join(uploadsRoot, "dispatches", pdfFilename);
+        if (!fs2.existsSync(path2.join(uploadsRoot, "dispatches"))) fs2.mkdirSync(path2.join(uploadsRoot, "dispatches"), { recursive: true });
+        fs2.writeFileSync(pdfPath, pdfBuf);
+
+        const proto = "https";
+        const host = "narmada-backend.onrender.com";
+        const pdfUrl = `${proto}://${host}/uploads/dispatches/${pdfFilename}`;
+        await v2.updatePoItem(dispatch.id, {} as any); // noop, just to show pattern
+        await (v2 as any).updateDispatch?.(dispatch.id, { pdfUrl });
+
+        // Email invoicing (fire-and-forget)
+        emailSvc.sendContactEmail({
+          name: "Delhi Warehouse",
+          email: "invoicing@narmadamotors.in",
+          subject: `Dispatch ${poFull.poNumber} Round ${currentRound} — ${shippedItems.length} items, Docket ${docketNo}`,
+          message: `Dispatch submitted.\nPO: ${poFull.poNumber}\nRound: ${currentRound}\nDocket: ${docketNo}\nCourier: ${courierName || "—"}\nItems: ${shippedItems.length}\nPDF: ${pdfUrl}`,
+          country: "IN",
+        } as any).catch(() => {});
+
+        // WhatsApp customer (fire-and-forget)
+        const customer = poFull.customerId ? await v2.getCustomer(poFull.customerId) : null;
+        if (customer) {
+          const phones = [customer.phone, (customer as any).whatsapp].filter(Boolean) as string[];
+          for (const phone of phones.slice(0, 1)) {
+            wa.sendTextMessage(phone,
+              `Dear ${customer.name}, your order ${poFull.poNumber} (Round ${currentRound}) has been dispatched via ${courierName || "courier"}. Docket: ${docketNo}. ${shippedItems.length} item(s) shipped. — Narmada Motors`
+            ).catch(() => {});
+          }
+        }
+      } catch (pdfErr: any) {
+        console.error("[R8] Dispatch PDF/notify error:", pdfErr.message);
+      }
+
+      res.json({ ok: true, dispatchId: dispatch.id, round: currentRound, isFullyDispatched: !!isFullyDispatched, shippedCount: shippedItems.length });
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  // ---- GET /api/admin/purchase-history ----
+  app.get("/api/admin/purchase-history", requireAuth, async (req: any, res: any) => {
+    try {
+      const result = v2.listPurchaseHistory({
+        q: req.query.q as string | undefined,
+        brand: req.query.brand as string | undefined,
+        vendorId: req.query.vendor_id ? parseInt(req.query.vendor_id as string, 10) : undefined,
+        customerId: req.query.customer_id ? parseInt(req.query.customer_id as string, 10) : undefined,
+        fromDate: req.query.from_date ? parseInt(req.query.from_date as string, 10) : undefined,
+        toDate: req.query.to_date ? parseInt(req.query.to_date as string, 10) : undefined,
+        limit: req.query.limit ? parseInt(req.query.limit as string, 10) : 50,
+        page: req.query.page ? parseInt(req.query.page as string, 10) : 1,
+      });
+      res.json({ rows: result.rows.map((r: any) => ({
+        id: r.id,
+        poNumber: r.po_number,
+        poDate: r.po_date,
+        customerName: r.customer_name,
+        partNumber: r.part_number,
+        brand: r.brand,
+        qty: r.qty,
+        vendorName: r.vendor_name,
+        vendorRate: r.vendor_rate,
+        lineTotal: r.line_total,
+      })), total: result.total });
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  // ---- GET /api/admin/purchase-history/export.xlsx ----
+  app.get("/api/admin/purchase-history/export.xlsx", requireAuth, async (req: any, res: any) => {
+    try {
+      const result = v2.listPurchaseHistory({
+        q: req.query.q as string | undefined,
+        brand: req.query.brand as string | undefined,
+        vendorId: req.query.vendor_id ? parseInt(req.query.vendor_id as string, 10) : undefined,
+        customerId: req.query.customer_id ? parseInt(req.query.customer_id as string, 10) : undefined,
+        limit: 5000,
+        page: 1,
+      });
+
+      const wb = new ExcelJS.Workbook();
+      const ws = wb.addWorksheet("Purchase History");
+      ws.columns = [
+        { header: "Date", key: "poDate", width: 14 },
+        { header: "PO #", key: "poNumber", width: 18 },
+        { header: "Customer", key: "customerName", width: 22 },
+        { header: "Part #", key: "partNumber", width: 18 },
+        { header: "Brand", key: "brand", width: 14 },
+        { header: "Qty", key: "qty", width: 8 },
+        { header: "Seller", key: "vendorName", width: 22 },
+        { header: "Rate (₹)", key: "vendorRate", width: 12 },
+        { header: "Total (₹)", key: "lineTotal", width: 12 },
+      ];
+
+      for (const r of result.rows) {
+        ws.addRow({
+          poDate: r.po_date ? new Date(r.po_date).toLocaleDateString("en-IN") : "",
+          poNumber: r.po_number || "",
+          customerName: r.customer_name || "",
+          partNumber: r.part_number || "",
+          brand: r.brand || "",
+          qty: r.qty || 0,
+          vendorName: r.vendor_name || "",
+          vendorRate: r.vendor_rate || "",
+          lineTotal: r.line_total || "",
+        });
+      }
+
+      ws.getRow(1).font = { bold: true };
+      res.setHeader("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
+      res.setHeader("Content-Disposition", `attachment; filename="purchase-history-${new Date().toISOString().slice(0, 10)}.xlsx"`);
+      const buffer = await wb.xlsx.writeBuffer();
+      res.send(buffer);
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  });
 }

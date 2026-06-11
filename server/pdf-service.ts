@@ -674,6 +674,8 @@ export interface PoForPdf {
   tax?: number | null;
   total?: number | null;
   notes?: string | null;
+  shipToName?: string | null;
+  shipToAddress?: string | null;
   items?: Array<{
     partNumber?: string | null;
     brand?: string | null;
@@ -683,6 +685,8 @@ export interface PoForPdf {
     discountPct?: number | null;
     taxPct?: number | null;
     lineTotal?: number | null;
+    vendorName?: string | null;
+    vendorRate?: number | null;
   }>;
 }
 
@@ -716,13 +720,14 @@ export async function generatePOPDF(po: PoForPdf, company: any): Promise<Buffer>
 
   // Table header
   const cols = [
-    { x: M, w: 30, label: "#" },
-    { x: M + 30, w: 90, label: "Part No" },
-    { x: M + 120, w: 75, label: "Brand" },
-    { x: M + 195, w: 150, label: "Description" },
-    { x: M + 345, w: 35, label: "Qty" },
-    { x: M + 380, w: 65, label: "Rate" },
-    { x: M + 445, w: 70, label: "Amount" },
+    { x: M, w: 25, label: "#" },
+    { x: M + 25, w: 80, label: "Part No" },
+    { x: M + 105, w: 55, label: "Brand" },
+    { x: M + 160, w: 110, label: "Description" },
+    { x: M + 270, w: 30, label: "Qty" },
+    { x: M + 300, w: 65, label: "Seller" },
+    { x: M + 365, w: 55, label: "Rate" },
+    { x: M + 420, w: 55, label: "Amount" },
   ];
   drawRect(page, M, y - 4, PAGE_W - 2 * M, 18, COLOR_CREAM);
   for (const c of cols) drawText(page, c.label, c.x + 2, y, bold, 9, COLOR_NAVY);
@@ -732,14 +737,16 @@ export async function generatePOPDF(po: PoForPdf, company: any): Promise<Buffer>
   for (let i = 0; i < items.length; i++) {
     const it = items[i];
     if (y < 120) { page = pdfDoc.addPage([PAGE_W, PAGE_H]); y = PAGE_H - M; }
-    const descLines = wrapText(String(it.description || ""), reg, 8, 145);
+    const descLines = wrapText(String(it.description || ""), reg, 8, 105);
     drawText(page, String(i + 1), cols[0].x + 2, y, reg, 8);
     drawText(page, String(it.partNumber || "-"), cols[1].x + 2, y, reg, 8);
     drawText(page, String(it.brand || "-"), cols[2].x + 2, y, reg, 8);
     drawText(page, descLines[0] || "-", cols[3].x + 2, y, reg, 8);
     drawText(page, String(it.qty ?? 0), cols[4].x + 2, y, reg, 8);
-    drawText(page, fmtCurrency(it.unitPrice, "INR", false), cols[5].x + 2, y, reg, 8);
-    drawText(page, fmtCurrency(it.lineTotal, "INR", false), cols[6].x + 2, y, reg, 8);
+    drawText(page, String(it.vendorName || "-"), cols[5].x + 2, y, reg, 8);
+    const rate = it.vendorRate ?? it.unitPrice;
+    drawText(page, fmtCurrency(rate, "INR", false), cols[6].x + 2, y, reg, 8);
+    drawText(page, fmtCurrency(it.lineTotal, "INR", false), cols[7].x + 2, y, reg, 8);
     y -= 14;
     for (let l = 1; l < descLines.length; l++) { drawText(page, descLines[l], cols[3].x + 2, y, reg, 8); y -= 12; }
     drawRect(page, M, y + 4, PAGE_W - 2 * M, 0.5, COLOR_BORDER);

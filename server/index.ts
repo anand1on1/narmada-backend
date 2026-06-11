@@ -93,8 +93,9 @@ app.use((req, res, next) => {
 (async () => {
   // ---- R4.4→R7: ensure additive tables + seed defaults on boot ----
   try {
-    const { runR4toR7Migrations } = await import("./migrations");
+    const { runR4toR7Migrations, runR8Migrations } = await import("./migrations");
     runR4toR7Migrations();
+    runR8Migrations();
     const { seedR5Defaults } = await import("./seed-r5");
     await seedR5Defaults();
   } catch (e: any) {

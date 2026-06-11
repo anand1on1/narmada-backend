@@ -754,6 +754,16 @@ export const purchaseOrdersV2 = sqliteTable("purchase_orders_v2", {
   createdBy: text("created_by"),
   createdAt: integer("created_at").notNull().$defaultFn(() => Date.now()),
   updatedAt: integer("updated_at").notNull().$defaultFn(() => Date.now()),
+  // R8 additions
+  customerPoNumber: text("customer_po_number"),
+  customerPoUrl: text("customer_po_url"),
+  customerPoParsedJson: text("customer_po_parsed_json"),
+  dispatchRound: integer("dispatch_round").default(1),
+  isFullyDispatched: integer("is_fully_dispatched").default(0),
+  delhiSubmittedAt: integer("delhi_submitted_at"),
+  shipToName: text("ship_to_name"),
+  shipToAddress: text("ship_to_address"),
+  shipToPhone: text("ship_to_phone"),
 });
 export const insertPurchaseOrderV2Schema = createInsertSchema(purchaseOrdersV2).omit({ id: true, createdAt: true, updatedAt: true });
 export type InsertPurchaseOrderV2 = z.infer<typeof insertPurchaseOrderV2Schema>;
@@ -781,6 +791,14 @@ export const poItems = sqliteTable("po_items", {
   collectedAt: integer("collected_at"),
   packedAt: integer("packed_at"),
   dispatchedAt: integer("dispatched_at"),
+  // R8 additions
+  vendorRate: real("vendor_rate"),
+  assignedAt: integer("assigned_at"),
+  assignedBy: text("assigned_by"),
+  shippedStatus: text("shipped_status").default("pending"),
+  shippedAt: integer("shipped_at"),
+  shippedBy: text("shipped_by"),
+  dispatchRoundShipped: integer("dispatch_round_shipped"),
 });
 export const insertPoItemSchema = createInsertSchema(poItems).omit({ id: true });
 export type InsertPoItem = z.infer<typeof insertPoItemSchema>;
@@ -988,3 +1006,21 @@ export const taskItems = sqliteTable("task_items", {
 export const insertTaskItemSchema = createInsertSchema(taskItems).omit({ id: true, createdAt: true, updatedAt: true });
 export type InsertTaskItem = z.infer<typeof insertTaskItemSchema>;
 export type TaskItem = typeof taskItems.$inferSelect;
+
+// -------- R8: DISPATCHES --------
+export const dispatches = sqliteTable("dispatches", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  poId: integer("po_id").notNull(),
+  roundNo: integer("round_no").notNull().default(1),
+  docketNo: text("docket_no"),
+  courierName: text("courier_name"),
+  dispatchDate: integer("dispatch_date"),
+  docketPhotoUrl: text("docket_photo_url"),
+  pdfUrl: text("pdf_url"),
+  submittedBy: text("submitted_by"),
+  submittedAt: integer("submitted_at"),
+  createdAt: integer("created_at").notNull().$defaultFn(() => Date.now()),
+});
+export const insertDispatchSchema = createInsertSchema(dispatches).omit({ id: true, createdAt: true });
+export type InsertDispatch = z.infer<typeof insertDispatchSchema>;
+export type Dispatch = typeof dispatches.$inferSelect;

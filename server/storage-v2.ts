@@ -1532,7 +1532,7 @@ import {
   vendors, vendorContacts, companies, purchaseOrdersV2, poItems,
   rfqsV2, rfqItems, rfqVendors, rfqQuotes, vendorConversations,
   warehouses, warehouseTransfers, rateHistory, leads, leadActivities,
-  targets, announcements, taskItems, ledgerQueries,
+  targets, announcements, taskItems, ledgerQueries, dispatches,
 } from "@shared/schema";
 import type {
   Vendor, InsertVendor, VendorContact,
@@ -1543,6 +1543,7 @@ import type {
   WarehouseTransfer, InsertWarehouseTransfer, RateHistory,
   Lead, InsertLead, LeadActivity, Target, InsertTarget,
   Announcement, InsertAnnouncement, TaskItem, InsertTaskItem,
+  InsertDispatch, Dispatch,
 } from "@shared/schema";
 
 function seqNumber(table: any, col: any, prefix: string): string {
@@ -1961,4 +1962,123 @@ export async function createConsignmentFromDispatch(input: {
     createdAt: now,
     updatedAt: now,
   } as any).returning().get();
+}
+
+// -------- R8: DISPATCHES --------
+export async function createDispatch(data: Partial<InsertDispatch>): Promise<Dispatch> {
+  const now = Date.now();
+  return db.insert(dispatches).values({ ...data, createdAt: now } as any).returning().get();
+}
+
+export async function listDispatches(poId: number): Promise<Dispatch[]> {
+  return db.select().from(dispatches).where(eq(dispatches.poId, poId)).orderBy(dispatches.roundNo).all();
+}
+
+// -------- R8: ASSIGN VENDOR TO PO ITEM (enhanced) --------
+export async function assignVendorToPoItemR8(
+  id: number,
+  data: { vendorId: number; vendorRate?: number; brand?: string; assignedBy?: string }
+): Promise<PoItem | undefined> {
+  const now = Date.now();
+  const item = db.update(poItems)
+    .set({
+      vendorId: data.vendorId,
+      vendorRate: data.vendorRate ?? null,
+      brand: data.brand || undefined,
+      assignedAt: now,
+      assignedBy: data.assignedBy || null,
+      purchaseCost: data.vendorRate ?? null,
+    } as any)
+    .where(eq(poItems.id, id))
+    .returning().get();
+  if (item && item.partNumber) {
+    await recordRate({
+      partNumber: item.partNumber,
+      brand: item.brand || undefined,
+      vendorId: data.vendorId,
+      rate: data.vendorRate,
+      source: "po",
+      sourceId: id,
+    });
+  }
+  return item;
+}
+
+// -------- R8: PURCHASE HISTORY --------
+export function listPurchaseHistory(opts: {
+  q?: string;
+  brand?: string;
+  vendorId?: number;
+  customerId?: number;
+  fromDate?: number;
+  toDate?: number;
+  limit?: number;
+  page?: number;
+}): { rows: any[]; total: number } {
+  const limit = Math.min(opts.limit || 50, 200);
+  const offset = ((opts.page || 1) - 1) * limit;
+
+  const conditions: string[] = [];
+  const params: any[] = [];
+
+  if (opts.q) {
+    conditions.push(`(pi.part_number LIKE ? OR pi.description LIKE ?)`);
+    const like = `%${opts.q}%`;
+    params.push(like, like);
+  }
+  if (opts.brand) { conditions.push(`pi.brand LIKE ?`); params.push(`%${opts.brand}%`); }
+  if (opts.vendorId) { conditions.push(`pi.vendor_id = ?`); params.push(opts.vendorId); }
+  if (opts.customerId) { conditions.push(`po.customer_id = ?`); params.push(opts.customerId); }
+  if (opts.fromDate) { conditions.push(`po.created_at >= ?`); params.push(opts.fromDate); }
+  if (opts.toDate) { conditions.push(`po.created_at <= ?`); params.push(opts.toDate); }
+
+  const where = conditions.length > 0 ? `WHERE ${conditions.join(" AND ")}` : "";
+
+  const rows = sqlite.prepare(`
+    SELECT
+      pi.id, po.po_number, po.created_at AS po_date,
+      c.name AS customer_name,
+      pi.part_number, pi.brand, pi.qty,
+      v.name AS vendor_name,
+      COALESCE(pi.vendor_rate, pi.purchase_cost) AS vendor_rate,
+      pi.line_total
+    FROM po_items pi
+    LEFT JOIN purchase_orders_v2 po ON po.id = pi.po_id
+    LEFT JOIN customers c ON c.id = po.customer_id
+    LEFT JOIN vendors v ON v.id = pi.vendor_id
+    ${where}
+    ORDER BY po.created_at DESC
+    LIMIT ? OFFSET ?
+  `).all(...params, limit, offset) as any[];
+
+  const countRow = sqlite.prepare(`
+    SELECT COUNT(*) AS cnt
+    FROM po_items pi
+    LEFT JOIN purchase_orders_v2 po ON po.id = pi.po_id
+    LEFT JOIN customers c ON c.id = po.customer_id
+    LEFT JOIN vendors v ON v.id = pi.vendor_id
+    ${where}
+  `).get(...params) as any;
+
+  return { rows, total: countRow?.cnt || 0 };
+}
+
+// -------- R8: DELHI PO LIST --------
+export async function listDelhiActivePOs(): Promise<any[]> {
+  const rows = sqlite.prepare(`
+    SELECT
+      po.id, po.po_number, po.status, po.created_at,
+      po.dispatch_round, po.is_fully_dispatched,
+      po.ship_to_name, po.ship_to_address, po.ship_to_phone,
+      c.name AS customer_name,
+      COUNT(pi.id) AS item_count,
+      SUM(CASE WHEN pi.shipped_status = 'shipped' THEN 1 ELSE 0 END) AS shipped_count
+    FROM purchase_orders_v2 po
+    LEFT JOIN customers c ON c.id = po.customer_id
+    LEFT JOIN po_items pi ON pi.po_id = po.id
+    WHERE po.is_fully_dispatched = 0 AND po.status NOT IN ('draft', 'cancelled')
+    GROUP BY po.id
+    ORDER BY po.created_at DESC
+  `).all() as any[];
+  return rows;
 }
