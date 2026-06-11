@@ -2,7 +2,7 @@ import { TeamLayout } from "./TeamLayout";
 import { teamFetch, useTeamAuth } from "@/lib/team-auth";
 import { useQuery } from "@tanstack/react-query";
 import { Link } from "wouter";
-import { FileText } from "lucide-react";
+import { FileText, Pencil } from "lucide-react";
 
 interface PO { id: number; poNumber: string; customerId: number | null; status: string; total: number | null; createdAt: number; }
 const STATUS_COLOR: Record<string, string> = { draft: "bg-slate-500/15 text-slate-700", open: "bg-blue-500/15 text-blue-700", fulfilled: "bg-emerald-500/15 text-emerald-700", cancelled: "bg-red-500/15 text-red-700" };
@@ -38,9 +38,14 @@ export default function TeamPOs() {
                 <td className="px-3 py-3"><span className={`text-xs font-bold rounded px-2 py-1 ${STATUS_COLOR[p.status] || "bg-muted"}`}>{p.status}</span></td>
                 <td className="px-3 py-3 text-xs text-muted-foreground">{fmt(p.createdAt)}</td>
                 <td className="px-3 py-3 text-right">
-                  <Link href={`/team/purchase-orders/${p.id}`}>
-                    <a className="text-accent font-semibold inline-flex items-center gap-1 hover:underline"><FileText className="w-4 h-4" /> Open</a>
-                  </Link>
+                  <div className="flex items-center justify-end gap-3">
+                    <Link href={`/team/purchase-orders/${p.id}`}>
+                      <a className="text-accent font-semibold inline-flex items-center gap-1 hover:underline text-xs"><FileText className="w-3.5 h-3.5" /> View</a>
+                    </Link>
+                    <Link href={`/team/purchase-orders/${p.id}/edit`}>
+                      <a className="text-muted-foreground font-semibold inline-flex items-center gap-1 hover:text-foreground text-xs"><Pencil className="w-3.5 h-3.5" /> Assign</a>
+                    </Link>
+                  </div>
                 </td>
               </tr>
             ))}</tbody>

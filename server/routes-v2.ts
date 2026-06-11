@@ -3007,7 +3007,7 @@ function registerR8Routes(
   const wa = require("./whatsapp") as typeof import("./whatsapp");
   const emailSvc = require("./email") as typeof import("./email");
   const pdfSvc = require("./pdf-service") as typeof import("./pdf-service");
-  const ExcelJS = require("exceljs");
+  const XLSX = require("xlsx");
 
   const uploadsRoot = ctx.uploadsDir || "./uploads";
   const poUploadsDir = path2.join(uploadsRoot, "customer-pos");
@@ -3375,38 +3375,26 @@ Return ONLY valid JSON matching this schema. If a field is unknown, use null.`;
         page: 1,
       });
 
-      const wb = new ExcelJS.Workbook();
-      const ws = wb.addWorksheet("Purchase History");
-      ws.columns = [
-        { header: "Date", key: "poDate", width: 14 },
-        { header: "PO #", key: "poNumber", width: 18 },
-        { header: "Customer", key: "customerName", width: 22 },
-        { header: "Part #", key: "partNumber", width: 18 },
-        { header: "Brand", key: "brand", width: 14 },
-        { header: "Qty", key: "qty", width: 8 },
-        { header: "Seller", key: "vendorName", width: 22 },
-        { header: "Rate (₹)", key: "vendorRate", width: 12 },
-        { header: "Total (₹)", key: "lineTotal", width: 12 },
+      const sheetData = [
+        ["Date", "PO #", "Customer", "Part #", "Brand", "Qty", "Seller", "Rate (\u20b9)", "Total (\u20b9)"],
+        ...result.rows.map((r: any) => [
+          r.po_date ? new Date(r.po_date).toLocaleDateString("en-IN") : "",
+          r.po_number || "",
+          r.customer_name || "",
+          r.part_number || "",
+          r.brand || "",
+          r.qty || 0,
+          r.vendor_name || "",
+          r.vendor_rate != null ? r.vendor_rate : "",
+          r.line_total != null ? r.line_total : "",
+        ]),
       ];
-
-      for (const r of result.rows) {
-        ws.addRow({
-          poDate: r.po_date ? new Date(r.po_date).toLocaleDateString("en-IN") : "",
-          poNumber: r.po_number || "",
-          customerName: r.customer_name || "",
-          partNumber: r.part_number || "",
-          brand: r.brand || "",
-          qty: r.qty || 0,
-          vendorName: r.vendor_name || "",
-          vendorRate: r.vendor_rate || "",
-          lineTotal: r.line_total || "",
-        });
-      }
-
-      ws.getRow(1).font = { bold: true };
+      const wb = XLSX.utils.book_new();
+      const ws = XLSX.utils.aoa_to_sheet(sheetData);
+      XLSX.utils.book_append_sheet(wb, ws, "Purchase History");
+      const buffer: Buffer = XLSX.write(wb, { type: "buffer", bookType: "xlsx" });
       res.setHeader("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
       res.setHeader("Content-Disposition", `attachment; filename="purchase-history-${new Date().toISOString().slice(0, 10)}.xlsx"`);
-      const buffer = await wb.xlsx.writeBuffer();
       res.send(buffer);
     } catch (e: any) {
       res.status(500).json({ error: e.message });

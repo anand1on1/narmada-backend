@@ -102,6 +102,7 @@ import TeamRFQs from "@/pages/team/TeamRFQs";
 import TeamRFQDetail from "@/pages/team/TeamRFQDetail";
 // Round 8 — new team pages
 import TeamPOUpload from "@/pages/team/TeamPOUpload";
+import TeamPOEdit from "@/pages/team/TeamPOEdit";
 // Delhi warehouse portal
 import DelhiLogin from "@/pages/delhi/DelhiLogin";
 import DelhiDashboard from "@/pages/delhi/DelhiDashboard";
@@ -235,11 +236,13 @@ function AppRouter() {
         <Route path="/team/quotations" component={TeamQuotations} />
         <Route path="/team/customers" component={TeamCustomers} />
         <Route path="/team/parts" component={TeamParts} />
+        {/* Round 8 — edit route BEFORE :id catch-all */}
+        <Route path="/team/purchase-orders/:id/edit" component={TeamPOEdit} />
         <Route path="/team/purchase-orders/:id" component={TeamPODetail} />
         <Route path="/team/purchase-orders" component={TeamPOs} />
         <Route path="/team/rfqs/:id" component={TeamRFQDetail} />
         <Route path="/team/rfqs" component={TeamRFQs} />
-        {/* Round 8 — new team routes */}
+        {/* Round 8 — upload route */}
         <Route path="/team/po/upload" component={TeamPOUpload} />
         <Route component={NotFound} />
       </Switch>
