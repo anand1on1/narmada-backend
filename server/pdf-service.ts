@@ -288,13 +288,14 @@ export async function generateQuotationPDF(
   const cols = {
     no: marginL + 4,
     partNo: marginL + 24,
-    desc: marginL + 90,
-    hsn: marginL + 270,
-    qty: marginL + 320,
-    mrp: marginL + 355,
-    disc: marginL + 395,
-    gst: marginL + 430,
-    total: marginL + 465,
+    desc: marginL + 84,
+    brand: marginL + 204,
+    hsn: marginL + 254,
+    qty: marginL + 294,
+    mrp: marginL + 326,
+    disc: marginL + 361,
+    gst: marginL + 393,
+    total: marginL + 425,
   };
 
   function drawTableHeaderAt(targetPage: PDFPage, headerYTop: number): number {
@@ -302,6 +303,7 @@ export async function generateQuotationPDF(
     drawText(targetPage, "#", cols.no, headerYTop, fontBold, 7, COLOR_WHITE);
     drawText(targetPage, "Part No.", cols.partNo, headerYTop, fontBold, 7, COLOR_WHITE);
     drawText(targetPage, "Description", cols.desc, headerYTop, fontBold, 7, COLOR_WHITE);
+    drawText(targetPage, "Brand", cols.brand, headerYTop, fontBold, 7, COLOR_WHITE);
     drawText(targetPage, "HSN", cols.hsn, headerYTop, fontBold, 7, COLOR_WHITE);
     drawText(targetPage, "Qty", cols.qty, headerYTop, fontBold, 7, COLOR_WHITE);
     drawText(targetPage, "MRP", cols.mrp, headerYTop, fontBold, 7, COLOR_WHITE);
@@ -349,13 +351,17 @@ export async function generateQuotationPDF(
       drawRect(curPage, marginL, rowY - 4, contentWidth, ROW_HEIGHT, COLOR_LIGHT_GRAY);
     }
 
-    const descTrunc = item.productName.length > 35
-      ? item.productName.slice(0, 34) + "…"
+    const descTrunc = item.productName.length > 22
+      ? item.productName.slice(0, 21) + "…"
       : item.productName;
+    const brandTrunc = item.brand && item.brand.length > 9
+      ? item.brand.slice(0, 8) + "…"
+      : (item.brand || "-");
 
     drawText(curPage, String(item.lineNo), cols.no, rowY, fontRegular, 7, COLOR_TEXT);
     drawText(curPage, item.partNumber || "-", cols.partNo, rowY, fontRegular, 7, COLOR_TEXT);
     drawText(curPage, descTrunc, cols.desc, rowY, fontRegular, 7, COLOR_TEXT);
+    drawText(curPage, brandTrunc, cols.brand, rowY, fontRegular, 7, COLOR_TEXT);
     drawText(curPage, item.hsn || "-", cols.hsn, rowY, fontRegular, 7, COLOR_TEXT);
     drawText(curPage, String(item.qty), cols.qty, rowY, fontRegular, 7, COLOR_TEXT);
     drawText(curPage, fmt(item.mrp), cols.mrp, rowY, fontRegular, 7, COLOR_TEXT);

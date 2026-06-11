@@ -1824,8 +1824,9 @@ export function registerV2Routes(app: Express, ctx: V2Context) {
       const safeName = result.quotation.quoteNo.replace(/[^a-zA-Z0-9._-]/g, "_");
       const pdfPath = path.join(DATA_DIR2, "uploads", "quotations", `${safeName}.pdf`);
 
-      // If PDF doesn't exist (draft quotation OR finalized but file lost), generate on-demand.
-      if (!fs.existsSync(pdfPath)) {
+      // ALWAYS regenerate the PDF on download so the file reflects the current DB state
+      // (avoids stale cached file after quotation updates / schema changes / column additions).
+      {
         const { quotation, items } = result;
         const customer = await v2.getCustomer(quotation.customerId);
         if (!customer) return res.status(404).json({ error: "Customer not found for this quotation" });
