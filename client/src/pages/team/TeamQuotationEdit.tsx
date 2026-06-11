@@ -4,7 +4,7 @@ import { TeamLayout } from "./TeamLayout";
 import { teamFetch, useTeamAuth } from "@/lib/team-auth";
 import { useToast } from "@/hooks/use-toast";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { Trash2, Plus, RefreshCw, Download, Send, Search, Sparkles, Truck, Building2, User2 } from "lucide-react";
+import { Trash2, Plus, RefreshCw, Download, Send, Search, Sparkles, Truck, Building2, User2, ShoppingCart } from "lucide-react";
 
 function currencySym(c: string | undefined | null): string {
   if (c === "USD") return "$";
@@ -362,6 +362,24 @@ export default function TeamQuotationEdit() {
     URL.revokeObjectURL(url);
   }
 
+  const convertMut = useMutation({
+    mutationFn: async () => {
+      if (!token) throw new Error("Not authenticated");
+      const r = await teamFetch(token, `/api/team/quotations/${id}/convert-to-po`, { method: "POST", body: JSON.stringify({}) });
+      const text = await r.text();
+      let body: any = {};
+      try { body = text ? JSON.parse(text) : {}; } catch { throw new Error(text.slice(0, 200) || "Convert failed"); }
+      if (!r.ok) throw new Error(body.error || "Convert failed");
+      return body;
+    },
+    onSuccess: (json: any) => {
+      const poNo = json?.poNumber || json?.poNo || (json?.poId ? `#${json.poId}` : "");
+      toast({ title: "Purchase Order created", description: poNo ? `PO ${poNo}` : "Opening PO list…" });
+      setTimeout(() => { window.location.hash = "#/team/purchase-orders"; }, 800);
+    },
+    onError: (e: Error) => toast({ title: "Convert failed", description: e.message, variant: "destructive" }),
+  });
+
   if (isLoading) {
     return (
       <TeamLayout title="Quotation">
@@ -400,6 +418,12 @@ export default function TeamQuotationEdit() {
         <button onClick={downloadPdf}
           className="px-4 py-2 border rounded-lg text-sm font-semibold inline-flex items-center gap-2 hover:bg-muted">
           <Download className="w-4 h-4" /> Download PDF
+        </button>
+        <button onClick={() => { if (confirm("Create a draft Purchase Order from this quotation?")) convertMut.mutate(); }}
+          disabled={convertMut.isPending}
+          className="px-4 py-2 border rounded-lg text-sm font-semibold inline-flex items-center gap-2 hover:bg-muted disabled:opacity-50">
+          {convertMut.isPending ? <RefreshCw className="w-4 h-4 animate-spin" /> : <ShoppingCart className="w-4 h-4" />}
+          Convert to PO
         </button>
         <button onClick={() => saveMut.mutate()} disabled={saveMut.isPending || !dirty}
           className="px-4 py-2 border rounded-lg text-sm font-semibold inline-flex items-center gap-2 hover:bg-muted disabled:opacity-50">

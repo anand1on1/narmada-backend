@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { useLocation } from "wouter";
 import { AdminLayout } from "./AdminLayout";
 import { adminFetch, useAdminAuth } from "@/lib/admin-auth";
-import { Trash2, Eye, Plus } from "lucide-react";
+import { Trash2, Eye, Plus, ExternalLink } from "lucide-react";
 
 interface Customer { id: number; name: string; }
 interface Quote {
@@ -104,7 +104,14 @@ export default function AdminQuotes() {
                   <td className="px-4 py-3 text-xs">{q.validUntil ? new Date(q.validUntil).toLocaleDateString("en-IN") : "—"}</td>
                   <td className="px-4 py-3">{badge(q.status)}</td>
                   <td className="px-4 py-3 text-right whitespace-nowrap">
-                    <button onClick={() => setView(q)} className="p-2 hover:bg-muted rounded" title="View"><Eye className="w-4 h-4" /></button>
+                    <button onClick={() => setView(q)} className="p-2 hover:bg-muted rounded" title="Quick view"><Eye className="w-4 h-4" /></button>
+                    <a
+                      href={`/#/team/quotations/${q.id}`}
+                      className="inline-flex items-center gap-1 px-2 py-1 text-xs font-semibold border rounded ml-1 hover:bg-muted"
+                      title="Open in Team portal to download PDF / convert to PO (requires Data Team login)"
+                    >
+                      <ExternalLink className="w-3 h-3" /> Open / PDF
+                    </a>
                     <select value={q.status} onChange={(e) => setStatus(q.id, e.target.value)} className="text-xs border rounded px-2 py-1 bg-background ml-1">
                       {STATUSES.map((s) => <option key={s} value={s}>{s}</option>)}
                     </select>
