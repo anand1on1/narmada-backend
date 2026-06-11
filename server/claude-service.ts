@@ -194,14 +194,28 @@ export async function extractPartsFromExcel(xlsxPath: string): Promise<ParsedPar
 /**
  * Chat reply using Claude — returns text response
  * history: array of {role: "user"|"assistant", content: string}
+ * customerContext: structured account data block injected into the system prompt so
+ *   Claude can only answer about this customer's own data (Bug 5 scope restriction).
  */
 export async function chatReply(
   history: Array<{ role: "user" | "assistant"; content: string }>,
   message: string,
+  customerContext?: string,
 ): Promise<string> {
   if (!CLAUDE_API_KEY || CLAUDE_API_KEY === "skip") {
     return "I'm here to help! Our customer support team will be in touch shortly.";
   }
+
+  const systemPrompt = `You are a customer support assistant for Narmada Mobility's B2B spare parts portal. You answer ONLY about the customer's own account data shown below.
+
+Rules:
+- If the question is about balance, invoices, ledger, consignments, RFQs, or quotes → answer using the data block below.
+- If the question is about anything else (general knowledge, other customers, pricing of products they haven't ordered, recommendations, opinions, off-topic chat) → reply EXACTLY: 'I can only help with questions about your account — balance, invoices, ledger, consignments, RFQs, and quotes. For other queries please contact our team at sales@narmadamobility.com'
+- Never invent numbers or facts. If the answer isn't in the data block, say you don't have that information.
+- Keep responses under 3 sentences when possible.
+
+CUSTOMER DATA:
+${customerContext || "(no account data available)"}`.trim();
 
   try {
     const client = getClient();
@@ -213,11 +227,8 @@ export async function chatReply(
     const response = await client.messages.create({
       model: MODEL,
       max_tokens: 1024,
-      system: `You are a helpful customer support assistant for Narmada Mobility, 
-an automotive parts supplier in India. Help customers with their inquiries about 
-parts, orders, deliveries, and account status. Be concise and professional.
-If you don't know something specific about an order, ask the customer for their 
-order number or direct them to contact the sales team.`,
+      temperature: 0.2, // low temperature for predictable scope adherence
+      system: systemPrompt,
       messages,
     });
 

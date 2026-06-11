@@ -133,6 +133,28 @@ export async function searchPriceItems(partNumber: string, brand?: string): Prom
   }));
 }
 
+/**
+ * Exact case-insensitive part number lookup in price_items.
+ * Used by the document import endpoint (Bug 4) to auto-fill MRP from the price list.
+ * Returns the most recently uploaded row for each brand that matches.
+ */
+export function lookupPartNumberMrp(partNumber: string): { mrp: number; brand: string } | null {
+  if (!partNumber) return null;
+  const clean = String(partNumber).toLowerCase().replace(/[^a-z0-9]/g, "");
+  if (!clean) return null;
+  // Exact match on cleaned part number, pick the most recently uploaded entry
+  const row = sqlite.prepare(`
+    SELECT pi.mrp, pi.brand
+    FROM price_items pi
+    LEFT JOIN price_lists pl ON pl.id = pi.price_list_id
+    WHERE pi.part_number_clean = ?
+    ORDER BY pl.uploaded_at DESC
+    LIMIT 1
+  `).get(clean) as any;
+  if (!row || row.mrp == null) return null;
+  return { mrp: row.mrp as number, brand: row.brand as string };
+}
+
 // -------- CONSIGNMENTS --------
 export async function listConsignments(opts: { status?: string; q?: string; limit?: number } = {}): Promise<Consignment[]> {
   const wheres: any[] = [];
@@ -1172,4 +1194,98 @@ export async function getStalePurchaseOrders(days: number): Promise<PurchaseOrde
 }
 export async function incrementPoReminder(id: number): Promise<void> {
   return bumpPoReminder(id);
+}
+
+// -------- PART SUGGESTIONS (Bug 3: autocomplete) --------
+export interface PartSuggestion {
+  partNumber: string;
+  productName: string;
+  brand: string | null;
+  mrp: number | null;
+  source: "price_list" | "past_entry";
+  entryDate: number | null;
+}
+
+/**
+ * Returns up to `limit` part suggestions matching `q` in partNumber OR productName/description.
+ * Sources searched:
+ *   1. price_items (price_list table) — joined with price_lists for upload date
+ *   2. quotation_items (past_entry) — most recent matching row per partNumber+brand combo
+ *
+ * Ordering: exact partNumber match first, prefix match next, then substring. Within each tier
+ * most recent entry wins. Deduplication: by partNumber + brand combo (brand-level granularity).
+ */
+export function getPartSuggestions(q: string, limit = 10): PartSuggestion[] {
+  const cap = Math.min(limit, 25);
+  if (!q || q.trim().length < 2) return [];
+  const term = q.trim().toLowerCase();
+  const likeTerm = `%${term}%`;
+
+  // ── Price list items ─────────────────────────────────────────────────────
+  const priceRows = sqlite.prepare(`
+    SELECT
+      pi.part_number     AS partNumber,
+      pi.description     AS productName,
+      pi.brand           AS brand,
+      pi.mrp             AS mrp,
+      pl.uploaded_at     AS entryDate,
+      CASE
+        WHEN LOWER(pi.part_number) = ?         THEN 1
+        WHEN LOWER(pi.part_number) LIKE ? || '%' THEN 2
+        ELSE 3
+      END AS tier
+    FROM price_items pi
+    LEFT JOIN price_lists pl ON pl.id = pi.price_list_id
+    WHERE LOWER(pi.part_number) LIKE ? OR LOWER(pi.description) LIKE ?
+    ORDER BY tier ASC, pl.uploaded_at DESC
+    LIMIT ?
+  `).all(term, term, likeTerm, likeTerm, cap * 3) as any[];
+
+  // ── Past quotation items ─────────────────────────────────────────────────
+  const pastRows = sqlite.prepare(`
+    SELECT
+      qi.part_number     AS partNumber,
+      qi.product_name    AS productName,
+      qi.brand           AS brand,
+      qi.mrp             AS mrp,
+      MAX(qi.created_at) AS entryDate,
+      CASE
+        WHEN LOWER(qi.part_number) = ?          THEN 1
+        WHEN LOWER(qi.part_number) LIKE ? || '%' THEN 2
+        ELSE 3
+      END AS tier
+    FROM quotation_items qi
+    WHERE qi.part_number IS NOT NULL
+      AND (LOWER(qi.part_number) LIKE ? OR LOWER(qi.product_name) LIKE ?)
+    GROUP BY LOWER(qi.part_number), LOWER(COALESCE(qi.brand,''))
+    ORDER BY tier ASC, entryDate DESC
+    LIMIT ?
+  `).all(term, term, likeTerm, likeTerm, cap * 3) as any[];
+
+  // ── Merge and deduplicate by partNumber+brand combo ──────────────────────
+  const seen = new Set<string>();
+  const results: PartSuggestion[] = [];
+
+  const addRow = (row: any, source: "price_list" | "past_entry") => {
+    if (!row.partNumber) return;
+    const key = `${String(row.partNumber).toLowerCase()}|${String(row.brand || "").toLowerCase()}`;
+    if (seen.has(key)) return;
+    seen.add(key);
+    results.push({
+      partNumber: row.partNumber,
+      productName: row.productName || "",
+      brand: row.brand || null,
+      mrp: row.mrp != null ? Number(row.mrp) : null,
+      source,
+      entryDate: row.entryDate ? Number(row.entryDate) : null,
+    });
+  };
+
+  // Interleave by tier: exact first, then prefix, then substring
+  for (let tier = 1; tier <= 3 && results.length < cap; tier++) {
+    for (const r of priceRows.filter((x: any) => x.tier === tier)) { if (results.length >= cap) break; addRow(r, "price_list"); }
+    for (const r of pastRows.filter((x: any) => x.tier === tier)) { if (results.length >= cap) break; addRow(r, "past_entry"); }
+  }
+
+  return results.slice(0, cap);
 }

@@ -3,6 +3,10 @@
  * Uses pdf-lib to generate quotation PDFs.
  * Dark band + red accent matching Narmada Mobility branding.
  * Saves to uploads/quotations/{quote_no}.pdf
+ *
+ * Font note: NotoSans-Regular.ttf is used instead of the built-in Helvetica so that
+ * Unicode characters such as the Rupee sign (₹ U+20B9) render correctly. Helvetica
+ * (WinAnsi encoding) does not include U+20B9 and silently drops or errors on it.
  */
 import { PDFDocument, rgb, StandardFonts, PDFPage, PDFFont } from "pdf-lib";
 import * as fs from "node:fs";
@@ -10,6 +14,9 @@ import * as path from "node:path";
 
 const DATA_DIR = process.env.DATA_DIR || ".";
 const QUOTATIONS_DIR = path.join(DATA_DIR, "uploads", "quotations");
+
+// Path to the bundled NotoSans font (supports ₹ and full Unicode range).
+const NOTO_SANS_PATH = path.join(__dirname, "assets", "fonts", "NotoSans-Regular.ttf");
 
 // Color palette
 const COLOR_DARK = rgb(0.1, 0.1, 0.15);        // near-black header
@@ -126,8 +133,21 @@ export async function generateQuotationPDF(
   const page = pdfDoc.addPage([595, 842]); // A4
   const { width, height } = page.getSize();
 
-  const fontBold = await pdfDoc.embedFont(StandardFonts.HelveticaBold);
-  const fontRegular = await pdfDoc.embedFont(StandardFonts.Helvetica);
+  // Prefer NotoSans (Unicode / ₹ support). Fall back to Helvetica only if the font file
+  // is missing (e.g. first deploy before assets are copied).
+  let fontBold: PDFFont;
+  let fontRegular: PDFFont;
+  if (fs.existsSync(NOTO_SANS_PATH)) {
+    const notoBytes = fs.readFileSync(NOTO_SANS_PATH);
+    // pdf-lib subset embedding: embed once and use for both regular and "bold" — NotoSans
+    // variable font includes weight axis so visual weight is acceptable for headers.
+    fontRegular = await pdfDoc.embedFont(notoBytes, { subset: true });
+    fontBold = fontRegular; // same TTF; weight difference handled via font-size contrast
+  } else {
+    // Fallback: Helvetica (WinAnsi) — ₹ will be replaced with "Rs." by fmtCurrency
+    fontBold = await pdfDoc.embedFont(StandardFonts.HelveticaBold);
+    fontRegular = await pdfDoc.embedFont(StandardFonts.Helvetica);
+  }
 
   let y = height - 40;
   const marginL = 40;

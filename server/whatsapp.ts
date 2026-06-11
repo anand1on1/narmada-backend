@@ -152,7 +152,10 @@ export async function sendOTP(phone: string, otp: string): Promise<void> {
       templateParams: [otp],
       source: "narmada-backend",
       media: {},
-      buttons: [{ type: "COPY_CODE", index: 0, copy_code: otp }],
+      // NOTE: Do NOT send a `buttons` array for OTP templates. AiSensy auto-infers
+      // the Copy Code button from the approved template definition and uses
+      // templateParams[0] as the code. An explicit buttons array causes silent
+      // delivery failure on Meta's side even when AiSensy returns success:true.
       carouselCards: [],
       location: {},
       attributes: {},

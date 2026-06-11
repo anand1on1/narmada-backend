@@ -118,11 +118,14 @@ export default function TeamQuotationEdit() {
   function onPartNumberChange(idx: number, val: string) {
     updateLine(idx, { partNumber: val });
     if (acTimerRef.current) clearTimeout(acTimerRef.current);
-    if (val.length >= 3) {
+    if (val.length >= 2) {
+      // Bug 3: 250 ms debounce to /api/team/part-suggestions
       acTimerRef.current = setTimeout(async () => {
-        const r = await teamFetch(token, `/api/team/parts?q=${encodeURIComponent(val)}`);
-        if (r.ok) { setAcResults(await r.json()); setAcIdx(idx); }
-      }, 300);
+        try {
+          const r = await teamFetch(token, `/api/team/part-suggestions?q=${encodeURIComponent(val)}&limit=10`);
+          if (r.ok) { setAcResults(await r.json()); setAcIdx(idx); }
+        } catch { /* ignore network errors during autocomplete */ }
+      }, 250);
     } else {
       setAcResults([]); setAcIdx(null);
     }
@@ -130,12 +133,10 @@ export default function TeamQuotationEdit() {
 
   function applyAcResult(idx: number, part: any) {
     updateLine(idx, {
-      partNumber: part.partNumber || part.part_number,
-      productName: part.name,
-      hsn: part.hsn || "",
+      partNumber: part.partNumber || part.part_number || "",
+      productName: part.productName || part.name || "",
       brand: part.brand || "",
-      gstPct: part.gstRate || part.gst_rate || 18,
-      mrp: part.lastMrp || part.last_mrp || 0,
+      mrp: part.mrp || 0,
     });
     setAcResults([]); setAcIdx(null);
   }
@@ -269,14 +270,22 @@ export default function TeamQuotationEdit() {
                       <input value={line.partNumber} onChange={(e) => onPartNumberChange(idx, e.target.value)}
                         className="w-full border rounded px-1.5 py-1 bg-background font-mono text-xs" />
                       {acIdx === idx && acResults.length > 0 && (
-                        <div className="absolute z-20 top-full left-0 mt-1 bg-card border rounded-lg shadow-lg w-56 max-h-40 overflow-y-auto">
-                          {acResults.map((p: any) => (
-                            <button key={p.id} onClick={() => applyAcResult(idx, p)}
-                              className="w-full text-left px-3 py-2 text-xs hover:bg-muted">
-                              <div className="font-mono font-semibold">{p.partNumber || p.part_number}</div>
-                              <div className="text-muted-foreground truncate">{p.name}</div>
-                            </button>
-                          ))}
+                        <div className="absolute z-20 top-full left-0 mt-1 bg-card border rounded-lg shadow-lg w-80 max-h-56 overflow-y-auto">
+                          {acResults.map((p: any, pi: number) => {
+                            const dateStr = p.entryDate
+                              ? new Date(p.entryDate).toLocaleDateString("en-IN", { day: "2-digit", month: "short", year: "numeric" })
+                              : "";
+                            const mrpStr = p.mrp != null ? `\u20b9${Number(p.mrp).toLocaleString("en-IN", { maximumFractionDigits: 2 })}` : "";
+                            return (
+                              <button key={pi} onClick={() => applyAcResult(idx, p)}
+                                className="w-full text-left px-3 py-2 text-xs hover:bg-muted border-b last:border-0">
+                                <div className="font-mono font-semibold text-foreground">{p.partNumber}</div>
+                                <div className="text-muted-foreground truncate">
+                                  {[p.productName, p.brand && `(${p.brand})`, mrpStr, dateStr].filter(Boolean).join(" — ")}
+                                </div>
+                              </button>
+                            );
+                          })}
                         </div>
                       )}
                     </>

@@ -394,6 +394,18 @@ export function registerV2Routes(app: Express, ctx: V2Context) {
     res.json({ results, count: results.length });
   });
 
+  // Bug 3: Part number / product name autocomplete for quote line items
+  // Requires admin/team auth (x-admin-token). Returns suggestions from price_list + past quote items.
+  app.get("/api/admin/part-suggestions", requireAuth, async (req, res) => {
+    try {
+      const q = String(req.query.q || "").trim();
+      const limit = Math.min(parseInt(String(req.query.limit || "10"), 10) || 10, 25);
+      if (!q || q.length < 2) return res.json([]);
+      const suggestions = v2.getPartSuggestions(q, limit);
+      res.json(suggestions);
+    } catch (e: any) { res.status(500).json({ error: e.message }); }
+  });
+
   // Admin
   app.get("/api/admin/price-lists", requireAdminRole, async (_req, res) => {
     const lists = await v2.listPriceLists();
@@ -1515,6 +1527,17 @@ export function registerV2Routes(app: Express, ctx: V2Context) {
     } catch (e: any) { res.status(400).json({ error: e.message }); }
   });
 
+  // -------- TEAM: PART SUGGESTIONS (Bug 3 — also accessible at /api/admin/part-suggestions) --------
+  app.get("/api/team/part-suggestions", requireDataTeam, async (req, res) => {
+    try {
+      const q = String(req.query.q || "").trim();
+      const limit = Math.min(parseInt(String(req.query.limit || "10"), 10) || 10, 25);
+      if (!q || q.length < 2) return res.json([]);
+      const suggestions = v2.getPartSuggestions(q, limit);
+      res.json(suggestions);
+    } catch (e: any) { res.status(500).json({ error: e.message }); }
+  });
+
   // -------- TEAM: PARTS MASTER --------
   app.get("/api/team/parts", requireDataTeam, async (req, res) => {
     try {
@@ -1597,7 +1620,20 @@ export function registerV2Routes(app: Express, ctx: V2Context) {
       } else {
         return res.status(400).json({ error: "Unsupported file type. Use JPG/PNG/PDF/XLSX/CSV" });
       }
-      res.json({ parts });
+      // Bug 4: For each extracted line that has a part_number, attempt to fill MRP from
+      // the price_list table (case-insensitive exact match). If multiple brand entries
+      // exist for the same part number the most recent upload wins.
+      const enrichedParts = parts.map((p: any) => {
+        const pn = p.part_number || p.partNumber;
+        if (pn) {
+          const match = v2.lookupPartNumberMrp(String(pn));
+          if (match) {
+            return { ...p, mrp: match.mrp, priceMatchedFrom: "price_list" as const };
+          }
+        }
+        return { ...p, priceMatchedFrom: null };
+      });
+      res.json({ parts: enrichedParts });
     } catch (e: any) { res.status(500).json({ error: e.message }); }
   });
 
@@ -1820,8 +1856,46 @@ export function registerV2Routes(app: Express, ctx: V2Context) {
       await v2.saveChatMessage(c.customerId, "user", String(message));
       const history = await v2.getChatHistory(c.customerId, 20);
       const histForClaude = history.slice(0, -1).map((m) => ({ role: m.role as "user" | "assistant", content: m.content }));
+
+      // Bug 5: fetch customer account data to inject as scoped context into Claude's
+      // system prompt, so the assistant can ONLY answer about this customer's own account.
+      let customerContext = "";
+      try {
+        const [balance, ledgerEntries, rfqs, quotes, consignments] = await Promise.all([
+          v2.getLedgerBalance(c.customerId),
+          v2.listLedgerEntries(c.customerId, { limit: 10 }),
+          v2.listRfqs({ customerId: c.customerId }),
+          v2.listQuotes({ customerId: c.customerId, limit: 5 }),
+          v2.listConsignments({ limit: 10 }),
+        ]);
+        // Filter consignments to only this customer's
+        const myConsignments = consignments.filter((cs: any) => cs.customerId === c.customerId).slice(0, 10);
+        customerContext = JSON.stringify({
+          balanceInr: balance,
+          last10LedgerEntries: ledgerEntries.map((e: any) => ({
+            date: e.entryDate || e.createdAt,
+            type: e.entryType,
+            amount: e.amountInr,
+            description: e.description,
+          })),
+          openRFQs: (rfqs as any[]).filter((r: any) => r.status === "open").map((r: any) => ({
+            id: r.id, createdAt: r.createdAt, partsCount: r.partsCount, status: r.status,
+          })),
+          last5Quotes: (quotes as any[]).map((q: any) => ({
+            id: q.id, quoteNo: q.quoteNo, status: q.status,
+            totalInr: q.totalInr, createdAt: q.createdAt,
+          })),
+          pendingConsignments: myConsignments.filter((cs: any) => cs.status !== "delivered").map((cs: any) => ({
+            docket: cs.docketNumber, status: cs.status, dispatchDate: cs.dispatchDate,
+            etaDate: cs.etaDate, invoiceNumber: cs.invoiceNumber,
+          })),
+        }, null, 2);
+      } catch (ctxErr: any) {
+        console.warn("[chat] context fetch error:", ctxErr?.message);
+      }
+
       const { chatReply } = await import("./claude-service");
-      const reply = await chatReply(histForClaude, String(message));
+      const reply = await chatReply(histForClaude, String(message), customerContext);
       const assistantMsg = await v2.saveChatMessage(c.customerId, "assistant", reply);
       res.json({ message: assistantMsg, reply });
     } catch (e: any) { res.status(500).json({ error: e.message }); }
