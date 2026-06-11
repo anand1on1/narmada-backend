@@ -259,10 +259,32 @@ export async function generateQuotationPDF(
 
   y -= 10;
 
-  // ============ TABLE HEADER ============
-  y -= 6;
-  drawRect(page, marginL, y - 4, contentWidth, 18, COLOR_DARK);
+  // ============ COMPUTE TOTALS FROM ITEMS ============
+  // Stored totals are often zero/null. Compute live from items so PDFs always
+  // reflect the truth even for older quotes that never had totals saved.
+  const itemTotals = items.reduce(
+    (acc, it) => {
+      const qty = it.qty || 0;
+      const mrp = it.mrp || 0;
+      const disc = (it.discount || 0) / 100;
+      const gst = (it.gstPct || 0) / 100;
+      const lineNet = qty * mrp * (1 - disc);
+      const lineTax = lineNet * gst;
+      const lineGross = lineNet + lineTax;
+      acc.subtotal += lineNet;
+      acc.totalDiscount += qty * mrp * disc;
+      acc.totalTax += lineTax;
+      acc.grandTotal += lineGross;
+      return acc;
+    },
+    { subtotal: 0, totalDiscount: 0, totalTax: 0, grandTotal: 0 },
+  );
+  const computedSubtotal = (quotation.subtotal && quotation.subtotal > 0) ? quotation.subtotal : itemTotals.subtotal;
+  const computedDiscount = (quotation.totalDiscount && quotation.totalDiscount > 0) ? quotation.totalDiscount : itemTotals.totalDiscount;
+  const computedTax = (quotation.totalTax && quotation.totalTax > 0) ? quotation.totalTax : itemTotals.totalTax;
+  const computedGrand = (quotation.grandTotal && quotation.grandTotal > 0) ? quotation.grandTotal : itemTotals.grandTotal;
 
+  // ============ COLUMN LAYOUT (shared across pages) ============
   const cols = {
     no: marginL + 4,
     partNo: marginL + 24,
@@ -275,55 +297,100 @@ export async function generateQuotationPDF(
     total: marginL + 465,
   };
 
-  const headerY = y;
-  drawText(page, "#", cols.no, headerY, fontBold, 7, COLOR_WHITE);
-  drawText(page, "Part No.", cols.partNo, headerY, fontBold, 7, COLOR_WHITE);
-  drawText(page, "Description", cols.desc, headerY, fontBold, 7, COLOR_WHITE);
-  drawText(page, "HSN", cols.hsn, headerY, fontBold, 7, COLOR_WHITE);
-  drawText(page, "Qty", cols.qty, headerY, fontBold, 7, COLOR_WHITE);
-  drawText(page, "MRP", cols.mrp, headerY, fontBold, 7, COLOR_WHITE);
-  drawText(page, "Disc%", cols.disc, headerY, fontBold, 7, COLOR_WHITE);
-  drawText(page, "GST%", cols.gst, headerY, fontBold, 7, COLOR_WHITE);
-  drawText(page, "Total", cols.total, headerY, fontBold, 7, COLOR_WHITE);
-  y -= 20;
+  function drawTableHeaderAt(targetPage: PDFPage, headerYTop: number): number {
+    drawRect(targetPage, marginL, headerYTop - 4, contentWidth, 18, COLOR_DARK);
+    drawText(targetPage, "#", cols.no, headerYTop, fontBold, 7, COLOR_WHITE);
+    drawText(targetPage, "Part No.", cols.partNo, headerYTop, fontBold, 7, COLOR_WHITE);
+    drawText(targetPage, "Description", cols.desc, headerYTop, fontBold, 7, COLOR_WHITE);
+    drawText(targetPage, "HSN", cols.hsn, headerYTop, fontBold, 7, COLOR_WHITE);
+    drawText(targetPage, "Qty", cols.qty, headerYTop, fontBold, 7, COLOR_WHITE);
+    drawText(targetPage, "MRP", cols.mrp, headerYTop, fontBold, 7, COLOR_WHITE);
+    drawText(targetPage, "Disc%", cols.disc, headerYTop, fontBold, 7, COLOR_WHITE);
+    drawText(targetPage, "GST%", cols.gst, headerYTop, fontBold, 7, COLOR_WHITE);
+    drawText(targetPage, "Total", cols.total, headerYTop, fontBold, 7, COLOR_WHITE);
+    return headerYTop - 20;
+  }
 
-  // ============ TABLE ROWS ============
+  // ============ TABLE HEADER (page 1) ============
+  y -= 6;
+  let curPage: PDFPage = page;
+  y = drawTableHeaderAt(curPage, y);
+  const allPages: PDFPage[] = [page];
+
+  // ============ TABLE ROWS (with real pagination) ============
+  const ROW_HEIGHT = 14;
+  const BOTTOM_THRESHOLD = 100; // when y drops below this, start a new page
+
   for (let i = 0; i < items.length; i++) {
     const item = items[i];
-    const rowY = y;
 
-    // Alternate row background
-    if (i % 2 === 1) {
-      drawRect(page, marginL, rowY - 4, contentWidth, 14, COLOR_LIGHT_GRAY);
+    if (y < BOTTOM_THRESHOLD) {
+      const newPage = pdfDoc.addPage([595, 842]);
+      allPages.push(newPage);
+      curPage = newPage;
+      // Continuation header band
+      drawRect(curPage, 0, height - 30, width, 30, COLOR_DARK);
+      drawText(
+        curPage,
+        `${company.name.toUpperCase()} — QUOTATION ${quotation.quoteNo} (continued)`,
+        marginL,
+        height - 20,
+        fontBold,
+        9,
+        COLOR_WHITE,
+      );
+      y = height - 50;
+      y = drawTableHeaderAt(curPage, y);
     }
 
-    // Truncate description if needed
+    const rowY = y;
+
+    if (i % 2 === 1) {
+      drawRect(curPage, marginL, rowY - 4, contentWidth, ROW_HEIGHT, COLOR_LIGHT_GRAY);
+    }
+
     const descTrunc = item.productName.length > 35
       ? item.productName.slice(0, 34) + "…"
       : item.productName;
 
-    drawText(page, String(item.lineNo), cols.no, rowY, fontRegular, 7, COLOR_TEXT);
-    drawText(page, item.partNumber || "-", cols.partNo, rowY, fontRegular, 7, COLOR_TEXT);
-    drawText(page, descTrunc, cols.desc, rowY, fontRegular, 7, COLOR_TEXT);
-    drawText(page, item.hsn || "-", cols.hsn, rowY, fontRegular, 7, COLOR_TEXT);
-    drawText(page, String(item.qty), cols.qty, rowY, fontRegular, 7, COLOR_TEXT);
-    drawText(page, fmt(item.mrp), cols.mrp, rowY, fontRegular, 7, COLOR_TEXT);
-    drawText(page, item.discount ? `${item.discount}%` : "-", cols.disc, rowY, fontRegular, 7, COLOR_TEXT);
-    drawText(page, item.gstPct ? `${item.gstPct}%` : "-", cols.gst, rowY, fontRegular, 7, COLOR_TEXT);
-    drawText(page, fmt(item.lineTotal), cols.total, rowY, fontRegular, 7, COLOR_TEXT);
+    drawText(curPage, String(item.lineNo), cols.no, rowY, fontRegular, 7, COLOR_TEXT);
+    drawText(curPage, item.partNumber || "-", cols.partNo, rowY, fontRegular, 7, COLOR_TEXT);
+    drawText(curPage, descTrunc, cols.desc, rowY, fontRegular, 7, COLOR_TEXT);
+    drawText(curPage, item.hsn || "-", cols.hsn, rowY, fontRegular, 7, COLOR_TEXT);
+    drawText(curPage, String(item.qty), cols.qty, rowY, fontRegular, 7, COLOR_TEXT);
+    drawText(curPage, fmt(item.mrp), cols.mrp, rowY, fontRegular, 7, COLOR_TEXT);
+    drawText(curPage, item.discount ? `${item.discount}%` : "-", cols.disc, rowY, fontRegular, 7, COLOR_TEXT);
+    drawText(curPage, item.gstPct ? `${item.gstPct}%` : "-", cols.gst, rowY, fontRegular, 7, COLOR_TEXT);
+    // Use computed line total if stored is null/zero
+    const liveLineTotal = (item.lineTotal && item.lineTotal > 0)
+      ? item.lineTotal
+      : (item.qty * item.mrp * (1 - (item.discount || 0) / 100) * (1 + (item.gstPct || 0) / 100));
+    drawText(curPage, fmt(liveLineTotal), cols.total, rowY, fontRegular, 7, COLOR_TEXT);
 
-    y -= 14;
+    y -= ROW_HEIGHT;
+  }
 
-    // Page overflow protection (simple — add new page if needed)
-    if (y < 160) {
-      // Just stop rendering items — real implementation would add pages
-      break;
-    }
+  // If totals + footer won't fit on the current page, push them to a fresh page
+  if (y < BOTTOM_THRESHOLD + 40) {
+    const newPage = pdfDoc.addPage([595, 842]);
+    allPages.push(newPage);
+    curPage = newPage;
+    drawRect(curPage, 0, height - 30, width, 30, COLOR_DARK);
+    drawText(
+      curPage,
+      `${company.name.toUpperCase()} — QUOTATION ${quotation.quoteNo} (continued)`,
+      marginL,
+      height - 20,
+      fontBold,
+      9,
+      COLOR_WHITE,
+    );
+    y = height - 60;
   }
 
   // ============ TOTALS BOX ============
   y -= 10;
-  drawRect(page, marginL + contentWidth - 170, y - 4, 170, 3, COLOR_RED);
+  drawRect(curPage, marginL + contentWidth - 170, y - 4, 170, 3, COLOR_RED);
   y -= 10;
 
   const totalsX = marginL + contentWidth - 170;
@@ -332,24 +399,24 @@ export async function generateQuotationPDF(
   function drawTotalRow(label: string, value: string, bold = false) {
     const fnt = bold ? fontBold : fontRegular;
     const col = bold ? COLOR_DARK : COLOR_TEXT;
-    drawText(page, label, totalsX, y, fnt, 8, col);
+    drawText(curPage, label, totalsX, y, fnt, 8, col);
     const vw = fnt.widthOfTextAtSize(value, 8);
-    drawText(page, value, totalsValX - vw, y, fnt, 8, col);
+    drawText(curPage, value, totalsValX - vw, y, fnt, 8, col);
     y -= 13;
   }
 
-  drawTotalRow("Subtotal:", fmt(quotation.subtotal));
-  if (quotation.totalDiscount && quotation.totalDiscount > 0) {
-    drawTotalRow("Discount:", `-${fmt(quotation.totalDiscount)}`);
+  drawTotalRow("Subtotal:", fmt(computedSubtotal));
+  if (computedDiscount > 0) {
+    drawTotalRow("Discount:", `-${fmt(computedDiscount)}`);
   }
-  drawTotalRow("GST:", fmt(quotation.totalTax));
+  drawTotalRow("GST:", fmt(computedTax));
   y -= 2;
-  drawRect(page, totalsX, y - 2, 170, 1, COLOR_MID_GRAY);
+  drawRect(curPage, totalsX, y - 2, 170, 1, COLOR_MID_GRAY);
   y -= 6;
-  drawTotalRow("GRAND TOTAL:", fmt(quotation.grandTotal), true);
+  drawTotalRow("GRAND TOTAL:", fmt(computedGrand), true);
   if (quotation.currency !== "INR" && quotation.fxRate && quotation.fxRate !== 1) {
     drawText(
-      page,
+      curPage,
       `(Rate: 1 ${quotation.currency} = ${useUnicodeFont ? "\u20b9" : "Rs. "}${quotation.fxRate.toFixed(4)})`,
       totalsX,
       y,
@@ -363,10 +430,10 @@ export async function generateQuotationPDF(
   // ============ BANK DETAILS ============
   if (company.bankName && company.bankAccount) {
     y -= 10;
-    drawText(page, "Bank Details:", marginL, y, fontBold, 8, COLOR_DARK);
+    drawText(curPage, "Bank Details:", marginL, y, fontBold, 8, COLOR_DARK);
     y -= 12;
     drawText(
-      page,
+      curPage,
       `${company.bankName} | A/C: ${company.bankAccount} | IFSC: ${company.bankIfsc || "-"}`,
       marginL,
       y,
@@ -380,38 +447,43 @@ export async function generateQuotationPDF(
   // ============ NOTES / TERMS ============
   if (quotation.notes) {
     y -= 6;
-    drawText(page, "Notes:", marginL, y, fontBold, 8, COLOR_DARK);
+    drawText(curPage, "Notes:", marginL, y, fontBold, 8, COLOR_DARK);
     y -= 12;
-    // Simple wrap (basic)
     const lines = wrapText(quotation.notes, fontRegular, 8, contentWidth);
     for (const line of lines.slice(0, 3)) {
-      drawText(page, line, marginL, y, fontRegular, 8, COLOR_TEXT);
+      drawText(curPage, line, marginL, y, fontRegular, 8, COLOR_TEXT);
       y -= 11;
     }
   }
 
   if (quotation.terms) {
     y -= 4;
-    drawText(page, "Terms & Conditions:", marginL, y, fontBold, 8, COLOR_DARK);
+    drawText(curPage, "Terms & Conditions:", marginL, y, fontBold, 8, COLOR_DARK);
     y -= 11;
     const lines = wrapText(quotation.terms, fontRegular, 7, contentWidth);
     for (const line of lines.slice(0, 5)) {
-      drawText(page, line, marginL, y, fontRegular, 7, COLOR_MID_GRAY);
+      drawText(curPage, line, marginL, y, fontRegular, 7, COLOR_MID_GRAY);
       y -= 10;
     }
   }
 
-  // ============ FOOTER ============
-  drawRect(page, 0, 24, width, 20, COLOR_DARK);
-  drawText(
-    page,
-    `${company.name} | This is a computer-generated quotation`,
-    marginL,
-    30,
-    fontRegular,
-    7,
-    rgb(0.75, 0.75, 0.75),
-  );
+  // ============ FOOTERS on EVERY page ============
+  const totalPages = allPages.length;
+  allPages.forEach((p, idx) => {
+    drawRect(p, 0, 24, width, 20, COLOR_DARK);
+    drawText(
+      p,
+      `${company.name} | This is a computer-generated quotation`,
+      marginL,
+      30,
+      fontRegular,
+      7,
+      rgb(0.75, 0.75, 0.75),
+    );
+    const pageLabel = `Page ${idx + 1} of ${totalPages}`;
+    const plw = fontRegular.widthOfTextAtSize(pageLabel, 7);
+    drawText(p, pageLabel, marginR - plw, 30, fontRegular, 7, rgb(0.75, 0.75, 0.75));
+  });
 
   // ============ SAVE ============
   const pdfBytes = await pdfDoc.save();
@@ -421,7 +493,7 @@ export async function generateQuotationPDF(
   const filePath = path.join(QUOTATIONS_DIR, `${safeName}.pdf`);
   fs.writeFileSync(filePath, buffer);
 
-  console.log(`[pdf] Generated quotation PDF: ${filePath}`);
+  console.log(`[pdf] Generated quotation PDF: ${filePath} (${totalPages} pages, ${items.length} items)`);
   return buffer;
 }
 

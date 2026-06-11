@@ -6,6 +6,13 @@ import { useToast } from "@/hooks/use-toast";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { Trash2, Plus, RefreshCw, Download, Send, Search } from "lucide-react";
 
+function currencySym(c: string | undefined | null): string {
+  if (c === "USD") return "$";
+  if (c === "EUR") return "€";
+  if (c === "AED") return "AED ";
+  return "₹";
+}
+
 interface LineItem {
   id?: number;
   lineNo: number;
@@ -259,7 +266,12 @@ export default function TeamQuotationEdit() {
               {quotation.status}
             </span>
           </div>
-          <div className="text-sm text-muted-foreground mt-1">Customer: {quotation.customerName}</div>
+          <div className="text-sm text-muted-foreground mt-1">
+            Customer: {quotation.customerName}
+            <span className="ml-3 inline-flex items-center gap-1 px-2 py-0.5 rounded bg-muted text-xs font-semibold">
+              Currency: {currencySym(quotation.currency)} {quotation.currency || "INR"}
+            </span>
+          </div>
         </div>
         <div className="flex-1" />
         <button onClick={downloadPdf}
@@ -359,7 +371,7 @@ export default function TeamQuotationEdit() {
                   {canEdit ? (
                     <input type="number" min={0} value={line.mrp} onChange={(e) => updateLine(idx, { mrp: parseFloat(e.target.value) || 0 })}
                       className="w-full border rounded px-1.5 py-1 bg-background text-xs text-right" />
-                  ) : `₹${line.mrp}`}
+                  ) : `${currencySym(quotation.currency)}${line.mrp}`}
                 </td>
                 <td className="px-2 py-1 text-right">
                   {canEdit ? (
@@ -376,7 +388,7 @@ export default function TeamQuotationEdit() {
                   ) : `${line.gstPct}%`}
                 </td>
                 <td className="px-2 py-1 text-right font-semibold">
-                  ₹{(line.lineTotal || 0).toLocaleString("en-IN", { maximumFractionDigits: 2 })}
+                  {currencySym(quotation.currency)}{(line.lineTotal || 0).toLocaleString("en-IN", { maximumFractionDigits: 2 })}
                 </td>
                 {canEdit && (
                   <td className="px-2 py-1">
@@ -393,7 +405,7 @@ export default function TeamQuotationEdit() {
           <tfoot>
             <tr className="bg-muted/30 font-semibold text-sm">
               <td colSpan={canEdit ? 9 : 8} className="px-3 py-2 text-right">Grand Total</td>
-              <td className="px-3 py-2 text-right">₹{grandTotal.toLocaleString("en-IN", { maximumFractionDigits: 2 })}</td>
+              <td className="px-3 py-2 text-right">{currencySym(quotation.currency)}{grandTotal.toLocaleString("en-IN", { maximumFractionDigits: 2 })}</td>
               {canEdit && <td />}
             </tr>
           </tfoot>
