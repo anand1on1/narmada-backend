@@ -1457,6 +1457,25 @@ export function registerV2Routes(app: Express, ctx: V2Context) {
     } catch (e: any) { res.status(500).json({ error: e.message }); }
   });
 
+  // -------- ADMIN: V2 QUOTATIONS (read-only mirror) --------
+  app.get("/api/admin/quotations", requireAuth, async (req, res) => {
+    try {
+      const status = (req.query.status as string) || undefined;
+      const customerId = req.query.customer_id ? parseInt(req.query.customer_id as string, 10) : undefined;
+      const page = req.query.page ? parseInt(req.query.page as string, 10) : 1;
+      const limit = 20;
+      const { rows, total } = await v2.listQuotations({ status, customerId, page, limit });
+      const custIds = Array.from(new Set(rows.map((r: any) => r.customerId).filter(Boolean)));
+      const custMap: Record<number, string> = {};
+      for (const cid of custIds) {
+        const c = await v2.getCustomer(cid as number);
+        if (c) custMap[cid as number] = c.name;
+      }
+      const quotations = rows.map((r: any) => ({ ...r, customerName: custMap[r.customerId] || null }));
+      res.json({ quotations, total, pages: Math.ceil(total / limit) });
+    } catch (e: any) { res.status(500).json({ error: e.message }); }
+  });
+
   // -------- ADMIN: QUOTING COMPANIES --------
   app.get("/api/admin/quoting-companies", requireAdminRole, async (_req, res) => {
     try { res.json(await v2.listQuotingCompanies()); }
@@ -1599,7 +1618,20 @@ export function registerV2Routes(app: Express, ctx: V2Context) {
       const status = (req.query.status as string) || undefined;
       const customerId = req.query.customer_id ? parseInt(req.query.customer_id as string, 10) : undefined;
       const page = req.query.page ? parseInt(req.query.page as string, 10) : 1;
-      res.json(await v2.listQuotations({ status, customerId, page }));
+      const limit = 20;
+      const { rows, total } = await v2.listQuotations({ status, customerId, page, limit });
+      // Enrich rows with customerName by batching customer lookup
+      const custIds = Array.from(new Set(rows.map((r: any) => r.customerId).filter(Boolean)));
+      const custMap: Record<number, string> = {};
+      for (const cid of custIds) {
+        const c = await v2.getCustomer(cid as number);
+        if (c) custMap[cid as number] = c.name;
+      }
+      const quotations = rows.map((r: any) => ({
+        ...r,
+        customerName: custMap[r.customerId] || null,
+      }));
+      res.json({ quotations, total, pages: Math.ceil(total / limit) });
     } catch (e: any) { res.status(500).json({ error: e.message }); }
   });
 
@@ -1620,22 +1652,48 @@ export function registerV2Routes(app: Express, ctx: V2Context) {
       } else {
         return res.status(400).json({ error: "Unsupported file type. Use JPG/PNG/PDF/XLSX/CSV" });
       }
-      // Bug 4: For each extracted line that has a part_number, attempt to fill MRP from
-      // the price_list table (case-insensitive exact match). If multiple brand entries
-      // exist for the same part number the most recent upload wins.
-      const enrichedParts = parts.map((p: any) => {
-        const pn = p.part_number || p.partNumber;
+      // Phase 1 (extract only): return parts as extracted by AI.
+      // MRP / price matching is done separately via POST /match-price-list.
+      const extractedParts = parts.map((p: any) => ({ ...p, priceMatchedFrom: null }));
+      res.json({ parts: extractedParts });
+    } catch (e: any) { res.status(500).json({ error: e.message }); }
+  });
+
+  // Phase 2: Match current draft lines against price list.
+  // POST /api/team/quotes/match-price-list and /api/admin/quotes/match-price-list
+  // Body: { lines: [{ lineNo, partNumber, brand?, hsn?, mrp?, gstPercent? }, ...] }
+  // Returns: { lines: [...updated...], matchedCount, unmatchedCount }
+  async function handleMatchPriceList(req: Request, res: Response) {
+    try {
+      const rawLines: any[] = Array.isArray(req.body?.lines) ? req.body.lines : [];
+      let matchedCount = 0;
+      let unmatchedCount = 0;
+      const updatedLines = rawLines.map((line: any) => {
+        const pn = line.partNumber || line.part_number;
         if (pn) {
           const match = v2.lookupPartNumberMrp(String(pn));
           if (match) {
-            return { ...p, mrp: match.mrp, priceMatchedFrom: "price_list" as const };
+            matchedCount++;
+            return {
+              ...line,
+              mrp: match.mrp,
+              brand: match.brand || line.brand,
+              hsn: match.hsnCode || line.hsn || "",
+              gstPercent: match.gstPercent ?? line.gstPercent,
+              gstPct: match.gstPercent ?? line.gstPct,
+              priceMatchedFrom: "price_list" as const,
+            };
           }
         }
-        return { ...p, priceMatchedFrom: null };
+        unmatchedCount++;
+        return { ...line, priceMatchedFrom: null };
       });
-      res.json({ parts: enrichedParts });
+      res.json({ lines: updatedLines, matchedCount, unmatchedCount });
     } catch (e: any) { res.status(500).json({ error: e.message }); }
-  });
+  }
+
+  app.post("/api/team/quotes/match-price-list", requireDataTeam, handleMatchPriceList);
+  app.post("/api/admin/quotes/match-price-list", requireAuth, handleMatchPriceList);
 
   app.post("/api/team/quotations", requireDataTeam, async (req, res) => {
     try {

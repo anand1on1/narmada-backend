@@ -138,13 +138,13 @@ export async function searchPriceItems(partNumber: string, brand?: string): Prom
  * Used by the document import endpoint (Bug 4) to auto-fill MRP from the price list.
  * Returns the most recently uploaded row for each brand that matches.
  */
-export function lookupPartNumberMrp(partNumber: string): { mrp: number; brand: string } | null {
+export function lookupPartNumberMrp(partNumber: string): { mrp: number; brand: string; hsnCode: string | null; gstPercent: number | null } | null {
   if (!partNumber) return null;
   const clean = String(partNumber).toLowerCase().replace(/[^a-z0-9]/g, "");
   if (!clean) return null;
   // Exact match on cleaned part number, pick the most recently uploaded entry
   const row = sqlite.prepare(`
-    SELECT pi.mrp, pi.brand
+    SELECT pi.mrp, pi.brand, pi.hsn_code AS hsnCode, pi.gst_percent AS gstPercent
     FROM price_items pi
     LEFT JOIN price_lists pl ON pl.id = pi.price_list_id
     WHERE pi.part_number_clean = ?
@@ -152,7 +152,12 @@ export function lookupPartNumberMrp(partNumber: string): { mrp: number; brand: s
     LIMIT 1
   `).get(clean) as any;
   if (!row || row.mrp == null) return null;
-  return { mrp: row.mrp as number, brand: row.brand as string };
+  return {
+    mrp: row.mrp as number,
+    brand: row.brand as string,
+    hsnCode: row.hsnCode || null,
+    gstPercent: row.gstPercent != null ? Number(row.gstPercent) : null,
+  };
 }
 
 // -------- CONSIGNMENTS --------
@@ -1202,6 +1207,8 @@ export interface PartSuggestion {
   productName: string;
   brand: string | null;
   mrp: number | null;
+  hsnCode: string | null;
+  gstPercent: number | null;
   source: "price_list" | "past_entry";
   entryDate: number | null;
 }
@@ -1228,6 +1235,8 @@ export function getPartSuggestions(q: string, limit = 10): PartSuggestion[] {
       pi.description     AS productName,
       pi.brand           AS brand,
       pi.mrp             AS mrp,
+      pi.hsn_code        AS hsnCode,
+      pi.gst_percent     AS gstPercent,
       pl.uploaded_at     AS entryDate,
       CASE
         WHEN LOWER(pi.part_number) = ?         THEN 1
@@ -1248,6 +1257,8 @@ export function getPartSuggestions(q: string, limit = 10): PartSuggestion[] {
       qi.product_name    AS productName,
       qi.brand           AS brand,
       qi.mrp             AS mrp,
+      qi.hsn             AS hsnCode,
+      qi.gst_pct         AS gstPercent,
       MAX(qi.created_at) AS entryDate,
       CASE
         WHEN LOWER(qi.part_number) = ?          THEN 1
@@ -1276,6 +1287,8 @@ export function getPartSuggestions(q: string, limit = 10): PartSuggestion[] {
       productName: row.productName || "",
       brand: row.brand || null,
       mrp: row.mrp != null ? Number(row.mrp) : null,
+      hsnCode: row.hsnCode || null,
+      gstPercent: row.gstPercent != null ? Number(row.gstPercent) : null,
       source,
       entryDate: row.entryDate ? Number(row.entryDate) : null,
     });

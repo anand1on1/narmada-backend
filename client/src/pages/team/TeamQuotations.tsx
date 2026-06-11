@@ -22,10 +22,20 @@ const STATUS_BADGE: Record<string, string> = {
   draft: "bg-amber-500/15 text-amber-700",
   sent: "bg-blue-500/15 text-blue-700",
   accepted: "bg-emerald-500/15 text-emerald-700",
+  finalized: "bg-blue-500/15 text-blue-700",
   expired: "bg-muted text-muted-foreground",
+  cancelled: "bg-red-500/15 text-red-700",
 };
 
-const STATUSES = ["", "draft", "sent", "accepted", "expired"];
+const STATUS_TABS = [
+  { value: "", label: "All" },
+  { value: "draft", label: "Draft" },
+  { value: "sent", label: "Sent / Finalized" },
+  { value: "accepted", label: "Accepted" },
+  { value: "expired", label: "Expired" },
+];
+
+const STATUSES = ["", "draft", "sent", "accepted", "expired", "cancelled"];
 
 export default function TeamQuotations() {
   const { token } = useTeamAuth();
@@ -64,11 +74,14 @@ export default function TeamQuotations() {
             placeholder="Search quote #, customer…"
             className="border rounded-lg pl-9 pr-3 py-2 bg-background text-sm w-64" />
         </div>
-        <select value={status} onChange={(e) => { setStatus(e.target.value); setPage(1); }}
-          className="border rounded-lg px-3 py-2 bg-background text-sm">
-          <option value="">All Statuses</option>
-          {STATUSES.slice(1).map((s) => <option key={s} value={s}>{s.charAt(0).toUpperCase() + s.slice(1)}</option>)}
-        </select>
+        <div className="flex gap-1 flex-wrap">
+          {STATUS_TABS.map((tab) => (
+            <button key={tab.value} onClick={() => { setStatus(tab.value); setPage(1); }}
+              className={`px-3 py-1.5 rounded-lg text-xs font-semibold border transition ${status === tab.value ? "bg-accent text-accent-foreground border-accent" : "bg-card border-border hover:bg-muted"}`}>
+              {tab.label}
+            </button>
+          ))}
+        </div>
         <button onClick={doSearch} className="px-3 py-2 border rounded-lg text-sm hover:bg-muted">Search</button>
         {(status || search) && (
           <button onClick={() => { setStatus(""); setSearch(""); setPage(1); }} className="px-3 py-2 border rounded-lg text-sm text-muted-foreground">Clear</button>

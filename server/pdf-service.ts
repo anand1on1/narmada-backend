@@ -15,8 +15,20 @@ import * as path from "node:path";
 const DATA_DIR = process.env.DATA_DIR || ".";
 const QUOTATIONS_DIR = path.join(DATA_DIR, "uploads", "quotations");
 
-// Path to the bundled NotoSans font (supports ₹ and full Unicode range).
-const NOTO_SANS_PATH = path.join(__dirname, "assets", "fonts", "NotoSans-Regular.ttf");
+// Resolve path to the bundled NotoSans font (supports ₹ and full Unicode range).
+// Tries multiple candidate locations so both dev (__dirname = server/) and
+// prod (__dirname = dist/) work, as well as a safety CWD-relative path.
+function resolveFontPath(): string | null {
+  const candidates = [
+    path.join(__dirname, "assets", "fonts", "NotoSans-Regular.ttf"),                  // prod: dist/assets
+    path.join(process.cwd(), "server", "assets", "fonts", "NotoSans-Regular.ttf"),     // dev
+    path.join(process.cwd(), "dist", "assets", "fonts", "NotoSans-Regular.ttf"),       // safety
+  ];
+  for (const p of candidates) {
+    if (fs.existsSync(p)) return p;
+  }
+  return null;
+}
 
 // Color palette
 const COLOR_DARK = rgb(0.1, 0.1, 0.15);        // near-black header
@@ -77,9 +89,12 @@ export interface CustomerForPdf {
   email: string | null;
 }
 
-function fmtCurrency(amount: number | null | undefined, currency = "INR"): string {
+function fmtCurrency(amount: number | null | undefined, currency = "INR", useUnicode = true): string {
   if (amount === null || amount === undefined) return "0.00";
-  const sym = currency === "USD" ? "$" : currency === "EUR" ? "€" : currency === "AED" ? "AED " : "₹";
+  const sym = currency === "USD" ? "$" :
+    currency === "EUR" ? (useUnicode ? "€" : "EUR ") :
+    currency === "AED" ? "AED " :
+    (useUnicode ? "₹" : "Rs. ");
   return `${sym}${amount.toFixed(2)}`;
 }
 
@@ -135,19 +150,27 @@ export async function generateQuotationPDF(
 
   // Prefer NotoSans (Unicode / ₹ support). Fall back to Helvetica only if the font file
   // is missing (e.g. first deploy before assets are copied).
+  const fontPath = resolveFontPath();
+  const useUnicodeFont = fontPath !== null;
   let fontBold: PDFFont;
   let fontRegular: PDFFont;
-  if (fs.existsSync(NOTO_SANS_PATH)) {
-    const notoBytes = fs.readFileSync(NOTO_SANS_PATH);
+  if (useUnicodeFont) {
+    const notoBytes = fs.readFileSync(fontPath!);
     // pdf-lib subset embedding: embed once and use for both regular and "bold" — NotoSans
     // variable font includes weight axis so visual weight is acceptable for headers.
     fontRegular = await pdfDoc.embedFont(notoBytes, { subset: true });
     fontBold = fontRegular; // same TTF; weight difference handled via font-size contrast
+    console.log("[PDF] using font: NotoSans (Unicode)");
   } else {
     // Fallback: Helvetica (WinAnsi) — ₹ will be replaced with "Rs." by fmtCurrency
     fontBold = await pdfDoc.embedFont(StandardFonts.HelveticaBold);
     fontRegular = await pdfDoc.embedFont(StandardFonts.Helvetica);
+    console.log("[PDF] using font: Helvetica (Rs. fallback)");
   }
+
+  // Closure-style fmtCurrency that captures the unicode flag so all call sites are safe
+  const fmt = (amount: number | null | undefined, cur = quotation.currency) =>
+    fmtCurrency(amount, cur, useUnicodeFont);
 
   let y = height - 40;
   const marginL = 40;
@@ -269,10 +292,10 @@ export async function generateQuotationPDF(
     drawText(page, descTrunc, cols.desc, rowY, fontRegular, 7, COLOR_TEXT);
     drawText(page, item.hsn || "-", cols.hsn, rowY, fontRegular, 7, COLOR_TEXT);
     drawText(page, String(item.qty), cols.qty, rowY, fontRegular, 7, COLOR_TEXT);
-    drawText(page, fmtCurrency(item.mrp, quotation.currency), cols.mrp, rowY, fontRegular, 7, COLOR_TEXT);
+    drawText(page, fmt(item.mrp), cols.mrp, rowY, fontRegular, 7, COLOR_TEXT);
     drawText(page, item.discount ? `${item.discount}%` : "-", cols.disc, rowY, fontRegular, 7, COLOR_TEXT);
     drawText(page, item.gstPct ? `${item.gstPct}%` : "-", cols.gst, rowY, fontRegular, 7, COLOR_TEXT);
-    drawText(page, fmtCurrency(item.lineTotal, quotation.currency), cols.total, rowY, fontRegular, 7, COLOR_TEXT);
+    drawText(page, fmt(item.lineTotal), cols.total, rowY, fontRegular, 7, COLOR_TEXT);
 
     y -= 14;
 
@@ -300,19 +323,19 @@ export async function generateQuotationPDF(
     y -= 13;
   }
 
-  drawTotalRow("Subtotal:", fmtCurrency(quotation.subtotal, quotation.currency));
+  drawTotalRow("Subtotal:", fmt(quotation.subtotal));
   if (quotation.totalDiscount && quotation.totalDiscount > 0) {
-    drawTotalRow("Discount:", `-${fmtCurrency(quotation.totalDiscount, quotation.currency)}`);
+    drawTotalRow("Discount:", `-${fmt(quotation.totalDiscount)}`);
   }
-  drawTotalRow("GST:", fmtCurrency(quotation.totalTax, quotation.currency));
+  drawTotalRow("GST:", fmt(quotation.totalTax));
   y -= 2;
   drawRect(page, totalsX, y - 2, 170, 1, COLOR_MID_GRAY);
   y -= 6;
-  drawTotalRow("GRAND TOTAL:", fmtCurrency(quotation.grandTotal, quotation.currency), true);
+  drawTotalRow("GRAND TOTAL:", fmt(quotation.grandTotal), true);
   if (quotation.currency !== "INR" && quotation.fxRate && quotation.fxRate !== 1) {
     drawText(
       page,
-      `(Rate: 1 ${quotation.currency} = ₹${quotation.fxRate.toFixed(4)})`,
+      `(Rate: 1 ${quotation.currency} = ${useUnicodeFont ? "\u20b9" : "Rs. "}${quotation.fxRate.toFixed(4)})`,
       totalsX,
       y,
       fontRegular,

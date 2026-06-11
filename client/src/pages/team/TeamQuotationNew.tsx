@@ -87,6 +87,7 @@ export default function TeamQuotationNew() {
   const [validUntil, setValidUntil] = useState("");
   const [saving, setSaving] = useState(false);
   const [uploading, setUploading] = useState(false);
+  const [matchingPrices, setMatchingPrices] = useState(false);
   const fileRef = useRef<HTMLInputElement>(null);
 
   // Autocomplete state
@@ -159,6 +160,8 @@ export default function TeamQuotationNew() {
       productName: part.productName || part.name || "",
       brand: part.brand || "",
       mrp: part.mrp || 0,
+      hsn: part.hsnCode || "",
+      gstPct: part.gstPercent ?? items[idx]?.gstPct ?? 18,
     });
     setAcResults([]); setAcPartIndex(null);
     // Defer focus until after React re-render
@@ -213,6 +216,40 @@ export default function TeamQuotationNew() {
       toast({ title: "Import error", description: e.message, variant: "destructive" });
     } finally {
       setUploading(false);
+    }
+  }
+
+  // ─── Match prices from price list (Phase 2) ───────────────────────────────
+
+  async function handleMatchPrices() {
+    setMatchingPrices(true);
+    try {
+      const lines = items.map((l, i) => ({ ...l, lineNo: i + 1 }));
+      const r = await teamFetch(token, "/api/team/quotes/match-price-list", {
+        method: "POST",
+        body: JSON.stringify({ lines }),
+      });
+      if (!r.ok) { const e = await r.json(); toast({ title: "Match failed", description: e.error, variant: "destructive" }); return; }
+      const json = await r.json();
+      const updatedLines: LineItem[] = (json.lines || []).map((p: any, i: number) => computeLine({
+        lineNo: i + 1,
+        partNumber: p.partNumber || p.part_number || "",
+        productName: p.productName || p.name || "",
+        hsn: p.hsn || "",
+        brand: p.brand || "",
+        qty: p.qty || 1,
+        mrp: p.mrp || 0,
+        discount: p.discount || 0,
+        gstPct: p.gstPct || p.gstPercent || 18,
+        lineTotal: 0,
+        source: p.source || "import",
+      }));
+      if (updatedLines.length) setItems(updatedLines);
+      toast({ title: `Matched ${json.matchedCount} of ${json.matchedCount + json.unmatchedCount} items from price list` });
+    } catch (e: any) {
+      toast({ title: "Match error", description: e.message, variant: "destructive" });
+    } finally {
+      setMatchingPrices(false);
     }
   }
 
@@ -373,6 +410,10 @@ export default function TeamQuotationNew() {
                   className="px-4 py-2 bg-accent text-accent-foreground rounded-lg text-sm font-semibold disabled:opacity-50 inline-flex items-center gap-2">
                   {uploading ? <><RefreshCw className="w-4 h-4 animate-spin" /> Processing…</> : <><Upload className="w-4 h-4" /> Choose File</>}
                 </button>
+                <button onClick={handleMatchPrices} disabled={matchingPrices || uploading}
+                  className="ml-2 px-4 py-2 border border-accent text-accent rounded-lg text-sm font-semibold disabled:opacity-50 inline-flex items-center gap-2 hover:bg-accent/10">
+                  {matchingPrices ? <><RefreshCw className="w-4 h-4 animate-spin" /> Matching…</> : <><Search className="w-4 h-4" /> Match Prices from List</>}
+                </button>
               </div>
             )}
 
@@ -386,11 +427,11 @@ export default function TeamQuotationNew() {
                     <th className="px-2 py-2 min-w-[160px]">Name</th>
                     <th className="px-2 py-2 w-20">HSN</th>
                     <th className="px-2 py-2 w-24">Brand</th>
-                    <th className="px-2 py-2 w-14">Qty</th>
-                    <th className="px-2 py-2 w-20">MRP</th>
-                    <th className="px-2 py-2 w-16">Disc%</th>
-                    <th className="px-2 py-2 w-16">GST%</th>
-                    <th className="px-2 py-2 w-24 text-right">Total</th>
+                    <th className="px-2 py-2 w-20 min-w-0">Qty</th>
+                    <th className="px-2 py-2 w-24 min-w-0">MRP</th>
+                    <th className="px-2 py-2 w-20 min-w-0">Disc%</th>
+                    <th className="px-2 py-2 w-20 min-w-0">GST%</th>
+                    <th className="px-2 py-2 w-24 text-right min-w-0">Total</th>
                     <th className="px-2 py-2 w-8"></th>
                   </tr>
                 </thead>
@@ -436,13 +477,13 @@ export default function TeamQuotationNew() {
                       <td className="px-2 py-1">
                         <input type="number" min={1} value={line.qty} onChange={(e) => updateLine(idx, { qty: parseFloat(e.target.value) || 1 })}
                           data-qty-idx={idx}
-                          className="w-full border rounded px-1.5 py-1 bg-background text-xs text-right" />
+                          className="w-full border rounded px-1.5 py-1 bg-background text-sm text-right" />
                       </td>
-                      <td className="px-2 py-1">
+                      <td className="px-2 py-1 min-w-0">
                         <input type="number" min={0} value={line.mrp} onChange={(e) => updateLine(idx, { mrp: parseFloat(e.target.value) || 0 })}
-                          className="w-full border rounded px-1.5 py-1 bg-background text-xs text-right" />
+                          className="w-full border rounded px-1.5 py-1 bg-background text-sm text-right" />
                       </td>
-                      <td className="px-2 py-1">
+                      <td className="px-2 py-1 min-w-0">
                         <input type="number" min={0} max={100} value={line.discount} onChange={(e) => updateLine(idx, { discount: parseFloat(e.target.value) || 0 })}
                           className="w-full border rounded px-1.5 py-1 bg-background text-xs text-right" />
                       </td>
@@ -477,6 +518,10 @@ export default function TeamQuotationNew() {
             <div className="mt-3">
               <button onClick={addLine} className="px-4 py-2 border rounded-lg text-sm inline-flex items-center gap-2 hover:bg-muted">
                 <Plus className="w-4 h-4" /> Add Row
+              </button>
+              <button onClick={handleMatchPrices} disabled={matchingPrices}
+                className="ml-2 px-4 py-2 border rounded-lg text-sm inline-flex items-center gap-2 hover:bg-muted disabled:opacity-50">
+                {matchingPrices ? <><RefreshCw className="w-4 h-4 animate-spin" /> Matching…</> : <><Search className="w-4 h-4" /> Match Prices from List</>}
               </button>
             </div>
             <div className="mt-6 flex justify-between">

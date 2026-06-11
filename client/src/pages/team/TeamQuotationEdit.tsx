@@ -4,7 +4,7 @@ import { TeamLayout } from "./TeamLayout";
 import { teamFetch, useTeamAuth } from "@/lib/team-auth";
 import { useToast } from "@/hooks/use-toast";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { Trash2, Plus, RefreshCw, Download, Send } from "lucide-react";
+import { Trash2, Plus, RefreshCw, Download, Send, Search } from "lucide-react";
 
 interface LineItem {
   id?: number;
@@ -68,6 +68,7 @@ export default function TeamQuotationEdit() {
   const [terms, setTerms] = useState("");
   const [validUntil, setValidUntil] = useState("");
   const [dirty, setDirty] = useState(false);
+  const [matchingPrices, setMatchingPrices] = useState(false);
 
   const acTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [acIdx, setAcIdx] = useState<number | null>(null);
@@ -137,8 +138,42 @@ export default function TeamQuotationEdit() {
       productName: part.productName || part.name || "",
       brand: part.brand || "",
       mrp: part.mrp || 0,
+      hsn: part.hsnCode || "",
+      gstPct: part.gstPercent ?? items[idx]?.gstPct ?? 18,
     });
     setAcResults([]); setAcIdx(null);
+  }
+
+  async function handleMatchPrices() {
+    setMatchingPrices(true);
+    try {
+      const lines = items.map((l, i) => ({ ...l, lineNo: i + 1 }));
+      const r = await teamFetch(token, "/api/team/quotes/match-price-list", {
+        method: "POST",
+        body: JSON.stringify({ lines }),
+      });
+      if (!r.ok) { const e = await r.json(); toast({ title: "Match failed", description: e.error, variant: "destructive" }); return; }
+      const json = await r.json();
+      const updatedLines: LineItem[] = (json.lines || []).map((p: any, i: number) => computeLine({
+        lineNo: i + 1,
+        partNumber: p.partNumber || p.part_number || "",
+        productName: p.productName || p.name || "",
+        hsn: p.hsn || "",
+        brand: p.brand || "",
+        qty: p.qty || 1,
+        mrp: p.mrp || 0,
+        discount: p.discount || 0,
+        gstPct: p.gstPct || p.gstPercent || 18,
+        lineTotal: 0,
+        source: p.source || "manual",
+      }));
+      if (updatedLines.length) { setItems(updatedLines); setDirty(true); }
+      toast({ title: `Matched ${json.matchedCount} of ${json.matchedCount + json.unmatchedCount} items from price list` });
+    } catch (e: any) {
+      toast({ title: "Match error", description: e.message, variant: "destructive" });
+    } finally {
+      setMatchingPrices(false);
+    }
   }
 
   const grandTotal = items.reduce((s, l) => s + (l.lineTotal || 0), 0);
@@ -252,11 +287,11 @@ export default function TeamQuotationEdit() {
               <th className="px-2 py-2 min-w-[160px]">Name</th>
               <th className="px-2 py-2 w-20">HSN</th>
               <th className="px-2 py-2 w-24">Brand</th>
-              <th className="px-2 py-2 w-14">Qty</th>
-              <th className="px-2 py-2 w-20">MRP</th>
-              <th className="px-2 py-2 w-16">Disc%</th>
-              <th className="px-2 py-2 w-16">GST%</th>
-              <th className="px-2 py-2 w-24 text-right">Total</th>
+              <th className="px-2 py-2 w-20 min-w-0">Qty</th>
+              <th className="px-2 py-2 w-24 min-w-0">MRP</th>
+              <th className="px-2 py-2 w-20 min-w-0">Disc%</th>
+              <th className="px-2 py-2 w-20 min-w-0">GST%</th>
+              <th className="px-2 py-2 w-24 text-right min-w-0">Total</th>
               {canEdit && <th className="px-2 py-2 w-8"></th>}
             </tr>
           </thead>
@@ -361,9 +396,15 @@ export default function TeamQuotationEdit() {
       </div>
 
       {canEdit && (
-        <button onClick={addLine} className="mb-4 px-4 py-2 border rounded-lg text-sm inline-flex items-center gap-2 hover:bg-muted">
-          <Plus className="w-4 h-4" /> Add Row
-        </button>
+        <div className="flex gap-2 mb-4">
+          <button onClick={addLine} className="px-4 py-2 border rounded-lg text-sm inline-flex items-center gap-2 hover:bg-muted">
+            <Plus className="w-4 h-4" /> Add Row
+          </button>
+          <button onClick={handleMatchPrices} disabled={matchingPrices}
+            className="px-4 py-2 border rounded-lg text-sm inline-flex items-center gap-2 hover:bg-muted disabled:opacity-50">
+            {matchingPrices ? <><RefreshCw className="w-4 h-4 animate-spin" /> Matching…</> : <><Search className="w-4 h-4" /> Match Prices from List</>}
+          </button>
+        </div>
       )}
 
       {/* Notes + Terms */}
