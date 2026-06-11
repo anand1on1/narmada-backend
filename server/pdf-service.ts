@@ -152,23 +152,35 @@ export async function generateQuotationPDF(
   const { width, height } = page.getSize();
 
   // Prefer NotoSans (Unicode / ₹ support). Fall back to Helvetica only if the font file
-  // is missing (e.g. first deploy before assets are copied).
+  // is missing or fontkit fails to parse it.
   const fontPath = resolveFontPath();
-  const useUnicodeFont = fontPath !== null;
+  let useUnicodeFont = fontPath !== null;
   let fontBold: PDFFont;
   let fontRegular: PDFFont;
   if (useUnicodeFont) {
-    const notoBytes = fs.readFileSync(fontPath!);
-    // pdf-lib subset embedding: embed once and use for both regular and "bold" — NotoSans
-    // variable font includes weight axis so visual weight is acceptable for headers.
-    fontRegular = await pdfDoc.embedFont(notoBytes, { subset: true });
-    fontBold = fontRegular; // same TTF; weight difference handled via font-size contrast
-    console.log("[PDF] using font: NotoSans (Unicode)");
+    try {
+      const notoBytes = fs.readFileSync(fontPath!);
+      console.log(`[PDF] NotoSans font loaded: ${notoBytes.length} bytes from ${fontPath}`);
+      if (notoBytes.length < 100000) {
+        throw new Error(`Font file suspiciously small (${notoBytes.length} bytes) — likely corrupt`);
+      }
+      // CRITICAL: subset:false embeds the FULL font. subset:true causes glyph dropout
+      // in pdf-lib where letters render as gaps because the subset table omits glyphs
+      // that were referenced. Full embed adds ~2.5MB per PDF but is bulletproof.
+      fontRegular = await pdfDoc.embedFont(notoBytes, { subset: false });
+      fontBold = fontRegular; // same TTF; weight difference handled via font-size contrast
+      console.log("[PDF] using font: NotoSans (Unicode, full embed)");
+    } catch (err) {
+      console.error("[PDF] NotoSans embed failed, falling back to Helvetica:", err);
+      useUnicodeFont = false;
+      fontBold = await pdfDoc.embedFont(StandardFonts.HelveticaBold);
+      fontRegular = await pdfDoc.embedFont(StandardFonts.Helvetica);
+    }
   } else {
     // Fallback: Helvetica (WinAnsi) — ₹ will be replaced with "Rs." by fmtCurrency
     fontBold = await pdfDoc.embedFont(StandardFonts.HelveticaBold);
     fontRegular = await pdfDoc.embedFont(StandardFonts.Helvetica);
-    console.log("[PDF] using font: Helvetica (Rs. fallback)");
+    console.log("[PDF] using font: Helvetica (Rs. fallback) — font path not resolved");
   }
 
   // Closure-style fmtCurrency that captures the unicode flag so all call sites are safe
