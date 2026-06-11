@@ -2,12 +2,14 @@ import { ReactNode, useEffect } from "react";
 import { Link, useLocation } from "wouter";
 import { useTeamAuth, teamFetch } from "@/lib/team-auth";
 import { Logo } from "@/components/Logo";
-import { LayoutDashboard, FileText, FilePlus, Users, Package, LogOut } from "lucide-react";
+import { LayoutDashboard, FileText, FilePlus, Users, Package, LogOut, ShoppingCart, Send } from "lucide-react";
 
 const navItems = [
   { href: "/team/dashboard", label: "Dashboard", icon: LayoutDashboard },
   { href: "/team/quotations", label: "Quotations", icon: FileText },
   { href: "/team/quotations/new", label: "New Quotation", icon: FilePlus },
+  { href: "/team/purchase-orders", label: "Purchase Orders", icon: ShoppingCart },
+  { href: "/team/rfqs", label: "RFQs", icon: Send },
   { href: "/team/customers", label: "Customers", icon: Users },
   { href: "/team/parts", label: "Parts Master", icon: Package },
 ];

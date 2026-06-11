@@ -2558,6 +2558,9 @@ function registerR4toR7Routes(
   });
 
   // ---------------- R5.3 PURCHASE ORDERS (team) ----------------
+  app.get("/api/team/vendors", requireDataTeam, async (req, res) => {
+    res.json(await v2.listVendors({ q: req.query.q as string | undefined, activeOnly: req.query.activeOnly === "true" }));
+  });
   app.get("/api/team/purchase-orders", requireDataTeam, async (req, res) => {
     res.json(await v2.listPurchaseOrdersV2({ status: req.query.status as string | undefined }));
   });

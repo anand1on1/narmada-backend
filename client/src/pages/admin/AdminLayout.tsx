@@ -7,6 +7,7 @@ import {
   FileText, Tag, Truck, Users,
   UserSquare, Wallet, CreditCard, FileQuestion, FileSpreadsheet, ShoppingCart, Landmark,
   Building2, UserCog, ScrollText, ClipboardList, Bell,
+  Factory, Inbox, Search, Target, Megaphone, CheckSquare, Sparkles, Facebook,
 } from "lucide-react";
 
 // Session A V2: 4-role sidebar matrix.
@@ -21,6 +22,9 @@ const ROLE_PAGES: Record<AdminRole, Set<string>> = {
     "/admin/customers", "/admin/ledger", "/admin/payments",
     "/admin/rfqs", "/admin/quotes", "/admin/purchase-orders", "/admin/bank",
     "/admin/quoting-companies", "/admin/data-team", "/admin/audit-logs", "/admin/notification-log", "/admin/account-requests",
+    "/admin/vendors", "/admin/vendor-inbox", "/admin/vendor-discovery", "/admin/companies",
+    "/admin/ai-ledger", "/admin/leads", "/admin/targets", "/admin/announcements", "/admin/tasks",
+    "/admin/ads-meta", "/admin/ads-google",
   ]),
   logistics: new Set(["/admin/consignments"]),
   accounts: new Set([
@@ -70,6 +74,17 @@ export function AdminLayout({ children, title }: { children: ReactNode; title: s
     { href: "/admin/purchase-orders", label: "Purchase Orders", icon: ShoppingCart },
     { href: "/admin/bank", label: "Bank Accounts", icon: Landmark },
     { href: "/admin/quoting-companies", label: "Quoting Companies", icon: Building2 },
+    { href: "/admin/companies", label: "Companies (Quoting)", icon: Building2 },
+    { href: "/admin/vendors", label: "Vendors", icon: Factory },
+    { href: "/admin/vendor-inbox", label: "Vendor Inbox", icon: Inbox },
+    { href: "/admin/vendor-discovery", label: "Vendor Discovery", icon: Search },
+    { href: "/admin/leads", label: "Leads", icon: Target },
+    { href: "/admin/ai-ledger", label: "AI Ledger", icon: Sparkles },
+    { href: "/admin/targets", label: "Targets", icon: Target },
+    { href: "/admin/announcements", label: "Announcements", icon: Megaphone },
+    { href: "/admin/tasks", label: "Tasks", icon: CheckSquare },
+    { href: "/admin/ads-meta", label: "Meta Ads", icon: Facebook },
+    { href: "/admin/ads-google", label: "Google Ads", icon: Search },
     { href: "/admin/data-team", label: "Data Team", icon: UserCog },
     { href: "/admin/account-requests", label: "Account Requests", icon: ClipboardList },
     { href: "/admin/audit-logs", label: "Audit Log", icon: ScrollText },

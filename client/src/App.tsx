@@ -57,6 +57,18 @@ import AdminDataTeam from "@/pages/admin/AdminDataTeam";
 import AdminAuditLog from "@/pages/admin/AdminAuditLog";
 import AdminNotificationLog from "@/pages/admin/AdminNotificationLog";
 import AdminAccountRequests from "@/pages/admin/AdminAccountRequests";
+// Rounds 4.4–7 — new admin pages
+import AdminVendors from "@/pages/admin/AdminVendors";
+import AdminCompanies from "@/pages/admin/AdminCompanies";
+import AdminAILedger from "@/pages/admin/AdminAILedger";
+import AdminLeads from "@/pages/admin/AdminLeads";
+import AdminVendorInbox from "@/pages/admin/AdminVendorInbox";
+import AdminVendorDiscovery from "@/pages/admin/AdminVendorDiscovery";
+import AdminTargets from "@/pages/admin/AdminTargets";
+import AdminAnnouncements from "@/pages/admin/AdminAnnouncements";
+import AdminTasks from "@/pages/admin/AdminTasks";
+import AdminAdsMeta from "@/pages/admin/AdminAdsMeta";
+import AdminAdsGoogle from "@/pages/admin/AdminAdsGoogle";
 
 import { CustomerAuthProvider } from "@/lib/customer-auth";
 import CustomerLogin from "@/pages/portal/CustomerLogin";
@@ -80,6 +92,14 @@ import TeamQuotationNew from "@/pages/team/TeamQuotationNew";
 import TeamQuotationEdit from "@/pages/team/TeamQuotationEdit";
 import TeamParts from "@/pages/team/TeamParts";
 import TeamCustomers from "@/pages/team/TeamCustomers";
+// Rounds 4.4–7 — team PO/RFQ pages
+import TeamPOs from "@/pages/team/TeamPOs";
+import TeamPODetail from "@/pages/team/TeamPODetail";
+import TeamRFQs from "@/pages/team/TeamRFQs";
+import TeamRFQDetail from "@/pages/team/TeamRFQDetail";
+// Delhi warehouse portal
+import DelhiLogin from "@/pages/delhi/DelhiLogin";
+import DelhiDashboard from "@/pages/delhi/DelhiDashboard";
 
 import NotFound from "@/pages/not-found";
 
@@ -145,6 +165,30 @@ function AppRouter() {
         <Route path="/admin/audit-logs" component={AdminAuditLog} />
         <Route path="/admin/notification-log" component={AdminNotificationLog} />
         <Route path="/admin/account-requests" component={AdminAccountRequests} />
+        {/* Rounds 4.4–7 — new admin routes */}
+        <Route path="/admin/vendors" component={AdminVendors} />
+        <Route path="/admin/companies" component={AdminCompanies} />
+        <Route path="/admin/ai-ledger" component={AdminAILedger} />
+        <Route path="/admin/leads" component={AdminLeads} />
+        <Route path="/admin/vendor-inbox" component={AdminVendorInbox} />
+        <Route path="/admin/vendor-discovery" component={AdminVendorDiscovery} />
+        <Route path="/admin/targets" component={AdminTargets} />
+        <Route path="/admin/announcements" component={AdminAnnouncements} />
+        <Route path="/admin/tasks" component={AdminTasks} />
+        <Route path="/admin/ads-meta" component={AdminAdsMeta} />
+        <Route path="/admin/ads-google" component={AdminAdsGoogle} />
+        <Route component={NotFound} />
+      </Switch>
+      </ErrorBoundary>
+    );
+  }
+  if (location.startsWith("/delhi")) {
+    return (
+      <ErrorBoundary key={location} label="delhi">
+      <Switch>
+        <Route path="/delhi" component={DelhiLogin} />
+        <Route path="/delhi/login" component={DelhiLogin} />
+        <Route path="/delhi/dashboard" component={DelhiDashboard} />
         <Route component={NotFound} />
       </Switch>
       </ErrorBoundary>
@@ -183,6 +227,10 @@ function AppRouter() {
         <Route path="/team/quotations" component={TeamQuotations} />
         <Route path="/team/customers" component={TeamCustomers} />
         <Route path="/team/parts" component={TeamParts} />
+        <Route path="/team/purchase-orders/:id" component={TeamPODetail} />
+        <Route path="/team/purchase-orders" component={TeamPOs} />
+        <Route path="/team/rfqs/:id" component={TeamRFQDetail} />
+        <Route path="/team/rfqs" component={TeamRFQs} />
         <Route component={NotFound} />
       </Switch>
       </ErrorBoundary>

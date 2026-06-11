@@ -202,4 +202,38 @@ ${rows.join("\n")}
   // Run once 60s after startup, then every 24h
   setTimeout(runPoReminderCheck, 60_000);
   setInterval(runPoReminderCheck, PO_REMINDER_INTERVAL_MS);
+
+  // ---- R5.8 Delhi dispatch reminder cron (pickups pending > 2 days) ----
+  const DELHI_REMINDER_INTERVAL_MS = 24 * 60 * 60 * 1000; // 24 hours
+  const DELHI_STALE_DAYS = 2;
+  async function runDelhiReminderCheck() {
+    try {
+      const { getStaleDelhiPickups } = await import("./storage-v2");
+      const { sendGenericEmail } = await import("./notifications");
+      const stale = await getStaleDelhiPickups(DELHI_STALE_DAYS);
+      if (!stale || stale.length === 0) {
+        log(`[delhi-reminder] No stale Delhi pickups (>${DELHI_STALE_DAYS}d)`);
+        return;
+      }
+      const rows = stale.map((it) => `<tr><td>${it.partNumber || "-"}</td><td>${it.brand || "-"}</td><td>${it.qty}</td><td>PO#${it.poId}</td></tr>`);
+      const html = `<h3>Delhi warehouse — pickups pending > ${DELHI_STALE_DAYS} days</h3>
+<table border="1" cellpadding="6" style="border-collapse:collapse">
+<tr><th>Part</th><th>Brand</th><th>Qty</th><th>PO</th></tr>
+${rows.join("\n")}
+</table>
+<p>These vendor-assigned items have not been collected. Please follow up.</p>`;
+      await sendGenericEmail({
+        to: ADMIN_REMINDER_EMAIL,
+        subject: `[Narmada] ${stale.length} Delhi pickup(s) overdue`,
+        html,
+        text: `${stale.length} Delhi pickups overdue (>${DELHI_STALE_DAYS}d).`,
+        event: "delhi_pickup_reminder",
+      });
+      log(`[delhi-reminder] Sent reminder for ${stale.length} stale pickups`);
+    } catch (e: any) {
+      log(`[delhi-reminder] Error: ${e?.message || e}`);
+    }
+  }
+  setTimeout(runDelhiReminderCheck, 90_000);
+  setInterval(runDelhiReminderCheck, DELHI_REMINDER_INTERVAL_MS);
 })();

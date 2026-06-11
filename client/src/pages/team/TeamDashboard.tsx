@@ -1,6 +1,6 @@
 import { TeamLayout } from "./TeamLayout";
 import { teamFetch, useTeamAuth } from "@/lib/team-auth";
-import { FileText, Clock, Send, CheckCircle } from "lucide-react";
+import { FileText, Clock, Send, CheckCircle, Megaphone, CheckSquare, Target as TargetIcon } from "lucide-react";
 import { useQuery } from "@tanstack/react-query";
 import { Link } from "wouter";
 
@@ -10,6 +10,9 @@ interface DashStats {
   sentThisMonth: number;
   accepted: number;
 }
+interface Announcement { id: number; title: string; body: string | null; createdAt: number; }
+interface MyTask { id: number; title: string; status: string; priority: string; }
+interface MyTarget { id: number; periodKey: string; metric: string; targetValue: number; currentValue: number; }
 
 interface RecentQuotation {
   id: number;
@@ -52,6 +55,23 @@ export default function TeamDashboard() {
     enabled: !!token,
   });
 
+  const { data: announcements = [] } = useQuery<Announcement[]>({
+    queryKey: ["team-announcements"],
+    queryFn: async () => { const r = await teamFetch(token, "/api/team/announcements"); return r.ok ? r.json() : []; },
+    enabled: !!token,
+  });
+  const { data: myTasks = [] } = useQuery<MyTask[]>({
+    queryKey: ["team-my-tasks"],
+    queryFn: async () => { const r = await teamFetch(token, "/api/team/my-tasks"); return r.ok ? r.json() : []; },
+    enabled: !!token,
+  });
+  const { data: myTargets = [] } = useQuery<MyTarget[]>({
+    queryKey: ["team-my-targets"],
+    queryFn: async () => { const r = await teamFetch(token, "/api/team/my-targets"); return r.ok ? r.json() : []; },
+    enabled: !!token,
+  });
+  const openTasks = myTasks.filter((t) => t.status !== "done");
+
   const statCards = [
     { label: "Total Quotations", value: stats?.total ?? "—", icon: FileText, color: "bg-blue-500/10 text-blue-700" },
     { label: "Drafts", value: stats?.drafts ?? "—", icon: Clock, color: "bg-amber-500/10 text-amber-700" },
@@ -61,6 +81,37 @@ export default function TeamDashboard() {
 
   return (
     <TeamLayout title="Dashboard">
+      {(announcements.length > 0 || openTasks.length > 0 || myTargets.length > 0) && (
+        <div className="grid md:grid-cols-3 gap-4 mb-8">
+          <div className="bg-card border rounded-xl p-4">
+            <div className="flex items-center gap-2 font-semibold mb-2"><Megaphone className="w-4 h-4 text-accent" /> Announcements</div>
+            {announcements.length === 0 ? <div className="text-xs text-muted-foreground">No announcements.</div> :
+              <ul className="space-y-2">{announcements.slice(0, 4).map((a) => (
+                <li key={a.id} className="text-sm border-b last:border-0 pb-1"><div className="font-semibold">{a.title}</div>{a.body && <div className="text-xs text-muted-foreground line-clamp-2">{a.body}</div>}</li>
+              ))}</ul>}
+          </div>
+          <div className="bg-card border rounded-xl p-4">
+            <div className="flex items-center gap-2 font-semibold mb-2"><CheckSquare className="w-4 h-4 text-accent" /> My Open Tasks</div>
+            {openTasks.length === 0 ? <div className="text-xs text-muted-foreground">No open tasks.</div> :
+              <ul className="space-y-1">{openTasks.slice(0, 5).map((t) => (
+                <li key={t.id} className="text-sm flex items-center justify-between border-b last:border-0 py-1"><span>{t.title}</span><span className="text-[10px] uppercase font-bold text-muted-foreground">{t.priority}</span></li>
+              ))}</ul>}
+          </div>
+          <div className="bg-card border rounded-xl p-4">
+            <div className="flex items-center gap-2 font-semibold mb-2"><TargetIcon className="w-4 h-4 text-accent" /> My Targets</div>
+            {myTargets.length === 0 ? <div className="text-xs text-muted-foreground">No targets set.</div> :
+              <ul className="space-y-2">{myTargets.slice(0, 4).map((tg) => {
+                const pct = tg.targetValue > 0 ? Math.min(100, Math.round((tg.currentValue / tg.targetValue) * 100)) : 0;
+                return (
+                  <li key={tg.id} className="text-xs">
+                    <div className="flex justify-between mb-0.5"><span>{tg.metric} ({tg.periodKey})</span><span>{pct}%</span></div>
+                    <div className="h-1.5 bg-muted rounded-full overflow-hidden"><div className="h-full bg-accent" style={{ width: `${pct}%` }} /></div>
+                  </li>
+                );
+              })}</ul>}
+          </div>
+        </div>
+      )}
       <div className="grid sm:grid-cols-2 lg:grid-cols-4 gap-4 mb-8">
         {statCards.map((s) => (
           <div key={s.label} className="bg-card border rounded-xl p-5">
