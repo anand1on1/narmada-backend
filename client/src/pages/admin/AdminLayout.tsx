@@ -22,7 +22,7 @@ const ROLE_PAGES: Record<AdminRole, Set<string>> = {
     "/admin/customers", "/admin/ledger", "/admin/payments",
     "/admin/rfqs", "/admin/quotes", "/admin/parts", "/admin/purchase-orders", "/admin/purchase-history", "/admin/bank",
     "/admin/quoting-companies", "/admin/data-team", "/admin/audit-logs", "/admin/notification-log", "/admin/account-requests",
-    "/admin/vendors", "/admin/vendor-inbox", "/admin/vendor-discovery", "/admin/companies",
+    "/admin/vendors", "/admin/vendor-ledger", "/admin/vendor-inbox", "/admin/vendor-discovery", "/admin/companies",
     "/admin/ai-ledger", "/admin/leads", "/admin/targets", "/admin/announcements", "/admin/tasks",
     "/admin/ads-meta", "/admin/ads-google",
   ]),
@@ -30,7 +30,7 @@ const ROLE_PAGES: Record<AdminRole, Set<string>> = {
   accounts: new Set([
     "/admin/dashboard", "/admin/consignments",
     "/admin/customers", "/admin/ledger", "/admin/payments",
-    "/admin/rfqs", "/admin/quotes", "/admin/purchase-orders", "/admin/bank",
+    "/admin/rfqs", "/admin/quotes", "/admin/purchase-orders", "/admin/bank", "/admin/vendor-ledger",
   ]),
   sales: new Set([
     "/admin/dashboard", "/admin/price-lists", "/admin/products", "/admin/contacts",
@@ -77,6 +77,7 @@ export function AdminLayout({ children, title }: { children: ReactNode; title: s
     { href: "/admin/bank", label: "Bank Accounts", icon: Landmark },
     { href: "/admin/companies", label: "Companies", icon: Building2 },
     { href: "/admin/vendors", label: "Vendors", icon: Factory },
+    { href: "/admin/vendor-ledger", label: "Vendor Ledger", icon: Wallet },
     { href: "/admin/vendor-inbox", label: "Vendor Inbox", icon: Inbox },
     { href: "/admin/vendor-discovery", label: "Vendor Discovery", icon: Search },
     { href: "/admin/leads", label: "Leads", icon: Target },

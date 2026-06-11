@@ -573,6 +573,38 @@ export async function sendVendorRateRequest(
   }
 }
 
+// R9 — consolidated batched rate request to a single seller covering many line items
+// across one or more POs. Template `narmada_vendor_rate_batch` (may not be Meta-approved yet)
+// → free-text fallback. params: {{1}}=vendor_name {{2}}=items_text {{3}}=our_company
+// The body (for log/backup) always carries the full items list AND the tax-question line.
+export async function sendVendorRateBatch(
+  phone: string,
+  p: { vendorName: string; itemsText: string },
+): Promise<{ status: string; body: string }> {
+  const templateName = "narmada_vendor_rate_batch";
+  const ourCompany = "Narmada Mobility";
+  const normalized = normalizePhone(phone);
+  const taxLine = "Please reply with rate per item. Mention if TAX INCLUSIVE (% included) or EXCLUSIVE (mention GST %).";
+  const body = `Hello ${p.vendorName},\n${ourCompany} requests your best rate for the following items:\n${p.itemsText}\n\n${taxLine}`;
+  try {
+    const raw = await postAisensy({
+      campaignName: templateName,
+      destination: normalized,
+      userName: ourCompany,
+      templateParams: [p.vendorName, p.itemsText, ourCompany],
+      source: "narmada-backend",
+      media: {}, buttons: [], carouselCards: [], location: {}, attributes: {},
+      paramsFallbackValue: { FirstName: p.vendorName },
+    });
+    const status = logAisensyResult(normalized, templateName, body, raw);
+    if (status === "failed") return { status: await sendFreeTextWa(phone, body, "vendor_rate_batch_fallback"), body };
+    return { status, body };
+  } catch (e: any) {
+    console.error(`[whatsapp] sendVendorRateBatch failed for ${normalized}:`, e?.message);
+    return { status: await sendFreeTextWa(phone, body, "vendor_rate_batch_fallback"), body };
+  }
+}
+
 // Generic free-text send (used by vendor inbox reply, lead outreach, dispatch reminders).
 export async function sendTextMessage(phone: string, text: string, eventKey = "free_text"): Promise<{ status: string }> {
   const status = await sendFreeTextWa(phone, text, eventKey);

@@ -17,8 +17,9 @@ import { useParams } from "wouter";
 import { apiUrl } from "@/lib/queryClient";
 import {
   Download, Check, Loader2, History, Send, Search,
-  ChevronDown, ChevronUp, Package,
+  ChevronDown, ChevronUp, Package, Pencil, Calendar,
 } from "lucide-react";
+import { LineQuotesPanel } from "./R9VendorQuotes";
 
 // ────────────────────────────────────────────────
 // Types
@@ -50,6 +51,7 @@ interface PO {
   notes: string | null;
   customerPoNumber: string | null;
   shipToName: string | null;
+  poDate: number | null;
   items: PoItem[];
 }
 
@@ -506,6 +508,67 @@ function HistoryTab({
 }
 
 // ────────────────────────────────────────────────
+// PO date editor (back/forward dating)
+// ────────────────────────────────────────────────
+function PoDateEditor({
+  poId, poDate, token, onSaved,
+}: {
+  poId: number; poDate: number | null; token: string | null; onSaved: () => void;
+}) {
+  const { toast } = useToast();
+  const [editing, setEditing] = useState(false);
+  const [val, setVal] = useState("");
+  const [saving, setSaving] = useState(false);
+
+  function open() {
+    const d = poDate ? new Date(poDate) : new Date();
+    setVal(d.toISOString().slice(0, 10));
+    setEditing(true);
+  }
+
+  async function save() {
+    if (!val) { toast({ title: "Pick a date", variant: "destructive" }); return; }
+    setSaving(true);
+    try {
+      const ts = new Date(val + "T00:00:00").getTime();
+      const r = await teamFetch(token, `/api/team/po/${poId}/po-date`, {
+        method: "PUT",
+        body: JSON.stringify({ po_date: ts }),
+      });
+      if (!r.ok) throw new Error("Failed");
+      toast({ title: "PO date updated" });
+      setEditing(false);
+      onSaved();
+    } catch (e: any) {
+      toast({ title: "Error", description: e.message, variant: "destructive" });
+    } finally { setSaving(false); }
+  }
+
+  if (editing) {
+    return (
+      <span className="inline-flex items-center gap-1">
+        <input type="date" value={val} onChange={(e) => setVal(e.target.value)}
+          className="border rounded-lg px-2 py-1.5 text-sm bg-background" />
+        <button onClick={save} disabled={saving}
+          className="px-2 py-1.5 bg-accent text-accent-foreground rounded-lg text-xs font-semibold inline-flex items-center gap-1 disabled:opacity-50">
+          {saving ? <Loader2 className="w-3 h-3 animate-spin" /> : <Check className="w-3 h-3" />}
+        </button>
+        <button onClick={() => setEditing(false)} className="px-2 py-1.5 border rounded-lg text-xs">Cancel</button>
+      </span>
+    );
+  }
+
+  return (
+    <button onClick={open}
+      className="border rounded-lg px-3 py-1.5 text-sm bg-background inline-flex items-center gap-1.5 hover:bg-muted">
+      <Calendar className="w-3.5 h-3.5" />
+      {poDate ? new Date(poDate).toLocaleDateString("en-IN") : "Set PO date"}
+      <Pencil className="w-3 h-3 opacity-60" />
+    </button>
+  );
+}
+
+// ────────────────────────────────────────────────
 // Main component
 // ────────────────────────────────────────────────
 const STATUSES = ["draft", "open", "partial", "fulfilled", "cancelled"];
@@ -612,6 +675,7 @@ export default function TeamPOEdit() {
           >
             {STATUSES.map((s) => <option key={s} value={s}>{s}</option>)}
           </select>
+          <PoDateEditor poId={poId} poDate={po.poDate} token={token} onSaved={() => qc.invalidateQueries({ queryKey: ["team-po-edit", poId] })} />
         </div>
         <div className="flex items-center gap-2">
           <button
@@ -686,13 +750,25 @@ export default function TeamPOEdit() {
               </div>
             </div>
 
-            {/* Vendor assignment panel */}
+            {/* Vendor assignment panel (legacy single-vendor) */}
             <ItemVendorPanel
               item={item}
               vendors={vendors}
               token={token}
               onAssigned={() => qc.invalidateQueries({ queryKey: ["team-po-edit", poId] })}
             />
+
+            {/* R9 multi-vendor quotes (ask many sellers, approve one) */}
+            <div className="mt-3 pt-3 border-t">
+              <div className="text-xs font-semibold text-muted-foreground mb-1">Multi-seller rate requests</div>
+              <LineQuotesPanel
+                itemId={item.id}
+                itemContext={`${item.partNumber || "Part"}${item.brand ? ` · ${item.brand}` : ""} · Qty ${item.qty}`}
+                vendors={vendors}
+                token={token}
+                onChanged={() => qc.invalidateQueries({ queryKey: ["team-po-edit", poId] })}
+              />
+            </div>
           </div>
         ))}
 

@@ -765,6 +765,8 @@ export const purchaseOrdersV2 = sqliteTable("purchase_orders_v2", {
   shipToAddress: text("ship_to_address"),
   shipToPhone: text("ship_to_phone"),
   notifiedDelhiAt: integer("notified_delhi_at"),
+  // R9 addition — editable PO date (back/forward date)
+  poDate: integer("po_date"),
 });
 export const insertPurchaseOrderV2Schema = createInsertSchema(purchaseOrdersV2).omit({ id: true, createdAt: true, updatedAt: true });
 export type InsertPurchaseOrderV2 = z.infer<typeof insertPurchaseOrderV2Schema>;
@@ -801,10 +803,55 @@ export const poItems = sqliteTable("po_items", {
   shippedAt: integer("shipped_at"),
   shippedBy: text("shipped_by"),
   dispatchRoundShipped: integer("dispatch_round_shipped"),
+  // R9 additions — final approved vendor + winning quote for this line
+  approvedVendorId: integer("approved_vendor_id"),
+  approvedQuoteId: integer("approved_quote_id"),
 });
 export const insertPoItemSchema = createInsertSchema(poItems).omit({ id: true });
 export type InsertPoItem = z.infer<typeof insertPoItemSchema>;
 export type PoItem = typeof poItems.$inferSelect;
+
+// -------- R9 multi-vendor RFQ quotes / chat / payments --------
+export const poItemVendorQuotes = sqliteTable("po_item_vendor_quotes", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  poItemId: integer("po_item_id").notNull(),
+  vendorId: integer("vendor_id"),
+  vendorName: text("vendor_name"),
+  vendorPhone: text("vendor_phone"),
+  rate: real("rate"),
+  taxInclusive: integer("tax_inclusive"),
+  taxPercent: real("tax_percent"),
+  status: text("status").notNull().default("requested"), // requested|received|approved|rejected|manual
+  requestedAt: integer("requested_at").notNull().default(0),
+  receivedAt: integer("received_at"),
+  approvedAt: integer("approved_at"),
+  notes: text("notes"),
+});
+export type PoItemVendorQuote = typeof poItemVendorQuotes.$inferSelect;
+
+export const vendorRfqMessages = sqliteTable("vendor_rfq_messages", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  vendorId: integer("vendor_id"),
+  vendorPhone: text("vendor_phone"),
+  direction: text("direction").notNull(), // out|in
+  body: text("body"),
+  aisensyMsgId: text("aisensy_msg_id"),
+  createdAt: integer("created_at").notNull().default(0),
+});
+export type VendorRfqMessage = typeof vendorRfqMessages.$inferSelect;
+
+export const vendorPayments = sqliteTable("vendor_payments", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  vendorId: integer("vendor_id").notNull(),
+  paidOn: integer("paid_on").notNull().default(0),
+  amount: real("amount").notNull().default(0),
+  method: text("method").notNull().default("bank"), // bank|upi|cash|cheque|other
+  reference: text("reference"),
+  notes: text("notes"),
+  createdBy: text("created_by"),
+  createdAt: integer("created_at").notNull().default(0),
+});
+export type VendorPayment = typeof vendorPayments.$inferSelect;
 
 // -------- R5.1 RFQs --------
 export const rfqsV2 = sqliteTable("rfqs_v2", {

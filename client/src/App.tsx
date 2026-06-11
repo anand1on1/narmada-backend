@@ -59,6 +59,7 @@ import AdminNotificationLog from "@/pages/admin/AdminNotificationLog";
 import AdminAccountRequests from "@/pages/admin/AdminAccountRequests";
 // Rounds 4.4–7 — new admin pages
 import AdminVendors from "@/pages/admin/AdminVendors";
+import AdminVendorLedger from "@/pages/admin/AdminVendorLedger";
 import AdminCompanies from "@/pages/admin/AdminCompanies";
 import AdminAILedger from "@/pages/admin/AdminAILedger";
 import AdminLeads from "@/pages/admin/AdminLeads";
@@ -173,6 +174,7 @@ function AppRouter() {
         <Route path="/admin/account-requests" component={AdminAccountRequests} />
         {/* Rounds 4.4–7 — new admin routes */}
         <Route path="/admin/vendors" component={AdminVendors} />
+        <Route path="/admin/vendor-ledger" component={AdminVendorLedger} />
         <Route path="/admin/companies" component={AdminCompanies} />
         <Route path="/admin/ai-ledger" component={AdminAILedger} />
         <Route path="/admin/leads" component={AdminLeads} />

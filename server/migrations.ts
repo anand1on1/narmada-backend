@@ -286,3 +286,79 @@ export function runR8Migrations() {
 
   console.log("[migrations] R8 tables/columns ensured");
 }
+
+// -------- R9 additive migrations --------
+// Multi-vendor RFQ quotes, embedded vendor chat, vendor payments/ledger, editable PO date,
+// customer-PO search. Additive only. NOTE: the design doc references a `sellers` table — this
+// codebase's vendor table is `vendors`, so vendor_id below references vendors.id.
+export function runR9Migrations() {
+  const stmts: Array<{ desc: string; sql: string }> = [
+    // po_item_vendor_quotes — one row per (line, vendor)
+    {
+      desc: "po_item_vendor_quotes table",
+      sql: `CREATE TABLE IF NOT EXISTS po_item_vendor_quotes (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        po_item_id INTEGER NOT NULL,
+        vendor_id INTEGER,
+        vendor_name TEXT,
+        vendor_phone TEXT,
+        rate REAL,
+        tax_inclusive INTEGER,
+        tax_percent REAL,
+        status TEXT NOT NULL DEFAULT 'requested',
+        requested_at INTEGER NOT NULL DEFAULT 0,
+        received_at INTEGER,
+        approved_at INTEGER,
+        notes TEXT
+      )`,
+    },
+    { desc: "uq_quote_item_vendor", sql: `CREATE UNIQUE INDEX IF NOT EXISTS uq_quote_item_vendor ON po_item_vendor_quotes(po_item_id, vendor_id)` },
+    { desc: "idx_quote_item", sql: `CREATE INDEX IF NOT EXISTS idx_quote_item ON po_item_vendor_quotes(po_item_id)` },
+    // vendor_rfq_messages — embedded chat (out/in)
+    {
+      desc: "vendor_rfq_messages table",
+      sql: `CREATE TABLE IF NOT EXISTS vendor_rfq_messages (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        vendor_id INTEGER,
+        vendor_phone TEXT,
+        direction TEXT NOT NULL,
+        body TEXT,
+        aisensy_msg_id TEXT,
+        created_at INTEGER NOT NULL DEFAULT 0
+      )`,
+    },
+    { desc: "idx_rfq_msg_vendor", sql: `CREATE INDEX IF NOT EXISTS idx_rfq_msg_vendor ON vendor_rfq_messages(vendor_id, created_at DESC)` },
+    // vendor_payments — manual ledger payments
+    {
+      desc: "vendor_payments table",
+      sql: `CREATE TABLE IF NOT EXISTS vendor_payments (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        vendor_id INTEGER NOT NULL,
+        paid_on INTEGER NOT NULL DEFAULT 0,
+        amount REAL NOT NULL DEFAULT 0,
+        method TEXT NOT NULL DEFAULT 'bank',
+        reference TEXT,
+        notes TEXT,
+        created_by TEXT,
+        created_at INTEGER NOT NULL DEFAULT 0
+      )`,
+    },
+    { desc: "idx_vendor_payments_vendor", sql: `CREATE INDEX IF NOT EXISTS idx_vendor_payments_vendor ON vendor_payments(vendor_id)` },
+    // po_items: final chosen vendor + winning quote
+    { desc: "po_items.approved_vendor_id", sql: `ALTER TABLE po_items ADD COLUMN approved_vendor_id INTEGER` },
+    { desc: "po_items.approved_quote_id", sql: `ALTER TABLE po_items ADD COLUMN approved_quote_id INTEGER` },
+    // purchase_orders_v2: editable PO date (customer_po_number already added in R8)
+    { desc: "purchase_orders_v2.po_date", sql: `ALTER TABLE purchase_orders_v2 ADD COLUMN po_date INTEGER` },
+    { desc: "idx_po_customer_po_number", sql: `CREATE INDEX IF NOT EXISTS idx_po_customer_po_number ON purchase_orders_v2(customer_po_number)` },
+  ];
+  for (const { desc, sql } of stmts) {
+    console.log(`[migrations] R9: ${desc}`);
+    try {
+      sqlite.exec(sql);
+    } catch (err: any) {
+      console.log(`[migrations] R9: skipped ${desc} —`, err?.message || err);
+    }
+  }
+
+  console.log("[migrations] R9 tables/columns ensured");
+}

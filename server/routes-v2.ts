@@ -2985,6 +2985,325 @@ function registerR4toR7Routes(
     throw err;
   }
   console.log("[v2] R8 routes registered: po-upload, create-from-parsed, assign-vendor, search-vendor-rates, delhi-pos, purchase-history");
+
+  // ============================================================
+  // R9: MULTI-VENDOR RFQ, EMBEDDED CHAT APPROVAL, VENDOR LEDGER
+  // ============================================================
+  console.log("[v2] R9 about to register");
+  try {
+    registerR9Routes(app, { requireAuth, requireDataTeam });
+    console.log("[v2] R9 registered OK");
+  } catch (err) {
+    console.error("[v2] R9 register FAILED:", err);
+    throw err;
+  }
+}
+
+// ============================================================
+// R9 ROUTE IMPLEMENTATIONS
+// ============================================================
+function registerR9Routes(
+  app: Express,
+  { requireAuth, requireDataTeam }: { requireAuth: any; requireDataTeam: any }
+) {
+  // ---- Per-line multi-vendor management (proc / data team) ----
+  app.get("/api/team/po-items/:id/quotes", requireDataTeam, async (req: any, res: any) => {
+    try {
+      const id = parseInt(req.params.id as string, 10);
+      res.json(v2.listQuotesForPoItem(id));
+    } catch (e: any) { res.status(500).json({ error: e.message }); }
+  });
+
+  app.post("/api/team/po-items/:id/quotes", requireDataTeam, async (req: any, res: any) => {
+    try {
+      const id = parseInt(req.params.id as string, 10);
+      const { vendor_id, vendor_name, vendor_phone } = req.body || {};
+      if (!vendor_id && !(vendor_name && String(vendor_name).trim())) {
+        return res.status(400).json({ error: "vendor_id or vendor_name required" });
+      }
+      let phone = vendor_phone ? String(vendor_phone) : null;
+      let name = vendor_name ? String(vendor_name) : null;
+      if (vendor_id) {
+        const vendor = await v2.getVendor(parseInt(vendor_id, 10));
+        if (vendor) {
+          name = name || vendor.name;
+          phone = phone || vendor.whatsapp || vendor.phone || null;
+        }
+      }
+      const row = v2.addQuoteToPoItem(id, {
+        vendorId: vendor_id ? parseInt(vendor_id, 10) : null,
+        vendorName: name,
+        vendorPhone: phone,
+      });
+      res.json(row);
+    } catch (e: any) { res.status(500).json({ error: e.message }); }
+  });
+
+  app.delete("/api/team/po-items/:id/quotes/:quoteId", requireDataTeam, async (req: any, res: any) => {
+    try {
+      const quoteId = parseInt(req.params.quoteId as string, 10);
+      const ok = v2.deleteVendorQuote(quoteId);
+      if (!ok) return res.status(400).json({ error: "Cannot remove (not found or already approved)" });
+      res.json({ ok: true });
+    } catch (e: any) { res.status(500).json({ error: e.message }); }
+  });
+
+  app.put("/api/team/po-items/:id/quotes/:quoteId/manual", requireDataTeam, async (req: any, res: any) => {
+    try {
+      const quoteId = parseInt(req.params.quoteId as string, 10);
+      const { rate, tax_inclusive, tax_percent, notes } = req.body || {};
+      if (rate == null || rate === "") return res.status(400).json({ error: "rate required" });
+      const row = v2.setQuoteManualRate(quoteId, {
+        rate: parseFloat(rate),
+        taxInclusive: tax_inclusive != null ? (tax_inclusive ? 1 : 0) : null,
+        taxPercent: tax_percent != null && tax_percent !== "" ? parseFloat(tax_percent) : null,
+        notes: notes ? String(notes) : null,
+      });
+      res.json(row);
+    } catch (e: any) { res.status(500).json({ error: e.message }); }
+  });
+
+  app.post("/api/team/po-items/:id/quotes/:quoteId/approve", requireDataTeam, async (req: any, res: any) => {
+    try {
+      const id = parseInt(req.params.id as string, 10);
+      const quoteId = parseInt(req.params.quoteId as string, 10);
+      const result = v2.approveQuote(id, quoteId);
+      if (!result) return res.status(404).json({ error: "Quote not found for this line" });
+      const u = (req as any).teamUser;
+      Promise.resolve(v2.writeAuditLog({
+        actorType: "data_team", actorId: String(u?.id || ""), action: "approve_quote",
+        entityType: "po_item", entityId: String(id),
+        afterJson: JSON.stringify({ quoteId, rate: result.quote?.rate, vendorId: result.quote?.vendor_id }),
+      })).catch(() => {});
+      res.json(result);
+    } catch (e: any) { res.status(500).json({ error: e.message }); }
+  });
+
+  app.post("/api/team/po-items/:id/unapprove", requireDataTeam, async (req: any, res: any) => {
+    try {
+      const id = parseInt(req.params.id as string, 10);
+      const ok = v2.unapprovePoItem(id);
+      if (!ok) return res.status(404).json({ error: "Item not found" });
+      res.json({ ok: true });
+    } catch (e: any) { res.status(500).json({ error: e.message }); }
+  });
+
+  // ---- Fire Rate Request (batched, one consolidated WA per vendor) ----
+  app.post("/api/team/rfq/fire", requireDataTeam, async (req: any, res: any) => {
+    try {
+      const { vendor_ids, po_ids } = req.body || {};
+      const vendorIds: number[] = Array.isArray(vendor_ids) ? vendor_ids.map((n: any) => parseInt(n, 10)).filter(Boolean) : [];
+      const poIds: number[] = Array.isArray(po_ids) ? po_ids.map((n: any) => parseInt(n, 10)).filter(Boolean) : [];
+      if (vendorIds.length === 0 || poIds.length === 0) {
+        return res.status(400).json({ error: "vendor_ids and po_ids required" });
+      }
+      const byVendor = v2.collectPendingQuotesForFire(vendorIds, poIds);
+      let firedVendors = 0; let firedItems = 0;
+      for (const [vendorId, items] of Array.from(byVendor.entries())) {
+        if (!items.length) continue;
+        const vendor = await v2.getVendor(vendorId);
+        const phone = vendor?.whatsapp || vendor?.phone || items[0]?.vendor_phone;
+        const itemsText = items
+          .map((it: any, i: number) => `${i + 1}. ${[it.part_number, it.brand, it.description].filter(Boolean).join(" ")} x${it.qty ?? 1} (PO ${it.po_number})`)
+          .join("\n");
+        firedVendors++; firedItems += items.length;
+        console.log(`[aisensy] batch RFQ to vendor ${vendorId} for ${items.length} items`);
+        const vendorName = vendor?.name || items[0]?.vendor_name || "Seller";
+        // Persist outbound copy immediately (so the chat shows it even if AiSensy is slow).
+        const taxLine = "Please reply with rate per item. Mention if TAX INCLUSIVE (% included) or EXCLUSIVE (mention GST %).";
+        const outBody = `Hello ${vendorName},\nNarmada Mobility requests your best rate for the following items:\n${itemsText}\n\n${taxLine}`;
+        v2.addRfqMessage({ vendorId, vendorPhone: phone || null, direction: "out", body: outBody });
+        if (phone) {
+          setImmediate(() => {
+            (async () => {
+              const wa = require("./whatsapp") as typeof import("./whatsapp");
+              await wa.sendVendorRateBatch(phone, { vendorName, itemsText });
+            })().catch((err) => console.error("[aisensy] batch RFQ failed:", err));
+          });
+        }
+      }
+      res.json({ ok: true, firedVendors, firedItems });
+    } catch (e: any) { res.status(500).json({ error: e.message }); }
+  });
+
+  // ---- Vendors with pending quotes (powers Fire Rate Request modal) ----
+  app.get("/api/team/rfq/pending-vendors", requireDataTeam, async (_req: any, res: any) => {
+    try { res.json(v2.listVendorsWithPendingQuotes()); }
+    catch (e: any) { res.status(500).json({ error: e.message }); }
+  });
+
+  // ---- Embedded chat ----
+  app.get("/api/team/rfq/chat/:vendorId", requireDataTeam, async (req: any, res: any) => {
+    try {
+      const vendorId = parseInt(req.params.vendorId as string, 10);
+      res.json(v2.listRfqMessages(vendorId, 50));
+    } catch (e: any) { res.status(500).json({ error: e.message }); }
+  });
+
+  // Public AiSensy inbound webhook for the R9 embedded chat. Persists every inbound message
+  // to vendor_rfq_messages so the chat drawer shows vendor replies. Distinct path from the
+  // existing R5.5 webhook (/api/webhooks/aisensy) to avoid double-registration.
+  app.post("/api/aisensy/webhook", async (req: any, res: any) => {
+    try {
+      const b = req.body || {};
+      const from = String(b.from || b.sender || b.phone || b.mobile || "");
+      const message = String(b.message || b.text || b.body || "");
+      const messageId = b.message_id || b.messageId || b.id || null;
+      if (!from) return res.json({ ok: true, ignored: "no from" });
+      const vendor = await v2.getVendorByPhone(from);
+      v2.addRfqMessage({
+        vendorId: vendor?.id ?? null, vendorPhone: from, direction: "in",
+        body: message, aisensyMsgId: messageId,
+      });
+      res.json({ ok: true, vendor: vendor?.id ?? null });
+    } catch (e: any) {
+      console.error("[webhook:aisensy-r9]", e?.message);
+      res.json({ ok: false, error: e?.message });
+    }
+  });
+
+  // Fallback: pull recent inbound from AiSensy API (when webhook isn't wired). Best-effort.
+  app.post("/api/team/rfq/sync-inbound", requireDataTeam, async (req: any, res: any) => {
+    try {
+      const apiKey = process.env.AISENSY_API_KEY || "";
+      if (!apiKey || apiKey === "skip") {
+        return res.json({ ok: false, synced: 0, note: "AISENSY_API_KEY not configured — webhook is the supported path" });
+      }
+      // AiSensy does not expose a stable public inbound-messages pull endpoint on all plans.
+      // We attempt a best-effort fetch; on any failure we degrade gracefully so the UI's
+      // webhook-driven thread remains the source of truth.
+      res.json({ ok: true, synced: 0, note: "Inbound is webhook-driven; no pull performed" });
+    } catch (e: any) { res.status(500).json({ error: e.message }); }
+  });
+
+  // ---- PO date + customer-PO search ----
+  app.put("/api/team/po/:id/po-date", requireDataTeam, async (req: any, res: any) => {
+    try {
+      const id = parseInt(req.params.id as string, 10);
+      const { po_date } = req.body || {};
+      if (po_date == null) return res.status(400).json({ error: "po_date required" });
+      const po = v2.updatePoDate(id, parseInt(po_date, 10));
+      const u = (req as any).teamUser;
+      Promise.resolve(v2.writeAuditLog({
+        actorType: "data_team", actorId: String(u?.id || ""), action: "update_po_date",
+        entityType: "purchase_order", entityId: String(id),
+        afterJson: JSON.stringify({ po_date: parseInt(po_date, 10) }),
+      })).catch(() => {});
+      res.json(po);
+    } catch (e: any) { res.status(500).json({ error: e.message }); }
+  });
+
+  app.get("/api/team/po/search", requireDataTeam, async (req: any, res: any) => {
+    try {
+      const q = String(req.query.q || "").trim();
+      if (!q) return res.json([]);
+      res.json(v2.searchPurchaseOrders(q));
+    } catch (e: any) { res.status(500).json({ error: e.message }); }
+  });
+
+  // ---- Outstanding today ----
+  function dayBounds(dateStr?: string): { start: number; end: number } {
+    const base = dateStr ? new Date(dateStr + "T00:00:00") : new Date();
+    const start = new Date(base.getFullYear(), base.getMonth(), base.getDate(), 0, 0, 0, 0).getTime();
+    const end = start + 86400000 - 1;
+    return { start, end };
+  }
+
+  app.get("/api/team/outstanding-today", requireDataTeam, async (req: any, res: any) => {
+    try {
+      const { start, end } = dayBounds(req.query.date as string | undefined);
+      res.json(v2.getOutstandingToday(start, end));
+    } catch (e: any) { res.status(500).json({ error: e.message }); }
+  });
+
+  app.get("/api/team/outstanding-today/export.xlsx", requireDataTeam, async (req: any, res: any) => {
+    try {
+      const dateStr = (req.query.date as string) || new Date().toISOString().slice(0, 10);
+      const { start, end } = dayBounds(req.query.date as string | undefined);
+      const data = v2.getOutstandingToday(start, end);
+      const XLSX = require("xlsx");
+      const sheetData = [
+        ["PO #", "Items Total", "Pending Rates"],
+        ...data.breakdown.map((r: any) => [r.po_number, r.items_total, r.pending]),
+        [],
+        ["Summary", "", ""],
+        ["POs Created", data.pos_created, ""],
+        ["Items Total", data.items_total, ""],
+        ["Rates Received", data.rates_received, ""],
+        ["Rates Pending", data.rates_pending, ""],
+      ];
+      const wb = XLSX.utils.book_new();
+      const ws = XLSX.utils.aoa_to_sheet(sheetData);
+      XLSX.utils.book_append_sheet(wb, ws, "Outstanding");
+      const buffer = XLSX.write(wb, { type: "buffer", bookType: "xlsx" });
+      res.setHeader("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
+      res.setHeader("Content-Disposition", `attachment; filename="outstanding-${dateStr}.xlsx"`);
+      res.send(buffer);
+    } catch (e: any) { res.status(500).json({ error: e.message }); }
+  });
+
+  // ---- Vendor ledger (admin) ----
+  app.get("/api/admin/vendor-ledger", requireAuth, async (req: any, res: any) => {
+    try {
+      const vendorId = req.query.vendor_id ? parseInt(req.query.vendor_id as string, 10) : undefined;
+      const from = req.query.from ? parseInt(req.query.from as string, 10) : undefined;
+      const to = req.query.to ? parseInt(req.query.to as string, 10) : undefined;
+      res.json(v2.getVendorLedger({ vendorId, from, to }));
+    } catch (e: any) { res.status(500).json({ error: e.message }); }
+  });
+
+  app.get("/api/admin/vendor-ledger/:vendorId/details", requireAuth, async (req: any, res: any) => {
+    try {
+      const vendorId = parseInt(req.params.vendorId as string, 10);
+      const from = req.query.from ? parseInt(req.query.from as string, 10) : undefined;
+      const to = req.query.to ? parseInt(req.query.to as string, 10) : undefined;
+      res.json(v2.getVendorLedgerDetails(vendorId, from, to));
+    } catch (e: any) { res.status(500).json({ error: e.message }); }
+  });
+
+  app.post("/api/admin/vendor-ledger/:vendorId/payment", requireAuth, async (req: any, res: any) => {
+    try {
+      const vendorId = parseInt(req.params.vendorId as string, 10);
+      const { paid_on, amount, method, reference, notes } = req.body || {};
+      if (amount == null || amount === "") return res.status(400).json({ error: "amount required" });
+      const u = (req as any).user;
+      const row = v2.addVendorPayment({
+        vendorId,
+        paidOn: paid_on != null ? parseInt(paid_on, 10) : Date.now(),
+        amount: parseFloat(amount),
+        method: method || "bank",
+        reference: reference ? String(reference) : null,
+        notes: notes ? String(notes) : null,
+        createdBy: u?.username || null,
+      });
+      res.json(row);
+    } catch (e: any) { res.status(500).json({ error: e.message }); }
+  });
+
+  app.get("/api/admin/vendor-ledger/export.xlsx", requireAuth, async (req: any, res: any) => {
+    try {
+      const from = req.query.from ? parseInt(req.query.from as string, 10) : undefined;
+      const to = req.query.to ? parseInt(req.query.to as string, 10) : undefined;
+      const rows = v2.getVendorLedger({ from, to });
+      const XLSX = require("xlsx");
+      const sheetData = [
+        ["Vendor", "Approved Items", "Approved Value", "Total Paid", "Balance", "Last Activity"],
+        ...rows.map((r: any) => [
+          r.vendor_name, r.item_count, r.total_approved_value, r.total_paid, r.balance,
+          r.last_activity_at ? new Date(r.last_activity_at).toISOString().slice(0, 10) : "",
+        ]),
+      ];
+      const wb = XLSX.utils.book_new();
+      const ws = XLSX.utils.aoa_to_sheet(sheetData);
+      XLSX.utils.book_append_sheet(wb, ws, "Vendor Ledger");
+      const buffer = XLSX.write(wb, { type: "buffer", bookType: "xlsx" });
+      res.setHeader("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
+      res.setHeader("Content-Disposition", `attachment; filename="vendor-ledger.xlsx"`);
+      res.send(buffer);
+    } catch (e: any) { res.status(500).json({ error: e.message }); }
+  });
+
+  console.log("[v2] R9 routes registered: quotes, rfq/fire, chat, webhook, po-date, po/search, outstanding-today, vendor-ledger");
 }
 
 // ============================================================

@@ -2093,3 +2093,322 @@ export async function listDelhiActivePOs(): Promise<any[]> {
   `).all() as any[];
   return rows;
 }
+
+// ============================================================
+// R9: MULTI-VENDOR RFQ QUOTES / CHAT / PAYMENTS / LEDGER
+// Raw-SQL helpers (same `sqlite` handle as the rest of this file). vendor_id references
+// the `vendors` table (the design doc's "sellers" maps to `vendors` here).
+// ============================================================
+
+// -------- Per-line vendor quotes --------
+export function listQuotesForPoItem(poItemId: number): any[] {
+  return sqlite.prepare(
+    `SELECT * FROM po_item_vendor_quotes WHERE po_item_id = ? ORDER BY requested_at ASC, id ASC`
+  ).all(poItemId) as any[];
+}
+
+export function getVendorQuote(id: number): any {
+  return sqlite.prepare(`SELECT * FROM po_item_vendor_quotes WHERE id = ?`).get(id) as any;
+}
+
+export function addQuoteToPoItem(
+  poItemId: number,
+  data: { vendorId?: number | null; vendorName?: string | null; vendorPhone?: string | null }
+): any {
+  const now = Date.now();
+  // Enforce one quote row per (line, vendor) — for free-text vendors vendor_id is null and
+  // the unique index permits multiple NULLs, which is intended.
+  if (data.vendorId != null) {
+    const existing = sqlite.prepare(
+      `SELECT * FROM po_item_vendor_quotes WHERE po_item_id = ? AND vendor_id = ?`
+    ).get(poItemId, data.vendorId) as any;
+    if (existing) return existing;
+  }
+  const info = sqlite.prepare(
+    `INSERT INTO po_item_vendor_quotes (po_item_id, vendor_id, vendor_name, vendor_phone, status, requested_at)
+     VALUES (?, ?, ?, ?, 'requested', ?)`
+  ).run(poItemId, data.vendorId ?? null, data.vendorName ?? null, data.vendorPhone ?? null, now);
+  return getVendorQuote(Number(info.lastInsertRowid));
+}
+
+export function deleteVendorQuote(id: number): boolean {
+  const q = getVendorQuote(id);
+  if (!q) return false;
+  if (q.status === "approved") return false;
+  sqlite.prepare(`DELETE FROM po_item_vendor_quotes WHERE id = ?`).run(id);
+  return true;
+}
+
+export function setQuoteManualRate(
+  id: number,
+  data: { rate: number; taxInclusive?: number | null; taxPercent?: number | null; notes?: string | null }
+): any {
+  const now = Date.now();
+  sqlite.prepare(
+    `UPDATE po_item_vendor_quotes
+     SET rate = ?, tax_inclusive = ?, tax_percent = ?, notes = ?, status = 'manual', received_at = COALESCE(received_at, ?)
+     WHERE id = ?`
+  ).run(data.rate, data.taxInclusive ?? null, data.taxPercent ?? null, data.notes ?? null, now, id);
+  return getVendorQuote(id);
+}
+
+// Approve a quote as the winner for its PO line. Atomic: marks the quote approved,
+// stamps po_items.approved_vendor_id / approved_quote_id / vendor_rate / vendor_name / vendor_id.
+export function approveQuote(poItemId: number, quoteId: number): { item: any; quote: any } | null {
+  const tx = sqlite.transaction(() => {
+    const quote = sqlite.prepare(
+      `SELECT * FROM po_item_vendor_quotes WHERE id = ? AND po_item_id = ?`
+    ).get(quoteId, poItemId) as any;
+    if (!quote) return null;
+    const now = Date.now();
+    sqlite.prepare(
+      `UPDATE po_item_vendor_quotes SET status = 'approved', approved_at = ? WHERE id = ?`
+    ).run(now, quoteId);
+    sqlite.prepare(
+      `UPDATE po_items
+       SET approved_vendor_id = ?, approved_quote_id = ?, vendor_id = COALESCE(?, vendor_id),
+           vendor_rate = ?, vendor_name = ?, purchase_cost = ?, assigned_at = ?
+       WHERE id = ?`
+    ).run(
+      quote.vendor_id ?? null, quoteId, quote.vendor_id ?? null,
+      quote.rate ?? null, quote.vendor_name ?? null, quote.rate ?? null, now, poItemId
+    );
+    const item = sqlite.prepare(`SELECT * FROM po_items WHERE id = ?`).get(poItemId) as any;
+    return { item, quote: getVendorQuote(quoteId) };
+  });
+  return tx();
+}
+
+export function unapprovePoItem(poItemId: number): boolean {
+  const tx = sqlite.transaction(() => {
+    const item = sqlite.prepare(`SELECT * FROM po_items WHERE id = ?`).get(poItemId) as any;
+    if (!item) return false;
+    if (item.approved_quote_id) {
+      sqlite.prepare(
+        `UPDATE po_item_vendor_quotes SET status = 'received', approved_at = NULL WHERE id = ?`
+      ).run(item.approved_quote_id);
+    }
+    sqlite.prepare(
+      `UPDATE po_items SET approved_vendor_id = NULL, approved_quote_id = NULL WHERE id = ?`
+    ).run(poItemId);
+    return true;
+  });
+  return tx();
+}
+
+// Collect outstanding (no-rate) quotes for a set of vendors across a set of POs, grouped by vendor.
+// Used by the batched RFQ-fire endpoint to build one consolidated message per vendor.
+export function collectPendingQuotesForFire(vendorIds: number[], poIds: number[]): Map<number, any[]> {
+  const byVendor = new Map<number, any[]>();
+  if (vendorIds.length === 0 || poIds.length === 0) return byVendor;
+  const vPlace = vendorIds.map(() => "?").join(",");
+  const pPlace = poIds.map(() => "?").join(",");
+  const rows = sqlite.prepare(
+    `SELECT q.*, pi.po_id, pi.part_number, pi.brand, pi.description, pi.qty,
+            po.po_number
+     FROM po_item_vendor_quotes q
+     JOIN po_items pi ON pi.id = q.po_item_id
+     JOIN purchase_orders_v2 po ON po.id = pi.po_id
+     WHERE q.vendor_id IN (${vPlace})
+       AND pi.po_id IN (${pPlace})
+       AND q.status = 'requested'
+       AND q.rate IS NULL
+     ORDER BY q.vendor_id, pi.po_id, pi.id`
+  ).all(...vendorIds, ...poIds) as any[];
+  for (const r of rows) {
+    if (!byVendor.has(r.vendor_id)) byVendor.set(r.vendor_id, []);
+    byVendor.get(r.vendor_id)!.push(r);
+  }
+  return byVendor;
+}
+
+// List vendors that currently have at least one pending (requested, no-rate) quote, with the
+// open POs each is tagged on. Powers the Fire Rate Request modal.
+export function listVendorsWithPendingQuotes(): any[] {
+  const vendors = sqlite.prepare(
+    `SELECT q.vendor_id, q.vendor_name, COUNT(*) AS pending_count
+     FROM po_item_vendor_quotes q
+     JOIN po_items pi ON pi.id = q.po_item_id
+     JOIN purchase_orders_v2 po ON po.id = pi.po_id
+     WHERE q.vendor_id IS NOT NULL AND q.status = 'requested' AND q.rate IS NULL
+       AND po.status NOT IN ('cancelled')
+     GROUP BY q.vendor_id
+     ORDER BY pending_count DESC`
+  ).all() as any[];
+  for (const v of vendors) {
+    v.pos = sqlite.prepare(
+      `SELECT DISTINCT po.id AS po_id, po.po_number, po.customer_po_number
+       FROM po_item_vendor_quotes q
+       JOIN po_items pi ON pi.id = q.po_item_id
+       JOIN purchase_orders_v2 po ON po.id = pi.po_id
+       WHERE q.vendor_id = ? AND q.status = 'requested' AND q.rate IS NULL
+       ORDER BY po.created_at DESC`
+    ).all(v.vendor_id) as any[];
+  }
+  return vendors;
+}
+
+// -------- Vendor RFQ chat messages --------
+export function addRfqMessage(data: {
+  vendorId?: number | null; vendorPhone?: string | null; direction: "out" | "in";
+  body?: string | null; aisensyMsgId?: string | null;
+}): any {
+  const now = Date.now();
+  const info = sqlite.prepare(
+    `INSERT INTO vendor_rfq_messages (vendor_id, vendor_phone, direction, body, aisensy_msg_id, created_at)
+     VALUES (?, ?, ?, ?, ?, ?)`
+  ).run(data.vendorId ?? null, data.vendorPhone ?? null, data.direction, data.body ?? null, data.aisensyMsgId ?? null, now);
+  return sqlite.prepare(`SELECT * FROM vendor_rfq_messages WHERE id = ?`).get(Number(info.lastInsertRowid));
+}
+
+export function listRfqMessages(vendorId: number, limit = 50): any[] {
+  const rows = sqlite.prepare(
+    `SELECT * FROM vendor_rfq_messages WHERE vendor_id = ? ORDER BY created_at DESC, id DESC LIMIT ?`
+  ).all(vendorId, limit) as any[];
+  return rows.reverse(); // newest last
+}
+
+// -------- Vendor payments --------
+export function addVendorPayment(data: {
+  vendorId: number; paidOn: number; amount: number; method: string;
+  reference?: string | null; notes?: string | null; createdBy?: string | null;
+}): any {
+  const now = Date.now();
+  const info = sqlite.prepare(
+    `INSERT INTO vendor_payments (vendor_id, paid_on, amount, method, reference, notes, created_by, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+  ).run(data.vendorId, data.paidOn, data.amount, data.method, data.reference ?? null, data.notes ?? null, data.createdBy ?? null, now);
+  return sqlite.prepare(`SELECT * FROM vendor_payments WHERE id = ?`).get(Number(info.lastInsertRowid));
+}
+
+export function listVendorPayments(vendorId: number, from?: number, to?: number): any[] {
+  const conds = ["vendor_id = ?"];
+  const params: any[] = [vendorId];
+  if (from != null) { conds.push("paid_on >= ?"); params.push(from); }
+  if (to != null) { conds.push("paid_on <= ?"); params.push(to); }
+  return sqlite.prepare(
+    `SELECT * FROM vendor_payments WHERE ${conds.join(" AND ")} ORDER BY paid_on DESC, id DESC`
+  ).all(...params) as any[];
+}
+
+// -------- Vendor ledger (one row per vendor) --------
+// Approved value = sum over approved po_items of vendor_rate * qty. Paid = sum vendor_payments.
+export function getVendorLedger(opts: { vendorId?: number; from?: number; to?: number } = {}): any[] {
+  const apprConds: string[] = ["pi.approved_vendor_id IS NOT NULL"];
+  const apprParams: any[] = [];
+  if (opts.vendorId != null) { apprConds.push("pi.approved_vendor_id = ?"); apprParams.push(opts.vendorId); }
+  if (opts.from != null) { apprConds.push("pi.assigned_at >= ?"); apprParams.push(opts.from); }
+  if (opts.to != null) { apprConds.push("pi.assigned_at <= ?"); apprParams.push(opts.to); }
+
+  const approved = sqlite.prepare(
+    `SELECT pi.approved_vendor_id AS vendor_id,
+            COUNT(*) AS item_count,
+            SUM(COALESCE(pi.vendor_rate, 0) * COALESCE(pi.qty, 1)) AS total_approved_value,
+            MAX(pi.assigned_at) AS last_activity_at
+     FROM po_items pi
+     WHERE ${apprConds.join(" AND ")}
+     GROUP BY pi.approved_vendor_id`
+  ).all(...apprParams) as any[];
+
+  const map = new Map<number, any>();
+  for (const a of approved) {
+    map.set(a.vendor_id, {
+      vendor_id: a.vendor_id,
+      item_count: a.item_count || 0,
+      total_approved_value: a.total_approved_value || 0,
+      total_paid: 0,
+      last_activity_at: a.last_activity_at || 0,
+    });
+  }
+
+  const payConds: string[] = ["1=1"];
+  const payParams: any[] = [];
+  if (opts.vendorId != null) { payConds.push("vendor_id = ?"); payParams.push(opts.vendorId); }
+  if (opts.from != null) { payConds.push("paid_on >= ?"); payParams.push(opts.from); }
+  if (opts.to != null) { payConds.push("paid_on <= ?"); payParams.push(opts.to); }
+  const payments = sqlite.prepare(
+    `SELECT vendor_id, SUM(amount) AS total_paid, MAX(paid_on) AS last_pay
+     FROM vendor_payments WHERE ${payConds.join(" AND ")} GROUP BY vendor_id`
+  ).all(...payParams) as any[];
+  for (const p of payments) {
+    if (!map.has(p.vendor_id)) {
+      map.set(p.vendor_id, { vendor_id: p.vendor_id, item_count: 0, total_approved_value: 0, total_paid: 0, last_activity_at: 0 });
+    }
+    const row = map.get(p.vendor_id);
+    row.total_paid = p.total_paid || 0;
+    if ((p.last_pay || 0) > row.last_activity_at) row.last_activity_at = p.last_pay || 0;
+  }
+
+  const rows = Array.from(map.values());
+  // Attach vendor name + compute balance
+  for (const r of rows) {
+    const v = sqlite.prepare(`SELECT name FROM vendors WHERE id = ?`).get(r.vendor_id) as any;
+    r.vendor_name = v?.name || `Vendor #${r.vendor_id}`;
+    r.balance = (r.total_approved_value || 0) - (r.total_paid || 0);
+  }
+  rows.sort((a, b) => (b.last_activity_at || 0) - (a.last_activity_at || 0));
+  return rows;
+}
+
+export function getVendorLedgerDetails(vendorId: number, from?: number, to?: number): { items: any[]; payments: any[] } {
+  const conds = ["pi.approved_vendor_id = ?"];
+  const params: any[] = [vendorId];
+  if (from != null) { conds.push("pi.assigned_at >= ?"); params.push(from); }
+  if (to != null) { conds.push("pi.assigned_at <= ?"); params.push(to); }
+  const items = sqlite.prepare(
+    `SELECT po.po_number, pi.part_number AS part, pi.brand, pi.qty, pi.vendor_rate AS rate,
+            (COALESCE(pi.vendor_rate, 0) * COALESCE(pi.qty, 1)) AS line_total, pi.assigned_at AS approved_at
+     FROM po_items pi
+     JOIN purchase_orders_v2 po ON po.id = pi.po_id
+     WHERE ${conds.join(" AND ")}
+     ORDER BY pi.assigned_at DESC`
+  ).all(...params) as any[];
+  const payments = listVendorPayments(vendorId, from, to);
+  return { items, payments };
+}
+
+// -------- Outstanding today --------
+export function getOutstandingToday(dayStart: number, dayEnd: number): any {
+  const posCreated = (sqlite.prepare(
+    `SELECT COUNT(*) AS n FROM purchase_orders_v2 WHERE created_at >= ? AND created_at <= ?`
+  ).get(dayStart, dayEnd) as any).n || 0;
+
+  const pos = sqlite.prepare(
+    `SELECT id, po_number FROM purchase_orders_v2 WHERE created_at >= ? AND created_at <= ? ORDER BY created_at DESC`
+  ).all(dayStart, dayEnd) as any[];
+
+  let itemsTotal = 0, ratesReceived = 0, ratesPending = 0;
+  const breakdown: any[] = [];
+  for (const po of pos) {
+    const items = sqlite.prepare(`SELECT id FROM po_items WHERE po_id = ?`).all(po.id) as any[];
+    let poPending = 0;
+    for (const it of items) {
+      const hasRate = (sqlite.prepare(
+        `SELECT COUNT(*) AS n FROM po_item_vendor_quotes WHERE po_item_id = ? AND status IN ('received','approved','manual')`
+      ).get(it.id) as any).n || 0;
+      if (hasRate > 0) ratesReceived++; else { ratesPending++; poPending++; }
+    }
+    itemsTotal += items.length;
+    breakdown.push({ po_id: po.id, po_number: po.po_number, items_total: items.length, pending: poPending });
+  }
+  return { pos_created: posCreated, items_total: itemsTotal, rates_received: ratesReceived, rates_pending: ratesPending, breakdown };
+}
+
+// -------- PO date + customer-PO search --------
+export function updatePoDate(id: number, poDate: number): any {
+  sqlite.prepare(`UPDATE purchase_orders_v2 SET po_date = ?, updated_at = ? WHERE id = ?`).run(poDate, Date.now(), id);
+  return sqlite.prepare(`SELECT * FROM purchase_orders_v2 WHERE id = ?`).get(id) as any;
+}
+
+export function searchPurchaseOrders(q: string): any[] {
+  const like = `%${q}%`;
+  return sqlite.prepare(
+    `SELECT po.id, po.po_number, po.customer_po_number, po.status, po.total, po.created_at, po.po_date,
+            c.name AS customer_name
+     FROM purchase_orders_v2 po
+     LEFT JOIN customers c ON c.id = po.customer_id
+     WHERE po.po_number LIKE ? OR po.customer_po_number LIKE ?
+     ORDER BY po.created_at DESC
+     LIMIT 20`
+  ).all(like, like) as any[];
+}

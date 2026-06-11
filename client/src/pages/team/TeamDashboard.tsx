@@ -1,8 +1,11 @@
+import { useState } from "react";
 import { TeamLayout } from "./TeamLayout";
 import { teamFetch, useTeamAuth } from "@/lib/team-auth";
-import { FileText, Clock, Send, CheckCircle, Megaphone, CheckSquare, Target as TargetIcon } from "lucide-react";
+import { FileText, Clock, Send, CheckCircle, Megaphone, CheckSquare, Target as TargetIcon, Search, Zap, ClipboardList } from "lucide-react";
 import { useQuery } from "@tanstack/react-query";
-import { Link } from "wouter";
+import { Link, useLocation } from "wouter";
+import { apiUrl } from "@/lib/queryClient";
+import { FireRateRequestModal } from "./R9VendorQuotes";
 
 interface DashStats {
   total: number;
@@ -31,8 +34,125 @@ const STATUS_BADGE: Record<string, string> = {
   expired: "bg-muted text-muted-foreground",
 };
 
+interface OutstandingToday {
+  pos_created: number;
+  items_total: number;
+  rates_received: number;
+  rates_pending: number;
+  breakdown: { po_id: number; po_number: string; items_total: number; pending: number }[];
+}
+interface PoSearchRow {
+  id: number;
+  po_number: string;
+  customer_po_number: string | null;
+  status: string;
+  total: number | null;
+  customer_name: string | null;
+}
+
+function PoSearchBox({ token }: { token: string | null }) {
+  const [, navigate] = useLocation();
+  const [q, setQ] = useState("");
+  const { data: results = [], isFetching } = useQuery<PoSearchRow[]>({
+    queryKey: ["team-po-search", q],
+    queryFn: async () => {
+      if (q.trim().length < 2) return [];
+      const r = await teamFetch(token, `/api/team/po/search?q=${encodeURIComponent(q.trim())}`);
+      return r.ok ? r.json() : [];
+    },
+    enabled: !!token && q.trim().length >= 2,
+  });
+
+  return (
+    <div className="relative">
+      <div className="flex items-center gap-2 bg-card border rounded-xl px-3 py-2">
+        <Search className="w-4 h-4 text-muted-foreground" />
+        <input
+          value={q}
+          onChange={(e) => setQ(e.target.value)}
+          placeholder="Search PO by NM/PO/… or customer PO number"
+          className="flex-1 bg-transparent text-sm outline-none"
+        />
+        {isFetching && <span className="text-xs text-muted-foreground">…</span>}
+      </div>
+      {q.trim().length >= 2 && results.length > 0 && (
+        <div className="absolute z-20 mt-1 w-full bg-card border rounded-xl shadow-lg max-h-72 overflow-y-auto">
+          {results.map((r) => (
+            <button
+              key={r.id}
+              onClick={() => navigate(`/team/po/${r.id}/edit`)}
+              className="w-full text-left px-3 py-2 hover:bg-muted border-b last:border-0 flex items-center justify-between"
+            >
+              <span>
+                <span className="font-mono font-semibold text-sm">{r.po_number}</span>
+                {r.customer_po_number && <span className="ml-2 text-xs text-muted-foreground">Cust PO: {r.customer_po_number}</span>}
+                {r.customer_name && <span className="ml-2 text-xs text-muted-foreground">· {r.customer_name}</span>}
+              </span>
+              <span className="text-[10px] uppercase font-bold text-muted-foreground">{r.status}</span>
+            </button>
+          ))}
+        </div>
+      )}
+      {q.trim().length >= 2 && !isFetching && results.length === 0 && (
+        <div className="absolute z-20 mt-1 w-full bg-card border rounded-xl shadow-lg px-3 py-2 text-xs text-muted-foreground">
+          No POs match "{q}".
+        </div>
+      )}
+    </div>
+  );
+}
+
+function OutstandingTodayWidget({ token }: { token: string | null }) {
+  const { data } = useQuery<OutstandingToday>({
+    queryKey: ["team-outstanding-today"],
+    queryFn: async () => {
+      const r = await teamFetch(token, "/api/team/outstanding-today");
+      return r.ok ? r.json() : { pos_created: 0, items_total: 0, rates_received: 0, rates_pending: 0, breakdown: [] };
+    },
+    enabled: !!token,
+  });
+
+  function exportXlsx() {
+    const t = (token || "");
+    fetch(apiUrl("/api/team/outstanding-today/export.xlsx"), { headers: t ? { "x-team-token": t } : {} })
+      .then((r) => r.blob())
+      .then((b) => {
+        const u = URL.createObjectURL(b);
+        const a = document.createElement("a");
+        a.href = u; a.download = "outstanding-today.xlsx"; a.click();
+        URL.revokeObjectURL(u);
+      });
+  }
+
+  return (
+    <div className="bg-card border rounded-xl p-4">
+      <div className="flex items-center justify-between mb-3">
+        <div className="flex items-center gap-2 font-semibold"><ClipboardList className="w-4 h-4 text-accent" /> Outstanding Today</div>
+        <button onClick={exportXlsx} className="text-xs text-accent hover:underline">Export .xlsx</button>
+      </div>
+      <div className="grid grid-cols-4 gap-2 text-center mb-3">
+        <div><div className="text-xl font-bold">{data?.pos_created ?? 0}</div><div className="text-[10px] text-muted-foreground uppercase">POs</div></div>
+        <div><div className="text-xl font-bold">{data?.items_total ?? 0}</div><div className="text-[10px] text-muted-foreground uppercase">Items</div></div>
+        <div><div className="text-xl font-bold text-emerald-600">{data?.rates_received ?? 0}</div><div className="text-[10px] text-muted-foreground uppercase">Rates In</div></div>
+        <div><div className="text-xl font-bold text-amber-600">{data?.rates_pending ?? 0}</div><div className="text-[10px] text-muted-foreground uppercase">Pending</div></div>
+      </div>
+      {data && data.breakdown.length > 0 && (
+        <div className="border-t pt-2 max-h-40 overflow-y-auto space-y-1">
+          {data.breakdown.map((b) => (
+            <div key={b.po_id} className="flex items-center justify-between text-xs">
+              <span className="font-mono">{b.po_number}</span>
+              <span className="text-muted-foreground">{b.items_total} items · {b.pending > 0 ? <span className="text-amber-600 font-semibold">{b.pending} pending</span> : <span className="text-emerald-600">all rated</span>}</span>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 export default function TeamDashboard() {
   const { token } = useTeamAuth();
+  const [fireOpen, setFireOpen] = useState(false);
 
   const { data: stats } = useQuery<DashStats>({
     queryKey: ["team-dash-stats"],
@@ -81,6 +201,24 @@ export default function TeamDashboard() {
 
   return (
     <TeamLayout title="Dashboard">
+      {/* R9 procurement quick actions */}
+      <div className="grid md:grid-cols-3 gap-4 mb-6">
+        <div className="md:col-span-2 flex flex-col gap-3">
+          <div className="flex items-center gap-3">
+            <div className="flex-1"><PoSearchBox token={token} /></div>
+            <button
+              onClick={() => setFireOpen(true)}
+              className="px-4 py-2.5 bg-accent text-accent-foreground rounded-xl text-sm font-semibold inline-flex items-center gap-2 whitespace-nowrap"
+            >
+              <Zap className="w-4 h-4" /> Fire Rate Request
+            </button>
+          </div>
+        </div>
+        <OutstandingTodayWidget token={token} />
+      </div>
+
+      {fireOpen && <FireRateRequestModal token={token} onClose={() => setFireOpen(false)} />}
+
       {(announcements.length > 0 || openTasks.length > 0 || myTargets.length > 0) && (
         <div className="grid md:grid-cols-3 gap-4 mb-8">
           <div className="bg-card border rounded-xl p-4">
