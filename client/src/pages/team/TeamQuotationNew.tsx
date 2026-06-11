@@ -6,7 +6,7 @@ import { useToast } from "@/hooks/use-toast";
 import { useQuery } from "@tanstack/react-query";
 import {
   ChevronRight, ChevronLeft, Plus, Trash2, Upload, Search, Check,
-  FileText, RefreshCw,
+  FileText, RefreshCw, Sparkles, Truck,
 } from "lucide-react";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -16,7 +16,11 @@ interface QuotingCompany {
   logoUrl: string | null; active: boolean;
 }
 
-interface Customer { id: number; name: string; phone: string | null; gstNumber: string | null; }
+interface Customer {
+  id: number; name: string; phone: string | null; email?: string | null; gstNumber: string | null;
+  defaultDiscountPct?: number | null;
+  address?: string | null; city?: string | null; state?: string | null; pincode?: string | null;
+}
 
 interface LineItem {
   lineNo: number;
@@ -32,9 +36,9 @@ interface LineItem {
   source: "manual" | "import";
 }
 
-const emptyLine = (): LineItem => ({
+const emptyLine = (defaultDisc = 0): LineItem => ({
   lineNo: 0, partNumber: "", productName: "", hsn: "", brand: "",
-  qty: 1, mrp: 0, discount: 0, gstPct: 18, lineTotal: 0, source: "manual",
+  qty: 1, mrp: 0, discount: defaultDisc, gstPct: 18, lineTotal: 0, source: "manual",
 });
 
 const CURRENCIES = ["INR", "USD", "EUR", "AED"];
@@ -90,8 +94,22 @@ export default function TeamQuotationNew() {
   const [matchingPrices, setMatchingPrices] = useState(false);
   const fileRef = useRef<HTMLInputElement>(null);
 
-  // Autocomplete state
+  // Round 3: shipping address (overrides customer billing for this quote)
+  const [shipOpen, setShipOpen] = useState(false);
+  const [shippingName, setShippingName] = useState("");
+  const [shippingAddress, setShippingAddress] = useState("");
+  const [shippingCity, setShippingCity] = useState("");
+  const [shippingState, setShippingState] = useState("");
+  const [shippingPincode, setShippingPincode] = useState("");
+  const [shippingPhone, setShippingPhone] = useState("");
+
+  // Round 3: AI prompt
+  const [aiPrompt, setAiPrompt] = useState("");
+  const [aiBusy, setAiBusy] = useState(false);
+
+  // Autocomplete state (works for both Part No. and Description)
   const [acPartIndex, setAcPartIndex] = useState<number | null>(null);
+  const [acField, setAcField] = useState<"part" | "name">("part");
   const [acResults, setAcResults] = useState<any[]>([]);
   const acTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -121,6 +139,20 @@ export default function TeamQuotationNew() {
     enabled: !!token,
   });
 
+  // Round 3: auto-apply default discount to empty lines when a customer is picked.
+  useEffect(() => {
+    if (!selectedCustomer) return;
+    const dd = selectedCustomer.defaultDiscountPct;
+    if (dd == null || dd === 0) return;
+    setItems((prev) =>
+      prev.map((l) => {
+        // Only touch rows where the user hasn't set a non-zero discount yet.
+        if (l.discount && l.discount !== 0) return l;
+        return computeLine({ ...l, discount: dd });
+      }),
+    );
+  }, [selectedCustomer?.id]); // eslint-disable-line react-hooks/exhaustive-deps
+
   // ─── FX rate ──────────────────────────────────────────────────────────────
 
   async function fetchFX(cur: string) {
@@ -134,17 +166,15 @@ export default function TeamQuotationNew() {
     finally { setFxLoading(false); }
   }
 
-  // ─── Part autocomplete ────────────────────────────────────────────────────
+  // ─── Part autocomplete (works from BOTH Part No. and Description) ──────────
 
-  function onPartNumberChange(idx: number, val: string) {
-    updateLine(idx, { partNumber: val });
+  function triggerAutocomplete(idx: number, val: string, field: "part" | "name") {
     if (acTimerRef.current) clearTimeout(acTimerRef.current);
     if (val.length >= 2) {
-      // Bug 3: 250 ms debounce to /api/team/part-suggestions (price_list + past entries)
       acTimerRef.current = setTimeout(async () => {
         try {
           const r = await teamFetch(token, `/api/team/part-suggestions?q=${encodeURIComponent(val)}&limit=10`);
-          if (r.ok) { setAcResults(await r.json()); setAcPartIndex(idx); }
+          if (r.ok) { setAcResults(await r.json()); setAcPartIndex(idx); setAcField(field); }
         } catch { /* ignore network errors during autocomplete */ }
       }, 250);
     } else {
@@ -152,9 +182,20 @@ export default function TeamQuotationNew() {
     }
   }
 
+  function onPartNumberChange(idx: number, val: string) {
+    updateLine(idx, { partNumber: val });
+    triggerAutocomplete(idx, val, "part");
+  }
+
+  function onProductNameChange(idx: number, val: string) {
+    updateLine(idx, { productName: val });
+    triggerAutocomplete(idx, val, "name");
+  }
+
   function applyAcResult(idx: number, part: any) {
     // Focus the qty input after filling the line item (quantity is the natural next field)
     const rowEl = document.querySelector<HTMLInputElement>(`[data-qty-idx="${idx}"]`);
+    const defaultDisc = selectedCustomer?.defaultDiscountPct ?? 0;
     updateLine(idx, {
       partNumber: part.partNumber || part.part_number || "",
       productName: part.productName || part.name || "",
@@ -162,9 +203,9 @@ export default function TeamQuotationNew() {
       mrp: part.mrp || 0,
       hsn: part.hsnCode || "",
       gstPct: part.gstPercent ?? items[idx]?.gstPct ?? 18,
+      discount: items[idx]?.discount || defaultDisc,
     });
     setAcResults([]); setAcPartIndex(null);
-    // Defer focus until after React re-render
     if (rowEl) setTimeout(() => rowEl.focus(), 50);
   }
 
@@ -178,13 +219,16 @@ export default function TeamQuotationNew() {
     });
   }
 
-  function addLine() { setItems((prev) => [...prev, emptyLine()]); }
+  function addLine() {
+    const dd = selectedCustomer?.defaultDiscountPct ?? 0;
+    setItems((prev) => [...prev, emptyLine(dd)]);
+  }
 
   function removeLine(idx: number) {
     setItems((prev) => prev.filter((_, i) => i !== idx).map((l, i) => ({ ...l, lineNo: i + 1 })));
   }
 
-  // ─── Document import ──────────────────────────────────────────────────────
+  // ─── Document import (Round 3: APPEND + de-dupe instead of REPLACE) ──────
 
   async function handleImport(file: File) {
     setUploading(true);
@@ -194,24 +238,48 @@ export default function TeamQuotationNew() {
       const r = await teamFetch(token, "/api/team/quotations/extract", { method: "POST", body: fd });
       if (!r.ok) { const e = await r.json(); toast({ title: "Import failed", description: e.error, variant: "destructive" }); return; }
       const json = await r.json();
-      // Backend returns { parts: [...] }; older clients expected array — handle both.
       const parsed: any[] = Array.isArray(json) ? json : Array.isArray(json?.parts) ? json.parts : [];
       if (!parsed.length) { toast({ title: "No items detected", description: "The document parser returned no rows. Try a clearer file.", variant: "destructive" }); return; }
-      const lines: LineItem[] = parsed.map((p, i) => computeLine({
-        lineNo: i + 1,
+      const defaultDisc = selectedCustomer?.defaultDiscountPct ?? 0;
+      const newLines: LineItem[] = parsed.map((p) => computeLine({
+        lineNo: 0,
         partNumber: p.part_number || p.partNumber || "",
         productName: p.name || p.productName || "",
         hsn: p.hsn || "",
         brand: p.brand || "",
         qty: p.qty || 1,
         mrp: p.mrp || 0,
-        discount: 0,
+        discount: defaultDisc,
         gstPct: 18,
         lineTotal: 0,
         source: "import",
       }));
-      if (lines.length) setItems(lines);
-      toast({ title: `Imported ${lines.length} item(s)`, description: "Review and edit before saving." });
+
+      // Round 3: APPEND to existing items instead of replacing; drop blank starter rows
+      // and de-duplicate by partNumber (or productName when partNumber is empty).
+      setItems((prev) => {
+        const nonBlankExisting = prev.filter((l) => l.partNumber || l.productName);
+        const merged = [...nonBlankExisting];
+        const seen = new Set(
+          merged.map((l) => (l.partNumber || `name:${l.productName}`).toLowerCase()),
+        );
+        let added = 0;
+        let skipped = 0;
+        for (const nl of newLines) {
+          const key = (nl.partNumber || `name:${nl.productName}`).toLowerCase();
+          if (!key.trim() || key === "name:") continue;
+          if (seen.has(key)) { skipped++; continue; }
+          seen.add(key);
+          merged.push(nl);
+          added++;
+        }
+        const renumbered = merged.map((l, i) => ({ ...l, lineNo: i + 1 }));
+        toast({
+          title: `Appended ${added} item(s)`,
+          description: skipped > 0 ? `Skipped ${skipped} duplicate(s).` : "Review and edit before saving.",
+        });
+        return renumbered.length > 0 ? renumbered : [emptyLine(defaultDisc)];
+      });
     } catch (e: any) {
       toast({ title: "Import error", description: e.message, variant: "destructive" });
     } finally {
@@ -253,6 +321,51 @@ export default function TeamQuotationNew() {
     }
   }
 
+  // ─── Round 3: AI prompt — Claude edits line items in place ────────────────
+
+  async function runAiPrompt() {
+    if (!aiPrompt.trim()) return;
+    setAiBusy(true);
+    try {
+      const r = await teamFetch(token, "/api/team/quotations/ai-edit", {
+        method: "POST",
+        body: JSON.stringify({
+          instruction: aiPrompt.trim(),
+          items: items.map((l, i) => ({ ...l, lineNo: i + 1 })),
+          context: {
+            customerName: selectedCustomer?.name,
+            companyName: selectedCompany?.name,
+            currency,
+          },
+        }),
+      });
+      if (!r.ok) { const e = await r.json(); throw new Error(e.error || "AI request failed"); }
+      const json = await r.json();
+      const updated: any[] = Array.isArray(json?.items) ? json.items : [];
+      if (!updated.length) { toast({ title: "AI returned no changes" }); return; }
+      const merged: LineItem[] = updated.map((p: any, i: number) => computeLine({
+        lineNo: i + 1,
+        partNumber: p.partNumber ?? "",
+        productName: p.productName ?? "",
+        hsn: p.hsn ?? "",
+        brand: p.brand ?? "",
+        qty: Number(p.qty) || 1,
+        mrp: Number(p.mrp) || 0,
+        discount: Number(p.discount) || 0,
+        gstPct: Number(p.gstPct) || 18,
+        lineTotal: 0,
+        source: items[i]?.source || "manual",
+      }));
+      setItems(merged);
+      toast({ title: "AI updated line items", description: json.summary || "Review the changes before saving." });
+      setAiPrompt("");
+    } catch (e: any) {
+      toast({ title: "AI error", description: e.message, variant: "destructive" });
+    } finally {
+      setAiBusy(false);
+    }
+  }
+
   // ─── Grand total ──────────────────────────────────────────────────────────
 
   const grandTotal = items.reduce((s, l) => s + (l.lineTotal || 0), 0);
@@ -260,22 +373,31 @@ export default function TeamQuotationNew() {
 
   // ─── Save ─────────────────────────────────────────────────────────────────
 
+  function buildPayload() {
+    return {
+      quotingCompanyId: selectedCompany!.id,
+      customerId: selectedCustomer!.id,
+      currency,
+      fxRate: fxRate || 1,
+      notes, terms, validUntil: validUntil || null,
+      shippingName: shippingName.trim() || null,
+      shippingAddress: shippingAddress.trim() || null,
+      shippingCity: shippingCity.trim() || null,
+      shippingState: shippingState.trim() || null,
+      shippingPincode: shippingPincode.trim() || null,
+      shippingPhone: shippingPhone.trim() || null,
+      items: items.map((l, i) => ({ ...l, lineNo: i + 1 })),
+    };
+  }
+
   async function saveDraft() {
     if (!selectedCompany || !selectedCustomer) return;
     setSaving(true);
     try {
-      const payload = {
-        quotingCompanyId: selectedCompany.id,
-        customerId: selectedCustomer.id,
-        currency,
-        fxRate: fxRate || 1,
-        notes, terms, validUntil: validUntil || null,
-        items: items.map((l, i) => ({ ...l, lineNo: i + 1 })),
-      };
-      const r = await teamFetch(token, "/api/team/quotations", { method: "POST", body: JSON.stringify(payload) });
+      const r = await teamFetch(token, "/api/team/quotations", { method: "POST", body: JSON.stringify(buildPayload()) });
       if (!r.ok) { const e = await r.json(); throw new Error(e.error || "Save failed"); }
       const resp = await r.json();
-      const created = resp.quotation || resp; // backend returns {quotation, items}
+      const created = resp.quotation || resp;
       toast({ title: "Draft saved", description: `Quotation ${created.quoteNo} created.` });
       navigate(`/team/quotations/${created.id}`);
     } catch (e: any) {
@@ -289,22 +411,22 @@ export default function TeamQuotationNew() {
     if (!selectedCompany || !selectedCustomer) return;
     setSaving(true);
     try {
-      const payload = {
-        quotingCompanyId: selectedCompany.id,
-        customerId: selectedCustomer.id,
-        currency,
-        fxRate: fxRate || 1,
-        notes, terms, validUntil: validUntil || null,
-        items: items.map((l, i) => ({ ...l, lineNo: i + 1 })),
-      };
-      const r = await teamFetch(token, "/api/team/quotations", { method: "POST", body: JSON.stringify(payload) });
+      const r = await teamFetch(token, "/api/team/quotations", { method: "POST", body: JSON.stringify(buildPayload()) });
       if (!r.ok) { const e = await r.json(); throw new Error(e.error || "Save failed"); }
       const resp = await r.json();
-      const created = resp.quotation || resp; // backend returns {quotation, items}
+      const created = resp.quotation || resp;
 
       const rf = await teamFetch(token, `/api/team/quotations/${created.id}/finalize`, { method: "POST" });
       if (!rf.ok) { const e = await rf.json(); throw new Error(e.error || "Finalize failed"); }
-      toast({ title: "Quotation sent!", description: `${created.quoteNo} finalized and sent to customer.` });
+      const finJson = await rf.json().catch(() => ({}));
+      const emailInfo = finJson?.email;
+      if (emailInfo && emailInfo.ok) {
+        toast({ title: "Quotation sent", description: `${created.quoteNo} emailed to ${selectedCustomer.email || "customer"}.` });
+      } else if (emailInfo && !emailInfo.ok) {
+        toast({ title: "Saved, but email failed", description: emailInfo.error || "Check SMTP settings.", variant: "destructive" });
+      } else {
+        toast({ title: "Quotation finalized", description: `${created.quoteNo} ready.` });
+      }
       navigate(`/team/quotations/${created.id}`);
     } catch (e: any) {
       toast({ title: "Error", description: e.message, variant: "destructive" });
@@ -317,7 +439,7 @@ export default function TeamQuotationNew() {
 
   return (
     <TeamLayout title="New Quotation">
-      <div className="max-w-4xl mx-auto">
+      <div className="max-w-5xl mx-auto">
         <StepBar step={step} />
 
         {/* Step 0: Pick company */}
@@ -325,14 +447,14 @@ export default function TeamQuotationNew() {
           <div>
             <h2 className="font-semibold text-lg mb-4">Select Quoting Company</h2>
             {companies.length === 0 ? (
-              <div className="p-12 text-center text-muted-foreground border rounded-xl">
+              <div className="p-12 text-center text-muted-foreground border rounded-xl bg-card">
                 No quoting companies configured. Ask admin to add one.
               </div>
             ) : (
               <div className="grid sm:grid-cols-2 gap-3">
                 {companies.map((c) => (
                   <button key={c.id} onClick={() => setSelectedCompany(c)}
-                    className={`border-2 rounded-xl p-4 text-left transition ${selectedCompany?.id === c.id ? "border-accent bg-accent/5" : "border-border hover:border-accent/50"}`}>
+                    className={`border-2 rounded-xl p-4 text-left transition bg-card ${selectedCompany?.id === c.id ? "border-accent bg-accent/5" : "border-border hover:border-accent/50"}`}>
                     {c.logoUrl && <img src={c.logoUrl} alt={c.name} className="h-10 object-contain mb-2" />}
                     <div className="font-semibold">{c.name}</div>
                     <div className="text-xs text-muted-foreground mt-1">GSTIN: {c.gstin || "—"}</div>
@@ -360,7 +482,7 @@ export default function TeamQuotationNew() {
                 placeholder="Search customers…"
                 className="w-full border rounded-lg pl-9 pr-3 py-2 bg-background text-sm" />
             </div>
-            <div className="border rounded-xl divide-y max-h-80 overflow-y-auto">
+            <div className="border rounded-xl divide-y max-h-80 overflow-y-auto bg-card shadow-sm">
               {customers.length === 0 ? (
                 <div className="p-6 text-center text-muted-foreground text-sm">No customers found.</div>
               ) : customers.slice(0, 20).map((c) => (
@@ -369,9 +491,12 @@ export default function TeamQuotationNew() {
                   <div className={`w-5 h-5 rounded-full border-2 ${selectedCustomer?.id === c.id ? "border-accent bg-accent" : "border-muted-foreground"} flex items-center justify-center shrink-0`}>
                     {selectedCustomer?.id === c.id && <Check className="w-3 h-3 text-white" />}
                   </div>
-                  <div>
+                  <div className="flex-1 min-w-0">
                     <div className="text-sm font-semibold">{c.name}</div>
-                    <div className="text-xs text-muted-foreground">{c.phone || ""} {c.gstNumber ? `· GST: ${c.gstNumber}` : ""}</div>
+                    <div className="text-xs text-muted-foreground truncate">
+                      {[c.phone, c.gstNumber && `GST: ${c.gstNumber}`, c.defaultDiscountPct != null && `Default Disc: ${c.defaultDiscountPct}%`]
+                        .filter(Boolean).join(" · ")}
+                    </div>
                   </div>
                 </button>
               ))}
@@ -401,11 +526,15 @@ export default function TeamQuotationNew() {
             </div>
 
             {importMode === "import" && (
-              <div className="border-2 border-dashed rounded-xl p-8 text-center mb-4">
+              <div className="border-2 border-dashed rounded-xl p-8 text-center mb-4 bg-card">
                 <Upload className="w-8 h-8 mx-auto mb-2 text-muted-foreground" />
-                <p className="text-sm text-muted-foreground mb-3">Upload PDF, Excel, or image — AI will extract parts list</p>
+                <p className="text-sm text-muted-foreground mb-1">Upload PDF, Excel, or image — AI will extract parts list</p>
+                <p className="text-xs text-muted-foreground mb-3">Multiple uploads <strong>append</strong> to existing items (duplicates skipped by Part No.)</p>
                 <input ref={fileRef} type="file" accept=".pdf,.xlsx,.xls,.jpg,.jpeg,.png" className="hidden"
-                  onChange={(e) => e.target.files?.[0] && handleImport(e.target.files[0])} />
+                  onChange={(e) => {
+                    const f = e.target.files?.[0];
+                    if (f) { handleImport(f); e.target.value = ""; }
+                  }} />
                 <button onClick={() => fileRef.current?.click()} disabled={uploading}
                   className="px-4 py-2 bg-accent text-accent-foreground rounded-lg text-sm font-semibold disabled:opacity-50 inline-flex items-center gap-2">
                   {uploading ? <><RefreshCw className="w-4 h-4 animate-spin" /> Processing…</> : <><Upload className="w-4 h-4" /> Choose File</>}
@@ -417,103 +546,122 @@ export default function TeamQuotationNew() {
               </div>
             )}
 
-            {/* Editable table */}
-            <div className="overflow-x-auto border rounded-xl">
-              <table className="w-full text-sm">
-                <thead>
-                  <tr className="bg-muted/60 text-left">
-                    <th className="px-3 py-2 w-10">#</th>
-                    <th className="px-3 py-2 min-w-[160px]">Part No</th>
-                    <th className="px-3 py-2 min-w-[220px]">Name</th>
-                    <th className="px-3 py-2 min-w-[110px]">HSN</th>
-                    <th className="px-3 py-2 min-w-[130px]">Brand</th>
-                    <th className="px-3 py-2 min-w-[90px]">Qty</th>
-                    <th className="px-3 py-2 min-w-[120px]">MRP</th>
-                    <th className="px-3 py-2 min-w-[100px]">Disc%</th>
-                    <th className="px-3 py-2 min-w-[90px]">GST%</th>
-                    <th className="px-3 py-2 min-w-[120px] text-right">Total</th>
-                    <th className="px-2 py-2 w-10"></th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y">
-                  {items.map((line, idx) => (
-                    <tr key={idx} className="hover:bg-muted/20">
-                      <td className="px-2 py-1 text-muted-foreground">{idx + 1}</td>
-                      <td className="px-2 py-1 relative">
-                        <input value={line.partNumber} onChange={(e) => onPartNumberChange(idx, e.target.value)}
-                          className="w-full border rounded px-1.5 py-1 bg-background font-mono text-xs" placeholder="Part #" />
-                        {acPartIndex === idx && acResults.length > 0 && (
-                          <div className="absolute z-20 top-full left-0 mt-1 bg-card border rounded-lg shadow-lg w-80 max-h-56 overflow-y-auto">
-                            {acResults.map((p: any, pi: number) => {
-                              const dateStr = p.entryDate
-                                ? new Date(p.entryDate).toLocaleDateString("en-IN", { day: "2-digit", month: "short", year: "numeric" })
-                                : "";
-                              const mrpStr = p.mrp != null ? `\u20b9${Number(p.mrp).toLocaleString("en-IN", { maximumFractionDigits: 2 })}` : "";
-                              return (
-                                <button key={pi} onClick={() => applyAcResult(idx, p)}
-                                  className="w-full text-left px-3 py-2 text-xs hover:bg-muted border-b last:border-0">
-                                  <div className="font-mono font-semibold text-foreground">{p.partNumber}</div>
-                                  <div className="text-muted-foreground truncate">
-                                    {[p.productName, p.brand && `(${p.brand})`, mrpStr, dateStr].filter(Boolean).join(" — ")}
-                                  </div>
-                                </button>
-                              );
-                            })}
-                          </div>
-                        )}
-                      </td>
-                      <td className="px-2 py-1">
-                        <input value={line.productName} onChange={(e) => updateLine(idx, { productName: e.target.value })}
-                          className="w-full border rounded px-1.5 py-1 bg-background text-xs" placeholder="Product name" />
-                      </td>
-                      <td className="px-2 py-1">
-                        <input value={line.hsn} onChange={(e) => updateLine(idx, { hsn: e.target.value })}
-                          className="w-full border rounded px-1.5 py-1 bg-background font-mono text-xs" />
-                      </td>
-                      <td className="px-2 py-1">
-                        <input value={line.brand} onChange={(e) => updateLine(idx, { brand: e.target.value })}
-                          className="w-full border rounded px-1.5 py-1 bg-background text-xs" />
-                      </td>
-                      <td className="px-2 py-1">
-                        <input type="number" min={1} value={line.qty} onChange={(e) => updateLine(idx, { qty: parseFloat(e.target.value) || 1 })}
-                          data-qty-idx={idx}
-                          className="w-full border rounded px-1.5 py-1 bg-background text-sm text-right" />
-                      </td>
-                      <td className="px-2 py-1 min-w-0">
-                        <input type="number" min={0} value={line.mrp} onChange={(e) => updateLine(idx, { mrp: parseFloat(e.target.value) || 0 })}
-                          className="w-full border rounded px-1.5 py-1 bg-background text-sm text-right" />
-                      </td>
-                      <td className="px-2 py-1 min-w-0">
-                        <input type="number" min={0} max={100} value={line.discount} onChange={(e) => updateLine(idx, { discount: parseFloat(e.target.value) || 0 })}
-                          className="w-full border rounded px-1.5 py-1 bg-background text-xs text-right" />
-                      </td>
-                      <td className="px-2 py-1">
-                        <select value={line.gstPct} onChange={(e) => updateLine(idx, { gstPct: parseFloat(e.target.value) })}
-                          className="w-full border rounded px-1 py-1 bg-background text-xs">
-                          {[0, 5, 12, 18, 28].map((g) => <option key={g} value={g}>{g}%</option>)}
-                        </select>
-                      </td>
-                      <td className="px-2 py-1 text-right font-semibold">
-                        ₹{line.lineTotal.toLocaleString("en-IN", { maximumFractionDigits: 2 })}
-                      </td>
-                      <td className="px-2 py-1">
-                        {items.length > 1 && (
-                          <button onClick={() => removeLine(idx)} className="p-1 hover:bg-red-100 rounded text-red-500">
-                            <Trash2 className="w-3 h-3" />
-                          </button>
-                        )}
-                      </td>
+            {/* AI prompt box (Round 3) */}
+            <div className="border rounded-xl p-3 mb-4 bg-card shadow-sm">
+              <div className="flex items-center gap-2 mb-2 text-sm font-semibold">
+                <Sparkles className="w-4 h-4 text-accent" />
+                Ask AI to edit these items
+              </div>
+              <div className="flex flex-col sm:flex-row gap-2">
+                <input value={aiPrompt} onChange={(e) => setAiPrompt(e.target.value)}
+                  onKeyDown={(e) => e.key === "Enter" && !aiBusy && runAiPrompt()}
+                  placeholder="e.g. 'decrease all rates by 10%', 'fill missing HSN codes', 'set GST to 18% on all rows'"
+                  className="flex-1 border rounded-lg px-3 py-2 bg-background text-sm" />
+                <button onClick={runAiPrompt} disabled={aiBusy || !aiPrompt.trim()}
+                  className="px-4 py-2 rounded-lg text-sm font-semibold bg-accent text-accent-foreground disabled:opacity-50 inline-flex items-center justify-center gap-1 whitespace-nowrap">
+                  {aiBusy ? <><RefreshCw className="w-4 h-4 animate-spin" /> Thinking…</> : <><Sparkles className="w-4 h-4" /> Apply</>}
+                </button>
+              </div>
+            </div>
+
+            {/* Editable table (Round 3: compact, sticky header, fixed layout, scrollable container) */}
+            <div className="border rounded-xl bg-card shadow-sm overflow-hidden">
+              <div className="overflow-x-auto max-h-[60vh] overflow-y-auto">
+                <table className="w-full text-xs table-fixed">
+                  <colgroup>
+                    <col style={{ width: 36 }} />
+                    <col style={{ width: 130 }} />
+                    <col style={{ width: 200 }} />
+                    <col style={{ width: 90 }} />
+                    <col style={{ width: 100 }} />
+                    <col style={{ width: 60 }} />
+                    <col style={{ width: 90 }} />
+                    <col style={{ width: 70 }} />
+                    <col style={{ width: 70 }} />
+                    <col style={{ width: 110 }} />
+                    <col style={{ width: 36 }} />
+                  </colgroup>
+                  <thead className="sticky top-0 bg-muted z-10">
+                    <tr className="text-left">
+                      <th className="px-2 py-2 font-semibold">#</th>
+                      <th className="px-2 py-2 font-semibold">Part No</th>
+                      <th className="px-2 py-2 font-semibold">Description</th>
+                      <th className="px-2 py-2 font-semibold">HSN</th>
+                      <th className="px-2 py-2 font-semibold">Brand</th>
+                      <th className="px-2 py-2 font-semibold text-right">Qty</th>
+                      <th className="px-2 py-2 font-semibold text-right">MRP</th>
+                      <th className="px-2 py-2 font-semibold text-right">Disc%</th>
+                      <th className="px-2 py-2 font-semibold text-right">GST%</th>
+                      <th className="px-2 py-2 font-semibold text-right">Total</th>
+                      <th className="px-1 py-2"></th>
                     </tr>
-                  ))}
-                </tbody>
-                <tfoot>
-                  <tr className="bg-muted/30 font-semibold">
-                    <td colSpan={9} className="px-3 py-2 text-right">Grand Total</td>
-                    <td className="px-3 py-2 text-right text-base">₹{grandTotal.toLocaleString("en-IN", { maximumFractionDigits: 2 })}</td>
-                    <td />
-                  </tr>
-                </tfoot>
-              </table>
+                  </thead>
+                  <tbody className="divide-y">
+                    {items.map((line, idx) => (
+                      <tr key={idx} className="hover:bg-muted/20">
+                        <td className="px-2 py-1 text-muted-foreground">{idx + 1}</td>
+                        <td className="px-1 py-1 relative">
+                          <input value={line.partNumber} onChange={(e) => onPartNumberChange(idx, e.target.value)}
+                            onFocus={() => line.partNumber.length >= 2 && triggerAutocomplete(idx, line.partNumber, "part")}
+                            className="w-full border rounded px-1.5 py-1 bg-background font-mono text-xs" placeholder="Part #" />
+                          {acPartIndex === idx && acField === "part" && acResults.length > 0 && (
+                            <AcDropdown results={acResults} onPick={(p) => applyAcResult(idx, p)} />
+                          )}
+                        </td>
+                        <td className="px-1 py-1 relative">
+                          <input value={line.productName} onChange={(e) => onProductNameChange(idx, e.target.value)}
+                            onFocus={() => line.productName.length >= 2 && triggerAutocomplete(idx, line.productName, "name")}
+                            className="w-full border rounded px-1.5 py-1 bg-background text-xs" placeholder="Description / product name" />
+                          {acPartIndex === idx && acField === "name" && acResults.length > 0 && (
+                            <AcDropdown results={acResults} onPick={(p) => applyAcResult(idx, p)} />
+                          )}
+                        </td>
+                        <td className="px-1 py-1">
+                          <input value={line.hsn} onChange={(e) => updateLine(idx, { hsn: e.target.value })}
+                            className="w-full border rounded px-1.5 py-1 bg-background font-mono text-xs" />
+                        </td>
+                        <td className="px-1 py-1">
+                          <input value={line.brand} onChange={(e) => updateLine(idx, { brand: e.target.value })}
+                            className="w-full border rounded px-1.5 py-1 bg-background text-xs" />
+                        </td>
+                        <td className="px-1 py-1">
+                          <input type="number" min={1} value={line.qty} onChange={(e) => updateLine(idx, { qty: parseFloat(e.target.value) || 1 })}
+                            data-qty-idx={idx}
+                            className="w-full border rounded px-1.5 py-1 bg-background text-xs text-right" />
+                        </td>
+                        <td className="px-1 py-1">
+                          <input type="number" min={0} value={line.mrp} onChange={(e) => updateLine(idx, { mrp: parseFloat(e.target.value) || 0 })}
+                            className="w-full border rounded px-1.5 py-1 bg-background text-xs text-right" />
+                        </td>
+                        <td className="px-1 py-1">
+                          <input type="number" min={0} max={100} value={line.discount} onChange={(e) => updateLine(idx, { discount: parseFloat(e.target.value) || 0 })}
+                            className="w-full border rounded px-1.5 py-1 bg-background text-xs text-right" />
+                        </td>
+                        <td className="px-1 py-1">
+                          <select value={line.gstPct} onChange={(e) => updateLine(idx, { gstPct: parseFloat(e.target.value) })}
+                            className="w-full border rounded px-1 py-1 bg-background text-xs">
+                            {[0, 5, 12, 18, 28].map((g) => <option key={g} value={g}>{g}%</option>)}
+                          </select>
+                        </td>
+                        <td className="px-2 py-1 text-right font-semibold text-xs">
+                          ₹{line.lineTotal.toLocaleString("en-IN", { maximumFractionDigits: 2 })}
+                        </td>
+                        <td className="px-1 py-1">
+                          {items.length > 1 && (
+                            <button onClick={() => removeLine(idx)} className="p-1 hover:bg-red-100 dark:hover:bg-red-950/30 rounded text-red-500">
+                              <Trash2 className="w-3 h-3" />
+                            </button>
+                          )}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+              <div className="border-t bg-muted/30 px-4 py-2 flex justify-end items-center gap-6 text-sm">
+                <span className="text-muted-foreground">Grand Total</span>
+                <span className="font-bold text-base">₹{grandTotal.toLocaleString("en-IN", { maximumFractionDigits: 2 })}</span>
+              </div>
             </div>
             <div className="mt-3">
               <button onClick={addLine} className="px-4 py-2 border rounded-lg text-sm inline-flex items-center gap-2 hover:bg-muted">
@@ -578,7 +726,7 @@ export default function TeamQuotationNew() {
           </div>
         )}
 
-        {/* Step 4: Notes + finish */}
+        {/* Step 4: Notes + Shipping + finish */}
         {step === 4 && (
           <div>
             <h2 className="font-semibold text-lg mb-4">Notes &amp; Terms</h2>
@@ -598,16 +746,43 @@ export default function TeamQuotationNew() {
                 <textarea value={terms} onChange={(e) => setTerms(e.target.value)} rows={4}
                   className="w-full border rounded-lg px-3 py-2 bg-background text-sm" placeholder="Payment terms, delivery terms…" />
               </label>
+
+              {/* Shipping address (Round 3) */}
+              <div className="border rounded-xl bg-card shadow-sm">
+                <button type="button" onClick={() => setShipOpen((v) => !v)}
+                  className="w-full flex items-center justify-between px-4 py-3 text-sm font-semibold hover:bg-muted/30">
+                  <span className="inline-flex items-center gap-2"><Truck className="w-4 h-4 text-accent" /> Ship To (different from billing)</span>
+                  <ChevronRight className={`w-4 h-4 transition ${shipOpen ? "rotate-90" : ""}`} />
+                </button>
+                {shipOpen && (
+                  <div className="px-4 pb-4 grid grid-cols-1 sm:grid-cols-2 gap-3 text-sm">
+                    <FieldRow label="Site / Contact Name" value={shippingName} onChange={setShippingName} placeholder={selectedCustomer?.name || ""} />
+                    <FieldRow label="Phone" value={shippingPhone} onChange={setShippingPhone} />
+                    <div className="sm:col-span-2">
+                      <FieldRow label="Address" value={shippingAddress} onChange={setShippingAddress} />
+                    </div>
+                    <FieldRow label="City" value={shippingCity} onChange={setShippingCity} />
+                    <FieldRow label="State" value={shippingState} onChange={setShippingState} />
+                    <FieldRow label="Pincode" value={shippingPincode} onChange={setShippingPincode} />
+                    <p className="text-xs text-muted-foreground sm:col-span-2">
+                      Leave blank to use the customer's billing address. Fill any field to add a separate SHIP TO block on the PDF.
+                    </p>
+                  </div>
+                )}
+              </div>
             </div>
 
             {/* Summary */}
-            <div className="mt-4 bg-muted rounded-xl p-4 text-sm space-y-1">
+            <div className="mt-4 bg-card border rounded-xl p-4 text-sm space-y-1 shadow-sm">
               <div className="font-semibold text-base">Summary</div>
               <div><span className="text-muted-foreground">Company:</span> {selectedCompany?.name}</div>
-              <div><span className="text-muted-foreground">Customer:</span> {selectedCustomer?.name}</div>
+              <div><span className="text-muted-foreground">Customer:</span> {selectedCustomer?.name} {selectedCustomer?.email && <span className="text-xs text-muted-foreground">· {selectedCustomer.email}</span>}</div>
               <div><span className="text-muted-foreground">Items:</span> {items.filter((l) => l.productName || l.partNumber).length}</div>
               <div><span className="text-muted-foreground">Total:</span> <strong>₹{grandTotal.toLocaleString("en-IN", { maximumFractionDigits: 2 })}</strong></div>
               <div><span className="text-muted-foreground">Currency:</span> {currency}</div>
+              {(shippingName || shippingAddress || shippingCity) && (
+                <div><span className="text-muted-foreground">Ship To:</span> {[shippingName, shippingCity].filter(Boolean).join(", ") || "custom address"}</div>
+              )}
             </div>
 
             <div className="mt-6 flex justify-between flex-wrap gap-2">
@@ -621,7 +796,7 @@ export default function TeamQuotationNew() {
                 </button>
                 <button onClick={saveAndFinalize} disabled={saving}
                   className="px-5 py-2.5 bg-accent text-accent-foreground rounded-lg text-sm font-semibold inline-flex items-center gap-2 disabled:opacity-50">
-                  {saving ? "Processing…" : "Save & Finalize →"}
+                  {saving ? "Processing…" : "Save & Share →"}
                 </button>
               </div>
             </div>
@@ -629,5 +804,43 @@ export default function TeamQuotationNew() {
         )}
       </div>
     </TeamLayout>
+  );
+}
+
+// ─── Helpers ──────────────────────────────────────────────────────────────────
+
+function AcDropdown({ results, onPick }: { results: any[]; onPick: (p: any) => void }) {
+  return (
+    <div className="absolute z-30 top-full left-0 mt-1 bg-card border rounded-lg shadow-lg w-[420px] max-h-60 overflow-y-auto">
+      {results.map((p: any, pi: number) => {
+        const dateStr = p.lastQuotedAt
+          ? new Date(p.lastQuotedAt).toLocaleDateString("en-IN", { day: "2-digit", month: "short", year: "numeric" })
+          : p.entryDate
+            ? new Date(p.entryDate).toLocaleDateString("en-IN", { day: "2-digit", month: "short", year: "numeric" })
+            : "";
+        const mrpStr = p.mrp != null ? `₹${Number(p.mrp).toLocaleString("en-IN", { maximumFractionDigits: 2 })}` : "";
+        const discStr = p.lastDiscount != null ? `${p.lastDiscount}% off` : "";
+        return (
+          <button key={pi} onClick={() => onPick(p)}
+            className="w-full text-left px-3 py-2 text-xs hover:bg-muted border-b last:border-0">
+            <div className="font-mono font-semibold text-foreground">{p.partNumber || "—"}</div>
+            <div className="text-foreground truncate">{p.productName}</div>
+            <div className="text-muted-foreground text-[11px] truncate">
+              {[p.brand && `(${p.brand})`, mrpStr, discStr, dateStr, p.lastCustomerName].filter(Boolean).join(" · ")}
+            </div>
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
+function FieldRow({ label, value, onChange, placeholder }: { label: string; value: string; onChange: (v: string) => void; placeholder?: string }) {
+  return (
+    <label className="block">
+      <span className="text-xs font-medium text-muted-foreground">{label}</span>
+      <input value={value} onChange={(e) => onChange(e.target.value)} placeholder={placeholder}
+        className="mt-1 w-full border rounded-lg px-3 py-2 bg-background text-sm" />
+    </label>
   );
 }

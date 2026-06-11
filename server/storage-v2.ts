@@ -946,6 +946,37 @@ export async function getQuotationWithItems(id: number): Promise<{ quotation: Qu
   const items = db.select().from(quotationItems).where(eq(quotationItems.quotationId, id)).orderBy(quotationItems.lineNo).all();
   return { quotation, items };
 }
+/**
+ * Round 3: Single source of truth for quotation totals.
+ * Used on create + update so DB-stored values stay in sync with what's rendered
+ * (PDF service + list endpoint use the same formula as a fallback).
+ */
+export function computeQuoteTotals(
+  items: Array<{ qty?: number | null; mrp?: number | null; discount?: number | null; gstPct?: number | null }>,
+): { subtotal: number; totalDiscount: number; totalTax: number; grandTotal: number } {
+  let sub = 0, disc = 0, tax = 0, grand = 0;
+  for (const it of items) {
+    const qty = Number(it.qty || 0);
+    const mrp = Number(it.mrp || 0);
+    const dPct = Number(it.discount || 0);
+    const gPct = Number(it.gstPct || 0);
+    const lineGross = qty * mrp;
+    const lineDisc = lineGross * (dPct / 100);
+    const lineNet = lineGross - lineDisc;
+    const lineTax = lineNet * (gPct / 100);
+    sub += lineGross;
+    disc += lineDisc;
+    tax += lineTax;
+    grand += lineNet + lineTax;
+  }
+  return {
+    subtotal: Math.round(sub * 100) / 100,
+    totalDiscount: Math.round(disc * 100) / 100,
+    totalTax: Math.round(tax * 100) / 100,
+    grandTotal: Math.round(grand * 100) / 100,
+  };
+}
+
 export async function createQuotation(
   data: InsertQuotation,
   items: Omit<InsertQuotationItem, "quotationId">[],
@@ -953,10 +984,16 @@ export async function createQuotation(
 ): Promise<{ quotation: Quotation; items: QuotationItem[] }> {
   const quoteNo = generateQuotationNo(companyPrefix || "NM");
   const now = Date.now();
+  // Persist computed totals so list / reports never show ₹0 for a real quote.
+  const totals = computeQuoteTotals(items as any[]);
   const quotation = db.insert(quotations).values({
     ...data,
     quoteNo,
     status: data.status || "draft",
+    subtotal: totals.subtotal,
+    totalDiscount: totals.totalDiscount,
+    totalTax: totals.totalTax,
+    grandTotal: totals.grandTotal,
     createdAt: now,
     updatedAt: now,
   } as any).returning().get();
@@ -986,6 +1023,15 @@ export async function updateQuotationItems(quotationId: number, items: Omit<Inse
     const s = db.insert(quotationItems).values({ ...item, quotationId, createdAt: now } as any).returning().get();
     saved.push(s);
   }
+  // Round 3: also refresh the parent quotation's totals so the list view + reports stay accurate.
+  const totals = computeQuoteTotals(items as any[]);
+  db.update(quotations).set({
+    subtotal: totals.subtotal,
+    totalDiscount: totals.totalDiscount,
+    totalTax: totals.totalTax,
+    grandTotal: totals.grandTotal,
+    updatedAt: now,
+  } as any).where(eq(quotations.id, quotationId)).run();
   return saved;
 }
 export async function deleteQuotation(id: number): Promise<void> {
@@ -1211,6 +1257,10 @@ export interface PartSuggestion {
   gstPercent: number | null;
   source: "price_list" | "past_entry";
   entryDate: number | null;
+  // Round 3 enrichment: last time this part was quoted to a customer
+  lastDiscount: number | null;
+  lastCustomerName: string | null;
+  lastQuotedAt: number | null;
 }
 
 /**
@@ -1250,25 +1300,39 @@ export function getPartSuggestions(q: string, limit = 10): PartSuggestion[] {
     LIMIT ?
   `).all(term, term, likeTerm, likeTerm, cap * 3) as any[];
 
-  // ── Past quotation items ─────────────────────────────────────────────────
+  // ── Past quotation items (enriched with last-quoted customer + discount) ─
+  // Use a window function so we keep ALL columns from the most recent row per partNumber+brand
+  // rather than MAX() over an arbitrary one. Last-quoted info comes from the latest quotation
+  // for this part regardless of customer.
   const pastRows = sqlite.prepare(`
-    SELECT
-      qi.part_number     AS partNumber,
-      qi.product_name    AS productName,
-      qi.brand           AS brand,
-      qi.mrp             AS mrp,
-      qi.hsn             AS hsnCode,
-      qi.gst_pct         AS gstPercent,
-      MAX(qi.created_at) AS entryDate,
-      CASE
-        WHEN LOWER(qi.part_number) = ?          THEN 1
-        WHEN LOWER(qi.part_number) LIKE ? || '%' THEN 2
-        ELSE 3
-      END AS tier
-    FROM quotation_items qi
-    WHERE qi.part_number IS NOT NULL
-      AND (LOWER(qi.part_number) LIKE ? OR LOWER(qi.product_name) LIKE ?)
-    GROUP BY LOWER(qi.part_number), LOWER(COALESCE(qi.brand,''))
+    SELECT * FROM (
+      SELECT
+        qi.part_number     AS partNumber,
+        qi.product_name    AS productName,
+        qi.brand           AS brand,
+        qi.mrp             AS mrp,
+        qi.hsn             AS hsnCode,
+        qi.gst_pct         AS gstPercent,
+        qi.discount        AS lastDiscount,
+        c.name             AS lastCustomerName,
+        q.created_at       AS lastQuotedAt,
+        qi.created_at      AS entryDate,
+        CASE
+          WHEN LOWER(qi.part_number) = ?          THEN 1
+          WHEN LOWER(qi.part_number) LIKE ? || '%' THEN 2
+          ELSE 3
+        END AS tier,
+        ROW_NUMBER() OVER (
+          PARTITION BY LOWER(qi.part_number), LOWER(COALESCE(qi.brand,''))
+          ORDER BY qi.created_at DESC
+        ) AS rn
+      FROM quotation_items qi
+      LEFT JOIN quotations q ON q.id = qi.quotation_id
+      LEFT JOIN customers c ON c.id = q.customer_id
+      WHERE qi.part_number IS NOT NULL
+        AND (LOWER(qi.part_number) LIKE ? OR LOWER(qi.product_name) LIKE ?)
+    )
+    WHERE rn = 1
     ORDER BY tier ASC, entryDate DESC
     LIMIT ?
   `).all(term, term, likeTerm, likeTerm, cap * 3) as any[];
@@ -1291,6 +1355,9 @@ export function getPartSuggestions(q: string, limit = 10): PartSuggestion[] {
       gstPercent: row.gstPercent != null ? Number(row.gstPercent) : null,
       source,
       entryDate: row.entryDate ? Number(row.entryDate) : null,
+      lastDiscount: row.lastDiscount != null ? Number(row.lastDiscount) : null,
+      lastCustomerName: row.lastCustomerName || null,
+      lastQuotedAt: row.lastQuotedAt ? Number(row.lastQuotedAt) : null,
     });
   };
 

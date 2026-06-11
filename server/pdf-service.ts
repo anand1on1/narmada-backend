@@ -52,6 +52,13 @@ export interface QuotationForPdf {
   notes: string | null;
   terms: string | null;
   createdAt: number;
+  // Round 3: shipping address (optional — "ship to" block when any field is set)
+  shippingName?: string | null;
+  shippingAddress?: string | null;
+  shippingCity?: string | null;
+  shippingState?: string | null;
+  shippingPincode?: string | null;
+  shippingPhone?: string | null;
 }
 
 export interface QuotationItemForPdf {
@@ -224,37 +231,83 @@ export async function generateQuotationPDF(
     y -= 14;
   }
 
-  // ============ BILL TO ============
+  // ============ BILL TO  +  SHIP TO (Round 3) ============
+  // Two columns: BILL TO on the left, SHIP TO on the right when shipping fields are set.
   y -= 6;
-  drawRect(page, marginL, y - 4, 120, 16, COLOR_RED);
-  drawText(page, "BILL TO", marginL + 4, y, fontBold, 9, COLOR_WHITE);
-  y -= 20;
+  const hasShipping = !!(
+    quotation.shippingName ||
+    quotation.shippingAddress ||
+    quotation.shippingCity ||
+    quotation.shippingState ||
+    quotation.shippingPincode ||
+    quotation.shippingPhone
+  );
+  const colWidth = hasShipping ? Math.floor((contentWidth - 12) / 2) : 120;
+  const shipColX = marginL + colWidth + 12;
 
-  drawText(page, customer.name, marginL, y, fontBold, 10, COLOR_TEXT);
-  y -= 14;
+  drawRect(page, marginL, y - 4, colWidth, 16, COLOR_RED);
+  drawText(page, "BILL TO", marginL + 4, y, fontBold, 9, COLOR_WHITE);
+  if (hasShipping) {
+    drawRect(page, shipColX, y - 4, colWidth, 16, COLOR_DARK);
+    drawText(page, "SHIP TO", shipColX + 4, y, fontBold, 9, COLOR_WHITE);
+  }
+
+  const colHeaderY = y;
+  y -= 20;
+  const colBodyStartY = y;
+
+  // BILL TO body (left column)
+  let leftY = colBodyStartY;
+  drawText(page, customer.name, marginL, leftY, fontBold, 10, COLOR_TEXT);
+  leftY -= 14;
   if (customer.address) {
-    drawText(page, customer.address, marginL, y, fontRegular, 8, COLOR_TEXT);
-    y -= 12;
+    drawText(page, customer.address, marginL, leftY, fontRegular, 8, COLOR_TEXT);
+    leftY -= 12;
   }
   const custCityState = [customer.city, customer.state].filter(Boolean).join(", ");
   if (custCityState) {
-    drawText(page, custCityState, marginL, y, fontRegular, 8, COLOR_TEXT);
-    y -= 12;
+    drawText(page, custCityState, marginL, leftY, fontRegular, 8, COLOR_TEXT);
+    leftY -= 12;
   }
   if (customer.gstNumber) {
-    drawText(page, `GSTIN: ${customer.gstNumber}`, marginL, y, fontRegular, 8, COLOR_MID_GRAY);
-    y -= 12;
+    drawText(page, `GSTIN: ${customer.gstNumber}`, marginL, leftY, fontRegular, 8, COLOR_MID_GRAY);
+    leftY -= 12;
   }
   if (customer.phone) {
-    drawText(page, `Ph: ${customer.phone}`, marginL, y, fontRegular, 8, COLOR_MID_GRAY);
-    y -= 12;
+    drawText(page, `Ph: ${customer.phone}`, marginL, leftY, fontRegular, 8, COLOR_MID_GRAY);
+    leftY -= 12;
   }
 
-  // Valid until (right side)
+  // SHIP TO body (right column) — only if any shipping field present
+  let rightY = colBodyStartY;
+  if (hasShipping) {
+    const shipName = quotation.shippingName || customer.name;
+    drawText(page, shipName, shipColX, rightY, fontBold, 10, COLOR_TEXT);
+    rightY -= 14;
+    if (quotation.shippingAddress) {
+      drawText(page, quotation.shippingAddress, shipColX, rightY, fontRegular, 8, COLOR_TEXT);
+      rightY -= 12;
+    }
+    const shipCityState = [quotation.shippingCity, quotation.shippingState].filter(Boolean).join(", ");
+    const shipLine2 = quotation.shippingPincode ? `${shipCityState}${shipCityState ? " " : ""}${quotation.shippingPincode}` : shipCityState;
+    if (shipLine2) {
+      drawText(page, shipLine2, shipColX, rightY, fontRegular, 8, COLOR_TEXT);
+      rightY -= 12;
+    }
+    if (quotation.shippingPhone) {
+      drawText(page, `Ph: ${quotation.shippingPhone}`, shipColX, rightY, fontRegular, 8, COLOR_MID_GRAY);
+      rightY -= 12;
+    }
+  }
+
+  // Collapse the two columns back to a single cursor at the lower of the two.
+  y = Math.min(leftY, rightY);
+
+  // Valid until (right side, anchored to the BILL TO header band so it never collides)
   if (quotation.validUntil) {
     const validStr = `Valid Until: ${fmtDate(quotation.validUntil)}`;
     const vw = fontRegular.widthOfTextAtSize(validStr, 9);
-    drawText(page, validStr, marginR - vw, y + 40, fontRegular, 9, COLOR_RED);
+    drawText(page, validStr, marginR - vw, colHeaderY + 24, fontRegular, 9, COLOR_RED);
   }
 
   y -= 10;
@@ -395,12 +448,14 @@ export async function generateQuotationPDF(
   }
 
   // ============ TOTALS BOX ============
-  y -= 10;
-  drawRect(curPage, marginL + contentWidth - 170, y - 4, 170, 3, COLOR_RED);
-  y -= 10;
-
+  // Round 3: clean up the red bar so it no longer overlaps with the totals text.
+  // We draw a thin red bar ABOVE the totals block (as a section divider), and a
+  // bold red underline BELOW the Grand Total row (clear of the text).
+  y -= 14;
   const totalsX = marginL + contentWidth - 170;
   const totalsValX = marginR - 4;
+  // Top divider — thin red bar sitting above the totals, with breathing room.
+  drawRect(curPage, totalsX, y + 8, 170, 2, COLOR_RED);
 
   function drawTotalRow(label: string, value: string, bold = false) {
     const fnt = bold ? fontBold : fontRegular;
@@ -420,6 +475,9 @@ export async function generateQuotationPDF(
   drawRect(curPage, totalsX, y - 2, 170, 1, COLOR_MID_GRAY);
   y -= 6;
   drawTotalRow("GRAND TOTAL:", fmt(computedGrand), true);
+  // Bottom red underline — clears the Grand Total text (which already moved y down 13px).
+  drawRect(curPage, totalsX, y + 6, 170, 2.5, COLOR_RED);
+  y -= 4;
   if (quotation.currency !== "INR" && quotation.fxRate && quotation.fxRate !== 1) {
     drawText(
       curPage,

@@ -306,3 +306,93 @@ Return ONLY valid JSON (no markdown fences) with keys:
     return null;
   }
 }
+
+// ============================================================
+// Round 3: AI-driven natural-language editor for quotation line items
+// ============================================================
+export interface AiQuoteItem {
+  lineNo?: number;
+  partNumber?: string | null;
+  productName: string;
+  hsn?: string | null;
+  brand?: string | null;
+  qty?: number;
+  mrp?: number;
+  discount?: number;
+  gstPct?: number;
+}
+
+const QUOTE_EDIT_SYSTEM = `You are a quotation editor for Narmada Mobility, an automotive truck/bus spare-parts supplier in India.
+The user will give you a natural-language instruction and the CURRENT line items array of a quotation.
+Apply the instruction and return ONLY a JSON object with this exact shape:
+{"items": [<modified items in the same schema>], "explanation": "one short sentence describing what you changed"}
+
+Schema for each item: {"lineNo": number, "partNumber": string|null, "productName": string,
+  "hsn": string|null, "brand": string|null, "qty": number, "mrp": number, "discount": number, "gstPct": number}
+
+Rules:
+- Preserve any field the user did not change.
+- Discount and gstPct are PERCENTAGES (0-100), not multipliers.
+- For "decrease/increase rates by X%": adjust mrp (not discount).
+- For "fill missing HSN codes": apply common Indian automotive HSN codes (87089900 = motor-vehicle parts general, 40169990 = rubber, 84212300 = filters, 73181500 = bolts, 85114000 = starters/alternators, 84099991 = engine parts, 87083000 = brakes).
+- For "set GST to 18%" or similar: change gstPct only.
+- Renumber lineNo sequentially 1..N at the end.
+- If the instruction is unclear or unsafe (e.g. "delete all"), return items unchanged with explanation describing why.
+- Output JSON ONLY — no markdown fences, no commentary.`;
+
+export async function editQuotationItems(
+  instruction: string,
+  items: AiQuoteItem[],
+  context?: { customerName?: string; currency?: string },
+): Promise<{ items: AiQuoteItem[]; explanation: string; ok: boolean; error?: string }> {
+  if (!CLAUDE_API_KEY || CLAUDE_API_KEY === "skip") {
+    return { items, explanation: "", ok: false, error: "Claude API key not configured (set CLAUDE_API_KEY)" };
+  }
+  if (!instruction || !instruction.trim()) {
+    return { items, explanation: "", ok: false, error: "Empty instruction" };
+  }
+  const userMsg = `Instruction: ${instruction.trim()}
+Customer: ${context?.customerName || "—"}
+Currency: ${context?.currency || "INR"}
+
+Current items (JSON):
+${JSON.stringify(items, null, 2)}`;
+
+  try {
+    const client = getClient();
+    const response = await client.messages.create({
+      model: MODEL,
+      max_tokens: 4096,
+      system: QUOTE_EDIT_SYSTEM,
+      messages: [{ role: "user", content: userMsg }],
+    });
+    const text = response.content[0]?.type === "text" ? response.content[0].text : "";
+    const cleaned = text.replace(/```(?:json)?\n?/gi, "").trim();
+    const parsed = JSON.parse(cleaned);
+    if (!parsed || !Array.isArray(parsed.items)) {
+      return { items, explanation: "", ok: false, error: "Claude did not return a valid items array" };
+    }
+    // Coerce/validate numeric fields and trim strings
+    const cleanItems: AiQuoteItem[] = parsed.items.map((it: any, idx: number) => ({
+      lineNo: Number(it.lineNo ?? idx + 1),
+      partNumber: it.partNumber == null ? null : String(it.partNumber),
+      productName: String(it.productName || ""),
+      hsn: it.hsn == null ? null : String(it.hsn),
+      brand: it.brand == null ? null : String(it.brand),
+      qty: Number(it.qty ?? 1),
+      mrp: Number(it.mrp ?? 0),
+      discount: Number(it.discount ?? 0),
+      gstPct: Number(it.gstPct ?? 18),
+    }));
+    // Renumber to be safe
+    cleanItems.forEach((it, i) => { it.lineNo = i + 1; });
+    return {
+      items: cleanItems,
+      explanation: String(parsed.explanation || ""),
+      ok: true,
+    };
+  } catch (e: any) {
+    console.error("[claude] editQuotationItems error:", e?.message, e?.stack?.split("\n").slice(0, 3).join(" | "));
+    return { items, explanation: "", ok: false, error: e?.message || "Claude call failed" };
+  }
+}

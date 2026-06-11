@@ -4,7 +4,7 @@ import { TeamLayout } from "./TeamLayout";
 import { teamFetch, useTeamAuth } from "@/lib/team-auth";
 import { useToast } from "@/hooks/use-toast";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { Trash2, Plus, RefreshCw, Download, Send, Search } from "lucide-react";
+import { Trash2, Plus, RefreshCw, Download, Send, Search, Sparkles, Truck, Building2, User2 } from "lucide-react";
 
 function currencySym(c: string | undefined | null): string {
   if (c === "USD") return "$";
@@ -34,6 +34,7 @@ interface Quotation {
   status: string;
   customerId: number;
   customerName: string;
+  quotingCompanyId?: number | null;
   currency: string;
   fxRate: number;
   notes: string | null;
@@ -45,8 +46,23 @@ interface Quotation {
   totalDiscount: number;
   pdfUrl: string | null;
   items: LineItem[];
+  shippingName?: string | null;
+  shippingAddress?: string | null;
+  shippingCity?: string | null;
+  shippingState?: string | null;
+  shippingPincode?: string | null;
+  shippingPhone?: string | null;
   createdAt: number;
   updatedAt: number;
+}
+
+interface CustomerLite {
+  id: number; name: string; phone: string | null; email?: string | null; gstNumber: string | null;
+  defaultDiscountPct?: number | null;
+}
+
+interface QuotingCompanyLite {
+  id: number; name: string; gstin: string | null; active: boolean;
 }
 
 const STATUS_BADGE: Record<string, string> = {
@@ -77,8 +93,26 @@ export default function TeamQuotationEdit() {
   const [dirty, setDirty] = useState(false);
   const [matchingPrices, setMatchingPrices] = useState(false);
 
+  // Round 3: editable header
+  const [customerId, setCustomerId] = useState<number | null>(null);
+  const [quotingCompanyId, setQuotingCompanyId] = useState<number | null>(null);
+
+  // Round 3: shipping
+  const [shipOpen, setShipOpen] = useState(false);
+  const [shippingName, setShippingName] = useState("");
+  const [shippingAddress, setShippingAddress] = useState("");
+  const [shippingCity, setShippingCity] = useState("");
+  const [shippingState, setShippingState] = useState("");
+  const [shippingPincode, setShippingPincode] = useState("");
+  const [shippingPhone, setShippingPhone] = useState("");
+
+  // Round 3: AI prompt
+  const [aiPrompt, setAiPrompt] = useState("");
+  const [aiBusy, setAiBusy] = useState(false);
+
   const acTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [acIdx, setAcIdx] = useState<number | null>(null);
+  const [acField, setAcField] = useState<"part" | "name">("part");
   const [acResults, setAcResults] = useState<any[]>([]);
 
   const { data: quotation, isLoading } = useQuery<Quotation>({
@@ -87,13 +121,32 @@ export default function TeamQuotationEdit() {
       const r = await teamFetch(token, `/api/team/quotations/${id}`);
       if (!r.ok) throw new Error("Failed to load");
       const resp = await r.json();
-      // Backend returns { quotation, items } — flatten so the page can use a single object.
-      if (resp && resp.quotation) {
-        return { ...resp.quotation, items: resp.items || [] };
-      }
+      if (resp && resp.quotation) return { ...resp.quotation, items: resp.items || [] };
       return resp;
     },
     enabled: !!token && !!id,
+  });
+
+  const { data: allCustomers = [] } = useQuery<CustomerLite[]>({
+    queryKey: ["team-all-customers"],
+    queryFn: async () => {
+      const r = await teamFetch(token, "/api/team/customers?limit=500");
+      if (!r.ok) return [];
+      const j = await r.json();
+      return Array.isArray(j) ? j : [];
+    },
+    enabled: !!token,
+  });
+
+  const { data: allQuotingCompanies = [] } = useQuery<QuotingCompanyLite[]>({
+    queryKey: ["team-all-quoting-companies"],
+    queryFn: async () => {
+      const r = await teamFetch(token, "/api/team/quoting-companies");
+      if (!r.ok) return [];
+      const j = await r.json();
+      return (Array.isArray(j) ? j : []).filter((c: any) => c.active);
+    },
+    enabled: !!token,
   });
 
   useEffect(() => {
@@ -102,6 +155,15 @@ export default function TeamQuotationEdit() {
       setNotes(quotation.notes || "");
       setTerms(quotation.terms || "");
       setValidUntil(quotation.validUntil?.split("T")[0] || "");
+      setCustomerId(quotation.customerId ?? null);
+      setQuotingCompanyId((quotation as any).quotingCompanyId ?? null);
+      setShippingName(quotation.shippingName || "");
+      setShippingAddress(quotation.shippingAddress || "");
+      setShippingCity(quotation.shippingCity || "");
+      setShippingState(quotation.shippingState || "");
+      setShippingPincode(quotation.shippingPincode || "");
+      setShippingPhone(quotation.shippingPhone || "");
+      setShipOpen(!!(quotation.shippingName || quotation.shippingAddress || quotation.shippingCity));
       setDirty(false);
     }
   }, [quotation]);
@@ -116,9 +178,10 @@ export default function TeamQuotationEdit() {
   }
 
   function addLine() {
+    const dd = allCustomers.find((c) => c.id === customerId)?.defaultDiscountPct ?? 0;
     setItems((prev) => [...prev, {
       lineNo: prev.length + 1, partNumber: "", productName: "", hsn: "", brand: "",
-      qty: 1, mrp: 0, discount: 0, gstPct: 18, lineTotal: 0, source: "manual",
+      qty: 1, mrp: 0, discount: dd, gstPct: 18, lineTotal: 0, source: "manual",
     }]);
     setDirty(true);
   }
@@ -128,23 +191,32 @@ export default function TeamQuotationEdit() {
     setDirty(true);
   }
 
-  function onPartNumberChange(idx: number, val: string) {
-    updateLine(idx, { partNumber: val });
+  function triggerAutocomplete(idx: number, val: string, field: "part" | "name") {
     if (acTimerRef.current) clearTimeout(acTimerRef.current);
     if (val.length >= 2) {
-      // Bug 3: 250 ms debounce to /api/team/part-suggestions
       acTimerRef.current = setTimeout(async () => {
         try {
           const r = await teamFetch(token, `/api/team/part-suggestions?q=${encodeURIComponent(val)}&limit=10`);
-          if (r.ok) { setAcResults(await r.json()); setAcIdx(idx); }
-        } catch { /* ignore network errors during autocomplete */ }
+          if (r.ok) { setAcResults(await r.json()); setAcIdx(idx); setAcField(field); }
+        } catch { /* ignore */ }
       }, 250);
     } else {
       setAcResults([]); setAcIdx(null);
     }
   }
 
+  function onPartNumberChange(idx: number, val: string) {
+    updateLine(idx, { partNumber: val });
+    triggerAutocomplete(idx, val, "part");
+  }
+
+  function onProductNameChange(idx: number, val: string) {
+    updateLine(idx, { productName: val });
+    triggerAutocomplete(idx, val, "name");
+  }
+
   function applyAcResult(idx: number, part: any) {
+    const dd = allCustomers.find((c) => c.id === customerId)?.defaultDiscountPct ?? 0;
     updateLine(idx, {
       partNumber: part.partNumber || part.part_number || "",
       productName: part.productName || part.name || "",
@@ -152,6 +224,7 @@ export default function TeamQuotationEdit() {
       mrp: part.mrp || 0,
       hsn: part.hsnCode || "",
       gstPct: part.gstPercent ?? items[idx]?.gstPct ?? 18,
+      discount: items[idx]?.discount || dd,
     });
     setAcResults([]); setAcIdx(null);
   }
@@ -188,6 +261,49 @@ export default function TeamQuotationEdit() {
     }
   }
 
+  async function runAiPrompt() {
+    if (!aiPrompt.trim()) return;
+    setAiBusy(true);
+    try {
+      const r = await teamFetch(token, "/api/team/quotations/ai-edit", {
+        method: "POST",
+        body: JSON.stringify({
+          instruction: aiPrompt.trim(),
+          items: items.map((l, i) => ({ ...l, lineNo: i + 1 })),
+          context: {
+            customerName: quotation?.customerName,
+            currency: quotation?.currency,
+          },
+        }),
+      });
+      if (!r.ok) { const e = await r.json(); throw new Error(e.error || "AI request failed"); }
+      const json = await r.json();
+      const updated: any[] = Array.isArray(json?.items) ? json.items : [];
+      if (!updated.length) { toast({ title: "AI returned no changes" }); return; }
+      const merged: LineItem[] = updated.map((p: any, i: number) => computeLine({
+        lineNo: i + 1,
+        partNumber: p.partNumber ?? "",
+        productName: p.productName ?? "",
+        hsn: p.hsn ?? "",
+        brand: p.brand ?? "",
+        qty: Number(p.qty) || 1,
+        mrp: Number(p.mrp) || 0,
+        discount: Number(p.discount) || 0,
+        gstPct: Number(p.gstPct) || 18,
+        lineTotal: 0,
+        source: items[i]?.source || "manual",
+      }));
+      setItems(merged);
+      setDirty(true);
+      toast({ title: "AI updated line items", description: json.summary || "Review and save." });
+      setAiPrompt("");
+    } catch (e: any) {
+      toast({ title: "AI error", description: e.message, variant: "destructive" });
+    } finally {
+      setAiBusy(false);
+    }
+  }
+
   const grandTotal = items.reduce((s, l) => s + (l.lineTotal || 0), 0);
 
   const saveMut = useMutation({
@@ -195,7 +311,14 @@ export default function TeamQuotationEdit() {
       const r = await teamFetch(token, `/api/team/quotations/${id}`, {
         method: "PATCH",
         body: JSON.stringify({
+          customerId, quotingCompanyId,
           notes, terms, validUntil: validUntil || null,
+          shippingName: shippingName.trim() || null,
+          shippingAddress: shippingAddress.trim() || null,
+          shippingCity: shippingCity.trim() || null,
+          shippingState: shippingState.trim() || null,
+          shippingPincode: shippingPincode.trim() || null,
+          shippingPhone: shippingPhone.trim() || null,
           items: items.map((l, i) => ({ ...l, lineNo: i + 1 })),
         }),
       });
@@ -212,15 +335,17 @@ export default function TeamQuotationEdit() {
 
   const finalizeMut = useMutation({
     mutationFn: async () => {
-      // Save first
       await saveMut.mutateAsync();
       const r = await teamFetch(token, `/api/team/quotations/${id}/finalize`, { method: "POST" });
       if (!r.ok) { const e = await r.json(); throw new Error(e.error || "Finalize failed"); }
       return r.json();
     },
-    onSuccess: () => {
+    onSuccess: (json: any) => {
       qc.invalidateQueries({ queryKey: ["team-quotation", id] });
-      toast({ title: "Quotation finalized and sent!" });
+      const em = json?.email;
+      if (em && em.ok) toast({ title: "Quotation finalized & emailed", description: `Sent via ${em.via || "SMTP"}.` });
+      else if (em && !em.ok) toast({ title: "Saved, but email failed", description: em.error || "Check SMTP settings.", variant: "destructive" });
+      else toast({ title: "Quotation finalized" });
     },
     onError: (e: Error) => toast({ title: "Error", description: e.message, variant: "destructive" }),
   });
@@ -253,7 +378,8 @@ export default function TeamQuotationEdit() {
     );
   }
 
-  const canEdit = quotation.status === "draft";
+  // Round 3: editing is allowed on ANY status (audit-logged on the server).
+  const canEdit = true;
 
   return (
     <TeamLayout title={quotation.quoteNo}>
@@ -267,10 +393,7 @@ export default function TeamQuotationEdit() {
             </span>
           </div>
           <div className="text-sm text-muted-foreground mt-1">
-            Customer: {quotation.customerName}
-            <span className="ml-3 inline-flex items-center gap-1 px-2 py-0.5 rounded bg-muted text-xs font-semibold">
-              Currency: {currencySym(quotation.currency)} {quotation.currency || "INR"}
-            </span>
+            Currency: {currencySym(quotation.currency)} {quotation.currency || "INR"}
           </div>
         </div>
         <div className="flex-1" />
@@ -278,178 +401,251 @@ export default function TeamQuotationEdit() {
           className="px-4 py-2 border rounded-lg text-sm font-semibold inline-flex items-center gap-2 hover:bg-muted">
           <Download className="w-4 h-4" /> Download PDF
         </button>
-        {canEdit && (
-          <>
-            <button onClick={() => saveMut.mutate()} disabled={saveMut.isPending || !dirty}
-              className="px-4 py-2 border rounded-lg text-sm font-semibold inline-flex items-center gap-2 hover:bg-muted disabled:opacity-50">
-              {saveMut.isPending ? <RefreshCw className="w-4 h-4 animate-spin" /> : null}
-              {saveMut.isPending ? "Saving…" : "Save Draft"}
-            </button>
-            <button onClick={() => { if (confirm("Finalize and send to customer? This cannot be undone.")) finalizeMut.mutate(); }}
-              disabled={finalizeMut.isPending}
-              className="px-4 py-2 bg-accent text-accent-foreground rounded-lg text-sm font-semibold inline-flex items-center gap-2 disabled:opacity-50">
-              <Send className="w-4 h-4" /> {finalizeMut.isPending ? "Sending…" : "Finalize & Send"}
-            </button>
-          </>
-        )}
+        <button onClick={() => saveMut.mutate()} disabled={saveMut.isPending || !dirty}
+          className="px-4 py-2 border rounded-lg text-sm font-semibold inline-flex items-center gap-2 hover:bg-muted disabled:opacity-50">
+          {saveMut.isPending ? <RefreshCw className="w-4 h-4 animate-spin" /> : null}
+          {saveMut.isPending ? "Saving…" : "Save"}
+        </button>
+        <button onClick={() => { if (confirm("Finalize and send to customer? An email will be sent.")) finalizeMut.mutate(); }}
+          disabled={finalizeMut.isPending}
+          className="px-4 py-2 bg-accent text-accent-foreground rounded-lg text-sm font-semibold inline-flex items-center gap-2 disabled:opacity-50">
+          <Send className="w-4 h-4" /> {finalizeMut.isPending ? "Sending…" : "Save & Share"}
+        </button>
       </div>
 
-      {/* Items table */}
-      <div className="overflow-x-auto border rounded-xl mb-4">
-        <table className="w-full text-sm">
-          <thead>
-            <tr className="bg-muted/60 text-left">
-              <th className="px-3 py-2 w-10">#</th>
-              <th className="px-3 py-2 min-w-[160px]">Part No</th>
-              <th className="px-3 py-2 min-w-[220px]">Name</th>
-              <th className="px-3 py-2 min-w-[110px]">HSN</th>
-              <th className="px-3 py-2 min-w-[130px]">Brand</th>
-              <th className="px-3 py-2 min-w-[90px]">Qty</th>
-              <th className="px-3 py-2 min-w-[120px]">MRP</th>
-              <th className="px-3 py-2 min-w-[100px]">Disc%</th>
-              <th className="px-3 py-2 min-w-[90px]">GST%</th>
-              <th className="px-3 py-2 min-w-[120px] text-right">Total</th>
-              {canEdit && <th className="px-2 py-2 w-10"></th>}
-            </tr>
-          </thead>
-          <tbody className="divide-y">
-            {items.map((line, idx) => (
-              <tr key={idx} className="hover:bg-muted/20">
-                <td className="px-2 py-1 text-muted-foreground">{idx + 1}</td>
-                <td className="px-2 py-1 relative">
-                  {canEdit ? (
-                    <>
-                      <input value={line.partNumber} onChange={(e) => onPartNumberChange(idx, e.target.value)}
-                        className="w-full border rounded px-1.5 py-1 bg-background font-mono text-xs" />
-                      {acIdx === idx && acResults.length > 0 && (
-                        <div className="absolute z-20 top-full left-0 mt-1 bg-card border rounded-lg shadow-lg w-80 max-h-56 overflow-y-auto">
-                          {acResults.map((p: any, pi: number) => {
-                            const dateStr = p.entryDate
-                              ? new Date(p.entryDate).toLocaleDateString("en-IN", { day: "2-digit", month: "short", year: "numeric" })
-                              : "";
-                            const mrpStr = p.mrp != null ? `\u20b9${Number(p.mrp).toLocaleString("en-IN", { maximumFractionDigits: 2 })}` : "";
-                            return (
-                              <button key={pi} onClick={() => applyAcResult(idx, p)}
-                                className="w-full text-left px-3 py-2 text-xs hover:bg-muted border-b last:border-0">
-                                <div className="font-mono font-semibold text-foreground">{p.partNumber}</div>
-                                <div className="text-muted-foreground truncate">
-                                  {[p.productName, p.brand && `(${p.brand})`, mrpStr, dateStr].filter(Boolean).join(" — ")}
-                                </div>
-                              </button>
-                            );
-                          })}
-                        </div>
-                      )}
-                    </>
-                  ) : <span className="font-mono">{line.partNumber || "—"}</span>}
-                </td>
-                <td className="px-2 py-1">
-                  {canEdit ? (
-                    <input value={line.productName} onChange={(e) => updateLine(idx, { productName: e.target.value })}
+      {/* Editable header cards: customer + quoting company */}
+      <div className="grid sm:grid-cols-2 gap-3 mb-6">
+        <div className="border rounded-xl p-3 bg-card shadow-sm">
+          <div className="text-xs font-bold uppercase tracking-wider text-muted-foreground mb-1 flex items-center gap-1">
+            <User2 className="w-3 h-3" /> Customer
+          </div>
+          <select value={customerId ?? ""} onChange={(e) => { setCustomerId(e.target.value ? parseInt(e.target.value, 10) : null); setDirty(true); }}
+            className="w-full border rounded-lg px-3 py-2 bg-background text-sm">
+            <option value="">— Select customer —</option>
+            {allCustomers.map((c) => (
+              <option key={c.id} value={c.id}>{c.name}{c.gstNumber ? ` · ${c.gstNumber}` : ""}</option>
+            ))}
+          </select>
+        </div>
+        <div className="border rounded-xl p-3 bg-card shadow-sm">
+          <div className="text-xs font-bold uppercase tracking-wider text-muted-foreground mb-1 flex items-center gap-1">
+            <Building2 className="w-3 h-3" /> Quoting Company
+          </div>
+          <select value={quotingCompanyId ?? ""} onChange={(e) => { setQuotingCompanyId(e.target.value ? parseInt(e.target.value, 10) : null); setDirty(true); }}
+            className="w-full border rounded-lg px-3 py-2 bg-background text-sm">
+            <option value="">— Select quoting company —</option>
+            {allQuotingCompanies.map((c) => (
+              <option key={c.id} value={c.id}>{c.name}{c.gstin ? ` · ${c.gstin}` : ""}</option>
+            ))}
+          </select>
+        </div>
+      </div>
+
+      {/* AI prompt */}
+      <div className="border rounded-xl p-3 mb-4 bg-card shadow-sm">
+        <div className="flex items-center gap-2 mb-2 text-sm font-semibold">
+          <Sparkles className="w-4 h-4 text-accent" /> Ask AI to edit these items
+        </div>
+        <div className="flex flex-col sm:flex-row gap-2">
+          <input value={aiPrompt} onChange={(e) => setAiPrompt(e.target.value)}
+            onKeyDown={(e) => e.key === "Enter" && !aiBusy && runAiPrompt()}
+            placeholder="e.g. 'decrease all rates by 10%', 'fill missing HSN codes'"
+            className="flex-1 border rounded-lg px-3 py-2 bg-background text-sm" />
+          <button onClick={runAiPrompt} disabled={aiBusy || !aiPrompt.trim()}
+            className="px-4 py-2 rounded-lg text-sm font-semibold bg-accent text-accent-foreground disabled:opacity-50 inline-flex items-center justify-center gap-1 whitespace-nowrap">
+            {aiBusy ? <><RefreshCw className="w-4 h-4 animate-spin" /> Thinking…</> : <><Sparkles className="w-4 h-4" /> Apply</>}
+          </button>
+        </div>
+      </div>
+
+      {/* Items table (compact, sticky header, scrollable) */}
+      <div className="border rounded-xl bg-card shadow-sm overflow-hidden mb-4">
+        <div className="overflow-x-auto max-h-[60vh] overflow-y-auto">
+          <table className="w-full text-xs table-fixed">
+            <colgroup>
+              <col style={{ width: 36 }} />
+              <col style={{ width: 130 }} />
+              <col style={{ width: 200 }} />
+              <col style={{ width: 90 }} />
+              <col style={{ width: 100 }} />
+              <col style={{ width: 60 }} />
+              <col style={{ width: 90 }} />
+              <col style={{ width: 70 }} />
+              <col style={{ width: 70 }} />
+              <col style={{ width: 110 }} />
+              <col style={{ width: 36 }} />
+            </colgroup>
+            <thead className="sticky top-0 bg-muted z-10">
+              <tr className="text-left">
+                <th className="px-2 py-2 font-semibold">#</th>
+                <th className="px-2 py-2 font-semibold">Part No</th>
+                <th className="px-2 py-2 font-semibold">Description</th>
+                <th className="px-2 py-2 font-semibold">HSN</th>
+                <th className="px-2 py-2 font-semibold">Brand</th>
+                <th className="px-2 py-2 font-semibold text-right">Qty</th>
+                <th className="px-2 py-2 font-semibold text-right">MRP</th>
+                <th className="px-2 py-2 font-semibold text-right">Disc%</th>
+                <th className="px-2 py-2 font-semibold text-right">GST%</th>
+                <th className="px-2 py-2 font-semibold text-right">Total</th>
+                <th className="px-1 py-2"></th>
+              </tr>
+            </thead>
+            <tbody className="divide-y">
+              {items.map((line, idx) => (
+                <tr key={idx} className="hover:bg-muted/20">
+                  <td className="px-2 py-1 text-muted-foreground">{idx + 1}</td>
+                  <td className="px-1 py-1 relative">
+                    <input value={line.partNumber} onChange={(e) => onPartNumberChange(idx, e.target.value)}
+                      onFocus={() => line.partNumber.length >= 2 && triggerAutocomplete(idx, line.partNumber, "part")}
+                      className="w-full border rounded px-1.5 py-1 bg-background font-mono text-xs" />
+                    {acIdx === idx && acField === "part" && acResults.length > 0 && (
+                      <AcDropdown results={acResults} onPick={(p) => applyAcResult(idx, p)} />
+                    )}
+                  </td>
+                  <td className="px-1 py-1 relative">
+                    <input value={line.productName} onChange={(e) => onProductNameChange(idx, e.target.value)}
+                      onFocus={() => line.productName.length >= 2 && triggerAutocomplete(idx, line.productName, "name")}
                       className="w-full border rounded px-1.5 py-1 bg-background text-xs" />
-                  ) : line.productName}
-                </td>
-                <td className="px-2 py-1 font-mono">
-                  {canEdit ? (
+                    {acIdx === idx && acField === "name" && acResults.length > 0 && (
+                      <AcDropdown results={acResults} onPick={(p) => applyAcResult(idx, p)} />
+                    )}
+                  </td>
+                  <td className="px-1 py-1">
                     <input value={line.hsn} onChange={(e) => updateLine(idx, { hsn: e.target.value })}
-                      className="w-full border rounded px-1.5 py-1 bg-background text-xs" />
-                  ) : line.hsn}
-                </td>
-                <td className="px-2 py-1">
-                  {canEdit ? (
+                      className="w-full border rounded px-1.5 py-1 bg-background font-mono text-xs" />
+                  </td>
+                  <td className="px-1 py-1">
                     <input value={line.brand} onChange={(e) => updateLine(idx, { brand: e.target.value })}
                       className="w-full border rounded px-1.5 py-1 bg-background text-xs" />
-                  ) : line.brand}
-                </td>
-                <td className="px-2 py-1">
-                  {canEdit ? (
+                  </td>
+                  <td className="px-1 py-1">
                     <input type="number" min={1} value={line.qty} onChange={(e) => updateLine(idx, { qty: parseFloat(e.target.value) || 1 })}
                       className="w-full border rounded px-1.5 py-1 bg-background text-xs text-right" />
-                  ) : line.qty}
-                </td>
-                <td className="px-2 py-1 text-right">
-                  {canEdit ? (
+                  </td>
+                  <td className="px-1 py-1">
                     <input type="number" min={0} value={line.mrp} onChange={(e) => updateLine(idx, { mrp: parseFloat(e.target.value) || 0 })}
                       className="w-full border rounded px-1.5 py-1 bg-background text-xs text-right" />
-                  ) : `${currencySym(quotation.currency)}${line.mrp}`}
-                </td>
-                <td className="px-2 py-1 text-right">
-                  {canEdit ? (
+                  </td>
+                  <td className="px-1 py-1">
                     <input type="number" min={0} max={100} value={line.discount} onChange={(e) => updateLine(idx, { discount: parseFloat(e.target.value) || 0 })}
                       className="w-full border rounded px-1.5 py-1 bg-background text-xs text-right" />
-                  ) : `${line.discount}%`}
-                </td>
-                <td className="px-2 py-1">
-                  {canEdit ? (
+                  </td>
+                  <td className="px-1 py-1">
                     <select value={line.gstPct} onChange={(e) => updateLine(idx, { gstPct: parseFloat(e.target.value) })}
                       className="w-full border rounded px-1 py-1 bg-background text-xs">
                       {[0, 5, 12, 18, 28].map((g) => <option key={g} value={g}>{g}%</option>)}
                     </select>
-                  ) : `${line.gstPct}%`}
-                </td>
-                <td className="px-2 py-1 text-right font-semibold">
-                  {currencySym(quotation.currency)}{(line.lineTotal || 0).toLocaleString("en-IN", { maximumFractionDigits: 2 })}
-                </td>
-                {canEdit && (
-                  <td className="px-2 py-1">
+                  </td>
+                  <td className="px-2 py-1 text-right font-semibold text-xs">
+                    {currencySym(quotation.currency)}{(line.lineTotal || 0).toLocaleString("en-IN", { maximumFractionDigits: 2 })}
+                  </td>
+                  <td className="px-1 py-1">
                     {items.length > 1 && (
-                      <button onClick={() => removeLine(idx)} className="p-1 hover:bg-red-100 rounded text-red-500">
+                      <button onClick={() => removeLine(idx)} className="p-1 hover:bg-red-100 dark:hover:bg-red-950/30 rounded text-red-500">
                         <Trash2 className="w-3 h-3" />
                       </button>
                     )}
                   </td>
-                )}
-              </tr>
-            ))}
-          </tbody>
-          <tfoot>
-            <tr className="bg-muted/30 font-semibold text-sm">
-              <td colSpan={canEdit ? 9 : 8} className="px-3 py-2 text-right">Grand Total</td>
-              <td className="px-3 py-2 text-right">{currencySym(quotation.currency)}{grandTotal.toLocaleString("en-IN", { maximumFractionDigits: 2 })}</td>
-              {canEdit && <td />}
-            </tr>
-          </tfoot>
-        </table>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+        <div className="border-t bg-muted/30 px-4 py-2 flex justify-end items-center gap-6 text-sm">
+          <span className="text-muted-foreground">Grand Total</span>
+          <span className="font-bold text-base">{currencySym(quotation.currency)}{grandTotal.toLocaleString("en-IN", { maximumFractionDigits: 2 })}</span>
+        </div>
       </div>
 
-      {canEdit && (
-        <div className="flex gap-2 mb-4">
-          <button onClick={addLine} className="px-4 py-2 border rounded-lg text-sm inline-flex items-center gap-2 hover:bg-muted">
-            <Plus className="w-4 h-4" /> Add Row
-          </button>
-          <button onClick={handleMatchPrices} disabled={matchingPrices}
-            className="px-4 py-2 border rounded-lg text-sm inline-flex items-center gap-2 hover:bg-muted disabled:opacity-50">
-            {matchingPrices ? <><RefreshCw className="w-4 h-4 animate-spin" /> Matching…</> : <><Search className="w-4 h-4" /> Match Prices from List</>}
-          </button>
-        </div>
-      )}
+      <div className="flex gap-2 mb-6">
+        <button onClick={addLine} className="px-4 py-2 border rounded-lg text-sm inline-flex items-center gap-2 hover:bg-muted">
+          <Plus className="w-4 h-4" /> Add Row
+        </button>
+        <button onClick={handleMatchPrices} disabled={matchingPrices}
+          className="px-4 py-2 border rounded-lg text-sm inline-flex items-center gap-2 hover:bg-muted disabled:opacity-50">
+          {matchingPrices ? <><RefreshCw className="w-4 h-4 animate-spin" /> Matching…</> : <><Search className="w-4 h-4" /> Match Prices from List</>}
+        </button>
+      </div>
 
       {/* Notes + Terms */}
-      {canEdit ? (
-        <div className="grid sm:grid-cols-2 gap-4">
-          <label className="block text-sm">
-            <div className="text-xs font-bold uppercase tracking-wider mb-1 text-muted-foreground">Valid Until</div>
-            <input type="date" value={validUntil} onChange={(e) => { setValidUntil(e.target.value); setDirty(true); }}
-              className="border rounded-lg px-3 py-2 bg-background" />
-          </label>
-          <div />
-          <label className="block text-sm sm:col-span-2">
-            <div className="text-xs font-bold uppercase tracking-wider mb-1 text-muted-foreground">Notes</div>
-            <textarea value={notes} onChange={(e) => { setNotes(e.target.value); setDirty(true); }} rows={2}
-              className="w-full border rounded-lg px-3 py-2 bg-background text-sm" />
-          </label>
-          <label className="block text-sm sm:col-span-2">
-            <div className="text-xs font-bold uppercase tracking-wider mb-1 text-muted-foreground">Terms</div>
-            <textarea value={terms} onChange={(e) => { setTerms(e.target.value); setDirty(true); }} rows={3}
-              className="w-full border rounded-lg px-3 py-2 bg-background text-sm" />
-          </label>
-        </div>
-      ) : (
-        <div className="grid sm:grid-cols-2 gap-4 text-sm">
-          {quotation.notes && <div><div className="text-xs font-bold text-muted-foreground uppercase mb-1">Notes</div><p className="text-sm">{quotation.notes}</p></div>}
-          {quotation.terms && <div><div className="text-xs font-bold text-muted-foreground uppercase mb-1">Terms</div><p className="text-sm whitespace-pre-line">{quotation.terms}</p></div>}
-        </div>
-      )}
+      <div className="grid sm:grid-cols-2 gap-4 mb-4">
+        <label className="block text-sm">
+          <div className="text-xs font-bold uppercase tracking-wider mb-1 text-muted-foreground">Valid Until</div>
+          <input type="date" value={validUntil} onChange={(e) => { setValidUntil(e.target.value); setDirty(true); }}
+            className="border rounded-lg px-3 py-2 bg-background" />
+        </label>
+        <div />
+        <label className="block text-sm sm:col-span-2">
+          <div className="text-xs font-bold uppercase tracking-wider mb-1 text-muted-foreground">Notes</div>
+          <textarea value={notes} onChange={(e) => { setNotes(e.target.value); setDirty(true); }} rows={2}
+            className="w-full border rounded-lg px-3 py-2 bg-background text-sm" />
+        </label>
+        <label className="block text-sm sm:col-span-2">
+          <div className="text-xs font-bold uppercase tracking-wider mb-1 text-muted-foreground">Terms</div>
+          <textarea value={terms} onChange={(e) => { setTerms(e.target.value); setDirty(true); }} rows={3}
+            className="w-full border rounded-lg px-3 py-2 bg-background text-sm" />
+        </label>
+      </div>
+
+      {/* Shipping address */}
+      <div className="border rounded-xl bg-card shadow-sm mb-6">
+        <button type="button" onClick={() => setShipOpen((v) => !v)}
+          className="w-full flex items-center justify-between px-4 py-3 text-sm font-semibold hover:bg-muted/30">
+          <span className="inline-flex items-center gap-2"><Truck className="w-4 h-4 text-accent" /> Ship To (different from billing)</span>
+          <span className="text-xs text-muted-foreground">{shipOpen ? "Hide" : "Show"}</span>
+        </button>
+        {shipOpen && (
+          <div className="px-4 pb-4 grid grid-cols-1 sm:grid-cols-2 gap-3 text-sm">
+            <FieldRow label="Site / Contact Name" value={shippingName} onChange={(v) => { setShippingName(v); setDirty(true); }} />
+            <FieldRow label="Phone" value={shippingPhone} onChange={(v) => { setShippingPhone(v); setDirty(true); }} />
+            <div className="sm:col-span-2">
+              <FieldRow label="Address" value={shippingAddress} onChange={(v) => { setShippingAddress(v); setDirty(true); }} />
+            </div>
+            <FieldRow label="City" value={shippingCity} onChange={(v) => { setShippingCity(v); setDirty(true); }} />
+            <FieldRow label="State" value={shippingState} onChange={(v) => { setShippingState(v); setDirty(true); }} />
+            <FieldRow label="Pincode" value={shippingPincode} onChange={(v) => { setShippingPincode(v); setDirty(true); }} />
+            <p className="text-xs text-muted-foreground sm:col-span-2">Leave all blank to use the customer's billing address.</p>
+          </div>
+        )}
+      </div>
     </TeamLayout>
+  );
+}
+
+// ─── Helpers ──────────────────────────────────────────────────────────────────
+
+function AcDropdown({ results, onPick }: { results: any[]; onPick: (p: any) => void }) {
+  return (
+    <div className="absolute z-30 top-full left-0 mt-1 bg-card border rounded-lg shadow-lg w-[420px] max-h-60 overflow-y-auto">
+      {results.map((p: any, pi: number) => {
+        const dateStr = p.lastQuotedAt
+          ? new Date(p.lastQuotedAt).toLocaleDateString("en-IN", { day: "2-digit", month: "short", year: "numeric" })
+          : p.entryDate
+            ? new Date(p.entryDate).toLocaleDateString("en-IN", { day: "2-digit", month: "short", year: "numeric" })
+            : "";
+        const mrpStr = p.mrp != null ? `₹${Number(p.mrp).toLocaleString("en-IN", { maximumFractionDigits: 2 })}` : "";
+        const discStr = p.lastDiscount != null ? `${p.lastDiscount}% off` : "";
+        return (
+          <button key={pi} onClick={() => onPick(p)}
+            className="w-full text-left px-3 py-2 text-xs hover:bg-muted border-b last:border-0">
+            <div className="font-mono font-semibold text-foreground">{p.partNumber || "—"}</div>
+            <div className="text-foreground truncate">{p.productName}</div>
+            <div className="text-muted-foreground text-[11px] truncate">
+              {[p.brand && `(${p.brand})`, mrpStr, discStr, dateStr, p.lastCustomerName].filter(Boolean).join(" · ")}
+            </div>
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
+function FieldRow({ label, value, onChange, placeholder }: { label: string; value: string; onChange: (v: string) => void; placeholder?: string }) {
+  return (
+    <label className="block">
+      <span className="text-xs font-medium text-muted-foreground">{label}</span>
+      <input value={value} onChange={(e) => onChange(e.target.value)} placeholder={placeholder}
+        className="mt-1 w-full border rounded-lg px-3 py-2 bg-background text-sm" />
+    </label>
   );
 }

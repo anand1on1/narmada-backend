@@ -371,6 +371,17 @@ try { sqlite.exec(`ALTER TABLE customers ADD COLUMN payment_terms_days INTEGER D
 try { sqlite.exec(`ALTER TABLE customers ADD COLUMN contact_person TEXT`); } catch {}
 try { sqlite.exec(`ALTER TABLE customers ADD COLUMN company_pan TEXT`); } catch {}
 
+// Round 3: per-customer default discount (auto-applied to new quote line items)
+try { sqlite.exec(`ALTER TABLE customers ADD COLUMN default_discount_pct REAL`); } catch {}
+
+// Round 3: per-quotation shipping address (single customer, multiple sites)
+try { sqlite.exec(`ALTER TABLE quotations ADD COLUMN shipping_name TEXT`); } catch {}
+try { sqlite.exec(`ALTER TABLE quotations ADD COLUMN shipping_address TEXT`); } catch {}
+try { sqlite.exec(`ALTER TABLE quotations ADD COLUMN shipping_city TEXT`); } catch {}
+try { sqlite.exec(`ALTER TABLE quotations ADD COLUMN shipping_state TEXT`); } catch {}
+try { sqlite.exec(`ALTER TABLE quotations ADD COLUMN shipping_pincode TEXT`); } catch {}
+try { sqlite.exec(`ALTER TABLE quotations ADD COLUMN shipping_phone TEXT`); } catch {}
+
 // Session B: Link RFQ to quote (after quote is created)
 try { sqlite.exec(`ALTER TABLE rfqs ADD COLUMN quote_id INTEGER`); } catch {}
 

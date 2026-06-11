@@ -180,6 +180,7 @@ export const customers = sqliteTable("customers", {
   contactPerson: text("contact_person"),
   companyPan: text("company_pan"),
   customerCode: text("customer_code"),  // NM/CUS/0001 style, optional unique
+  defaultDiscountPct: real("default_discount_pct"),  // applied as discount% on each new quote line for this customer
 });
 
 export const insertCustomerSchema = createInsertSchema(customers).omit({ id: true, createdAt: true });
@@ -542,6 +543,13 @@ export const quotations = sqliteTable("quotations", {
   terms: text("terms"),
   createdByUserId: integer("created_by_user_id"),
   pdfUrl: text("pdf_url"),
+  // Optional ship-to (one customer may have many sites)
+  shippingName: text("shipping_name"),
+  shippingAddress: text("shipping_address"),
+  shippingCity: text("shipping_city"),
+  shippingState: text("shipping_state"),
+  shippingPincode: text("shipping_pincode"),
+  shippingPhone: text("shipping_phone"),
   createdAt: integer("created_at").notNull().$defaultFn(() => Date.now()),
   updatedAt: integer("updated_at").notNull().$defaultFn(() => Date.now()),
 });

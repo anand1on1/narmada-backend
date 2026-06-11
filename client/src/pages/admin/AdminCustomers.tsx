@@ -20,6 +20,7 @@ interface Customer {
   paymentTermsDays: number | null;
   contactPerson: string | null;
   companyPan: string | null;
+  defaultDiscountPct?: number | null;
   consignmentCount?: number;
   createdAt: number;
 }
@@ -28,6 +29,7 @@ const emptyCustomer: Partial<Customer> = {
   name: "", phone: "", email: "", address: "", city: "Patna", state: "Bihar",
   pincode: "", gstNumber: "", notes: "", contactPerson: "", companyPan: "",
   creditLimitInr: 0, openingBalanceInr: 0, paymentTermsDays: 0,
+  defaultDiscountPct: null,
 };
 
 export default function AdminCustomers() {
@@ -227,6 +229,7 @@ function CustomerEditor({ item, onChange, onClose, onSave, saving }: any) {
                 <Field label="Credit Limit (₹)"><input type="number" value={item.creditLimitInr || 0} onChange={(e) => onChange({ ...item, creditLimitInr: parseFloat(e.target.value) || 0 })} className="w-full border rounded-lg px-3 py-2 bg-background" /></Field>
                 <Field label="Opening Balance (₹)"><input type="number" value={item.openingBalanceInr || 0} onChange={(e) => onChange({ ...item, openingBalanceInr: parseFloat(e.target.value) || 0 })} className="w-full border rounded-lg px-3 py-2 bg-background" /></Field>
                 <Field label="Payment Terms (days)"><input type="number" value={item.paymentTermsDays || 0} onChange={(e) => onChange({ ...item, paymentTermsDays: parseInt(e.target.value) || 0 })} className="w-full border rounded-lg px-3 py-2 bg-background" /></Field>
+                <Field label="Default Discount %"><input type="number" step="0.01" value={item.defaultDiscountPct ?? ""} onChange={(e) => onChange({ ...item, defaultDiscountPct: e.target.value === "" ? null : parseFloat(e.target.value) })} placeholder="Auto-applied to new line items" className="w-full border rounded-lg px-3 py-2 bg-background" /></Field>
               </div>
               <Field label="Notes"><textarea value={item.notes || ""} onChange={(e) => onChange({ ...item, notes: e.target.value })} rows={3} className="w-full border rounded-lg px-3 py-2 bg-background" /></Field>
               <div className="text-xs text-muted-foreground">Opening balance is seeded as a single ledger entry the first time you record any transaction. Edit on the Ledger page later if needed.</div>

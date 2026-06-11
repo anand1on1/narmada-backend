@@ -1457,6 +1457,54 @@ export function registerV2Routes(app: Express, ctx: V2Context) {
     } catch (e: any) { res.status(500).json({ error: e.message }); }
   });
 
+  // Round 3: data team can create + edit customers (was admin-only before).
+  app.post("/api/team/customers", requireDataTeam, async (req, res) => {
+    try {
+      const parsed = insertCustomerSchema.parse(req.body || {});
+      const customer = await v2.createCustomer(parsed);
+      const teamUser = (req as any).teamUser;
+      Promise.resolve(v2.writeAuditLog({
+        actorType: "data_team", actorId: String(teamUser?.id || ""), action: "create_customer",
+        entityType: "customer", entityId: String(customer.id),
+        afterJson: JSON.stringify({ id: customer.id, name: customer.name }),
+      })).catch((e: any) => console.error("[audit] team customer create failed:", e?.message));
+      res.json(customer);
+    } catch (e: any) { res.status(400).json({ error: e.message, details: e.errors }); }
+  });
+
+  app.patch("/api/team/customers/:id", requireDataTeam, async (req, res) => {
+    try {
+      const id = parseInt(req.params.id as string, 10);
+      const customer = await v2.updateCustomer(id, req.body || {});
+      if (!customer) return res.status(404).json({ error: "Customer not found" });
+      const teamUser = (req as any).teamUser;
+      Promise.resolve(v2.writeAuditLog({
+        actorType: "data_team", actorId: String(teamUser?.id || ""), action: "update_customer",
+        entityType: "customer", entityId: String(id),
+      })).catch((e: any) => console.error("[audit] team customer update failed:", e?.message));
+      res.json(customer);
+    } catch (e: any) { res.status(400).json({ error: e.message }); }
+  });
+
+  // Round 3: AI-driven natural-language editor for the quotation line items.
+  // Body: { prompt: string, items: AiQuoteItem[], context?: { customerName, currency } }
+  // Returns: { items, explanation, ok, error? }
+  app.post("/api/team/quotations/ai-edit", requireDataTeam, async (req, res) => {
+    try {
+      // Accept both `instruction` (preferred, matches claude-service signature) and
+      // `prompt` (legacy) so the client can send either.
+      const body = req.body || {};
+      const instruction: string | undefined = body.instruction || body.prompt;
+      const { items, context } = body;
+      if (!instruction || typeof instruction !== "string") return res.status(400).json({ error: "instruction is required" });
+      if (!Array.isArray(items)) return res.status(400).json({ error: "items must be an array" });
+      const { editQuotationItems } = await import("./claude-service");
+      const result = await editQuotationItems(instruction, items, context || {});
+      // Pass through `summary` alias for the explanation field for nicer client toasts.
+      res.json({ ...result, summary: (result as any).explanation });
+    } catch (e: any) { res.status(500).json({ error: e.message }); }
+  });
+
   // -------- ADMIN: V2 QUOTATIONS (read-only mirror) --------
   app.get("/api/admin/quotations", requireAuth, async (req, res) => {
     try {
@@ -1808,6 +1856,12 @@ export function registerV2Routes(app: Express, ctx: V2Context) {
           totalTax: quotation.totalTax, grandTotal: quotation.grandTotal,
           validUntil: quotation.validUntil, notes: quotation.notes,
           terms: quotation.terms, createdAt: quotation.createdAt,
+          shippingName: (quotation as any).shippingName ?? null,
+          shippingAddress: (quotation as any).shippingAddress ?? null,
+          shippingCity: (quotation as any).shippingCity ?? null,
+          shippingState: (quotation as any).shippingState ?? null,
+          shippingPincode: (quotation as any).shippingPincode ?? null,
+          shippingPhone: (quotation as any).shippingPhone ?? null,
         },
         items.map((item) => ({
           lineNo: item.lineNo, partNumber: item.partNumber, productName: item.productName,
@@ -1828,6 +1882,30 @@ export function registerV2Routes(app: Express, ctx: V2Context) {
       const safeName = quotation.quoteNo.replace(/[^a-zA-Z0-9._-]/g, "_");
       const pdfUrl = `/files/quotations/${safeName}.pdf`;
       const updated = await v2.updateQuotation(id, { status: "sent", pdfUrl });
+
+      // Round 3: actually email the PDF to the customer (was only WhatsApp before).
+      let emailResult: { ok: boolean; via: string; error?: string; messageId?: string } | null = null;
+      if (customer.email) {
+        const DATA_DIR3 = process.env.DATA_DIR || ".";
+        const absPdfPath = path.join(DATA_DIR3, "uploads", "quotations", `${safeName}.pdf`);
+        const { sendQuotationEmail } = await import("./email");
+        emailResult = await sendQuotationEmail({
+          to: customer.email,
+          customerName: customer.name,
+          quoteNo: quotation.quoteNo,
+          pdfPath: absPdfPath,
+          currency: quotation.currency,
+          grandTotal: quotation.grandTotal || undefined,
+          ccSelf: true,
+        });
+        if (!emailResult.ok) {
+          console.error(`[finalize] Email to ${customer.email} failed:`, emailResult.error);
+        }
+      } else {
+        console.warn(`[finalize] Customer ${customer.id} has no email — skipping email send for ${quotation.quoteNo}`);
+        emailResult = { ok: false, via: "skipped", error: "customer has no email on file" };
+      }
+
       if (customer.phone) {
         const { sendQuoteSent } = await import("./whatsapp");
         Promise.resolve(sendQuoteSent(customer.phone, customer.name, quotation.quoteNo, pdfUrl))
@@ -1835,7 +1913,12 @@ export function registerV2Routes(app: Express, ctx: V2Context) {
       }
       const teamUser = (req as any).teamUser;
       await v2.writeAuditLog({ actorType: "data_team", actorId: String(teamUser.id), action: "finalize_quotation", entityType: "quotation", entityId: String(id) });
-      res.json({ quotation: updated, pdfUrl });
+      // Surface email status in the response so the UI can show "Sent ✓" or "Saved but email failed".
+      res.json({
+        quotation: updated,
+        pdfUrl,
+        email: emailResult,
+      });
     } catch (e: any) { res.status(500).json({ error: e.message }); }
   });
 
@@ -1871,6 +1954,12 @@ export function registerV2Routes(app: Express, ctx: V2Context) {
             totalTax: quotation.totalTax, grandTotal: quotation.grandTotal,
             validUntil: quotation.validUntil, notes: quotation.notes,
             terms: quotation.terms, createdAt: quotation.createdAt,
+            shippingName: (quotation as any).shippingName ?? null,
+            shippingAddress: (quotation as any).shippingAddress ?? null,
+            shippingCity: (quotation as any).shippingCity ?? null,
+            shippingState: (quotation as any).shippingState ?? null,
+            shippingPincode: (quotation as any).shippingPincode ?? null,
+            shippingPhone: (quotation as any).shippingPhone ?? null,
           },
           items.map((item) => ({
             lineNo: item.lineNo, partNumber: item.partNumber, productName: item.productName,

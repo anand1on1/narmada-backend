@@ -75,3 +75,94 @@ function escape(s: string): string {
     .replace(/"/g, "&quot;")
     .replace(/'/g, "&#039;");
 }
+
+// ============================================================
+// Round 3: Quotation email via SMTP (nodemailer) with PDF attachment
+// ============================================================
+import nodemailer from "nodemailer";
+import fs from "fs";
+
+export interface QuotationEmailPayload {
+  to: string;                  // customer email
+  customerName: string;
+  quoteNo: string;
+  pdfPath: string;             // absolute path to generated PDF
+  currency?: string;
+  grandTotal?: number;
+  cc?: string | null;
+  ccSelf?: boolean;             // also CC quotes@... so the team has a record
+}
+
+let _smtpTransport: nodemailer.Transporter | null = null;
+function getSmtpTransport(): nodemailer.Transporter | null {
+  if (_smtpTransport) return _smtpTransport;
+  const host = process.env.SMTP_HOST;
+  const user = process.env.SMTP_USER;
+  const pass = process.env.SMTP_PASS;
+  if (!host || !user || !pass) return null;
+  const port = Number(process.env.SMTP_PORT || 465);
+  const secure = String(process.env.SMTP_SECURE ?? "true").toLowerCase() !== "false";
+  _smtpTransport = nodemailer.createTransport({ host, port, secure, auth: { user, pass } });
+  return _smtpTransport;
+}
+
+export async function sendQuotationEmail(
+  p: QuotationEmailPayload,
+): Promise<{ ok: boolean; via: string; error?: string; messageId?: string }> {
+  const transport = getSmtpTransport();
+  if (!transport) {
+    return {
+      ok: false,
+      via: "smtp_unconfigured",
+      error: "SMTP not configured. Set SMTP_HOST, SMTP_USER, SMTP_PASS on Render (and SMTP_PORT, SMTP_SECURE if not 465/true).",
+    };
+  }
+  if (!p.to) return { ok: false, via: "skipped", error: "customer email is empty" };
+  if (!fs.existsSync(p.pdfPath)) return { ok: false, via: "smtp", error: `PDF not found at ${p.pdfPath}` };
+
+  const fromName = process.env.SMTP_FROM_NAME || "Narmada Mobility";
+  const fromEmail = process.env.SMTP_FROM_EMAIL || process.env.SMTP_USER!;
+  const ccList: string[] = [];
+  if (p.cc) ccList.push(p.cc);
+  if (p.ccSelf !== false) ccList.push(fromEmail);
+
+  const totalLine = (p.grandTotal && p.grandTotal > 0)
+    ? `<p style="margin:8px 0;">Grand Total: <strong>${escape(p.currency || "INR")} ${escape(String(p.grandTotal.toLocaleString("en-IN")))}</strong></p>`
+    : "";
+
+  const html = `
+    <div style="font-family:-apple-system,BlinkMacSystemFont,sans-serif;max-width:640px;margin:0 auto;padding:24px;color:#0f172a;">
+      <div style="background:#0a2540;color:white;padding:20px;border-radius:8px 8px 0 0;">
+        <h2 style="margin:0;font-size:20px;">Quotation ${escape(p.quoteNo)}</h2>
+        <p style="margin:4px 0 0;opacity:0.85;font-size:13px;">From Narmada Mobility</p>
+      </div>
+      <div style="background:white;border:1px solid #e5e7eb;border-top:none;padding:24px;border-radius:0 0 8px 8px;">
+        <p>Dear ${escape(p.customerName)},</p>
+        <p>Please find attached our quotation <strong>${escape(p.quoteNo)}</strong> for your reference.</p>
+        ${totalLine}
+        <p>If you have any questions or need clarification on any item, please reply to this email.</p>
+        <p style="margin-top:24px;">Best regards,<br/><strong>Narmada Mobility</strong><br/>Patna, India</p>
+        <div style="margin-top:24px;padding:12px;background:#f9fafb;border-radius:6px;font-size:12px;color:#6b7280;">
+          This is an automated message. Reply directly to reach our sales team.
+        </div>
+      </div>
+    </div>`;
+
+  try {
+    const info = await transport.sendMail({
+      from: `"${fromName}" <${fromEmail}>`,
+      to: p.to,
+      cc: ccList.length ? ccList : undefined,
+      subject: `Quotation ${p.quoteNo} from Narmada Mobility`,
+      html,
+      attachments: [
+        { filename: `${p.quoteNo}.pdf`, path: p.pdfPath, contentType: "application/pdf" },
+      ],
+    });
+    console.log(`[email] Quotation ${p.quoteNo} sent to ${p.to} via SMTP (id=${info.messageId})`);
+    return { ok: true, via: "smtp", messageId: info.messageId };
+  } catch (e: any) {
+    console.error("[email] SMTP send failed:", e);
+    return { ok: false, via: "smtp", error: e.message || String(e) };
+  }
+}
