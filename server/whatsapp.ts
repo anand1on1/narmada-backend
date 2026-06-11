@@ -543,6 +543,36 @@ export async function sendVendorPaymentConfirmation(phone: string, vendorName: s
   }
 }
 
+// R8-v2 — vendor rate request fired when a seller is assigned to a PO line item.
+// Template `narmada_vendor_rate_request` (may not be Meta-approved yet) → text fallback.
+// params: {{1}}=vendor_name {{2}}=part_number {{3}}=brand {{4}}=qty {{5}}=our_po_number {{6}}=our_company
+export async function sendVendorRateRequest(
+  phone: string,
+  p: { vendorName: string; partNumber: string; brand: string; qty: string; ourPoNumber: string },
+): Promise<{ status: string }> {
+  const templateName = "narmada_vendor_rate_request";
+  const ourCompany = "Narmada Mobility";
+  const normalized = normalizePhone(phone);
+  const body = `Hello ${p.vendorName},\n${ourCompany} requests your best rate for:\nPart: ${p.partNumber}${p.brand ? ` (${p.brand})` : ""}\nQty: ${p.qty}\nRef PO: ${p.ourPoNumber}\nPlease reply with rate, MOQ and lead time.`;
+  try {
+    const raw = await postAisensy({
+      campaignName: templateName,
+      destination: normalized,
+      userName: ourCompany,
+      templateParams: [p.vendorName, p.partNumber, p.brand, p.qty, p.ourPoNumber, ourCompany],
+      source: "narmada-backend",
+      media: {}, buttons: [], carouselCards: [], location: {}, attributes: {},
+      paramsFallbackValue: { FirstName: p.vendorName },
+    });
+    const status = logAisensyResult(normalized, templateName, body, raw);
+    if (status === "failed") return { status: await sendFreeTextWa(phone, body, "vendor_rate_request_fallback") };
+    return { status };
+  } catch (e: any) {
+    console.error(`[whatsapp] sendVendorRateRequest failed for ${normalized}:`, e?.message);
+    return { status: await sendFreeTextWa(phone, body, "vendor_rate_request_fallback") };
+  }
+}
+
 // Generic free-text send (used by vendor inbox reply, lead outreach, dispatch reminders).
 export async function sendTextMessage(phone: string, text: string, eventKey = "free_text"): Promise<{ status: string }> {
   const status = await sendFreeTextWa(phone, text, eventKey);

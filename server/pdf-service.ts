@@ -687,6 +687,7 @@ export interface PoForPdf {
     lineTotal?: number | null;
     vendorName?: string | null;
     vendorRate?: number | null;
+    purchaseCost?: number | null;
   }>;
 }
 
@@ -771,6 +772,86 @@ export async function generatePOPDF(po: PoForPdf, company: any): Promise<Buffer>
     drawText(page, "Notes:", M, y, bold, 9); y -= 12;
     for (const line of wrapText(po.notes, reg, 9, PAGE_W - 2 * M)) { drawText(page, line, M, y, reg, 9, COLOR_TEXT_MUTED); y -= 12; }
   }
+
+  const bytes = await pdfDoc.save();
+  return Buffer.from(bytes);
+}
+
+// =====================================================================
+// R8-v2 — Internal Purchase Order PDF (Bug 4)
+// Shows seller + purchase rate + line cost + customer rate. Internal-only —
+// must never be sent to the customer (the customer-facing doc is generatePOPDF /
+// the quotation PDF). Columns:
+//   S.No | Part No | Brand | Description | Qty | Vendor | Purchase Rate | Line Cost | Customer Rate
+// =====================================================================
+export async function generateInternalPOPDF(po: PoForPdf, company: any): Promise<Buffer> {
+  const pdfDoc = await PDFDocument.create();
+  const PAGE_W = 842, PAGE_H = 595; // landscape — more horizontal room for 9 columns
+  let page = pdfDoc.addPage([PAGE_W, PAGE_H]);
+  const bold = await pdfDoc.embedFont(StandardFonts.HelveticaBold);
+  const reg = await pdfDoc.embedFont(StandardFonts.Helvetica);
+  const M = 30;
+  let y = PAGE_H - M;
+
+  drawRect(page, 0, PAGE_H - 60, PAGE_W, 60, COLOR_NAVY);
+  drawText(page, company?.name || "NARMADA MOTORS", M, PAGE_H - 30, bold, 16, COLOR_WHITE);
+  drawText(page, "INTERNAL PURCHASE ORDER", PAGE_W - M - 240, PAGE_H - 30, bold, 14, COLOR_WHITE);
+  drawText(page, "CONFIDENTIAL — NOT FOR CUSTOMER", PAGE_W - M - 240, PAGE_H - 48, reg, 8, COLOR_WHITE);
+  y = PAGE_H - 78;
+
+  drawText(page, `PO No: ${po.poNumber}`, M, y, bold, 11);
+  drawText(page, `Date: ${fmtDate(po.createdAt)}`, PAGE_W - M - 200, y, reg, 10);
+  y -= 14;
+  drawText(page, `Status: ${(po.status || "draft").toUpperCase()}`, M, y, reg, 10);
+  if (po.shipToName) drawText(page, `Ship To: ${po.shipToName}`, M + 160, y, reg, 10);
+  y -= 20;
+
+  const cols = [
+    { x: M, w: 28, label: "S.No" },
+    { x: M + 28, w: 95, label: "Part No" },
+    { x: M + 123, w: 70, label: "Brand" },
+    { x: M + 193, w: 175, label: "Description" },
+    { x: M + 368, w: 35, label: "Qty" },
+    { x: M + 403, w: 110, label: "Vendor" },
+    { x: M + 513, w: 80, label: "Purch. Rate" },
+    { x: M + 593, w: 85, label: "Line Cost" },
+    { x: M + 678, w: 85, label: "Cust. Rate" },
+  ];
+  const drawHeader = () => {
+    drawRect(page, M, y - 4, PAGE_W - 2 * M, 18, COLOR_CREAM);
+    for (const c of cols) drawText(page, c.label, c.x + 2, y, bold, 8, COLOR_NAVY);
+    y -= 20;
+  };
+  drawHeader();
+
+  const items = po.items || [];
+  let totalCost = 0;
+  for (let i = 0; i < items.length; i++) {
+    const it = items[i];
+    if (y < 70) { page = pdfDoc.addPage([PAGE_W, PAGE_H]); y = PAGE_H - M; drawHeader(); }
+    const qty = Number(it.qty ?? 0);
+    const purchRate = it.vendorRate ?? it.purchaseCost ?? null;
+    const lineCost = purchRate != null ? purchRate * qty : null;
+    if (lineCost != null) totalCost += lineCost;
+    const custRate = it.unitPrice ?? null;
+    const descLines = wrapText(String(it.description || ""), reg, 8, 170);
+    drawText(page, String(i + 1), cols[0].x + 2, y, reg, 8);
+    drawText(page, String(it.partNumber || "-"), cols[1].x + 2, y, reg, 8);
+    drawText(page, String(it.brand || "-"), cols[2].x + 2, y, reg, 8);
+    drawText(page, descLines[0] || "-", cols[3].x + 2, y, reg, 8);
+    drawText(page, String(qty), cols[4].x + 2, y, reg, 8);
+    drawText(page, String(it.vendorName || "-"), cols[5].x + 2, y, reg, 8);
+    drawText(page, purchRate != null ? fmtCurrency(purchRate, "INR", false) : "-", cols[6].x + 2, y, reg, 8);
+    drawText(page, lineCost != null ? fmtCurrency(lineCost, "INR", false) : "-", cols[7].x + 2, y, reg, 8);
+    drawText(page, custRate != null ? fmtCurrency(custRate, "INR", false) : "-", cols[8].x + 2, y, reg, 8);
+    y -= 14;
+    for (let l = 1; l < descLines.length; l++) { drawText(page, descLines[l], cols[3].x + 2, y, reg, 8); y -= 12; }
+    drawRect(page, M, y + 4, PAGE_W - 2 * M, 0.5, COLOR_BORDER);
+  }
+
+  y -= 12;
+  drawText(page, "Total Purchase Cost:", cols[6].x - 40, y, bold, 10);
+  drawText(page, fmtCurrency(totalCost, "INR", false), cols[7].x + 2, y, bold, 10);
 
   const bytes = await pdfDoc.save();
   return Buffer.from(bytes);

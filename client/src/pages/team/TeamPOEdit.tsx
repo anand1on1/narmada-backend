@@ -108,6 +108,7 @@ function ItemVendorPanel({
   const [open, setOpen] = useState(false);
   const [tab, setTab] = useState<TabKey>("history");
   const [vendorId, setVendorId] = useState<string>(item.vendorId ? String(item.vendorId) : "");
+  const [vendorName, setVendorName] = useState<string>(item.vendorName || "");
   const [vendorRate, setVendorRate] = useState<string>(item.vendorRate != null ? String(item.vendorRate) : item.purchaseCost != null ? String(item.purchaseCost) : "");
   const [brand, setBrand] = useState<string>(item.vendorBrand || item.brand || "");
   const [saving, setSaving] = useState(false);
@@ -125,13 +126,15 @@ function ItemVendorPanel({
   const margin = calcMargin(item.unitPrice, item.vendorRate ?? item.purchaseCost);
 
   async function saveAssignment() {
-    if (!vendorId) return;
+    // Allow saving with a registered seller (dropdown) OR a free-text seller name.
+    if (!vendorId && !vendorName.trim()) return;
     setSaving(true);
     try {
       const r = await teamFetch(token, `/api/team/po-items/${item.id}/assign-vendor`, {
         method: "POST",
         body: JSON.stringify({
-          vendor_id: Number(vendorId),
+          vendor_id: vendorId ? Number(vendorId) : undefined,
+          vendor_name: vendorName.trim() || undefined,
           vendor_rate: vendorRate ? parseFloat(vendorRate) : undefined,
           brand: brand || undefined,
         }),
@@ -140,7 +143,7 @@ function ItemVendorPanel({
         const j = await r.json().catch(() => ({}));
         throw new Error(j.error || "Save failed");
       }
-      toast({ title: "Vendor assigned" });
+      toast({ title: "Saved" });
       setOpen(false);
       onAssigned();
     } catch (e: any) {
@@ -216,8 +219,8 @@ function ItemVendorPanel({
       {/* Current assignment summary */}
       <div className="flex items-center gap-2 flex-wrap">
         <span className="text-xs text-muted-foreground">
-          {currentVendor ? (
-            <span className="font-semibold text-foreground">{currentVendor.name}</span>
+          {currentVendor || item.vendorName ? (
+            <span className="font-semibold text-foreground">{currentVendor?.name || item.vendorName}</span>
           ) : (
             <span className="italic">Unassigned</span>
           )}
@@ -243,12 +246,22 @@ function ItemVendorPanel({
               <label className="text-xs font-semibold block mb-1">Seller</label>
               <select
                 value={vendorId}
-                onChange={(e) => setVendorId(e.target.value)}
+                onChange={(e) => {
+                  setVendorId(e.target.value);
+                  const v = vendors.find((x) => String(x.id) === e.target.value);
+                  if (v) setVendorName(v.name);
+                }}
                 className="w-full border rounded-lg px-2 py-1.5 text-xs bg-background"
               >
                 <option value="">— Select seller —</option>
                 {vendors.map((v) => <option key={v.id} value={v.id}>{v.name}</option>)}
               </select>
+              <input
+                value={vendorName}
+                onChange={(e) => { setVendorName(e.target.value); }}
+                placeholder="or type seller name"
+                className="mt-1 w-full border rounded-lg px-2 py-1.5 text-xs bg-background"
+              />
             </div>
             <div className="w-24">
               <label className="text-xs font-semibold block mb-1">Rate ₹</label>
@@ -407,10 +420,10 @@ function ItemVendorPanel({
           <div className="flex justify-end pt-1">
             <button
               onClick={saveAssignment}
-              disabled={!vendorId || saving}
+              disabled={(!vendorId && !vendorName.trim()) || saving}
               className="px-4 py-1.5 bg-accent text-accent-foreground rounded-lg text-xs font-semibold inline-flex items-center gap-1 disabled:opacity-50"
             >
-              {saving ? <><Loader2 className="w-3 h-3 animate-spin" /> Saving…</> : <><Check className="w-3 h-3" /> Save Assignment</>}
+              {saving ? <><Loader2 className="w-3 h-3 animate-spin" /> Saving…</> : <><Check className="w-3 h-3" /> Save</>}
             </button>
           </div>
         </div>
@@ -538,16 +551,14 @@ export default function TeamPOEdit() {
     onError: (e: any) => toast({ title: "Error", description: e.message, variant: "destructive" }),
   });
 
-  async function saveAndNotifyDelhi() {
+  async function notifyDelhi() {
     setNotifying(true);
     try {
-      // Update status to "open" so Delhi can see it
-      await teamFetch(token, `/api/team/purchase-orders/${poId}`, {
-        method: "PATCH",
-        body: JSON.stringify({ status: "open" }),
-      });
+      const r = await teamFetch(token, `/api/team/po/${poId}/notify-delhi`, { method: "POST" });
+      const j = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(j.error || "Notify failed");
       qc.invalidateQueries({ queryKey: ["team-po-edit", poId] });
-      toast({ title: "PO marked open — Delhi notified", description: "Delhi team can now see this PO in their dashboard." });
+      toast({ title: `Delhi notified. They can see ${j.assignedCount} assigned lines.` });
     } catch (e: any) {
       toast({ title: "Error", description: e.message, variant: "destructive" });
     } finally {
@@ -557,7 +568,7 @@ export default function TeamPOEdit() {
 
   function downloadPdf() {
     const t = getTeamToken();
-    fetch(apiUrl(`/api/team/purchase-orders/${poId}/pdf`), {
+    fetch(apiUrl(`/api/team/purchase-orders/${poId}/pdf?type=internal`), {
       headers: t ? { "x-team-token": t } : {},
     })
       .then((r) => r.blob())
@@ -579,7 +590,8 @@ export default function TeamPOEdit() {
     );
   }
 
-  const allAssigned = po.items.length > 0 && po.items.every((it) => it.vendorId != null);
+  const assignedCount = po.items.filter((it) => it.vendorId != null).length;
+  const anyAssigned = assignedCount > 0;
 
   return (
     <TeamLayout title={`PO ${po.poNumber} — Vendor Assignment`}>
@@ -609,19 +621,23 @@ export default function TeamPOEdit() {
             <Download className="w-4 h-4" /> PDF
           </button>
           <button
-            onClick={saveAndNotifyDelhi}
-            disabled={notifying || !allAssigned}
-            title={!allAssigned ? "Assign all vendors before notifying Delhi" : "Mark PO open and notify Delhi"}
+            onClick={notifyDelhi}
+            disabled={notifying || !anyAssigned}
+            title={!anyAssigned ? "Assign at least one vendor first" : `Notify Delhi — they will see ${assignedCount} assigned line(s)`}
             className="px-4 py-2 bg-accent text-accent-foreground rounded-lg text-sm font-semibold inline-flex items-center gap-2 disabled:opacity-50"
           >
-            {notifying ? <><Loader2 className="w-4 h-4 animate-spin" /> Saving…</> : <><Send className="w-4 h-4" /> Save &amp; Notify Delhi</>}
+            {notifying ? <><Loader2 className="w-4 h-4 animate-spin" /> Notifying…</> : <><Send className="w-4 h-4" /> Notify Delhi</>}
           </button>
         </div>
       </div>
 
-      {!allAssigned && (
+      {!anyAssigned ? (
         <div className="mb-4 px-4 py-2.5 bg-amber-50 border border-amber-200 rounded-lg text-xs text-amber-800">
-          {po.items.filter((it) => !it.vendorId).length} item(s) still need vendor assignment before Delhi can be notified.
+          Assign at least one seller before notifying Delhi. You don't need to assign every line — Delhi will only see the lines you've assigned.
+        </div>
+      ) : (
+        <div className="mb-4 px-4 py-2.5 bg-emerald-50 border border-emerald-200 rounded-lg text-xs text-emerald-800">
+          {assignedCount} of {po.items.length} line(s) assigned. Delhi will see only the assigned lines when notified.
         </div>
       )}
 

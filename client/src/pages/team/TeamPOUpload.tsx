@@ -63,11 +63,21 @@ export default function TeamPOUpload() {
         body: form,
       });
       const j = await r.json();
-      if (!r.ok) { toast({ title: "Upload failed", description: j.error, variant: "destructive" }); return; }
+      // 422 = extraction returned 0 items. The server still sends a blank editable
+      // row so the operator can type lines manually — fall through and show step 3.
+      if (!r.ok && r.status !== 422) {
+        toast({ title: "Upload failed", description: j.error, variant: "destructive" });
+        return;
+      }
+      if (r.status === 422) {
+        toast({ title: "No items auto-detected", description: "Please enter the line items manually.", variant: "destructive" });
+      }
       setFileUrl(j.fileUrl || "");
       const p: ParsedData = j.parsed || { customerPoNumber: null, shipTo: null, items: [] };
-      // Ensure items array
-      if (!p.items) p.items = [];
+      // Ensure at least one editable row exists
+      if (!p.items || p.items.length === 0) {
+        p.items = [{ partNumber: "", brand: "", description: "", qty: 1, customerRate: null }];
+      }
       setParsed(p);
       setStep(3);
     } catch (e: any) {

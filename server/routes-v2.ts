@@ -2602,27 +2602,25 @@ function registerR4toR7Routes(
       res.json({ poId: po.id, poNumber: po.poNumber });
     } catch (e: any) { res.status(500).json({ error: e.message }); }
   });
-  app.put("/api/team/po-items/:id/assign-vendor", requireDataTeam, async (req, res) => {
-    try {
-      const { vendor_id, vendorId, purchase_cost, purchaseCost } = req.body || {};
-      const vid = vendor_id ?? vendorId;
-      const cost = purchase_cost ?? purchaseCost;
-      const item = await v2.assignVendorToPoItem(parseInt(req.params.id as string, 10), Number(vid), cost != null ? Number(cost) : undefined);
-      if (!item) return res.status(404).json({ error: "Not found" });
-      res.json(item);
-    } catch (e: any) { res.status(500).json({ error: e.message }); }
-  });
+  // NOTE: the legacy PUT /api/team/po-items/:id/assign-vendor was removed in R8-v2.
+  // The canonical endpoint is POST /api/team/po-items/:id/assign-vendor (registered in
+  // registerR8Routes) which persists vendor_id + vendor_name + vendor_rate + brand and
+  // fires the AiSensy seller rate-request.
 
-  // PO PDF
+  // PO PDF. ?type=internal (or ?internal=1) renders the internal procurement doc with
+  // seller + purchase rate + line cost + customer rate columns (Bug 4). The default
+  // (customer-facing) variant is unchanged and never leaks seller/cost info.
   app.get("/api/team/purchase-orders/:id/pdf", requireDataTeam, async (req, res) => {
     try {
       const po = await v2.getPurchaseOrderV2(parseInt(req.params.id as string, 10));
       if (!po) return res.status(404).json({ error: "Not found" });
       const company = po.companyId ? await v2.getCompany(po.companyId) : await v2.getDefaultCompany();
       const pdf = require("./pdf-service");
-      const bytes = await pdf.generatePOPDF(po, company);
+      const internal = req.query.type === "internal" || req.query.internal === "1";
+      const bytes = internal ? await pdf.generateInternalPOPDF(po, company) : await pdf.generatePOPDF(po, company);
+      const suffix = internal ? "-INTERNAL" : "";
       res.setHeader("Content-Type", "application/pdf");
-      res.setHeader("Content-Disposition", `inline; filename="${po.poNumber.replace(/\//g, "-")}.pdf"`);
+      res.setHeader("Content-Disposition", `inline; filename="${po.poNumber.replace(/\//g, "-")}${suffix}.pdf"`);
       res.send(Buffer.from(bytes));
     } catch (e: any) { res.status(500).json({ error: e.message }); }
   });
@@ -3046,44 +3044,59 @@ function registerR8Routes(
       const host = req.get("host") || "narmada-backend.onrender.com";
       const fileUrl = `${proto}://${host}/uploads/customer-pos/${req.file.filename}`;
 
-      // Try Claude extraction
+      // Try Claude extraction. claude-service returns ParsedPart[] in the shape
+      // { part_number, name, qty }. Normalize into the canonical client contract:
+      //   { customerName, customerPo, poDate, items:[{partNumber,brand,description,qty,customerRate}] }
       const claude = require("./claude-service") as typeof import("./claude-service");
-      let parsed: any = { customerPoNumber: null, shipTo: null, items: [] };
+      let extracted: any[] = [];
       if (claude.isClaudeConfigured()) {
         const ext = path2.extname(req.file.filename).toLowerCase();
-        const prompt = `Extract from this purchase order document:
-1. customerPoNumber: the PO number from the buyer's document
-2. shipTo: { name, address, phone }
-3. items: array of { partNumber, brand, description, qty, rate }
-Return ONLY valid JSON matching this schema. If a field is unknown, use null.`;
-
         try {
           if (ext === ".pdf") {
-            const extracted = await claude.extractPartsFromPdf(req.file.path);
-            if (extracted && extracted.length > 0) {
-              parsed.items = extracted.map((p: any) => ({
-                partNumber: p.partNumber || null,
-                brand: p.brand || null,
-                description: p.description || null,
-                qty: p.qty || 1,
-                rate: null,
-              }));
-            }
+            extracted = (await claude.extractPartsFromPdf(req.file.path)) || [];
           } else {
-            const extracted = await claude.extractPartsFromImage(req.file.path);
-            if (extracted && extracted.length > 0) {
-              parsed.items = extracted.map((p: any) => ({
-                partNumber: p.partNumber || null,
-                brand: p.brand || null,
-                description: p.description || null,
-                qty: p.qty || 1,
-                rate: null,
-              }));
-            }
+            extracted = (await claude.extractPartsFromImage(req.file.path)) || [];
           }
         } catch (claudeErr: any) {
           console.error("[R8] Claude extraction error:", claudeErr.message);
         }
+      }
+
+      const items = (extracted || []).map((p: any) => ({
+        partNumber: p.part_number ?? p.partNumber ?? null,
+        brand: p.brand ?? null,
+        description: p.name ?? p.description ?? null,
+        qty: Number(p.qty ?? p.quantity ?? 1) || 1,
+        customerRate: null,
+      }));
+
+      console.log("[po-parse] claude raw:", JSON.stringify(extracted).slice(0, 1000));
+      console.log(`[po-parse] normalized ${items.length} item(s)`);
+
+      // Canonical shape the frontend consumes. customerPoNumber/shipTo are not
+      // reliably extractable from a parts-only prompt, so they start null and the
+      // operator fills them on the Review & Edit screen.
+      const parsed = {
+        customerName: null as string | null,
+        customerPo: null as string | null,
+        customerPoNumber: null as string | null,
+        poDate: null as string | null,
+        shipTo: null as { name: string | null; address: string | null; phone: string | null } | null,
+        items,
+      };
+
+      // Bug 1 hardening: 0 items → 422 + one blank editable row so the operator
+      // can type the lines in manually instead of staring at an empty screen.
+      if (items.length === 0) {
+        return res.status(422).json({
+          error: "Could not extract line items. Edit manually.",
+          fileUrl,
+          customerId,
+          parsed: {
+            ...parsed,
+            items: [{ partNumber: "", brand: "", description: "", qty: 1, customerRate: null }],
+          },
+        });
       }
 
       res.json({
@@ -3146,20 +3159,49 @@ Return ONLY valid JSON matching this schema. If a field is unknown, use null.`;
   });
 
   // ---- POST /api/team/po-items/:id/assign-vendor ----
-  // Assigns a vendor + rate + brand to a PO line item
+  // Assigns a seller (vendor) + rate + brand to a PO line item. Accepts a registered
+  // vendor_id and/or a free-text vendor_name. Persists vendor_id, vendor_name,
+  // vendor_rate, brand, updated_at and returns the enriched row. Fires a
+  // fire-and-forget AiSensy WhatsApp rate request to the seller (Bug 5).
   app.post("/api/team/po-items/:id/assign-vendor", requireDataTeam, async (req: any, res: any) => {
     try {
       const id = parseInt(req.params.id as string, 10);
       const u = (req as any).teamUser;
-      const { vendor_id, vendor_rate, brand } = req.body || {};
-      if (!vendor_id) return res.status(400).json({ error: "vendor_id required" });
+      const { vendor_id, vendor_name, vendor_rate, brand } = req.body || {};
+      if (!vendor_id && !(vendor_name && String(vendor_name).trim())) {
+        return res.status(400).json({ error: "vendor_id or vendor_name required" });
+      }
       const item = await v2.assignVendorToPoItemR8(id, {
-        vendorId: parseInt(vendor_id, 10),
-        vendorRate: vendor_rate ? parseFloat(vendor_rate) : undefined,
+        vendorId: vendor_id ? parseInt(vendor_id, 10) : undefined,
+        vendorName: vendor_name ? String(vendor_name) : undefined,
+        vendorRate: vendor_rate != null && vendor_rate !== "" ? parseFloat(vendor_rate) : undefined,
         brand: brand || undefined,
         assignedBy: u?.username,
       });
       if (!item) return res.status(404).json({ error: "Item not found" });
+
+      // Bug 5: fire-and-forget vendor rate-request via AiSensy WhatsApp. Only when we
+      // have a registered vendor with a phone — free-text-only sellers have no number.
+      if (vendor_id) {
+        const vid = parseInt(vendor_id, 10);
+        setImmediate(() => {
+          (async () => {
+            const vendor = await v2.getVendor(vid);
+            const phone = vendor?.whatsapp || vendor?.phone;
+            if (!vendor || !phone) return;
+            console.log(`[aisensy] notifying vendor ${vendor.name} for po-item ${id}`);
+            const wa = require("./whatsapp") as typeof import("./whatsapp");
+            await wa.sendVendorRateRequest(phone, {
+              vendorName: vendor.name,
+              partNumber: item.partNumber || "",
+              brand: item.brand || brand || "",
+              qty: item.qty != null ? String(item.qty) : "1",
+              ourPoNumber: String(item.poId ?? id),
+            });
+          })().catch((err) => console.error("[aisensy] vendor notify failed:", err));
+        });
+      }
+
       res.json(item);
     } catch (e: any) {
       res.status(500).json({ error: e.message });
@@ -3198,6 +3240,26 @@ Return ONLY valid JSON matching this schema. If a field is unknown, use null.`;
         priceList: priceRows.slice(0, 10),
         rfqSentTo: knownVendorIds.length,
       });
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  // ---- POST /api/team/po/:id/notify-delhi ----
+  // Partial-notify: stamps notified_delhi_at and flips status so Delhi can see the PO.
+  // Delhi only sees the line items that already have a vendor assigned — unassigned
+  // lines stay invisible (Bug 3). At least 1 assigned line is required.
+  app.post("/api/team/po/:id/notify-delhi", requireDataTeam, async (req: any, res: any) => {
+    try {
+      const id = parseInt(req.params.id as string, 10);
+      const po = await v2.getPurchaseOrderV2(id);
+      if (!po) return res.status(404).json({ error: "PO not found" });
+      const assigned = po.items.filter((it: any) => it.vendorId != null);
+      if (assigned.length === 0) {
+        return res.status(400).json({ error: "Assign at least one seller before notifying Delhi" });
+      }
+      await v2.updatePurchaseOrderV2(id, { notifiedDelhiAt: Date.now(), status: po.status === "draft" ? "open" : po.status } as any);
+      res.json({ ok: true, assignedCount: assigned.length });
     } catch (e: any) {
       res.status(500).json({ error: e.message });
     }

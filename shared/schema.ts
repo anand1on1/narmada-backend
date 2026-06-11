@@ -764,6 +764,7 @@ export const purchaseOrdersV2 = sqliteTable("purchase_orders_v2", {
   shipToName: text("ship_to_name"),
   shipToAddress: text("ship_to_address"),
   shipToPhone: text("ship_to_phone"),
+  notifiedDelhiAt: integer("notified_delhi_at"),
 });
 export const insertPurchaseOrderV2Schema = createInsertSchema(purchaseOrdersV2).omit({ id: true, createdAt: true, updatedAt: true });
 export type InsertPurchaseOrderV2 = z.infer<typeof insertPurchaseOrderV2Schema>;
@@ -793,6 +794,7 @@ export const poItems = sqliteTable("po_items", {
   dispatchedAt: integer("dispatched_at"),
   // R8 additions
   vendorRate: real("vendor_rate"),
+  vendorName: text("vendor_name"),
   assignedAt: integer("assigned_at"),
   assignedBy: text("assigned_by"),
   shippedStatus: text("shipped_status").default("pending"),

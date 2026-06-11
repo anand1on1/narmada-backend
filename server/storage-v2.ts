@@ -1977,21 +1977,29 @@ export async function listDispatches(poId: number): Promise<Dispatch[]> {
 // -------- R8: ASSIGN VENDOR TO PO ITEM (enhanced) --------
 export async function assignVendorToPoItemR8(
   id: number,
-  data: { vendorId: number; vendorRate?: number; brand?: string; assignedBy?: string }
-): Promise<PoItem | undefined> {
+  data: { vendorId?: number; vendorName?: string; vendorRate?: number; brand?: string; assignedBy?: string }
+): Promise<(PoItem & { vendorName: string | null }) | undefined> {
   const now = Date.now();
+  // Resolve a display name: explicit free-text wins, else look up the registered vendor.
+  let resolvedName: string | null = data.vendorName?.trim() || null;
+  if (!resolvedName && data.vendorId) {
+    const v = await getVendor(data.vendorId);
+    resolvedName = v?.name || null;
+  }
+  const setFields: any = {
+    vendorRate: data.vendorRate ?? null,
+    vendorName: resolvedName,
+    assignedAt: now,
+    assignedBy: data.assignedBy || null,
+    purchaseCost: data.vendorRate ?? null,
+  };
+  if (data.vendorId != null) setFields.vendorId = data.vendorId;
+  if (data.brand) setFields.brand = data.brand;
   const item = db.update(poItems)
-    .set({
-      vendorId: data.vendorId,
-      vendorRate: data.vendorRate ?? null,
-      brand: data.brand || undefined,
-      assignedAt: now,
-      assignedBy: data.assignedBy || null,
-      purchaseCost: data.vendorRate ?? null,
-    } as any)
+    .set(setFields)
     .where(eq(poItems.id, id))
     .returning().get();
-  if (item && item.partNumber) {
+  if (item && item.partNumber && data.vendorId) {
     await recordRate({
       partNumber: item.partNumber,
       brand: item.brand || undefined,
@@ -2001,7 +2009,8 @@ export async function assignVendorToPoItemR8(
       sourceId: id,
     });
   }
-  return item;
+  if (!item) return undefined;
+  return { ...item, vendorName: item.vendorName ?? resolvedName };
 }
 
 // -------- R8: PURCHASE HISTORY --------
@@ -2075,9 +2084,11 @@ export async function listDelhiActivePOs(): Promise<any[]> {
       SUM(CASE WHEN pi.shipped_status = 'shipped' THEN 1 ELSE 0 END) AS shipped_count
     FROM purchase_orders_v2 po
     LEFT JOIN customers c ON c.id = po.customer_id
-    LEFT JOIN po_items pi ON pi.po_id = po.id
+    -- Delhi only sees line items that have a seller assigned (Bug 3 — partial notify).
+    LEFT JOIN po_items pi ON pi.po_id = po.id AND pi.vendor_id IS NOT NULL
     WHERE po.is_fully_dispatched = 0 AND po.status NOT IN ('draft', 'cancelled')
     GROUP BY po.id
+    HAVING item_count > 0
     ORDER BY po.created_at DESC
   `).all() as any[];
   return rows;

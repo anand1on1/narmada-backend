@@ -162,8 +162,11 @@ export default function DelhiDashboard() {
       const r = await teamFetch(token, `/api/team/purchase-orders/${poId}`);
       if (!r.ok) throw new Error("Could not load PO");
       const data = await r.json();
-      // Normalise item field names (backend returns camelCase from schema)
-      const items: PoItemDetail[] = (data.items || []).map((it: any) => ({
+      // Delhi only sees line items that have a seller assigned (Bug 3 — partial notify).
+      // Unassigned lines (e.g. 96 of 100 not yet sourced) stay hidden from the warehouse.
+      const items: PoItemDetail[] = (data.items || [])
+        .filter((it: any) => (it.vendorId ?? it.vendor_id) != null)
+        .map((it: any) => ({
         id: it.id,
         part_number: it.partNumber ?? it.part_number ?? null,
         brand: it.brand ?? null,
