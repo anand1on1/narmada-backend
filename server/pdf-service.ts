@@ -9,6 +9,7 @@
  * (WinAnsi encoding) does not include U+20B9 and silently drops or errors on it.
  */
 import { PDFDocument, rgb, StandardFonts, PDFPage, PDFFont } from "pdf-lib";
+import fontkit from "@pdf-lib/fontkit";
 import * as fs from "node:fs";
 import * as path from "node:path";
 
@@ -145,6 +146,8 @@ export async function generateQuotationPDF(
   }
 
   const pdfDoc = await PDFDocument.create();
+  // Required by pdf-lib to embed custom (non-Standard) fonts such as our NotoSans TTF.
+  pdfDoc.registerFontkit(fontkit as any);
   const page = pdfDoc.addPage([595, 842]); // A4
   const { width, height } = page.getSize();
 
