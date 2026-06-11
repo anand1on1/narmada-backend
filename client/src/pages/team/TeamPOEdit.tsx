@@ -299,6 +299,7 @@ function ItemVendorPanel({
             {/* History tab */}
             {tab === "history" && (
               <HistoryTab
+                itemId={item.id}
                 partNumber={item.partNumber}
                 brand={item.brand}
                 token={token}
@@ -420,25 +421,30 @@ function ItemVendorPanel({
 
 // ────────────────────────────────────────────────
 // History sub-component (lazy-loads on tab open)
+// Uses search-vendor-rates (requireDataTeam) to fetch history
 // ────────────────────────────────────────────────
 function HistoryTab({
+  itemId,
   partNumber,
   brand,
   token,
   onUse,
 }: {
+  itemId: number;
   partNumber: string | null;
   brand: string | null;
   token: string | null;
   onUse: (row: HistoryRow) => void;
 }) {
-  const { data, isLoading } = useQuery<{ rows: HistoryRow[] }>({
-    queryKey: ["ph-item", partNumber, brand],
+  const { data, isLoading } = useQuery<VendorRatesResult>({
+    queryKey: ["ph-item", itemId, partNumber, brand],
     queryFn: async () => {
-      if (!partNumber) return { rows: [] };
-      const qs = new URLSearchParams({ q: partNumber, ...(brand ? { brand } : {}), limit: "10" });
-      const r = await teamFetch(token, `/api/admin/purchase-history?${qs}`);
-      return r.ok ? r.json() : { rows: [] };
+      if (!partNumber) return { history: [], priceList: [], rfqSentTo: 0 };
+      const r = await teamFetch(token, `/api/team/po/${itemId}/search-vendor-rates`, {
+        method: "POST",
+        body: JSON.stringify({ part_number: partNumber, brand: brand || "" }),
+      });
+      return r.ok ? r.json() : { history: [], priceList: [], rfqSentTo: 0 };
     },
     enabled: !!partNumber && !!token,
     staleTime: 60_000,
@@ -446,7 +452,7 @@ function HistoryTab({
 
   if (isLoading) return <div className="py-4 text-center text-xs text-muted-foreground"><Loader2 className="w-4 h-4 animate-spin inline" /></div>;
 
-  const rows = data?.rows ?? [];
+  const rows = data?.history ?? [];
   if (rows.length === 0) return <div className="py-4 text-center text-xs text-muted-foreground">No past purchase history for this part.</div>;
 
   return (
