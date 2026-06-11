@@ -420,7 +420,7 @@ export async function generateQuotationPDF(
     total:  MARGIN_L + 452,
   };
   const HEADER_BAR_H = 20;
-  const ROW_H = 16;
+  const ROW_H = 18;
 
   function drawTableHeaderAt(p: PDFPage, yTop: number): number {
     // Navy header bar
@@ -439,7 +439,7 @@ export async function generateQuotationPDF(
     const tlabel = "Total";
     const tw = fontBold.widthOfTextAtSize(tlabel, 7.5);
     drawText(p, tlabel, MARGIN_R - tw - 6, ty, fontBold, 7.5, COLOR_WHITE);
-    return yTop - HEADER_BAR_H - 2;
+    return yTop - HEADER_BAR_H - 10;
   }
 
   // Truncation helpers per column width
