@@ -233,48 +233,54 @@ export function runR4toR7Migrations() {
 
 // -------- R8 additive migrations --------
 export function runR8Migrations() {
-  // Use try/catch per statement to survive "duplicate column" on re-runs
-  const stmts = [
+  // Each statement is run in isolation so that a "duplicate column" (re-run) or any
+  // other per-statement error is logged and skipped rather than stalling/aborting boot.
+  const stmts: Array<{ desc: string; sql: string }> = [
     // purchase_orders_v2 new columns
-    `ALTER TABLE purchase_orders_v2 ADD COLUMN customer_po_number TEXT`,
-    `ALTER TABLE purchase_orders_v2 ADD COLUMN customer_po_url TEXT`,
-    `ALTER TABLE purchase_orders_v2 ADD COLUMN customer_po_parsed_json TEXT`,
-    `ALTER TABLE purchase_orders_v2 ADD COLUMN dispatch_round INTEGER DEFAULT 1`,
-    `ALTER TABLE purchase_orders_v2 ADD COLUMN is_fully_dispatched INTEGER DEFAULT 0`,
-    `ALTER TABLE purchase_orders_v2 ADD COLUMN delhi_submitted_at INTEGER`,
-    `ALTER TABLE purchase_orders_v2 ADD COLUMN ship_to_name TEXT`,
-    `ALTER TABLE purchase_orders_v2 ADD COLUMN ship_to_address TEXT`,
-    `ALTER TABLE purchase_orders_v2 ADD COLUMN ship_to_phone TEXT`,
+    { desc: "purchase_orders_v2.customer_po_number", sql: `ALTER TABLE purchase_orders_v2 ADD COLUMN customer_po_number TEXT` },
+    { desc: "purchase_orders_v2.customer_po_url", sql: `ALTER TABLE purchase_orders_v2 ADD COLUMN customer_po_url TEXT` },
+    { desc: "purchase_orders_v2.customer_po_parsed_json", sql: `ALTER TABLE purchase_orders_v2 ADD COLUMN customer_po_parsed_json TEXT` },
+    { desc: "purchase_orders_v2.dispatch_round", sql: `ALTER TABLE purchase_orders_v2 ADD COLUMN dispatch_round INTEGER DEFAULT 1` },
+    { desc: "purchase_orders_v2.is_fully_dispatched", sql: `ALTER TABLE purchase_orders_v2 ADD COLUMN is_fully_dispatched INTEGER DEFAULT 0` },
+    { desc: "purchase_orders_v2.delhi_submitted_at", sql: `ALTER TABLE purchase_orders_v2 ADD COLUMN delhi_submitted_at INTEGER` },
+    { desc: "purchase_orders_v2.ship_to_name", sql: `ALTER TABLE purchase_orders_v2 ADD COLUMN ship_to_name TEXT` },
+    { desc: "purchase_orders_v2.ship_to_address", sql: `ALTER TABLE purchase_orders_v2 ADD COLUMN ship_to_address TEXT` },
+    { desc: "purchase_orders_v2.ship_to_phone", sql: `ALTER TABLE purchase_orders_v2 ADD COLUMN ship_to_phone TEXT` },
     // po_items new columns
-    `ALTER TABLE po_items ADD COLUMN vendor_rate REAL`,
-    `ALTER TABLE po_items ADD COLUMN assigned_at INTEGER`,
-    `ALTER TABLE po_items ADD COLUMN assigned_by TEXT`,
-    `ALTER TABLE po_items ADD COLUMN shipped_status TEXT DEFAULT 'pending'`,
-    `ALTER TABLE po_items ADD COLUMN shipped_at INTEGER`,
-    `ALTER TABLE po_items ADD COLUMN shipped_by TEXT`,
-    `ALTER TABLE po_items ADD COLUMN dispatch_round_shipped INTEGER`,
+    { desc: "po_items.vendor_rate", sql: `ALTER TABLE po_items ADD COLUMN vendor_rate REAL` },
+    { desc: "po_items.assigned_at", sql: `ALTER TABLE po_items ADD COLUMN assigned_at INTEGER` },
+    { desc: "po_items.assigned_by", sql: `ALTER TABLE po_items ADD COLUMN assigned_by TEXT` },
+    { desc: "po_items.shipped_status", sql: `ALTER TABLE po_items ADD COLUMN shipped_status TEXT DEFAULT 'pending'` },
+    { desc: "po_items.shipped_at", sql: `ALTER TABLE po_items ADD COLUMN shipped_at INTEGER` },
+    { desc: "po_items.shipped_by", sql: `ALTER TABLE po_items ADD COLUMN shipped_by TEXT` },
+    { desc: "po_items.dispatch_round_shipped", sql: `ALTER TABLE po_items ADD COLUMN dispatch_round_shipped INTEGER` },
+    // dispatches table
+    {
+      desc: "dispatches table",
+      sql: `CREATE TABLE IF NOT EXISTS dispatches (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        po_id INTEGER NOT NULL,
+        round_no INTEGER NOT NULL DEFAULT 1,
+        docket_no TEXT,
+        courier_name TEXT,
+        dispatch_date INTEGER,
+        docket_photo_url TEXT,
+        pdf_url TEXT,
+        submitted_by TEXT,
+        submitted_at INTEGER,
+        created_at INTEGER NOT NULL DEFAULT 0
+      )`,
+    },
+    { desc: "idx_dispatches_po", sql: `CREATE INDEX IF NOT EXISTS idx_dispatches_po ON dispatches(po_id)` },
   ];
-  for (const stmt of stmts) {
-    try { sqlite.exec(stmt); } catch (_e: any) { /* column already exists */ }
+  for (const { desc, sql } of stmts) {
+    console.log(`[migrations] R8: ${desc}`);
+    try {
+      sqlite.exec(sql);
+    } catch (err: any) {
+      console.log(`[migrations] R8: skipped ${desc} —`, err?.message || err);
+    }
   }
-
-  // dispatches table
-  sqlite.exec(`
-    CREATE TABLE IF NOT EXISTS dispatches (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      po_id INTEGER NOT NULL,
-      round_no INTEGER NOT NULL DEFAULT 1,
-      docket_no TEXT,
-      courier_name TEXT,
-      dispatch_date INTEGER,
-      docket_photo_url TEXT,
-      pdf_url TEXT,
-      submitted_by TEXT,
-      submitted_at INTEGER,
-      created_at INTEGER NOT NULL DEFAULT 0
-    );
-    CREATE INDEX IF NOT EXISTS idx_dispatches_po ON dispatches(po_id);
-  `);
 
   console.log("[migrations] R8 tables/columns ensured");
 }

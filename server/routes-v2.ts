@@ -2978,7 +2978,14 @@ function registerR4toR7Routes(
   // ============================================================
   // R8: PO WORKFLOW — CUSTOMER PO UPLOAD + VENDOR ASSIGNMENT
   // ============================================================
-  registerR8Routes(app, { requireAuth, requireAdminRole, requireDataTeam, requireDelhi, ctx });
+  console.log("[v2] R8 about to register");
+  try {
+    registerR8Routes(app, { requireAuth, requireAdminRole, requireDataTeam, requireDelhi, ctx });
+    console.log("[v2] R8 registered OK");
+  } catch (err) {
+    console.error("[v2] R8 register FAILED:", err);
+    throw err;
+  }
   console.log("[v2] R8 routes registered: po-upload, create-from-parsed, assign-vendor, search-vendor-rates, delhi-pos, purchase-history");
 }
 
@@ -3001,13 +3008,12 @@ function registerR8Routes(
     ctx: V2Context;
   }
 ) {
+  // node:path and node:fs are built-ins — fast, safe, no module-init cost — keep eager.
   const path2 = require("node:path") as typeof import("node:path");
   const fs2 = require("node:fs") as typeof import("node:fs");
-  const claude = require("./claude-service") as typeof import("./claude-service");
-  const wa = require("./whatsapp") as typeof import("./whatsapp");
-  const emailSvc = require("./email") as typeof import("./email");
-  const pdfSvc = require("./pdf-service") as typeof import("./pdf-service");
-  const XLSX = require("xlsx");
+  // Heavy modules (claude-service, whatsapp, email, pdf-service, xlsx) are lazy-loaded
+  // inside the individual route handlers that use them, so they never run module-init
+  // work at boot/register time.
 
   const uploadsRoot = ctx.uploadsDir || "./uploads";
   const poUploadsDir = path2.join(uploadsRoot, "customer-pos");
@@ -3041,6 +3047,7 @@ function registerR8Routes(
       const fileUrl = `${proto}://${host}/uploads/customer-pos/${req.file.filename}`;
 
       // Try Claude extraction
+      const claude = require("./claude-service") as typeof import("./claude-service");
       let parsed: any = { customerPoNumber: null, shipTo: null, items: [] };
       if (claude.isClaudeConfigured()) {
         const ext = path2.extname(req.file.filename).toLowerCase();
@@ -3173,6 +3180,7 @@ Return ONLY valid JSON matching this schema. If a field is unknown, use null.`;
       // (2) Fire-and-forget: send WhatsApp RFQ to vendors who supplied this part before
       const knownVendorIds: number[] = Array.from(new Set(historyRows.map((r: any) => r.vendor_id).filter(Boolean))) as number[];
       if (knownVendorIds.length > 0) {
+        const wa = require("./whatsapp") as typeof import("./whatsapp");
         Promise.all(knownVendorIds.slice(0, 5).map(async (vid: number) => {
           const vendor = await v2.getVendor(vid);
           if (!vendor) return;
@@ -3277,6 +3285,9 @@ Return ONLY valid JSON matching this schema. If a field is unknown, use null.`;
 
       // Generate dispatch PDF (fire-and-forget on failure)
       try {
+        const pdfSvc = require("./pdf-service") as typeof import("./pdf-service");
+        const emailSvc = require("./email") as typeof import("./email");
+        const wa = require("./whatsapp") as typeof import("./whatsapp");
         const company = await v2.getDefaultCompany();
         const pdfBuf = await pdfSvc.generatePOPDF({
           poNumber: `${poFull.poNumber}-D${currentRound}`,
@@ -3366,6 +3377,7 @@ Return ONLY valid JSON matching this schema. If a field is unknown, use null.`;
   // ---- GET /api/admin/purchase-history/export.xlsx ----
   app.get("/api/admin/purchase-history/export.xlsx", requireAuth, async (req: any, res: any) => {
     try {
+      const XLSX = require("xlsx");
       const result = v2.listPurchaseHistory({
         q: req.query.q as string | undefined,
         brand: req.query.brand as string | undefined,

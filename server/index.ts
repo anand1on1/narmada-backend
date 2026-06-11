@@ -92,17 +92,23 @@ app.use((req, res, next) => {
 
 (async () => {
   // ---- R4.4→R7: ensure additive tables + seed defaults on boot ----
+  console.log("[boot] step: pre-migrations");
   try {
     const { runR4toR7Migrations, runR8Migrations } = await import("./migrations");
     runR4toR7Migrations();
+    console.log("[boot] step: post-R4-R7 migrations");
     runR8Migrations();
+    console.log("[boot] step: post-R8 migrations");
     const { seedR5Defaults } = await import("./seed-r5");
     await seedR5Defaults();
+    console.log("[boot] step: post-seed");
   } catch (e: any) {
     console.error("[migrations] boot setup failed:", e?.message || e);
   }
 
+  console.log("[boot] step: pre-route-register");
   await registerRoutes(httpServer, app);
+  console.log("[boot] step: post-route-register");
 
   app.use((err: any, _req: Request, res: Response, next: NextFunction) => {
     const status = err.status || err.statusCode || 500;
@@ -139,6 +145,7 @@ app.use((req, res, next) => {
       reusePort: true,
     },
     () => {
+      console.log(`[boot] listening on PORT ${port}`);
       log(`serving on port ${port}`);
     },
   );
