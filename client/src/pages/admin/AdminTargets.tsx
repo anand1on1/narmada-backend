@@ -6,6 +6,8 @@ import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { Plus, Trash2 } from "lucide-react";
 
 interface Target { id: number; userId: number | null; period: string; periodKey: string; metric: string; targetValue: number; currentValue: number; }
+interface Customer { id: number; name: string; }
+interface TeamUser { id: number; name: string | null; username: string; role: string; }
 
 const METRICS = ["quotations", "po_value", "leads_won"];
 const EMPTY: Partial<Target> = { period: "month", periodKey: new Date().toISOString().slice(0, 7), metric: "quotations", targetValue: 0 };
@@ -15,6 +17,20 @@ export default function AdminTargets() {
   const { toast } = useToast();
   const qc = useQueryClient();
   const [editing, setEditing] = useState<Partial<Target> | null>(null);
+
+  const { data: customers = [] } = useQuery<Customer[]>({
+    queryKey: ["admin-customers-dropdown"],
+    queryFn: async () => { const r = await adminFetch(token, `/api/admin/customers`); return r.ok ? r.json() : []; },
+    enabled: !!token,
+  });
+
+  const { data: teamUsers = [] } = useQuery<TeamUser[]>({
+    queryKey: ["admin-team-users-dropdown"],
+    queryFn: async () => { const r = await adminFetch(token, `/api/admin/data-team-users`); return r.ok ? r.json() : []; },
+    enabled: !!token,
+  });
+
+  const salesUsers = teamUsers.filter((u) => u.role === "sales" || u.role === "data_team");
 
   const { data: targets = [] } = useQuery<Target[]>({
     queryKey: ["admin-targets"],
@@ -94,8 +110,11 @@ export default function AdminTargets() {
                 </select></label>
               <label className="text-xs font-semibold block">Target Value
                 <input type="number" value={editing.targetValue} onChange={(e) => setEditing({ ...editing, targetValue: Number(e.target.value) })} className="mt-1 w-full border rounded-lg px-3 py-2 bg-background text-sm font-normal" /></label>
-              <label className="text-xs font-semibold block">User ID (optional, blank = company-wide)
-                <input type="number" value={editing.userId || ""} onChange={(e) => setEditing({ ...editing, userId: e.target.value ? Number(e.target.value) : null })} className="mt-1 w-full border rounded-lg px-3 py-2 bg-background text-sm font-normal" /></label>
+              <label className="text-xs font-semibold block">Assign To (Sales User, optional)
+                <select value={editing.userId || ""} onChange={(e) => setEditing({ ...editing, userId: e.target.value ? Number(e.target.value) : null })} className="mt-1 w-full border rounded-lg px-3 py-2 bg-background text-sm font-normal">
+                  <option value="">— Company-wide (no specific user) —</option>
+                  {salesUsers.map((u) => <option key={u.id} value={u.id}>{u.name || u.username} ({u.role})</option>)}
+                </select></label>
             </div>
             <div className="flex justify-end gap-2 mt-5">
               <button onClick={() => setEditing(null)} className="px-4 py-2 border rounded-lg text-sm">Cancel</button>

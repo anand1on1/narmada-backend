@@ -1,7 +1,8 @@
 import { useEffect, useState } from "react";
 import { AdminLayout } from "./AdminLayout";
 import { adminFetch, useAdminAuth } from "@/lib/admin-auth";
-import { Edit3, Trash2, FileText, Eye, X } from "lucide-react";
+import { Edit3, Trash2, FileText, Eye, X, Plus, Search } from "lucide-react";
+import { useToast } from "@/hooks/use-toast";
 
 interface Customer { id: number; name: string; }
 interface RFQ {
@@ -14,11 +15,13 @@ const STATUSES = ["open", "quoted", "closed"];
 
 export default function AdminRFQs() {
   const { token } = useAdminAuth();
+  const { toast } = useToast();
   const [items, setItems] = useState<RFQ[]>([]);
   const [customers, setCustomers] = useState<Customer[]>([]);
   const [filter, setFilter] = useState<"all" | string>("all");
   const [quoteFor, setQuoteFor] = useState<RFQ | null>(null);
   const [detailsFor, setDetailsFor] = useState<RFQ | null>(null);
+  const [showNewRFQ, setShowNewRFQ] = useState(false);
 
   async function load() {
     if (!token) return;
@@ -67,7 +70,23 @@ export default function AdminRFQs() {
         {STATUSES.map((s) => (
           <button key={s} onClick={() => setFilter(s)} className={`px-3 py-1.5 rounded-lg text-xs font-bold uppercase tracking-wider ${filter === s ? "bg-accent text-accent-foreground" : "bg-card border"}`}>{s}</button>
         ))}
+        <div className="flex-1" />
+        <button
+          onClick={() => setShowNewRFQ(true)}
+          className="px-4 py-2 bg-accent text-accent-foreground rounded-lg text-sm font-semibold inline-flex items-center gap-2"
+        >
+          <Plus className="w-4 h-4" /> New RFQ
+        </button>
       </div>
+      {showNewRFQ && (
+        <NewRFQModal
+          token={token}
+          customers={customers}
+          onClose={() => setShowNewRFQ(false)}
+          onCreated={(id) => { setShowNewRFQ(false); load(); }}
+          toast={toast}
+        />
+      )}
 
       <div className="bg-card border rounded-xl overflow-x-auto">
         {items.length === 0 ? (
@@ -271,4 +290,187 @@ function QuoteCreator({ rfq, onClose }: { rfq: RFQ; onClose: () => void }) {
 
 function Field({ label, children }: { label: string; children: any }) {
   return <label className="block text-sm"><div className="text-xs font-bold uppercase tracking-wider mb-1 text-muted-foreground">{label}</div>{children}</label>;
+}
+
+// ---- New RFQ Modal (Admin) ----
+interface NewRFQModalProps {
+  token: string | null;
+  customers: Customer[];
+  onClose: () => void;
+  onCreated: (id: number) => void;
+  toast: (t: { title: string; description?: string; variant?: "destructive" }) => void;
+}
+
+function NewRFQModal({ token, customers, onClose, onCreated, toast }: NewRFQModalProps) {
+  const [customerId, setCustomerId] = useState<string>("");
+  const [notes, setNotes] = useState("");
+  const [partSearch, setPartSearch] = useState("");
+  const [partResults, setPartResults] = useState<any[]>([]);
+  const [selectedParts, setSelectedParts] = useState<Array<{ partNumber: string; description: string; qty: number }>>([]);
+  const [busy, setBusy] = useState(false);
+
+  async function searchParts() {
+    if (!token || partSearch.length < 3) return;
+    try {
+      const r = await adminFetch(token, `/api/team/parts?q=${encodeURIComponent(partSearch)}`);
+      if (r.ok) setPartResults(await r.json());
+    } catch {}
+  }
+
+  function addPart(p: any) {
+    if (selectedParts.find((x) => x.partNumber === p.partNumber)) return;
+    setSelectedParts([...selectedParts, { partNumber: p.partNumber, description: p.description || "", qty: 1 }]);
+    setPartResults([]);
+    setPartSearch("");
+  }
+
+  function removePart(pn: string) {
+    setSelectedParts(selectedParts.filter((p) => p.partNumber !== pn));
+  }
+
+  function setPartQty(pn: string, qty: number) {
+    setSelectedParts(selectedParts.map((p) => p.partNumber === pn ? { ...p, qty } : p));
+  }
+
+  async function submit() {
+    if (!token) return;
+    if (!customerId) { toast({ title: "Select a customer", variant: "destructive" }); return; }
+    if (selectedParts.length === 0) { toast({ title: "Add at least one part", variant: "destructive" }); return; }
+    setBusy(true);
+    try {
+      const r = await adminFetch(token, `/api/admin/rfqs`, {
+        method: "POST",
+        body: JSON.stringify({
+          customerId: Number(customerId),
+          items: JSON.stringify(selectedParts.map((p) => ({ partNumber: p.partNumber, description: p.description, quantity: p.qty }))),
+          notes,
+          status: "open",
+        }),
+      });
+      const j = await r.json();
+      if (!r.ok) { toast({ title: "Error", description: j.error || "Failed", variant: "destructive" }); return; }
+      toast({ title: `RFQ created` });
+      onCreated(j.id);
+    } catch (e: any) {
+      toast({ title: "Error", description: e.message, variant: "destructive" });
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="fixed inset-0 bg-black/60 z-50 flex items-center justify-center p-4">
+      <div className="bg-card border rounded-2xl shadow-2xl w-full max-w-2xl max-h-[90vh] overflow-y-auto">
+        <div className="sticky top-0 bg-card border-b px-6 py-4 flex items-center justify-between z-10">
+          <h2 className="font-display text-lg font-bold">New RFQ</h2>
+          <button onClick={onClose} className="p-1 hover:bg-muted rounded"><X className="w-5 h-5" /></button>
+        </div>
+        <div className="p-6 space-y-4">
+          <Field label="Customer *">
+            <select
+              value={customerId}
+              onChange={(e) => setCustomerId(e.target.value)}
+              className="w-full border rounded-lg px-3 py-2 bg-background text-sm"
+            >
+              <option value="">— Select customer —</option>
+              {customers.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
+            </select>
+          </Field>
+
+          <Field label="Search & Add Parts">
+            <div className="flex gap-2">
+              <input
+                value={partSearch}
+                onChange={(e) => setPartSearch(e.target.value)}
+                onKeyDown={(e) => e.key === "Enter" && searchParts()}
+                placeholder="Type ≥3 chars of part number…"
+                className="flex-1 border rounded-lg px-3 py-2 bg-background text-sm"
+              />
+              <button
+                type="button"
+                onClick={searchParts}
+                disabled={partSearch.length < 3}
+                className="px-3 py-2 border rounded-lg text-sm inline-flex items-center gap-1 disabled:opacity-50"
+              >
+                <Search className="w-4 h-4" />
+              </button>
+            </div>
+            {partResults.length > 0 && (
+              <div className="border rounded-lg mt-1 bg-background shadow-md max-h-48 overflow-y-auto">
+                {partResults.map((p: any, i: number) => (
+                  <button
+                    key={i}
+                    type="button"
+                    onClick={() => addPart(p)}
+                    className="w-full text-left px-3 py-2 hover:bg-muted text-xs border-b last:border-0"
+                  >
+                    <span className="font-mono font-semibold">{p.partNumber}</span>
+                    {p.brand && <span className="ml-2 text-muted-foreground">{p.brand}</span>}
+                    {p.description && <span className="ml-2 text-muted-foreground truncate">{p.description}</span>}
+                  </button>
+                ))}
+              </div>
+            )}
+          </Field>
+
+          {selectedParts.length > 0 && (
+            <div className="border rounded-lg overflow-hidden">
+              <table className="w-full text-xs">
+                <thead className="bg-muted/50">
+                  <tr>
+                    <th className="px-3 py-2 text-left">Part #</th>
+                    <th className="px-3 py-2 text-left">Description</th>
+                    <th className="px-3 py-2 text-right w-20">Qty</th>
+                    <th className="w-8"></th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y">
+                  {selectedParts.map((p) => (
+                    <tr key={p.partNumber}>
+                      <td className="px-3 py-1.5 font-mono font-semibold">{p.partNumber}</td>
+                      <td className="px-3 py-1.5 text-muted-foreground truncate max-w-[180px]">{p.description}</td>
+                      <td className="px-3 py-1.5">
+                        <input
+                          type="number"
+                          min={1}
+                          value={p.qty}
+                          onChange={(e) => setPartQty(p.partNumber, Math.max(1, parseInt(e.target.value) || 1))}
+                          className="w-16 border rounded px-2 py-0.5 bg-background text-right"
+                        />
+                      </td>
+                      <td className="px-2">
+                        <button type="button" onClick={() => removePart(p.partNumber)} className="text-red-500 hover:text-red-700">
+                          <X className="w-3 h-3" />
+                        </button>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+
+          <Field label="Notes (optional)">
+            <textarea
+              value={notes}
+              onChange={(e) => setNotes(e.target.value)}
+              rows={2}
+              className="w-full border rounded-lg px-3 py-2 bg-background text-sm"
+              placeholder="Any special requirements or context…"
+            />
+          </Field>
+        </div>
+        <div className="sticky bottom-0 bg-card border-t px-6 py-4 flex justify-end gap-2">
+          <button onClick={onClose} className="px-4 py-2 border rounded-lg text-sm">Cancel</button>
+          <button
+            onClick={submit}
+            disabled={busy || !customerId || selectedParts.length === 0}
+            className="px-6 py-2 bg-accent text-accent-foreground rounded-lg text-sm font-semibold disabled:opacity-50"
+          >
+            {busy ? "Creating…" : "Create RFQ"}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
 }

@@ -69,6 +69,9 @@ import AdminAnnouncements from "@/pages/admin/AdminAnnouncements";
 import AdminTasks from "@/pages/admin/AdminTasks";
 import AdminAdsMeta from "@/pages/admin/AdminAdsMeta";
 import AdminAdsGoogle from "@/pages/admin/AdminAdsGoogle";
+// Round 8 — new admin pages
+import AdminParts from "@/pages/admin/AdminParts";
+import AdminPurchaseHistory from "@/pages/admin/AdminPurchaseHistory";
 
 import { CustomerAuthProvider } from "@/lib/customer-auth";
 import CustomerLogin from "@/pages/portal/CustomerLogin";
@@ -97,6 +100,8 @@ import TeamPOs from "@/pages/team/TeamPOs";
 import TeamPODetail from "@/pages/team/TeamPODetail";
 import TeamRFQs from "@/pages/team/TeamRFQs";
 import TeamRFQDetail from "@/pages/team/TeamRFQDetail";
+// Round 8 — new team pages
+import TeamPOUpload from "@/pages/team/TeamPOUpload";
 // Delhi warehouse portal
 import DelhiLogin from "@/pages/delhi/DelhiLogin";
 import DelhiDashboard from "@/pages/delhi/DelhiDashboard";
@@ -177,6 +182,9 @@ function AppRouter() {
         <Route path="/admin/tasks" component={AdminTasks} />
         <Route path="/admin/ads-meta" component={AdminAdsMeta} />
         <Route path="/admin/ads-google" component={AdminAdsGoogle} />
+        {/* Round 8 — new admin routes */}
+        <Route path="/admin/parts" component={AdminParts} />
+        <Route path="/admin/purchase-history" component={AdminPurchaseHistory} />
         <Route component={NotFound} />
       </Switch>
       </ErrorBoundary>
@@ -231,6 +239,8 @@ function AppRouter() {
         <Route path="/team/purchase-orders" component={TeamPOs} />
         <Route path="/team/rfqs/:id" component={TeamRFQDetail} />
         <Route path="/team/rfqs" component={TeamRFQs} />
+        {/* Round 8 — new team routes */}
+        <Route path="/team/po/upload" component={TeamPOUpload} />
         <Route component={NotFound} />
       </Switch>
       </ErrorBoundary>

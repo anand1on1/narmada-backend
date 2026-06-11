@@ -4,7 +4,7 @@ import { useTeamAuth, teamFetch } from "@/lib/team-auth";
 import { useToast } from "@/hooks/use-toast";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { Logo } from "@/components/Logo";
-import { LogOut, Package, Truck, PackageCheck } from "lucide-react";
+import { LogOut, Package, Truck, PackageCheck, Megaphone, X } from "lucide-react";
 
 interface QItem {
   id: number; partNumber: string | null; brand: string | null; qty: number;
@@ -20,6 +20,22 @@ export default function DelhiDashboard() {
   const qc = useQueryClient();
   const [dispatchItem, setDispatchItem] = useState<QItem | null>(null);
   const [docket, setDocket] = useState(""); const [courier, setCourier] = useState("");
+  const [bannerDismissed, setBannerDismissed] = useState(() => {
+    try { return sessionStorage.getItem("delhi_announcement_dismissed") === "1"; } catch { return false; }
+  });
+
+  const { data: announcement } = useQuery<{ id: number; title: string; body: string | null } | null>({
+    queryKey: ["delhi-announcement"],
+    queryFn: async () => {
+      if (!token) return null;
+      const r = await teamFetch(token, `/api/team/announcements`);
+      if (!r.ok) return null;
+      const arr = await r.json();
+      return Array.isArray(arr) && arr.length > 0 ? arr[0] : null;
+    },
+    enabled: !!token,
+    staleTime: 60_000,
+  });
 
   useEffect(() => { if (ready && !token) navigate("/delhi"); }, [ready, token, navigate]);
 
@@ -75,6 +91,18 @@ export default function DelhiDashboard() {
           <button onClick={logout} className="text-sm px-3 py-1.5 rounded-lg text-red-600 hover:bg-red-50 inline-flex items-center gap-1"><LogOut className="w-4 h-4" /> Logout</button>
         </div>
       </header>
+      {announcement && !bannerDismissed && (
+        <div className="bg-amber-50 border-b border-amber-200 px-4 py-2.5 flex items-start gap-3">
+          <Megaphone className="w-4 h-4 text-amber-600 flex-shrink-0 mt-0.5" />
+          <div className="flex-1 text-sm text-amber-800">
+            <span className="font-semibold">{announcement.title}</span>
+            {announcement.body && <span className="ml-2">{announcement.body}</span>}
+          </div>
+          <button onClick={() => { setBannerDismissed(true); try { sessionStorage.setItem("delhi_announcement_dismissed", "1"); } catch {} }} className="text-amber-500 hover:text-amber-700">
+            <X className="w-4 h-4" />
+          </button>
+        </div>
+      )}
       <div className="p-6 flex flex-col lg:flex-row gap-6">
         <Col title="To Pick Up" icon={Package} items={q?.pickup || []} action={(it) => (
           <button onClick={() => setStatus.mutate({ id: it.id, status: "collected" })} className="w-full text-xs px-2 py-1.5 rounded bg-accent text-accent-foreground font-semibold">Mark Collected</button>

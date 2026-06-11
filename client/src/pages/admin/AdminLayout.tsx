@@ -7,7 +7,7 @@ import {
   FileText, Tag, Truck, Users,
   UserSquare, Wallet, CreditCard, FileQuestion, FileSpreadsheet, ShoppingCart, Landmark,
   Building2, UserCog, ScrollText, ClipboardList, Bell,
-  Factory, Inbox, Search, Target, Megaphone, CheckSquare, Sparkles, Facebook,
+  Factory, Inbox, Search, Target, Megaphone, CheckSquare, Sparkles, Facebook, History,
 } from "lucide-react";
 
 // Session A V2: 4-role sidebar matrix.
@@ -20,7 +20,7 @@ const ROLE_PAGES: Record<AdminRole, Set<string>> = {
     "/admin/dashboard", "/admin/products", "/admin/blog", "/admin/price-lists",
     "/admin/consignments", "/admin/contacts", "/admin/sitemap", "/admin/team", "/admin/settings",
     "/admin/customers", "/admin/ledger", "/admin/payments",
-    "/admin/rfqs", "/admin/quotes", "/admin/purchase-orders", "/admin/bank",
+    "/admin/rfqs", "/admin/quotes", "/admin/parts", "/admin/purchase-orders", "/admin/purchase-history", "/admin/bank",
     "/admin/quoting-companies", "/admin/data-team", "/admin/audit-logs", "/admin/notification-log", "/admin/account-requests",
     "/admin/vendors", "/admin/vendor-inbox", "/admin/vendor-discovery", "/admin/companies",
     "/admin/ai-ledger", "/admin/leads", "/admin/targets", "/admin/announcements", "/admin/tasks",
@@ -71,7 +71,9 @@ export function AdminLayout({ children, title }: { children: ReactNode; title: s
     { href: "/admin/payments", label: "Payments", icon: CreditCard },
     { href: "/admin/rfqs", label: "RFQs", icon: FileQuestion },
     { href: "/admin/quotes", label: "Quotes", icon: FileSpreadsheet },
+    { href: "/admin/parts", label: "Parts", icon: Package },
     { href: "/admin/purchase-orders", label: "Purchase Orders", icon: ShoppingCart },
+    { href: "/admin/purchase-history", label: "Purchase History", icon: History },
     { href: "/admin/bank", label: "Bank Accounts", icon: Landmark },
     { href: "/admin/companies", label: "Companies", icon: Building2 },
     { href: "/admin/vendors", label: "Vendors", icon: Factory },

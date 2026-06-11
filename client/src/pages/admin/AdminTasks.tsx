@@ -6,6 +6,7 @@ import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { Plus, Trash2 } from "lucide-react";
 
 interface Task { id: number; title: string; description: string | null; assignedTo: number | null; assignedBy: string | null; dueDate: number | null; status: string; priority: string; }
+interface AssigneeUser { id: number; name: string | null; username: string; role: string; }
 const STATUSES = ["open", "doing", "done"];
 const STATUS_COLOR: Record<string, string> = { open: "bg-blue-500/15 text-blue-700", doing: "bg-amber-500/15 text-amber-700", done: "bg-emerald-500/15 text-emerald-700" };
 
@@ -20,6 +21,18 @@ export default function AdminTasks() {
     queryFn: async () => { const r = await adminFetch(token, `/api/admin/tasks`); return r.ok ? r.json() : []; },
     enabled: !!token,
   });
+
+  const { data: assigneeUsers = [] } = useQuery<AssigneeUser[]>({
+    queryKey: ["admin-assignee-users"],
+    queryFn: async () => { const r = await adminFetch(token, `/api/admin/data-team-users`); return r.ok ? r.json() : []; },
+    enabled: !!token,
+  });
+
+  function assigneeName(id: number | null): string {
+    if (!id) return "—";
+    const u = assigneeUsers.find((x) => x.id === id);
+    return u ? `${u.name || u.username} (${u.role})` : `#${id}`;
+  }
 
   const save = useMutation({
     mutationFn: async (t: { title: string; description: string; assignedTo: string; priority: string }) => {
@@ -61,7 +74,7 @@ export default function AdminTasks() {
               <tr key={t.id} className="hover:bg-muted/30">
                 <td className="px-3 py-3"><div className="font-semibold">{t.title}</div>{t.description && <div className="text-xs text-muted-foreground">{t.description}</div>}</td>
                 <td className="px-3 py-3 text-xs">{t.priority}</td>
-                <td className="px-3 py-3">{t.assignedTo ?? "—"}</td>
+                <td className="px-3 py-3 text-xs">{assigneeName(t.assignedTo)}</td>
                 <td className="px-3 py-3">
                   <select value={t.status} onChange={(e) => setStatus.mutate({ id: t.id, status: e.target.value })}
                     className={`text-xs font-bold rounded px-2 py-1 border-0 ${STATUS_COLOR[t.status] || "bg-muted"}`}>
@@ -86,8 +99,11 @@ export default function AdminTasks() {
                 <input value={editing.title} onChange={(e) => setEditing({ ...editing, title: e.target.value })} className="mt-1 w-full border rounded-lg px-3 py-2 bg-background text-sm font-normal" /></label>
               <label className="text-xs font-semibold block">Description
                 <textarea value={editing.description} onChange={(e) => setEditing({ ...editing, description: e.target.value })} rows={3} className="mt-1 w-full border rounded-lg px-3 py-2 bg-background text-sm font-normal" /></label>
-              <label className="text-xs font-semibold block">Assigned To (team user ID)
-                <input type="number" value={editing.assignedTo} onChange={(e) => setEditing({ ...editing, assignedTo: e.target.value })} className="mt-1 w-full border rounded-lg px-3 py-2 bg-background text-sm font-normal" /></label>
+              <label className="text-xs font-semibold block">Assigned To
+                <select value={editing.assignedTo || ""} onChange={(e) => setEditing({ ...editing, assignedTo: e.target.value || "" })} className="mt-1 w-full border rounded-lg px-3 py-2 bg-background text-sm font-normal">
+                  <option value="">— Unassigned —</option>
+                  {assigneeUsers.map((u) => <option key={u.id} value={u.id}>{u.name || u.username} ({u.role})</option>)}
+                </select></label>
               <label className="text-xs font-semibold block">Priority
                 <select value={editing.priority} onChange={(e) => setEditing({ ...editing, priority: e.target.value })} className="mt-1 w-full border rounded-lg px-3 py-2 bg-background text-sm font-normal">
                   <option value="low">low</option><option value="normal">normal</option><option value="high">high</option>
