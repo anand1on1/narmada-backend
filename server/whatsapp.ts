@@ -459,3 +459,92 @@ export async function sendConsignmentDelivered(
     logNotification("whatsapp", normalized, templateName, body, "failed", e?.message);
   }
 }
+
+// ============================================================
+// R5.x VENDOR-FACING SENDS (templates not yet Meta-approved → text fallback)
+// ============================================================
+
+// Free-text WhatsApp via AiSensy. AiSensy free-text is only deliverable inside a 24h
+// session window, but we attempt it as a fallback for unapproved templates. Logs result.
+async function sendFreeTextWa(phone: string, text: string, eventKey: string): Promise<string> {
+  const normalized = normalizePhone(phone);
+  if (!normalized) { logNotification("whatsapp", phone || "", eventKey, text, "failed", "no phone"); return "failed"; }
+  if (!AISENSY_API_KEY || AISENSY_API_KEY === "skip") {
+    logNotification("whatsapp", normalized, eventKey, text, "failed", "AISENSY_API_KEY not configured");
+    return "failed";
+  }
+  try {
+    // AiSensy supports a direct-message endpoint; reuse campaign API with a generic session message.
+    const res = await fetch("https://backend.aisensy.com/direct-apis/t1/messages", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "Authorization": `Bearer ${AISENSY_API_KEY}` },
+      body: JSON.stringify({ to: normalized, type: "text", text: { body: text } }),
+    });
+    const raw = await res.text().catch(() => "");
+    const status: "sent" | "failed" = res.ok ? "sent" : "failed";
+    logNotification("whatsapp", normalized, eventKey, text, status, res.ok ? undefined : raw.slice(0, 500), raw);
+    return status;
+  } catch (e: any) {
+    logNotification("whatsapp", normalized, eventKey, text, "failed", e?.message);
+    return "failed";
+  }
+}
+
+// R5.4 — vendor RFQ. Template `vendor_rfq` (NOT yet approved). Try template, fall back to free text.
+// Returns the AiSensy message id if obtainable (best-effort).
+export async function sendVendorRFQ(phone: string, vendorName: string, itemList: string, rfqRef: string, deadline = "ASAP"): Promise<{ status: string; messageId?: string }> {
+  const templateName = "vendor_rfq";
+  const normalized = normalizePhone(phone);
+  const body = `Hello ${vendorName},\nNarmada Mobility wants to know rate for:\n${itemList}\nPlease reply with: Rate, MOQ, Lead time, photo.\nRFQ Ref: ${rfqRef}`;
+  try {
+    const raw = await postAisensy({
+      campaignName: templateName,
+      destination: normalized,
+      userName: "Narmada Mobility",
+      templateParams: [vendorName, itemList, rfqRef],
+      source: "narmada-backend",
+      media: {}, buttons: [], carouselCards: [], location: {}, attributes: {},
+      paramsFallbackValue: { FirstName: vendorName },
+    });
+    const status = logAisensyResult(normalized, templateName, body, raw);
+    if (status === "failed") {
+      const fb = await sendFreeTextWa(phone, body, "vendor_rfq_fallback");
+      return { status: fb };
+    }
+    return { status };
+  } catch (e: any) {
+    console.error(`[whatsapp] sendVendorRFQ template failed for ${normalized}, falling back to text:`, e?.message);
+    const fb = await sendFreeTextWa(phone, body, "vendor_rfq_fallback");
+    return { status: fb };
+  }
+}
+
+// R6.2 — payment confirmation to vendor. Template `payment_confirmation_vendor` (NOT yet approved).
+export async function sendVendorPaymentConfirmation(phone: string, vendorName: string, amount: string, utr: string): Promise<{ status: string }> {
+  const templateName = "payment_confirmation_vendor";
+  const normalized = normalizePhone(phone);
+  const body = `Hello ${vendorName},\nNarmada Mobility has made a payment of ₹${amount}.\nUTR/Ref: ${utr}\nThank you.`;
+  try {
+    const raw = await postAisensy({
+      campaignName: templateName,
+      destination: normalized,
+      userName: "Narmada Mobility",
+      templateParams: [vendorName, amount, utr],
+      source: "narmada-backend",
+      media: {}, buttons: [], carouselCards: [], location: {}, attributes: {},
+      paramsFallbackValue: { FirstName: vendorName },
+    });
+    const status = logAisensyResult(normalized, templateName, body, raw);
+    if (status === "failed") return { status: await sendFreeTextWa(phone, body, "vendor_payment_fallback") };
+    return { status };
+  } catch (e: any) {
+    console.error(`[whatsapp] sendVendorPaymentConfirmation failed for ${normalized}:`, e?.message);
+    return { status: await sendFreeTextWa(phone, body, "vendor_payment_fallback") };
+  }
+}
+
+// Generic free-text send (used by vendor inbox reply, lead outreach, dispatch reminders).
+export async function sendTextMessage(phone: string, text: string, eventKey = "free_text"): Promise<{ status: string }> {
+  const status = await sendFreeTextWa(phone, text, eventKey);
+  return { status };
+}

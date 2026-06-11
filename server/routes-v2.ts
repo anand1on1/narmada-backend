@@ -2308,5 +2308,667 @@ export function registerV2Routes(app: Express, ctx: V2Context) {
     } catch (e: any) { res.status(500).json({ error: e.message }); }
   });
 
+  // ============================================================================
+  // ROUNDS 4.4 → 7 ROUTES
+  // ============================================================================
+  registerR4toR7Routes(app, { requireAuth, requireAdminRole, requireDataTeam, ctx });
+
   console.log("[v2] Session C routes registered: quoting-companies, data-team, parts, quotations, chat, registration, audit-logs, search, health");
+  console.log("[v2] R4.4→R7 routes registered: ai-ledger, vendors, companies, warehouses, purchase-orders, rfqs, vendor-inbox, webhooks, delhi, rates, leads, targets, announcements, tasks, vendor-discovery, outreach, catalogue");
+}
+
+// ============================================================================
+// R4.4 → R7 route registration (separate fn to keep registerV2Routes readable)
+// ============================================================================
+function registerR4toR7Routes(
+  app: Express,
+  deps: {
+    requireAuth: any;
+    requireAdminRole: any;
+    requireDataTeam: any;
+    ctx: V2Context;
+  },
+) {
+  const { requireAuth, requireAdminRole, requireDataTeam, ctx } = deps;
+  const claude = require("./claude-service");
+  const wa = require("./whatsapp");
+  const { rawSqlite } = require("./storage");
+
+  // Delhi-warehouse middleware: a data-team session whose user.role === "delhi_warehouse".
+  async function requireDelhi(req: Request, res: Response, next: NextFunction): Promise<void> {
+    const token = (req.headers["x-team-token"] as string | undefined)
+      || (req.headers["authorization"] as string | undefined)?.replace("Bearer ", "");
+    if (!token) { res.status(401).json({ error: "Unauthorized" }); return; }
+    const session = await v2.getDataTeamSession(token);
+    if (!session) { res.status(401).json({ error: "Unauthorized" }); return; }
+    const user = await v2.getDataTeamUser(session.userId);
+    if (!user || !user.active) { res.status(401).json({ error: "Unauthorized" }); return; }
+    // admins (auto-provisioned) and delhi_warehouse role allowed
+    if (user.role !== "delhi_warehouse" && user.role !== "admin" && user.role !== "data_team") {
+      res.status(403).json({ error: "Delhi warehouse role required" }); return;
+    }
+    (req as any).teamUser = user;
+    next();
+  }
+
+  // ---------------- R4.4 AI LEDGER ----------------
+  app.post("/api/admin/ledger/ask", requireAdminRole, async (req, res) => {
+    try {
+      const question = String(req.body?.question || "").trim();
+      if (!question) return res.status(400).json({ error: "question required" });
+      const u = (req as any).user as TokenInfo;
+      const translated = await claude.ledgerNlToSql(question);
+      if (!translated) {
+        await v2.logLedgerQuery({ userId: u.username, question, answer: "AI unavailable" });
+        return res.status(503).json({ error: "AI not configured (set CLAUDE_API_KEY) or could not translate question" });
+      }
+      const sqlText = String(translated.sql || "").trim();
+      // Validate SELECT-only
+      if (!/^select\b/i.test(sqlText) || /\b(insert|update|delete|drop|alter|create|pragma|attach|replace)\b/i.test(sqlText)) {
+        await v2.logLedgerQuery({ userId: u.username, question, sql: sqlText, answer: "rejected (non-SELECT)" });
+        return res.status(400).json({ error: "Generated SQL was not a safe SELECT", sql: sqlText });
+      }
+      let rows: any[] = [];
+      try {
+        rows = rawSqlite.prepare(sqlText).all(...(translated.params || []));
+      } catch (e: any) {
+        await v2.logLedgerQuery({ userId: u.username, question, sql: sqlText, answer: `SQL error: ${e?.message}` });
+        return res.status(400).json({ error: `SQL execution failed: ${e?.message}`, sql: sqlText });
+      }
+      await v2.logLedgerQuery({ userId: u.username, question, sql: sqlText, answer: `${rows.length} rows` });
+      res.json({ rows, sql: sqlText, explanation: translated.explanation });
+    } catch (e: any) { res.status(500).json({ error: e.message }); }
+  });
+
+  app.get("/api/admin/ledger/overdue", requireAdminRole, async (_req, res) => {
+    try {
+      // Overdue = customers whose outstanding balance > 0 and whose oldest unpaid invoice
+      // ledger entry is older than (payment_terms_days || 30) days.
+      const custs = await v2.getCustomers();
+      const now = Date.now();
+      const out: any[] = [];
+      for (const c of custs) {
+        const balance = await v2.getLedgerBalance(c.id);
+        if (balance <= 0) continue;
+        const entries = await v2.listLedgerEntries(c.id, { limit: 500 });
+        const invoices = entries.filter((e) => e.voucherType === "invoice").sort((a, b) => a.entryDate - b.entryDate);
+        const oldest = invoices[0];
+        const termDays = (c.paymentTermsDays && c.paymentTermsDays > 0) ? c.paymentTermsDays : 30;
+        const ageDays = oldest ? Math.floor((now - oldest.entryDate) / 86400000) : 0;
+        if (oldest && ageDays > termDays) {
+          out.push({
+            customerId: c.id, name: c.name, phone: c.phone, email: c.email,
+            balanceInr: balance, oldestInvoiceDate: oldest.entryDate, ageDays, termDays,
+          });
+        }
+      }
+      out.sort((a, b) => b.ageDays - a.ageDays);
+      res.json(out);
+    } catch (e: any) { res.status(500).json({ error: e.message }); }
+  });
+
+  app.post("/api/admin/ledger/remind/:customerId", requireAdminRole, async (req, res) => {
+    try {
+      const customerId = parseInt(req.params.customerId as string, 10);
+      const c = await v2.getCustomer(customerId);
+      if (!c) return res.status(404).json({ error: "Customer not found" });
+      const balance = await v2.getLedgerBalance(customerId);
+      const msg = `Dear ${c.name}, our records show an outstanding balance of ₹${balance.toLocaleString("en-IN")} on your Narmada Mobility account. Kindly arrange payment at your earliest. Thank you.`;
+      // WhatsApp (approved account-approved template fallback to free text) + email — fire-and-forget
+      if (c.phone) wa.sendTextMessage(c.phone, msg, "ledger_reminder").catch(() => {});
+      if (c.email) {
+        sendGenericEmail({
+          to: c.email,
+          subject: "Payment reminder — Narmada Mobility",
+          html: `<p>${msg}</p>`,
+          text: msg,
+          event: "ledger_reminder",
+        }).catch(() => {});
+      }
+      res.json({ ok: true, balanceInr: balance, sentWhatsapp: !!c.phone, sentEmail: !!c.email });
+    } catch (e: any) { res.status(500).json({ error: e.message }); }
+  });
+
+  app.post("/api/admin/ledger/reconcile", requireAdminRole, async (req, res) => {
+    try {
+      const csv = String(req.body?.csv || "");
+      if (!csv.trim()) return res.status(400).json({ error: "csv required (date,description,amount,ref)" });
+      const parsed = Papa.parse(csv.trim(), { header: true, skipEmptyLines: true, transformHeader: (h: string) => h.trim().toLowerCase() });
+      const bankRows = (parsed.data as any[]).map((r) => ({
+        date: r.date, description: r.description || "", amount: parseFloat(String(r.amount || "0").replace(/[^0-9.\-]/g, "")) || 0, ref: r.ref || r.reference || "",
+      }));
+      const payments = await v2.listPayments({ limit: 2000 });
+      const matches: any[] = [];
+      const unmatched: any[] = [];
+      for (const br of bankRows) {
+        const m = payments.find((p) => Math.abs((p.amountInr || 0) - br.amount) < 1 && (
+          (br.ref && (p.referenceNo || "").includes(br.ref)) ||
+          Math.abs((p.paymentDate || 0) - Date.parse(br.date || "")) < 5 * 86400000
+        ));
+        if (m) matches.push({ bank: br, paymentId: m.id, customerId: m.customerId, amountInr: m.amountInr });
+        else unmatched.push(br);
+      }
+      res.json({ matched: matches, unmatched, totalBankRows: bankRows.length });
+    } catch (e: any) { res.status(500).json({ error: e.message }); }
+  });
+
+  // ---------------- R5.2 VENDORS ----------------
+  app.get("/api/admin/vendors", requireAuth, async (req, res) => {
+    try {
+      const rows = await v2.listVendors({
+        q: req.query.q as string | undefined,
+        brand: req.query.brand as string | undefined,
+        category: req.query.category as string | undefined,
+        activeOnly: req.query.activeOnly === "true",
+      });
+      res.json(rows);
+    } catch (e: any) { res.status(500).json({ error: e.message }); }
+  });
+  app.get("/api/admin/vendors/:id", requireAuth, async (req, res) => {
+    const v = await v2.getVendor(parseInt(req.params.id as string, 10));
+    if (!v) return res.status(404).json({ error: "Not found" });
+    const contacts = await v2.listVendorContacts(v.id);
+    res.json({ ...v, contacts });
+  });
+  app.post("/api/admin/vendors", requireAuth, async (req, res) => {
+    try { res.json(await v2.createVendor(req.body || {})); }
+    catch (e: any) { res.status(500).json({ error: e.message }); }
+  });
+  app.patch("/api/admin/vendors/:id", requireAuth, async (req, res) => {
+    try {
+      const v = await v2.updateVendor(parseInt(req.params.id as string, 10), req.body || {});
+      if (!v) return res.status(404).json({ error: "Not found" });
+      res.json(v);
+    } catch (e: any) { res.status(500).json({ error: e.message }); }
+  });
+  app.delete("/api/admin/vendors/:id", requireAdminRole, async (req, res) => {
+    await v2.deleteVendor(parseInt(req.params.id as string, 10));
+    res.json({ ok: true });
+  });
+  app.post("/api/admin/vendors/bulk-import", requireAuth, async (req, res) => {
+    try {
+      const csv = String(req.body?.csv || "");
+      if (!csv.trim()) return res.status(400).json({ error: "csv required" });
+      const parsed = Papa.parse(csv.trim(), { header: true, skipEmptyLines: true, transformHeader: (h: string) => h.trim().toLowerCase().replace(/\s+/g, "_") });
+      let n = 0;
+      for (const r of parsed.data as any[]) {
+        if (!r.name && !r.code) continue;
+        await v2.createVendor({
+          code: r.code || undefined, name: r.name, gstin: r.gstin, pan: r.pan,
+          address: r.address, city: r.city, state: r.state, pincode: r.pincode,
+          phone: r.phone, whatsapp: r.whatsapp || r.phone, email: r.email,
+          paymentTerms: r.payment_terms, brands: r.brands, categories: r.categories,
+        } as any);
+        n++;
+      }
+      res.json({ inserted: n });
+    } catch (e: any) { res.status(500).json({ error: e.message }); }
+  });
+
+  // ---------------- R5.2 COMPANIES ----------------
+  app.get("/api/admin/companies", requireAuth, async (_req, res) => {
+    res.json(await v2.listCompanies());
+  });
+  app.get("/api/admin/companies/:id", requireAuth, async (req, res) => {
+    const c = await v2.getCompany(parseInt(req.params.id as string, 10));
+    if (!c) return res.status(404).json({ error: "Not found" });
+    res.json(c);
+  });
+  app.post("/api/admin/companies", requireAdminRole, async (req, res) => {
+    try { res.json(await v2.createCompany(req.body || {})); }
+    catch (e: any) { res.status(500).json({ error: e.message }); }
+  });
+  app.patch("/api/admin/companies/:id", requireAdminRole, async (req, res) => {
+    const c = await v2.updateCompany(parseInt(req.params.id as string, 10), req.body || {});
+    if (!c) return res.status(404).json({ error: "Not found" });
+    res.json(c);
+  });
+  app.delete("/api/admin/companies/:id", requireAdminRole, async (req, res) => {
+    await v2.deleteCompany(parseInt(req.params.id as string, 10));
+    res.json({ ok: true });
+  });
+  app.post("/api/admin/companies/:id/set-default", requireAdminRole, async (req, res) => {
+    await v2.setDefaultCompany(parseInt(req.params.id as string, 10));
+    res.json({ ok: true });
+  });
+
+  // ---------------- WAREHOUSES (admin + team) ----------------
+  app.get("/api/admin/warehouses", requireAuth, async (_req, res) => res.json(await v2.listWarehouses()));
+  app.get("/api/team/warehouses", requireDataTeam, async (_req, res) => res.json(await v2.listWarehouses(true)));
+  app.post("/api/admin/warehouses", requireAdminRole, async (req, res) => {
+    try { res.json(await v2.createWarehouse(req.body || {})); }
+    catch (e: any) { res.status(500).json({ error: e.message }); }
+  });
+  app.patch("/api/admin/warehouses/:id", requireAdminRole, async (req, res) => {
+    const w = await v2.updateWarehouse(parseInt(req.params.id as string, 10), req.body || {});
+    if (!w) return res.status(404).json({ error: "Not found" });
+    res.json(w);
+  });
+
+  // R6.2 inter-warehouse transfers
+  app.get("/api/team/transfers", requireDataTeam, async (_req, res) => res.json(await v2.listWarehouseTransfers()));
+  app.post("/api/team/transfers", requireDataTeam, async (req, res) => {
+    try { res.json(await v2.createWarehouseTransfer(req.body || {})); }
+    catch (e: any) { res.status(500).json({ error: e.message }); }
+  });
+  app.patch("/api/team/transfers/:id", requireDataTeam, async (req, res) => {
+    const t = await v2.updateWarehouseTransfer(parseInt(req.params.id as string, 10), req.body || {});
+    if (!t) return res.status(404).json({ error: "Not found" });
+    res.json(t);
+  });
+
+  // ---------------- R5.3 PURCHASE ORDERS (team) ----------------
+  app.get("/api/team/purchase-orders", requireDataTeam, async (req, res) => {
+    res.json(await v2.listPurchaseOrdersV2({ status: req.query.status as string | undefined }));
+  });
+  app.get("/api/team/purchase-orders/:id", requireDataTeam, async (req, res) => {
+    const po = await v2.getPurchaseOrderV2(parseInt(req.params.id as string, 10));
+    if (!po) return res.status(404).json({ error: "Not found" });
+    res.json(po);
+  });
+  app.post("/api/team/purchase-orders", requireDataTeam, async (req, res) => {
+    try {
+      const u = (req as any).teamUser;
+      const { items, ...po } = req.body || {};
+      res.json(await v2.createPurchaseOrderV2({ ...po, createdBy: u?.username }, items || []));
+    } catch (e: any) { res.status(500).json({ error: e.message }); }
+  });
+  app.patch("/api/team/purchase-orders/:id", requireDataTeam, async (req, res) => {
+    const po = await v2.updatePurchaseOrderV2(parseInt(req.params.id as string, 10), req.body || {});
+    if (!po) return res.status(404).json({ error: "Not found" });
+    res.json(po);
+  });
+  app.post("/api/team/quotations/:id/convert-to-po", requireDataTeam, async (req, res) => {
+    try {
+      const quotationId = parseInt(req.params.id as string, 10);
+      const qw = await v2.getQuotationWithItems(quotationId);
+      if (!qw) return res.status(404).json({ error: "Quotation not found" });
+      const quote = qw.quotation;
+      const items = (qw.items || []).map((it: any) => ({
+        partNumber: it.partNumber, brand: it.brand, description: it.productName || it.description,
+        qty: it.qty, unitPrice: it.mrp ?? it.unitPrice ?? 0, discountPct: it.discount ?? 0,
+        taxPct: it.gstPct ?? 18, lineTotal: it.lineTotal ?? 0,
+      }));
+      const company = await v2.getDefaultCompany();
+      const po = await v2.createPurchaseOrderV2({
+        quotationId, customerId: quote.customerId, companyId: company?.id,
+        subtotal: quote.subtotal ?? 0, discount: quote.totalDiscount ?? 0,
+        tax: quote.totalTax ?? 0, total: quote.grandTotal ?? 0,
+        createdBy: (req as any).teamUser?.username,
+      }, items);
+      res.json({ poId: po.id, poNumber: po.poNumber });
+    } catch (e: any) { res.status(500).json({ error: e.message }); }
+  });
+  app.put("/api/team/po-items/:id/assign-vendor", requireDataTeam, async (req, res) => {
+    try {
+      const { vendor_id, vendorId, purchase_cost, purchaseCost } = req.body || {};
+      const vid = vendor_id ?? vendorId;
+      const cost = purchase_cost ?? purchaseCost;
+      const item = await v2.assignVendorToPoItem(parseInt(req.params.id as string, 10), Number(vid), cost != null ? Number(cost) : undefined);
+      if (!item) return res.status(404).json({ error: "Not found" });
+      res.json(item);
+    } catch (e: any) { res.status(500).json({ error: e.message }); }
+  });
+
+  // PO PDF
+  app.get("/api/team/purchase-orders/:id/pdf", requireDataTeam, async (req, res) => {
+    try {
+      const po = await v2.getPurchaseOrderV2(parseInt(req.params.id as string, 10));
+      if (!po) return res.status(404).json({ error: "Not found" });
+      const company = po.companyId ? await v2.getCompany(po.companyId) : await v2.getDefaultCompany();
+      const pdf = require("./pdf-service");
+      const bytes = await pdf.generatePOPDF(po, company);
+      res.setHeader("Content-Type", "application/pdf");
+      res.setHeader("Content-Disposition", `inline; filename="${po.poNumber.replace(/\//g, "-")}.pdf"`);
+      res.send(Buffer.from(bytes));
+    } catch (e: any) { res.status(500).json({ error: e.message }); }
+  });
+
+  // ---------------- R5.4 RFQs (team) ----------------
+  app.get("/api/team/rfqs", requireDataTeam, async (req, res) => {
+    res.json(await v2.listRfqsV2({ status: req.query.status as string | undefined }));
+  });
+  app.get("/api/team/rfqs/:id", requireDataTeam, async (req, res) => {
+    const rfq = await v2.getRfqV2(parseInt(req.params.id as string, 10));
+    if (!rfq) return res.status(404).json({ error: "Not found" });
+    res.json(rfq);
+  });
+  app.post("/api/team/rfqs", requireDataTeam, async (req, res) => {
+    try {
+      const u = (req as any).teamUser;
+      const { items, vendorIds, vendor_ids, ...rfq } = req.body || {};
+      res.json(await v2.createRfqV2({ ...rfq, requestedBy: u?.username }, items || [], vendorIds || vendor_ids || []));
+    } catch (e: any) { res.status(500).json({ error: e.message }); }
+  });
+  app.post("/api/team/rfqs/:id/send", requireDataTeam, async (req, res) => {
+    try {
+      const rfqId = parseInt(req.params.id as string, 10);
+      const rfq = await v2.getRfqV2(rfqId);
+      if (!rfq) return res.status(404).json({ error: "Not found" });
+      const itemList = rfq.items.map((it) => `• ${it.partNumber || ""} ${it.brand || ""} ${it.description || ""} (qty ${it.qty})`).join("\n");
+      for (const rv of rfq.vendors) {
+        const vendor = await v2.getVendor(rv.vendorId);
+        if (!vendor || !(vendor.whatsapp || vendor.phone)) continue;
+        const phone = vendor.whatsapp || vendor.phone!;
+        wa.sendVendorRFQ(phone, vendor.name, itemList, rfq.rfqNumber).then(async (r: any) => {
+          await v2.markRfqVendorSent(rfqId, rv.vendorId, r?.messageId);
+          await v2.addVendorConversation({
+            vendorId: rv.vendorId, rfqId, direction: "out", messageText: itemList,
+            sentBy: (req as any).teamUser?.username,
+          });
+        }).catch(() => {});
+      }
+      await v2.updateRfqV2(rfqId, { status: "sent" });
+      res.json({ ok: true, sentTo: rfq.vendors.length });
+    } catch (e: any) { res.status(500).json({ error: e.message }); }
+  });
+  app.post("/api/team/rfq-quotes", requireDataTeam, async (req, res) => {
+    try { res.json(await v2.createRfqQuote({ ...req.body, extractedBy: req.body?.extractedBy || "manual" })); }
+    catch (e: any) { res.status(500).json({ error: e.message }); }
+  });
+  app.post("/api/team/rfq-quotes/:id/select-winner", requireDataTeam, async (req, res) => {
+    await v2.selectRfqWinner(parseInt(req.params.id as string, 10));
+    res.json({ ok: true });
+  });
+
+  // ---------------- R5.5 AISENSY INBOUND WEBHOOK ----------------
+  app.post("/api/webhooks/aisensy", async (req, res) => {
+    try {
+      const secret = process.env.AISENSY_WEBHOOK_SECRET || "";
+      if (secret) {
+        const got = (req.headers["x-aisensy-secret"] as string) || (req.headers["x-webhook-secret"] as string) || "";
+        if (got !== secret) return res.status(401).json({ error: "bad secret" });
+      }
+      const b = req.body || {};
+      const from = String(b.from || b.sender || b.phone || "");
+      const message = String(b.message || b.text || b.body || "");
+      const mediaUrl = b.media_url || b.mediaUrl || null;
+      const messageId = b.message_id || b.messageId || null;
+      if (!from) return res.json({ ok: true, ignored: "no from" });
+      const vendor = await v2.getVendorByPhone(from);
+      if (!vendor) { res.json({ ok: true, ignored: "unknown vendor" }); return; }
+
+      // Find an active RFQ for this vendor (most recent open one)
+      const rfqVendorRows = await v2.listRfqVendorsForVendor(vendor.id);
+      const activeRfqId = rfqVendorRows[0]?.rfqId;
+
+      let extracted: any = null;
+      if (message && claude.isClaudeConfigured()) {
+        extracted = await claude.extractVendorQuote(message);
+      }
+      await v2.addVendorConversation({
+        vendorId: vendor.id, rfqId: activeRfqId, direction: "in",
+        messageText: message, mediaUrl, whatsappMessageId: messageId,
+        claudeExtracted: extracted ? JSON.stringify(extracted) : null,
+      });
+      // If an active RFQ + extraction with a rate, save a pending-confirm quote
+      if (activeRfqId && extracted && extracted.rate != null) {
+        const rfq = await v2.getRfqV2(activeRfqId);
+        const item = rfq?.items.find((it) => extracted.part_number && it.partNumber === extracted.part_number) || rfq?.items[0];
+        await v2.createRfqQuote({
+          rfqId: activeRfqId, vendorId: vendor.id, itemId: item?.id,
+          rate: extracted.rate, moq: extracted.moq, leadTimeDays: extracted.lead_time_days,
+          notes: extracted.notes, rawMessage: message, extractedBy: "ai", photoUrl: mediaUrl,
+        });
+      }
+      res.json({ ok: true, vendor: vendor.id, extracted: !!extracted });
+    } catch (e: any) {
+      console.error("[webhook:aisensy]", e?.message);
+      res.json({ ok: false, error: e?.message });
+    }
+  });
+
+  // Vendor inbox (admin)
+  app.get("/api/admin/vendor-inbox", requireAuth, async (_req, res) => res.json(await v2.listVendorInbox()));
+  app.get("/api/admin/vendors/:id/conversations", requireAuth, async (req, res) => {
+    res.json(await v2.listVendorConversations(parseInt(req.params.id as string, 10)));
+  });
+  app.post("/api/admin/vendors/:id/reply", requireAuth, async (req, res) => {
+    try {
+      const vendorId = parseInt(req.params.id as string, 10);
+      const vendor = await v2.getVendor(vendorId);
+      if (!vendor) return res.status(404).json({ error: "Not found" });
+      const text = String(req.body?.message || "");
+      const phone = vendor.whatsapp || vendor.phone;
+      if (phone) wa.sendTextMessage(phone, text, "vendor_reply").catch(() => {});
+      await v2.addVendorConversation({ vendorId, direction: "out", messageText: text, sentBy: (req as any).user?.username });
+      res.json({ ok: true });
+    } catch (e: any) { res.status(500).json({ error: e.message }); }
+  });
+
+  // ---------------- R5.6 RATE HISTORY ----------------
+  app.get("/api/team/parts/:partNumber/rates", requireDataTeam, async (req, res) => {
+    res.json(await v2.getPartRates(req.params.partNumber as string));
+  });
+  app.get("/api/admin/parts/:partNumber/rates", requireAuth, async (req, res) => {
+    res.json(await v2.getPartRates(req.params.partNumber as string));
+  });
+
+  // ---------------- R5.7 DELHI WAREHOUSE ----------------
+  app.get("/api/delhi/queue", requireDelhi, async (_req, res) => res.json(await v2.getDelhiQueue()));
+  app.post("/api/delhi/po-items/:id/status", requireDelhi, async (req, res) => {
+    try {
+      const id = parseInt(req.params.id as string, 10);
+      const { status, docket_no, courier, photo_url } = req.body || {};
+      const now = Date.now();
+      const patch: any = { fulfilStatus: status };
+      if (status === "collected") patch.collectedAt = now;
+      if (status === "packed") patch.packedAt = now;
+      if (status === "dispatched") { patch.dispatchedAt = now; patch.docketNo = docket_no || null; patch.courier = courier || null; patch.photoUrl = photo_url || null; }
+      const item = await v2.updatePoItem(id, patch);
+      if (!item) return res.status(404).json({ error: "Not found" });
+
+      // On dispatch: create consignment (client rate, NOT purchase cost) + notify customer
+      if (status === "dispatched") {
+        try {
+          const po = item.poId ? await v2.getPurchaseOrderV2(item.poId) : undefined;
+          const customer = po?.customerId ? await v2.getCustomer(po.customerId) : undefined;
+          await v2.createConsignmentFromDispatch({
+            customerId: po?.customerId, partNumber: item.partNumber, qty: item.qty,
+            rateInr: item.unitPrice, docketNo: docket_no, courier,
+          });
+          if (customer?.phone) {
+            wa.sendConsignmentCreated(customer.phone, customer.name, docket_no || item.partNumber || "order", item.partNumber || "", new Date().toLocaleDateString("en-IN")).catch(() => {});
+          }
+          if (customer?.email) {
+            sendGenericEmail({ to: customer.email, subject: "Your order has been dispatched — Narmada Mobility", html: `<p>Dear ${customer.name}, your order (${item.partNumber || ""}) has been dispatched. Docket: ${docket_no || "-"}, Courier: ${courier || "-"}.</p>`, text: `Your order has been dispatched. Docket ${docket_no || "-"}.`, event: "dispatch_notify" }).catch(() => {});
+          }
+        } catch (e: any) { console.error("[delhi] dispatch side-effects:", e?.message); }
+      }
+      res.json(item);
+    } catch (e: any) { res.status(500).json({ error: e.message }); }
+  });
+
+  // ---------------- R6.1 VENDOR DISCOVERY (Perplexity) ----------------
+  app.post("/api/admin/vendor-discovery", requireAdminRole, async (req, res) => {
+    try {
+      const query = String(req.body?.query || "").trim();
+      if (!query) return res.status(400).json({ error: "query required" });
+      const key = process.env.PPLX_API_KEY || "";
+      if (!key) return res.status(503).json({ error: "PPLX_API_KEY not configured" });
+      const sys = `You are a sourcing assistant for an automotive spare-parts distributor in India. Find 5-10 real candidate vendors/suppliers/manufacturers for the user's requirement. Return ONLY JSON array: [{"name","city","phone","website","source_url","confidence"}]. confidence 0..1. Use null for unknown fields.`;
+      const r = await fetch("https://api.perplexity.ai/chat/completions", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "Authorization": `Bearer ${key}` },
+        body: JSON.stringify({
+          model: "sonar-pro",
+          messages: [{ role: "system", content: sys }, { role: "user", content: query }],
+          return_citations: true,
+        }),
+      });
+      const j: any = await r.json().catch(() => ({}));
+      if (!r.ok) return res.status(502).json({ error: j?.error?.message || "Perplexity error", raw: j });
+      const content = j?.choices?.[0]?.message?.content || "[]";
+      let candidates: any[] = [];
+      try { candidates = JSON.parse(String(content).replace(/```(?:json)?\n?/gi, "").trim()); } catch { candidates = []; }
+      res.json({ candidates: Array.isArray(candidates) ? candidates : [], citations: j?.citations || [] });
+    } catch (e: any) { res.status(500).json({ error: e.message }); }
+  });
+
+  // ---------------- R6.2 VENDOR PAYMENT NOTIFY ----------------
+  app.post("/api/admin/vendors/:id/payment-notify", requireAdminRole, async (req, res) => {
+    try {
+      const vendor = await v2.getVendor(parseInt(req.params.id as string, 10));
+      if (!vendor) return res.status(404).json({ error: "Not found" });
+      const { amount, utr } = req.body || {};
+      const phone = vendor.whatsapp || vendor.phone;
+      if (!phone) return res.status(400).json({ error: "Vendor has no phone" });
+      const r = await wa.sendVendorPaymentConfirmation(phone, vendor.name, String(amount || "0"), String(utr || "-"));
+      await v2.addVendorConversation({ vendorId: vendor.id, direction: "out", messageText: `Payment ₹${amount} UTR ${utr}`, sentBy: (req as any).user?.username });
+      res.json({ ok: true, status: r.status });
+    } catch (e: any) { res.status(500).json({ error: e.message }); }
+  });
+
+  // ---------------- R7.1 LEADS CRM ----------------
+  app.get("/api/admin/leads", requireAuth, async (req, res) => {
+    res.json(await v2.listLeads({
+      stage: req.query.stage as string | undefined,
+      source: req.query.source as string | undefined,
+      ownerId: req.query.ownerId ? parseInt(req.query.ownerId as string, 10) : undefined,
+      q: req.query.q as string | undefined,
+      page: req.query.page ? parseInt(req.query.page as string, 10) : undefined,
+      limit: req.query.limit ? parseInt(req.query.limit as string, 10) : undefined,
+    }));
+  });
+  app.get("/api/admin/leads/:id", requireAuth, async (req, res) => {
+    const lead = await v2.getLead(parseInt(req.params.id as string, 10));
+    if (!lead) return res.status(404).json({ error: "Not found" });
+    res.json(lead);
+  });
+  app.post("/api/admin/leads", requireAuth, async (req, res) => {
+    try { res.json(await v2.createLead(req.body || {})); }
+    catch (e: any) { res.status(500).json({ error: e.message }); }
+  });
+  app.patch("/api/admin/leads/:id", requireAuth, async (req, res) => {
+    try {
+      const id = parseInt(req.params.id as string, 10);
+      const before = await v2.getLead(id);
+      const lead = await v2.updateLead(id, req.body || {});
+      if (!lead) return res.status(404).json({ error: "Not found" });
+      if (req.body?.stage && before && before.stage !== req.body.stage) {
+        await v2.addLeadActivity(id, "stage_change", `${before.stage} → ${req.body.stage}`, (req as any).user?.username);
+      }
+      res.json(lead);
+    } catch (e: any) { res.status(500).json({ error: e.message }); }
+  });
+  app.delete("/api/admin/leads/:id", requireAdminRole, async (req, res) => {
+    await v2.deleteLead(parseInt(req.params.id as string, 10));
+    res.json({ ok: true });
+  });
+  app.post("/api/admin/leads/:id/activities", requireAuth, async (req, res) => {
+    const { type, detail } = req.body || {};
+    res.json(await v2.addLeadActivity(parseInt(req.params.id as string, 10), type || "note", detail, (req as any).user?.username));
+  });
+  app.post("/api/admin/leads/bulk-import", requireAuth, async (req, res) => {
+    try {
+      const csv = String(req.body?.csv || "");
+      if (!csv.trim()) return res.status(400).json({ error: "csv required" });
+      const parsed = Papa.parse(csv.trim(), { header: true, skipEmptyLines: true, transformHeader: (h: string) => h.trim().toLowerCase().replace(/\s+/g, "_") });
+      const n = await v2.bulkInsertLeads(parsed.data as any[]);
+      res.json({ inserted: n });
+    } catch (e: any) { res.status(500).json({ error: e.message }); }
+  });
+
+  // R7.2 lead outreach (Claude draft → send)
+  app.post("/api/admin/leads/:id/outreach", requireAuth, async (req, res) => {
+    try {
+      const lead = await v2.getLead(parseInt(req.params.id as string, 10));
+      if (!lead) return res.status(404).json({ error: "Not found" });
+      const send = req.body?.send === true;
+      let message = String(req.body?.message || "");
+      if (!message) {
+        const sys = `You are a sales rep for Narmada Mobility (B2B automotive spare parts, India). Write a short, friendly WhatsApp outreach message (max 60 words). Detect the lead's language from their requirement; reply in Hindi if the requirement is in Hindi, otherwise English. No markdown.`;
+        const draft = await claude.claudeText(sys, `Lead: ${lead.name}, city ${lead.city || "-"}, requirement: ${lead.requirement || "general enquiry"}.`);
+        message = draft || `Hello ${lead.name}, this is Narmada Mobility. We supply genuine commercial-vehicle spare parts. How can we help with your requirement?`;
+      }
+      if (send) {
+        const phone = lead.whatsapp || lead.phone;
+        if (!phone) return res.status(400).json({ error: "Lead has no phone" });
+        const r = await wa.sendTextMessage(phone, message, "lead_outreach");
+        await v2.addLeadActivity(lead.id, "whatsapp", message, (req as any).user?.username);
+        return res.json({ sent: true, status: r.status, message });
+      }
+      res.json({ sent: false, message }); // preview
+    } catch (e: any) { res.status(500).json({ error: e.message }); }
+  });
+
+  // ---------------- R7.1 TARGETS ----------------
+  app.get("/api/admin/targets", requireAuth, async (req, res) => {
+    res.json(await v2.listTargets({
+      userId: req.query.userId ? parseInt(req.query.userId as string, 10) : undefined,
+      periodKey: req.query.periodKey as string | undefined,
+    }));
+  });
+  app.post("/api/admin/targets", requireAdminRole, async (req, res) => {
+    try { res.json(await v2.createTarget(req.body || {})); }
+    catch (e: any) { res.status(500).json({ error: e.message }); }
+  });
+  app.patch("/api/admin/targets/:id", requireAdminRole, async (req, res) => {
+    const t = await v2.updateTarget(parseInt(req.params.id as string, 10), req.body || {});
+    if (!t) return res.status(404).json({ error: "Not found" });
+    res.json(t);
+  });
+  app.delete("/api/admin/targets/:id", requireAdminRole, async (req, res) => {
+    await v2.deleteTarget(parseInt(req.params.id as string, 10));
+    res.json({ ok: true });
+  });
+  // Team view of their own targets
+  app.get("/api/team/my-targets", requireDataTeam, async (req, res) => {
+    const u = (req as any).teamUser;
+    res.json(await v2.listTargets({ userId: u?.id }));
+  });
+
+  // ---------------- R7.1 ANNOUNCEMENTS ----------------
+  app.get("/api/admin/announcements", requireAuth, async (_req, res) => res.json(await v2.listAnnouncements()));
+  app.post("/api/admin/announcements", requireAdminRole, async (req, res) => {
+    try { res.json(await v2.createAnnouncement({ ...req.body, createdBy: (req as any).user?.username })); }
+    catch (e: any) { res.status(500).json({ error: e.message }); }
+  });
+  app.delete("/api/admin/announcements/:id", requireAdminRole, async (req, res) => {
+    await v2.deleteAnnouncement(parseInt(req.params.id as string, 10));
+    res.json({ ok: true });
+  });
+  // Team home: announcements for their audience
+  app.get("/api/team/announcements", requireDataTeam, async (req, res) => {
+    const u = (req as any).teamUser;
+    const audience = u?.role === "delhi_warehouse" ? "delhi" : "patna";
+    res.json(await v2.listAnnouncements(audience));
+  });
+
+  // ---------------- R7.1 TASKS ----------------
+  app.get("/api/admin/tasks", requireAuth, async (req, res) => {
+    res.json(await v2.listTaskItems({
+      assignedTo: req.query.assignedTo ? parseInt(req.query.assignedTo as string, 10) : undefined,
+      status: req.query.status as string | undefined,
+    }));
+  });
+  app.post("/api/admin/tasks", requireAuth, async (req, res) => {
+    try { res.json(await v2.createTaskItem({ ...req.body, assignedBy: (req as any).user?.username })); }
+    catch (e: any) { res.status(500).json({ error: e.message }); }
+  });
+  app.patch("/api/admin/tasks/:id", requireAuth, async (req, res) => {
+    const t = await v2.updateTaskItem(parseInt(req.params.id as string, 10), req.body || {});
+    if (!t) return res.status(404).json({ error: "Not found" });
+    res.json(t);
+  });
+  app.delete("/api/admin/tasks/:id", requireAdminRole, async (req, res) => {
+    await v2.deleteTaskItem(parseInt(req.params.id as string, 10));
+    res.json({ ok: true });
+  });
+  app.get("/api/team/my-tasks", requireDataTeam, async (req, res) => {
+    const u = (req as any).teamUser;
+    res.json(await v2.listTaskItems({ assignedTo: u?.id }));
+  });
+
+  // ---------------- R7.2 CATALOGUE PDF ----------------
+  app.post("/api/admin/catalogue/generate", requireAdminRole, async (req, res) => {
+    try {
+      const { brand, category, company_id } = req.body || {};
+      const products = await storage.listProducts({ brand, category, activeOnly: true });
+      const company = company_id ? await v2.getCompany(Number(company_id)) : await v2.getDefaultCompany();
+      const pdf = require("./pdf-service");
+      const result = await pdf.generateCataloguePDF(products, company, { brand, category });
+      res.json({ url: result.url, count: products.length });
+    } catch (e: any) { res.status(500).json({ error: e.message }); }
+  });
 }

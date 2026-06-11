@@ -1524,3 +1524,441 @@ export function getPartSuggestions(q: string, limit = 10): PartSuggestion[] {
 
   return results.slice(0, cap);
 }
+
+// =============================================================
+// ROUNDS 4.4 → 7 STORAGE
+// =============================================================
+import {
+  vendors, vendorContacts, companies, purchaseOrdersV2, poItems,
+  rfqsV2, rfqItems, rfqVendors, rfqQuotes, vendorConversations,
+  warehouses, warehouseTransfers, rateHistory, leads, leadActivities,
+  targets, announcements, taskItems, ledgerQueries,
+} from "@shared/schema";
+import type {
+  Vendor, InsertVendor, VendorContact,
+  Company, InsertCompany,
+  PurchaseOrderV2, InsertPurchaseOrderV2, PoItem, InsertPoItem,
+  RfqV2, InsertRfqV2, RfqItem, RfqVendor, RfqQuote,
+  VendorConversation, Warehouse, InsertWarehouse,
+  WarehouseTransfer, InsertWarehouseTransfer, RateHistory,
+  Lead, InsertLead, LeadActivity, Target, InsertTarget,
+  Announcement, InsertAnnouncement, TaskItem, InsertTaskItem,
+} from "@shared/schema";
+
+function seqNumber(table: any, col: any, prefix: string): string {
+  // Format: PREFIX/YY/0001  (e.g. NM/PO/26/0001)
+  const yy = String(new Date().getFullYear()).slice(-2);
+  const pfx = `${prefix}/${yy}/`;
+  const row = db.select({ c: sql<number>`COUNT(*)` }).from(table).where(like(col, `${pfx}%`)).get();
+  const next = ((row?.c as number) || 0) + 1;
+  return `${pfx}${String(next).padStart(4, "0")}`;
+}
+
+// -------- VENDORS --------
+export async function listVendors(opts: { q?: string; brand?: string; category?: string; activeOnly?: boolean } = {}): Promise<Vendor[]> {
+  const conds: any[] = [];
+  if (opts.activeOnly) conds.push(eq(vendors.isActive, true));
+  if (opts.brand) conds.push(like(vendors.brands, `%${opts.brand}%`));
+  if (opts.category) conds.push(like(vendors.categories, `%${opts.category}%`));
+  if (opts.q) conds.push(or(like(vendors.name, `%${opts.q}%`), like(vendors.code, `%${opts.q}%`), like(vendors.city, `%${opts.q}%`), like(vendors.phone, `%${opts.q}%`)));
+  const base = db.select().from(vendors);
+  const rows = conds.length ? base.where(and(...conds)).orderBy(desc(vendors.createdAt)).all() : base.orderBy(desc(vendors.createdAt)).all();
+  return rows;
+}
+export async function getVendor(id: number): Promise<Vendor | undefined> {
+  return db.select().from(vendors).where(eq(vendors.id, id)).get();
+}
+export async function getVendorByPhone(phone: string): Promise<Vendor | undefined> {
+  const norm = phone.replace(/[^0-9]/g, "");
+  const all = db.select().from(vendors).all();
+  return all.find((v) => (v.whatsapp || "").replace(/[^0-9]/g, "").endsWith(norm.slice(-10)) || (v.phone || "").replace(/[^0-9]/g, "").endsWith(norm.slice(-10)));
+}
+export async function createVendor(data: Partial<InsertVendor>): Promise<Vendor> {
+  const code = data.code || seqNumber(vendors, vendors.code, "NM/V");
+  const now = Date.now();
+  return db.insert(vendors).values({ ...data, code, name: data.name || "Unnamed", createdAt: now, updatedAt: now } as any).returning().get();
+}
+export async function updateVendor(id: number, data: Partial<InsertVendor>): Promise<Vendor | undefined> {
+  return db.update(vendors).set({ ...data, updatedAt: Date.now() }).where(eq(vendors.id, id)).returning().get();
+}
+export async function deleteVendor(id: number): Promise<void> {
+  db.delete(vendors).where(eq(vendors.id, id)).run();
+}
+export async function listVendorContacts(vendorId: number): Promise<VendorContact[]> {
+  return db.select().from(vendorContacts).where(eq(vendorContacts.vendorId, vendorId)).all();
+}
+
+// -------- COMPANIES --------
+export async function listCompanies(activeOnly = false): Promise<Company[]> {
+  const base = db.select().from(companies);
+  return activeOnly ? base.where(eq(companies.isActive, true)).orderBy(desc(companies.isDefault)).all() : base.orderBy(desc(companies.isDefault)).all();
+}
+export async function getCompany(id: number): Promise<Company | undefined> {
+  return db.select().from(companies).where(eq(companies.id, id)).get();
+}
+export async function getDefaultCompany(): Promise<Company | undefined> {
+  return db.select().from(companies).where(eq(companies.isDefault, true)).get() || db.select().from(companies).get();
+}
+export async function createCompany(data: Partial<InsertCompany>): Promise<Company> {
+  const code = data.code || seqNumber(companies, companies.code, "NM/C");
+  const now = Date.now();
+  return db.insert(companies).values({ ...data, code, name: data.name || "Company", createdAt: now, updatedAt: now } as any).returning().get();
+}
+export async function updateCompany(id: number, data: Partial<InsertCompany>): Promise<Company | undefined> {
+  return db.update(companies).set({ ...data, updatedAt: Date.now() }).where(eq(companies.id, id)).returning().get();
+}
+export async function deleteCompany(id: number): Promise<void> {
+  db.delete(companies).where(eq(companies.id, id)).run();
+}
+export async function setDefaultCompany(id: number): Promise<void> {
+  db.update(companies).set({ isDefault: false }).run();
+  db.update(companies).set({ isDefault: true, updatedAt: Date.now() }).where(eq(companies.id, id)).run();
+}
+
+// -------- WAREHOUSES --------
+export async function listWarehouses(activeOnly = false): Promise<Warehouse[]> {
+  const base = db.select().from(warehouses);
+  return activeOnly ? base.where(eq(warehouses.isActive, true)).all() : base.all();
+}
+export async function getWarehouse(id: number): Promise<Warehouse | undefined> {
+  return db.select().from(warehouses).where(eq(warehouses.id, id)).get();
+}
+export async function createWarehouse(data: Partial<InsertWarehouse>): Promise<Warehouse> {
+  return db.insert(warehouses).values({ ...data, code: data.code || `WH${Date.now()}`, name: data.name || "Warehouse", createdAt: Date.now() } as any).returning().get();
+}
+export async function updateWarehouse(id: number, data: Partial<InsertWarehouse>): Promise<Warehouse | undefined> {
+  return db.update(warehouses).set(data).where(eq(warehouses.id, id)).returning().get();
+}
+export async function listWarehouseTransfers(): Promise<WarehouseTransfer[]> {
+  return db.select().from(warehouseTransfers).orderBy(desc(warehouseTransfers.createdAt)).all();
+}
+export async function createWarehouseTransfer(data: Partial<InsertWarehouseTransfer>): Promise<WarehouseTransfer> {
+  return db.insert(warehouseTransfers).values({ ...data, createdAt: Date.now() } as any).returning().get();
+}
+export async function updateWarehouseTransfer(id: number, data: Partial<WarehouseTransfer>): Promise<WarehouseTransfer | undefined> {
+  return db.update(warehouseTransfers).set(data).where(eq(warehouseTransfers.id, id)).returning().get();
+}
+
+// -------- PURCHASE ORDERS (v2) --------
+export async function listPurchaseOrdersV2(opts: { status?: string; customerId?: number } = {}): Promise<PurchaseOrderV2[]> {
+  const conds: any[] = [];
+  if (opts.status) conds.push(eq(purchaseOrdersV2.status, opts.status));
+  if (opts.customerId) conds.push(eq(purchaseOrdersV2.customerId, opts.customerId));
+  const base = db.select().from(purchaseOrdersV2);
+  return conds.length ? base.where(and(...conds)).orderBy(desc(purchaseOrdersV2.createdAt)).all() : base.orderBy(desc(purchaseOrdersV2.createdAt)).all();
+}
+export async function getPurchaseOrderV2(id: number): Promise<(PurchaseOrderV2 & { items: PoItem[] }) | undefined> {
+  const po = db.select().from(purchaseOrdersV2).where(eq(purchaseOrdersV2.id, id)).get();
+  if (!po) return undefined;
+  const items = db.select().from(poItems).where(eq(poItems.poId, id)).all();
+  return { ...po, items };
+}
+export async function createPurchaseOrderV2(data: Partial<InsertPurchaseOrderV2>, items: Partial<InsertPoItem>[] = []): Promise<PurchaseOrderV2> {
+  const poNumber = data.poNumber || seqNumber(purchaseOrdersV2, purchaseOrdersV2.poNumber, "NM/PO");
+  const now = Date.now();
+  const po = db.insert(purchaseOrdersV2).values({ ...data, poNumber, createdAt: now, updatedAt: now } as any).returning().get();
+  for (const it of items) {
+    db.insert(poItems).values({ ...it, poId: po.id } as any).run();
+  }
+  return po;
+}
+export async function updatePurchaseOrderV2(id: number, data: Partial<InsertPurchaseOrderV2>): Promise<PurchaseOrderV2 | undefined> {
+  return db.update(purchaseOrdersV2).set({ ...data, updatedAt: Date.now() }).where(eq(purchaseOrdersV2.id, id)).returning().get();
+}
+export async function getPoItem(id: number): Promise<PoItem | undefined> {
+  return db.select().from(poItems).where(eq(poItems.id, id)).get();
+}
+export async function updatePoItem(id: number, data: Partial<PoItem>): Promise<PoItem | undefined> {
+  return db.update(poItems).set(data).where(eq(poItems.id, id)).returning().get();
+}
+export async function assignVendorToPoItem(id: number, vendorId: number, purchaseCost?: number): Promise<PoItem | undefined> {
+  const item = db.update(poItems).set({ vendorId, purchaseCost: purchaseCost ?? null }).where(eq(poItems.id, id)).returning().get();
+  if (item && item.partNumber) {
+    await recordRate({ partNumber: item.partNumber, brand: item.brand || undefined, vendorId, rate: purchaseCost, source: "po", sourceId: id });
+  }
+  return item;
+}
+
+// -------- RFQs (v2) --------
+export async function listRfqsV2(opts: { status?: string } = {}): Promise<RfqV2[]> {
+  const base = db.select().from(rfqsV2);
+  return opts.status ? base.where(eq(rfqsV2.status, opts.status)).orderBy(desc(rfqsV2.createdAt)).all() : base.orderBy(desc(rfqsV2.createdAt)).all();
+}
+export async function getRfqV2(id: number): Promise<(RfqV2 & { items: RfqItem[]; vendors: RfqVendor[]; quotes: RfqQuote[] }) | undefined> {
+  const rfq = db.select().from(rfqsV2).where(eq(rfqsV2.id, id)).get();
+  if (!rfq) return undefined;
+  const items = db.select().from(rfqItems).where(eq(rfqItems.rfqId, id)).all();
+  const vnds = db.select().from(rfqVendors).where(eq(rfqVendors.rfqId, id)).all();
+  const quotes = db.select().from(rfqQuotes).where(eq(rfqQuotes.rfqId, id)).all();
+  return { ...rfq, items, vendors: vnds, quotes };
+}
+export async function createRfqV2(data: Partial<InsertRfqV2>, items: Partial<RfqItem>[] = [], vendorIds: number[] = []): Promise<RfqV2> {
+  const rfqNumber = data.rfqNumber || seqNumber(rfqsV2, rfqsV2.rfqNumber, "NM/RFQ");
+  const rfq = db.insert(rfqsV2).values({ ...data, rfqNumber, createdAt: Date.now() } as any).returning().get();
+  for (const it of items) db.insert(rfqItems).values({ ...it, rfqId: rfq.id } as any).run();
+  for (const vid of vendorIds) db.insert(rfqVendors).values({ rfqId: rfq.id, vendorId: vid, status: "pending" } as any).run();
+  return rfq;
+}
+export async function updateRfqV2(id: number, data: Partial<InsertRfqV2>): Promise<RfqV2 | undefined> {
+  return db.update(rfqsV2).set(data).where(eq(rfqsV2.id, id)).returning().get();
+}
+export async function listRfqVendorsForVendor(vendorId: number, statuses: string[] = ["pending", "responded"]): Promise<RfqVendor[]> {
+  return db.select().from(rfqVendors).where(eq(rfqVendors.vendorId, vendorId)).all().filter((rv) => statuses.includes(rv.status));
+}
+export async function markRfqVendorSent(rfqId: number, vendorId: number, whatsappMessageId?: string): Promise<void> {
+  db.update(rfqVendors).set({ sentAt: Date.now(), whatsappMessageId: whatsappMessageId ?? null })
+    .where(and(eq(rfqVendors.rfqId, rfqId), eq(rfqVendors.vendorId, vendorId))).run();
+}
+export async function createRfqQuote(data: Partial<RfqQuote>): Promise<RfqQuote> {
+  const q = db.insert(rfqQuotes).values({ ...data, receivedAt: Date.now() } as any).returning().get();
+  // mark vendor responded
+  if (data.rfqId && data.vendorId) {
+    db.update(rfqVendors).set({ status: "responded" }).where(and(eq(rfqVendors.rfqId, data.rfqId), eq(rfqVendors.vendorId, data.vendorId))).run();
+  }
+  // record rate history
+  const item = data.itemId ? db.select().from(rfqItems).where(eq(rfqItems.id, data.itemId)).get() : undefined;
+  await recordRate({
+    partNumber: item?.partNumber || undefined,
+    brand: item?.brand || undefined,
+    vendorId: data.vendorId,
+    rate: data.rate ?? undefined,
+    moq: data.moq ?? undefined,
+    leadTimeDays: data.leadTimeDays ?? undefined,
+    source: "rfq_quote",
+    sourceId: q.id,
+  });
+  return q;
+}
+export async function selectRfqWinner(quoteId: number): Promise<void> {
+  const quote = db.select().from(rfqQuotes).where(eq(rfqQuotes.id, quoteId)).get();
+  if (!quote) return;
+  // unset other winners for same item
+  if (quote.itemId) db.update(rfqQuotes).set({ isWinner: false }).where(eq(rfqQuotes.itemId, quote.itemId)).run();
+  db.update(rfqQuotes).set({ isWinner: true }).where(eq(rfqQuotes.id, quoteId)).run();
+  db.update(rfqsV2).set({ status: "decided" }).where(eq(rfqsV2.id, quote.rfqId)).run();
+}
+
+// -------- VENDOR CONVERSATIONS --------
+export async function addVendorConversation(data: Partial<VendorConversation>): Promise<VendorConversation> {
+  return db.insert(vendorConversations).values({ ...data, createdAt: Date.now() } as any).returning().get();
+}
+export async function listVendorConversations(vendorId: number): Promise<VendorConversation[]> {
+  return db.select().from(vendorConversations).where(eq(vendorConversations.vendorId, vendorId)).orderBy(vendorConversations.createdAt).all();
+}
+export async function listVendorInbox(): Promise<{ vendor: Vendor; latest: VendorConversation | null; count: number }[]> {
+  const allVendors = db.select().from(vendors).all();
+  const out: { vendor: Vendor; latest: VendorConversation | null; count: number }[] = [];
+  for (const v of allVendors) {
+    const convs = db.select().from(vendorConversations).where(eq(vendorConversations.vendorId, v.id)).orderBy(desc(vendorConversations.createdAt)).all();
+    if (convs.length > 0) out.push({ vendor: v, latest: convs[0], count: convs.length });
+  }
+  out.sort((a, b) => (b.latest?.createdAt || 0) - (a.latest?.createdAt || 0));
+  return out;
+}
+
+// -------- RATE HISTORY --------
+export async function recordRate(data: { partNumber?: string; brand?: string; vendorId?: number; rate?: number; moq?: number; leadTimeDays?: number; source: string; sourceId?: number }): Promise<void> {
+  if (!data.partNumber && !data.vendorId) return;
+  db.insert(rateHistory).values({
+    partNumber: data.partNumber ?? null, brand: data.brand ?? null, vendorId: data.vendorId ?? null,
+    rate: data.rate ?? null, moq: data.moq ?? null, leadTimeDays: data.leadTimeDays ?? null,
+    source: data.source, sourceId: data.sourceId ?? null, recordedAt: Date.now(),
+  } as any).run();
+}
+export async function getPartRates(partNumber: string): Promise<{ vendorId: number | null; vendorName: string; rows: RateHistory[]; latest: number | null; avg: number | null; min: number | null; max: number | null; lastDate: number | null }[]> {
+  const rows = db.select().from(rateHistory).where(eq(rateHistory.partNumber, partNumber)).orderBy(desc(rateHistory.recordedAt)).all();
+  const byVendor = new Map<number | null, RateHistory[]>();
+  for (const r of rows) {
+    const k = r.vendorId ?? null;
+    if (!byVendor.has(k)) byVendor.set(k, []);
+    byVendor.get(k)!.push(r);
+  }
+  const out: any[] = [];
+  for (const [vid, list] of Array.from(byVendor.entries())) {
+    const rates = list.map((x: RateHistory) => x.rate).filter((x: number | null): x is number => x != null);
+    const v = vid ? db.select().from(vendors).where(eq(vendors.id, vid)).get() : undefined;
+    out.push({
+      vendorId: vid, vendorName: v?.name || "—", rows: list,
+      latest: list[0]?.rate ?? null,
+      avg: rates.length ? rates.reduce((a, b) => a + b, 0) / rates.length : null,
+      min: rates.length ? Math.min(...rates) : null,
+      max: rates.length ? Math.max(...rates) : null,
+      lastDate: list[0]?.recordedAt ?? null,
+    });
+  }
+  return out;
+}
+
+// -------- DELHI WAREHOUSE QUEUE (R5.7) --------
+export async function getDelhiQueue(): Promise<{ pickup: any[]; pack: any[]; dispatch: any[] }> {
+  // PO items where vendor assigned; group by fulfil_status
+  const items = db.select().from(poItems).where(sql`${poItems.vendorId} IS NOT NULL`).all();
+  const enrich = async (it: PoItem) => {
+    const vendor = it.vendorId ? db.select().from(vendors).where(eq(vendors.id, it.vendorId)).get() : undefined;
+    const po = db.select().from(purchaseOrdersV2).where(eq(purchaseOrdersV2.id, it.poId)).get();
+    const customer = po?.customerId ? await getCustomer(po.customerId) : undefined;
+    return {
+      ...it,
+      vendorName: vendor?.name || "—", vendorPhone: vendor?.phone || vendor?.whatsapp || "—", vendorAddress: vendor?.address || "—",
+      clientName: customer?.name || "—", clientCity: (customer as any)?.city || "—",
+      poNumber: po?.poNumber || "—",
+    };
+  };
+  const pickup: any[] = [], pack: any[] = [], dispatch: any[] = [];
+  for (const it of items) {
+    const e = await enrich(it);
+    if (it.fulfilStatus === "pending") pickup.push(e);
+    else if (it.fulfilStatus === "collected") pack.push(e);
+    else if (it.fulfilStatus === "packed") dispatch.push(e);
+  }
+  return { pickup, pack, dispatch };
+}
+export async function getStaleDelhiPickups(days = 2): Promise<PoItem[]> {
+  const cutoff = Date.now() - days * 86400000;
+  return db.select().from(poItems).where(and(eq(poItems.fulfilStatus, "pending"), sql`${poItems.vendorId} IS NOT NULL`)).all()
+    .filter((it) => {
+      const po = db.select().from(purchaseOrdersV2).where(eq(purchaseOrdersV2.id, it.poId)).get();
+      return po && (po.createdAt || 0) < cutoff;
+    });
+}
+
+// -------- LEADS (R7) --------
+export async function listLeads(opts: { stage?: string; source?: string; ownerId?: number; q?: string; page?: number; limit?: number } = {}): Promise<{ rows: Lead[]; total: number }> {
+  const conds: any[] = [];
+  if (opts.stage) conds.push(eq(leads.stage, opts.stage));
+  if (opts.source) conds.push(eq(leads.source, opts.source));
+  if (opts.ownerId) conds.push(eq(leads.ownerId, opts.ownerId));
+  if (opts.q) conds.push(or(like(leads.name, `%${opts.q}%`), like(leads.phone, `%${opts.q}%`), like(leads.city, `%${opts.q}%`), like(leads.requirement, `%${opts.q}%`)));
+  const where = conds.length ? and(...conds) : undefined;
+  const totalRow = (where ? db.select({ c: sql<number>`COUNT(*)` }).from(leads).where(where) : db.select({ c: sql<number>`COUNT(*)` }).from(leads)).get();
+  const limit = opts.limit || 500;
+  const offset = ((opts.page || 1) - 1) * limit;
+  const base = db.select().from(leads);
+  const rows = (where ? base.where(where) : base).orderBy(desc(leads.createdAt)).limit(limit).offset(offset).all();
+  return { rows, total: (totalRow?.c as number) || 0 };
+}
+export async function getLead(id: number): Promise<(Lead & { activities: LeadActivity[] }) | undefined> {
+  const lead = db.select().from(leads).where(eq(leads.id, id)).get();
+  if (!lead) return undefined;
+  const activities = db.select().from(leadActivities).where(eq(leadActivities.leadId, id)).orderBy(desc(leadActivities.createdAt)).all();
+  return { ...lead, activities };
+}
+export async function createLead(data: Partial<InsertLead>): Promise<Lead> {
+  const now = Date.now();
+  return db.insert(leads).values({ ...data, name: data.name || "Lead", createdAt: now, updatedAt: now } as any).returning().get();
+}
+export async function updateLead(id: number, data: Partial<InsertLead>): Promise<Lead | undefined> {
+  return db.update(leads).set({ ...data, updatedAt: Date.now() }).where(eq(leads.id, id)).returning().get();
+}
+export async function deleteLead(id: number): Promise<void> {
+  db.delete(leads).where(eq(leads.id, id)).run();
+}
+export async function addLeadActivity(leadId: number, type: string, detail?: string, createdBy?: string): Promise<LeadActivity> {
+  db.update(leads).set({ lastContactAt: Date.now(), updatedAt: Date.now() }).where(eq(leads.id, leadId)).run();
+  return db.insert(leadActivities).values({ leadId, type, detail: detail ?? null, createdBy: createdBy ?? null, createdAt: Date.now() } as any).returning().get();
+}
+export async function bulkInsertLeads(rows: Partial<InsertLead>[]): Promise<number> {
+  let n = 0;
+  const now = Date.now();
+  for (const r of rows) {
+    if (!r.name && !r.phone) continue;
+    db.insert(leads).values({ ...r, name: r.name || r.phone || "Lead", source: r.source || "import", createdAt: now, updatedAt: now } as any).run();
+    n++;
+  }
+  return n;
+}
+
+// -------- TARGETS --------
+export async function listTargets(opts: { userId?: number; periodKey?: string } = {}): Promise<Target[]> {
+  const conds: any[] = [];
+  if (opts.userId) conds.push(eq(targets.userId, opts.userId));
+  if (opts.periodKey) conds.push(eq(targets.periodKey, opts.periodKey));
+  const base = db.select().from(targets);
+  return conds.length ? base.where(and(...conds)).all() : base.all();
+}
+export async function createTarget(data: Partial<InsertTarget>): Promise<Target> {
+  const now = Date.now();
+  return db.insert(targets).values({ ...data, createdAt: now, updatedAt: now } as any).returning().get();
+}
+export async function updateTarget(id: number, data: Partial<InsertTarget>): Promise<Target | undefined> {
+  return db.update(targets).set({ ...data, updatedAt: Date.now() }).where(eq(targets.id, id)).returning().get();
+}
+export async function deleteTarget(id: number): Promise<void> {
+  db.delete(targets).where(eq(targets.id, id)).run();
+}
+
+// -------- ANNOUNCEMENTS --------
+export async function listAnnouncements(audience?: string): Promise<Announcement[]> {
+  const now = Date.now();
+  const all = db.select().from(announcements).orderBy(desc(announcements.createdAt)).all()
+    .filter((a) => !a.expiresAt || a.expiresAt > now);
+  if (!audience) return all;
+  return all.filter((a) => a.audience === "all" || a.audience === audience);
+}
+export async function createAnnouncement(data: Partial<InsertAnnouncement>): Promise<Announcement> {
+  return db.insert(announcements).values({ ...data, title: data.title || "Announcement", createdAt: Date.now() } as any).returning().get();
+}
+export async function deleteAnnouncement(id: number): Promise<void> {
+  db.delete(announcements).where(eq(announcements.id, id)).run();
+}
+
+// -------- TASKS --------
+export async function listTaskItems(opts: { assignedTo?: number; status?: string } = {}): Promise<TaskItem[]> {
+  const conds: any[] = [];
+  if (opts.assignedTo) conds.push(eq(taskItems.assignedTo, opts.assignedTo));
+  if (opts.status) conds.push(eq(taskItems.status, opts.status));
+  const base = db.select().from(taskItems);
+  return conds.length ? base.where(and(...conds)).orderBy(desc(taskItems.createdAt)).all() : base.orderBy(desc(taskItems.createdAt)).all();
+}
+export async function createTaskItem(data: Partial<InsertTaskItem>): Promise<TaskItem> {
+  const now = Date.now();
+  return db.insert(taskItems).values({ ...data, title: data.title || "Task", createdAt: now, updatedAt: now } as any).returning().get();
+}
+export async function updateTaskItem(id: number, data: Partial<InsertTaskItem>): Promise<TaskItem | undefined> {
+  return db.update(taskItems).set({ ...data, updatedAt: Date.now() }).where(eq(taskItems.id, id)).returning().get();
+}
+export async function deleteTaskItem(id: number): Promise<void> {
+  db.delete(taskItems).where(eq(taskItems.id, id)).run();
+}
+
+// -------- LEDGER QUERIES LOG (R4.4) --------
+export async function logLedgerQuery(data: { userId?: string; question: string; answer?: string; sql?: string }): Promise<void> {
+  db.insert(ledgerQueries).values({ ...data, createdAt: Date.now() } as any).run();
+}
+
+// -------- R5.7 DELHI DISPATCH → CONSIGNMENT --------
+// Creates a tracking consignment when a Delhi warehouse PO item is dispatched.
+// Uses the CLIENT-facing rate (invoiceAmount), never the purchase cost.
+export async function createConsignmentFromDispatch(input: {
+  customerId?: number | null;
+  partNumber?: string | null;
+  qty?: number | null;
+  rateInr?: number | null;
+  docketNo?: string | null;
+  courier?: string | null;
+}): Promise<Consignment> {
+  const now = Date.now();
+  const customer = input.customerId ? await getCustomer(input.customerId) : undefined;
+  const docket = (input.docketNo && String(input.docketNo).trim())
+    || seqNumber(consignments, consignments.docketNumber, "NM/DKT");
+  const qty = input.qty ?? 1;
+  const amount = (input.rateInr ?? 0) * qty;
+  return db.insert(consignments).values({
+    docketNumber: docket,
+    carrier: input.courier || null,
+    origin: "Delhi",
+    destination: (customer as any)?.city || (customer as any)?.state || "—",
+    customerId: input.customerId ?? null,
+    customerName: customer?.name || null,
+    customerPhone: customer?.phone || null,
+    customerEmail: customer?.email || null,
+    bundlesCount: 1,
+    invoiceAmount: amount,
+    dispatchDate: now,
+    status: "in_transit",
+    notes: input.partNumber ? `Part ${input.partNumber} x${qty}` : null,
+    createdBy: "delhi_warehouse",
+    createdAt: now,
+    updatedAt: now,
+  } as any).returning().get();
+}

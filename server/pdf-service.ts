@@ -661,3 +661,167 @@ function wrapText(text: string, font: PDFFont, size: number, maxWidth: number): 
   if (current) lines.push(current);
   return lines;
 }
+
+// =====================================================================
+// R5.3 — Purchase Order PDF (internal procurement doc, not customer-facing)
+// =====================================================================
+export interface PoForPdf {
+  poNumber: string;
+  createdAt?: number | null;
+  status?: string | null;
+  subtotal?: number | null;
+  discount?: number | null;
+  tax?: number | null;
+  total?: number | null;
+  notes?: string | null;
+  items?: Array<{
+    partNumber?: string | null;
+    brand?: string | null;
+    description?: string | null;
+    qty?: number | null;
+    unitPrice?: number | null;
+    discountPct?: number | null;
+    taxPct?: number | null;
+    lineTotal?: number | null;
+  }>;
+}
+
+export async function generatePOPDF(po: PoForPdf, company: any): Promise<Buffer> {
+  const pdfDoc = await PDFDocument.create();
+  const PAGE_W = 595, PAGE_H = 842;
+  let page = pdfDoc.addPage([PAGE_W, PAGE_H]);
+  const bold = await pdfDoc.embedFont(StandardFonts.HelveticaBold);
+  const reg = await pdfDoc.embedFont(StandardFonts.Helvetica);
+  const M = 40;
+  let y = PAGE_H - M;
+
+  // Header band
+  drawRect(page, 0, PAGE_H - 70, PAGE_W, 70, COLOR_NAVY);
+  drawText(page, company?.name || "NARMADA MOTORS", M, PAGE_H - 36, bold, 18, COLOR_WHITE);
+  drawText(page, "PURCHASE ORDER", PAGE_W - M - 150, PAGE_H - 36, bold, 16, COLOR_WHITE);
+  if (company?.gstin) drawText(page, `GSTIN: ${company.gstin}`, M, PAGE_H - 56, reg, 9, COLOR_WHITE);
+  y = PAGE_H - 90;
+
+  // Company address block
+  const addr = [company?.addressLine1, company?.addressLine2, [company?.city, company?.state, company?.pincode].filter(Boolean).join(", ")].filter(Boolean) as string[];
+  for (const line of addr) { drawText(page, line, M, y, reg, 9, COLOR_TEXT_MUTED); y -= 12; }
+  y -= 6;
+
+  // PO meta
+  drawText(page, `PO No: ${po.poNumber}`, M, y, bold, 11);
+  drawText(page, `Date: ${fmtDate(po.createdAt)}`, PAGE_W - M - 160, y, reg, 10);
+  y -= 16;
+  drawText(page, `Status: ${(po.status || "draft").toUpperCase()}`, M, y, reg, 10);
+  y -= 20;
+
+  // Table header
+  const cols = [
+    { x: M, w: 30, label: "#" },
+    { x: M + 30, w: 90, label: "Part No" },
+    { x: M + 120, w: 75, label: "Brand" },
+    { x: M + 195, w: 150, label: "Description" },
+    { x: M + 345, w: 35, label: "Qty" },
+    { x: M + 380, w: 65, label: "Rate" },
+    { x: M + 445, w: 70, label: "Amount" },
+  ];
+  drawRect(page, M, y - 4, PAGE_W - 2 * M, 18, COLOR_CREAM);
+  for (const c of cols) drawText(page, c.label, c.x + 2, y, bold, 9, COLOR_NAVY);
+  y -= 20;
+
+  const items = po.items || [];
+  for (let i = 0; i < items.length; i++) {
+    const it = items[i];
+    if (y < 120) { page = pdfDoc.addPage([PAGE_W, PAGE_H]); y = PAGE_H - M; }
+    const descLines = wrapText(String(it.description || ""), reg, 8, 145);
+    drawText(page, String(i + 1), cols[0].x + 2, y, reg, 8);
+    drawText(page, String(it.partNumber || "-"), cols[1].x + 2, y, reg, 8);
+    drawText(page, String(it.brand || "-"), cols[2].x + 2, y, reg, 8);
+    drawText(page, descLines[0] || "-", cols[3].x + 2, y, reg, 8);
+    drawText(page, String(it.qty ?? 0), cols[4].x + 2, y, reg, 8);
+    drawText(page, fmtCurrency(it.unitPrice, "INR", false), cols[5].x + 2, y, reg, 8);
+    drawText(page, fmtCurrency(it.lineTotal, "INR", false), cols[6].x + 2, y, reg, 8);
+    y -= 14;
+    for (let l = 1; l < descLines.length; l++) { drawText(page, descLines[l], cols[3].x + 2, y, reg, 8); y -= 12; }
+    drawRect(page, M, y + 4, PAGE_W - 2 * M, 0.5, COLOR_BORDER);
+  }
+
+  // Totals
+  y -= 10;
+  const tx = PAGE_W - M - 200;
+  const trow = (label: string, val: number | null | undefined, isBold = false) => {
+    drawText(page, label, tx, y, isBold ? bold : reg, 10);
+    drawText(page, fmtCurrency(val, "INR", false), tx + 110, y, isBold ? bold : reg, 10);
+    y -= 16;
+  };
+  trow("Subtotal", po.subtotal);
+  trow("Discount", po.discount);
+  trow("Tax (GST)", po.tax);
+  drawRect(page, tx, y + 4, 200, 0.5, COLOR_BORDER);
+  trow("Grand Total", po.total, true);
+
+  if (po.notes) {
+    y -= 10;
+    drawText(page, "Notes:", M, y, bold, 9); y -= 12;
+    for (const line of wrapText(po.notes, reg, 9, PAGE_W - 2 * M)) { drawText(page, line, M, y, reg, 9, COLOR_TEXT_MUTED); y -= 12; }
+  }
+
+  const bytes = await pdfDoc.save();
+  return Buffer.from(bytes);
+}
+
+// =====================================================================
+// R7.2 — Product Catalogue PDF (writes to uploads dir, returns served URL)
+// =====================================================================
+export async function generateCataloguePDF(
+  products: any[],
+  company: any,
+  opts: { brand?: string; category?: string } = {},
+): Promise<{ url: string; path: string }> {
+  const pdfDoc = await PDFDocument.create();
+  const PAGE_W = 595, PAGE_H = 842;
+  let page = pdfDoc.addPage([PAGE_W, PAGE_H]);
+  const bold = await pdfDoc.embedFont(StandardFonts.HelveticaBold);
+  const reg = await pdfDoc.embedFont(StandardFonts.Helvetica);
+  const M = 40;
+
+  drawRect(page, 0, PAGE_H - 80, PAGE_W, 80, COLOR_NAVY);
+  drawText(page, company?.name || "NARMADA MOTORS", M, PAGE_H - 36, bold, 18, COLOR_WHITE);
+  drawText(page, "PRODUCT CATALOGUE", M, PAGE_H - 58, reg, 12, COLOR_WHITE);
+  const filt = [opts.brand, opts.category].filter(Boolean).join(" / ");
+  if (filt) drawText(page, filt.toUpperCase(), PAGE_W - M - 180, PAGE_H - 58, reg, 10, COLOR_WHITE);
+  let y = PAGE_H - 100;
+
+  const cols = [
+    { x: M, w: 100, label: "Part No" },
+    { x: M + 100, w: 70, label: "Brand" },
+    { x: M + 170, w: 220, label: "Product" },
+    { x: M + 390, w: 60, label: "Category" },
+    { x: M + 460, w: 55, label: "Price" },
+  ];
+  const drawHeader = () => {
+    drawRect(page, M, y - 4, PAGE_W - 2 * M, 18, COLOR_CREAM);
+    for (const c of cols) drawText(page, c.label, c.x + 2, y, bold, 9, COLOR_NAVY);
+    y -= 20;
+  };
+  drawHeader();
+
+  for (const p of products) {
+    if (y < 80) { page = pdfDoc.addPage([PAGE_W, PAGE_H]); y = PAGE_H - M; drawHeader(); }
+    const nameLines = wrapText(String(p.name || ""), reg, 8, 215);
+    drawText(page, String(p.partNumber || p.oemNumber || "-"), cols[0].x + 2, y, reg, 8);
+    drawText(page, String(p.brand || "-"), cols[1].x + 2, y, reg, 8);
+    drawText(page, nameLines[0] || "-", cols[2].x + 2, y, reg, 8);
+    drawText(page, String(p.category || "-"), cols[3].x + 2, y, reg, 8);
+    drawText(page, fmtCurrency(p.priceInr, "INR", false), cols[4].x + 2, y, reg, 8);
+    y -= 14;
+    for (let l = 1; l < nameLines.length; l++) { drawText(page, nameLines[l], cols[2].x + 2, y, reg, 8); y -= 12; }
+    drawRect(page, M, y + 4, PAGE_W - 2 * M, 0.5, COLOR_BORDER);
+  }
+
+  const bytes = await pdfDoc.save();
+  const dir = path.join(DATA_DIR, "uploads");
+  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+  const fname = `catalogue-${Date.now()}.pdf`;
+  fs.writeFileSync(path.join(dir, fname), Buffer.from(bytes));
+  return { url: `/files/${fname}`, path: path.join(dir, fname) };
+}

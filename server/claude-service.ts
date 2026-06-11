@@ -396,3 +396,74 @@ ${JSON.stringify(items, null, 2)}`;
     return { items, explanation: "", ok: false, error: e?.message || "Claude call failed" };
   }
 }
+
+// =====================================================================
+// R4.4 / R5.4 / R7.2 — generic Claude helpers
+// =====================================================================
+
+export function isClaudeConfigured(): boolean {
+  return !!(CLAUDE_API_KEY && CLAUDE_API_KEY !== "skip");
+}
+
+// Generic completion that returns parsed JSON (or null). Strips markdown fences.
+export async function claudeJSON<T = any>(system: string, userMsg: string, maxTokens = 2048): Promise<T | null> {
+  if (!isClaudeConfigured()) return null;
+  try {
+    const client = getClient();
+    const response = await client.messages.create({
+      model: MODEL, max_tokens: maxTokens, temperature: 0.1,
+      system, messages: [{ role: "user", content: userMsg }],
+    });
+    const text = response.content[0]?.type === "text" ? response.content[0].text : "";
+    const cleaned = text.replace(/```(?:json)?\n?/gi, "").trim();
+    return JSON.parse(cleaned) as T;
+  } catch (e: any) {
+    console.error("[claude] claudeJSON error:", e?.message);
+    return null;
+  }
+}
+
+// Generic plain-text completion (for outreach drafting).
+export async function claudeText(system: string, userMsg: string, maxTokens = 1024): Promise<string | null> {
+  if (!isClaudeConfigured()) return null;
+  try {
+    const client = getClient();
+    const response = await client.messages.create({
+      model: MODEL, max_tokens: maxTokens, temperature: 0.4,
+      system, messages: [{ role: "user", content: userMsg }],
+    });
+    return response.content[0]?.type === "text" ? response.content[0].text.trim() : null;
+  } catch (e: any) {
+    console.error("[claude] claudeText error:", e?.message);
+    return null;
+  }
+}
+
+// R4.4 — translate NL question to a SELECT-only SQL against known tables.
+const LEDGER_NL_SYSTEM = `You translate a natural-language business question into a single SQLite SELECT query.
+You may ONLY query these tables and columns:
+- customers(id, name, phone, email, city, state, gst_number, credit_limit_inr, payment_terms_days)
+- ledger_entries(id, customer_id, entry_date, voucher_type, voucher_no, description, debit_inr, credit_inr, balance_inr)
+- payment_records(id, customer_id, amount_inr, payment_mode, payment_date, reference_no, notes)
+- quotations(id, quote_no, customer_id, status, grand_total, created_at)
+Rules:
+- Output ONLY valid JSON: {"sql": "SELECT ...", "params": [], "explanation": "..."}
+- The SQL MUST start with SELECT. Never INSERT/UPDATE/DELETE/DROP/ALTER/PRAGMA/ATTACH.
+- Use ? placeholders for any user values and list them in params in order.
+- entry_date / paid_at / created_at are unix epoch milliseconds integers.
+- Keep results bounded (add LIMIT 200 if not aggregating).`;
+
+export async function ledgerNlToSql(question: string): Promise<{ sql: string; params: any[]; explanation: string } | null> {
+  const r = await claudeJSON<{ sql: string; params: any[]; explanation: string }>(LEDGER_NL_SYSTEM, `Question: ${question}`);
+  if (!r || !r.sql) return null;
+  return { sql: r.sql, params: Array.isArray(r.params) ? r.params : [], explanation: r.explanation || "" };
+}
+
+// R5.4 / R5.5 — extract a vendor quote from a free-text WhatsApp reply.
+const VENDOR_EXTRACT_SYSTEM = `You extract a vendor price quote from a WhatsApp message (English or Hindi).
+Return ONLY JSON: {"part_number": string|null, "brand": string|null, "rate": number|null, "moq": number|null, "lead_time_days": number|null, "notes": string|null, "confidence": number}
+confidence is 0..1. If a field is absent, use null. rate/moq are numbers (strip currency symbols and commas).`;
+
+export async function extractVendorQuote(rawText: string, productContext?: string): Promise<{ part_number: string | null; brand: string | null; rate: number | null; moq: number | null; lead_time_days: number | null; notes: string | null; confidence: number } | null> {
+  return claudeJSON(VENDOR_EXTRACT_SYSTEM, `Product context: ${productContext || "(none)"}\n\nVendor message:\n${rawText}`);
+}
