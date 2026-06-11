@@ -91,6 +91,16 @@ app.use((req, res, next) => {
 });
 
 (async () => {
+  // ---- R4.4→R7: ensure additive tables + seed defaults on boot ----
+  try {
+    const { runR4toR7Migrations } = await import("./migrations");
+    runR4toR7Migrations();
+    const { seedR5Defaults } = await import("./seed-r5");
+    await seedR5Defaults();
+  } catch (e: any) {
+    console.error("[migrations] boot setup failed:", e?.message || e);
+  }
+
   await registerRoutes(httpServer, app);
 
   app.use((err: any, _req: Request, res: Response, next: NextFunction) => {

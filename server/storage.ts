@@ -585,6 +585,7 @@ try {
 } catch {}
 
 export const db = drizzle(sqlite);
+export const rawSqlite = sqlite;
 
 export interface IStorage {
   listProducts(filters?: { brand?: string; category?: string; q?: string; featured?: boolean; activeOnly?: boolean }): Promise<Product[]>;

@@ -650,3 +650,341 @@ export const accountRequests = sqliteTable("account_requests", {
 export const insertAccountRequestSchema = createInsertSchema(accountRequests).omit({ id: true, createdAt: true, reviewedAt: true, status: true });
 export type InsertAccountRequest = z.infer<typeof insertAccountRequestSchema>;
 export type AccountRequest = typeof accountRequests.$inferSelect;
+
+// =====================================================================
+// ROUNDS 4.4 → 7 — ADDITIVE TABLES (vendors, companies, POs, RFQs,
+// warehouses, rate history, leads CRM, targets, announcements, tasks)
+// =====================================================================
+
+// -------- R4.4 AI LEDGER QUERIES --------
+export const ledgerQueries = sqliteTable("ledger_queries", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  userId: text("user_id"),
+  question: text("question").notNull(),
+  answer: text("answer"),
+  sql: text("sql"),
+  createdAt: integer("created_at").notNull().$defaultFn(() => Date.now()),
+});
+export type LedgerQuery = typeof ledgerQueries.$inferSelect;
+
+// -------- R5.1 VENDOR MASTER --------
+export const vendors = sqliteTable("vendors", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  code: text("code").notNull().unique(),
+  name: text("name").notNull(),
+  gstin: text("gstin"),
+  pan: text("pan"),
+  address: text("address"),
+  city: text("city"),
+  state: text("state"),
+  pincode: text("pincode"),
+  phone: text("phone"),
+  whatsapp: text("whatsapp"),
+  email: text("email"),
+  paymentTerms: text("payment_terms"),
+  brands: text("brands"),       // comma list or json
+  categories: text("categories"),
+  rating: integer("rating"),    // 1-5
+  notes: text("notes"),
+  isActive: integer("is_active", { mode: "boolean" }).notNull().default(true),
+  createdAt: integer("created_at").notNull().$defaultFn(() => Date.now()),
+  updatedAt: integer("updated_at").notNull().$defaultFn(() => Date.now()),
+});
+export const insertVendorSchema = createInsertSchema(vendors).omit({ id: true, createdAt: true, updatedAt: true });
+export type InsertVendor = z.infer<typeof insertVendorSchema>;
+export type Vendor = typeof vendors.$inferSelect;
+
+export const vendorContacts = sqliteTable("vendor_contacts", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  vendorId: integer("vendor_id").notNull(),
+  name: text("name").notNull(),
+  role: text("role"),
+  phone: text("phone"),
+  whatsapp: text("whatsapp"),
+  email: text("email"),
+});
+export const insertVendorContactSchema = createInsertSchema(vendorContacts).omit({ id: true });
+export type InsertVendorContact = z.infer<typeof insertVendorContactSchema>;
+export type VendorContact = typeof vendorContacts.$inferSelect;
+
+// -------- R5.1 COMPANY MASTER (multi-company billing) --------
+export const companies = sqliteTable("companies", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  code: text("code").notNull().unique(),
+  name: text("name").notNull(),
+  gstin: text("gstin"),
+  pan: text("pan"),
+  addressLine1: text("address_line1"),
+  addressLine2: text("address_line2"),
+  city: text("city"),
+  state: text("state"),
+  pincode: text("pincode"),
+  bankName: text("bank_name"),
+  bankBranch: text("bank_branch"),
+  accountNo: text("account_no"),
+  ifsc: text("ifsc"),
+  beneficiaryName: text("beneficiary_name"),
+  signatoryName: text("signatory_name"),
+  signatoryPhone: text("signatory_phone"),
+  signatoryEmail: text("signatory_email"),
+  gstType: text("gst_type").notNull().default("regular"), // regular | composition | unregistered
+  logoUrl: text("logo_url"),
+  isDefault: integer("is_default", { mode: "boolean" }).notNull().default(false),
+  isActive: integer("is_active", { mode: "boolean" }).notNull().default(true),
+  createdAt: integer("created_at").notNull().$defaultFn(() => Date.now()),
+  updatedAt: integer("updated_at").notNull().$defaultFn(() => Date.now()),
+});
+export const insertCompanySchema = createInsertSchema(companies).omit({ id: true, createdAt: true, updatedAt: true });
+export type InsertCompany = z.infer<typeof insertCompanySchema>;
+export type Company = typeof companies.$inferSelect;
+
+// -------- R5.1 PURCHASE ORDERS --------
+export const purchaseOrdersV2 = sqliteTable("purchase_orders_v2", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  poNumber: text("po_number").notNull().unique(), // NM/PO/YY/0001
+  quotationId: integer("quotation_id"),
+  customerId: integer("customer_id"),
+  companyId: integer("company_id"),
+  status: text("status").notNull().default("draft"), // draft|sent|partial|fulfilled|cancelled
+  subtotal: real("subtotal").notNull().default(0),
+  discount: real("discount").notNull().default(0),
+  tax: real("tax").notNull().default(0),
+  total: real("total").notNull().default(0),
+  notes: text("notes"),
+  createdBy: text("created_by"),
+  createdAt: integer("created_at").notNull().$defaultFn(() => Date.now()),
+  updatedAt: integer("updated_at").notNull().$defaultFn(() => Date.now()),
+});
+export const insertPurchaseOrderV2Schema = createInsertSchema(purchaseOrdersV2).omit({ id: true, createdAt: true, updatedAt: true });
+export type InsertPurchaseOrderV2 = z.infer<typeof insertPurchaseOrderV2Schema>;
+export type PurchaseOrderV2 = typeof purchaseOrdersV2.$inferSelect;
+
+export const poItems = sqliteTable("po_items", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  poId: integer("po_id").notNull(),
+  partNumber: text("part_number"),
+  brand: text("brand"),
+  description: text("description"),
+  qty: real("qty").notNull().default(1),
+  unitPrice: real("unit_price").notNull().default(0),
+  discountPct: real("discount_pct").notNull().default(0),
+  taxPct: real("tax_pct").notNull().default(0),
+  lineTotal: real("line_total").notNull().default(0),
+  vendorId: integer("vendor_id"),
+  purchaseCost: real("purchase_cost"),
+  warehouseId: integer("warehouse_id"),
+  // R5.7 fulfilment lifecycle
+  fulfilStatus: text("fulfil_status").notNull().default("pending"), // pending|collected|packed|dispatched
+  docketNo: text("docket_no"),
+  courier: text("courier"),
+  photoUrl: text("photo_url"),
+  collectedAt: integer("collected_at"),
+  packedAt: integer("packed_at"),
+  dispatchedAt: integer("dispatched_at"),
+});
+export const insertPoItemSchema = createInsertSchema(poItems).omit({ id: true });
+export type InsertPoItem = z.infer<typeof insertPoItemSchema>;
+export type PoItem = typeof poItems.$inferSelect;
+
+// -------- R5.1 RFQs --------
+export const rfqsV2 = sqliteTable("rfqs_v2", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  rfqNumber: text("rfq_number").notNull().unique(), // NM/RFQ/YY/0001
+  poId: integer("po_id"),
+  status: text("status").notNull().default("draft"), // draft|sent|responses_in|decided|closed
+  requestedBy: text("requested_by"),
+  notes: text("notes"),
+  createdAt: integer("created_at").notNull().$defaultFn(() => Date.now()),
+  closedAt: integer("closed_at"),
+});
+export const insertRfqV2Schema = createInsertSchema(rfqsV2).omit({ id: true, createdAt: true, closedAt: true });
+export type InsertRfqV2 = z.infer<typeof insertRfqV2Schema>;
+export type RfqV2 = typeof rfqsV2.$inferSelect;
+
+export const rfqItems = sqliteTable("rfq_items", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  rfqId: integer("rfq_id").notNull(),
+  partNumber: text("part_number"),
+  brand: text("brand"),
+  description: text("description"),
+  qty: real("qty").notNull().default(1),
+  targetPrice: real("target_price"),
+  notes: text("notes"),
+});
+export const insertRfqItemSchema = createInsertSchema(rfqItems).omit({ id: true });
+export type InsertRfqItem = z.infer<typeof insertRfqItemSchema>;
+export type RfqItem = typeof rfqItems.$inferSelect;
+
+export const rfqVendors = sqliteTable("rfq_vendors", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  rfqId: integer("rfq_id").notNull(),
+  vendorId: integer("vendor_id").notNull(),
+  sentAt: integer("sent_at"),
+  status: text("status").notNull().default("pending"), // pending|responded|no_response
+  whatsappMessageId: text("whatsapp_message_id"),
+});
+export const insertRfqVendorSchema = createInsertSchema(rfqVendors).omit({ id: true });
+export type InsertRfqVendor = z.infer<typeof insertRfqVendorSchema>;
+export type RfqVendor = typeof rfqVendors.$inferSelect;
+
+export const rfqQuotes = sqliteTable("rfq_quotes", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  rfqId: integer("rfq_id").notNull(),
+  vendorId: integer("vendor_id").notNull(),
+  itemId: integer("item_id"),
+  rate: real("rate"),
+  moq: real("moq"),
+  leadTimeDays: integer("lead_time_days"),
+  photoUrl: text("photo_url"),
+  notes: text("notes"),
+  rawMessage: text("raw_message"),
+  extractedBy: text("extracted_by").notNull().default("manual"), // ai|manual
+  isWinner: integer("is_winner", { mode: "boolean" }).notNull().default(false),
+  receivedAt: integer("received_at").notNull().$defaultFn(() => Date.now()),
+});
+export const insertRfqQuoteSchema = createInsertSchema(rfqQuotes).omit({ id: true, receivedAt: true });
+export type InsertRfqQuote = z.infer<typeof insertRfqQuoteSchema>;
+export type RfqQuote = typeof rfqQuotes.$inferSelect;
+
+// -------- R5.1 VENDOR CONVERSATIONS --------
+export const vendorConversations = sqliteTable("vendor_conversations", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  vendorId: integer("vendor_id").notNull(),
+  rfqId: integer("rfq_id"),
+  direction: text("direction").notNull(), // in|out
+  channel: text("channel").notNull().default("whatsapp"),
+  messageText: text("message_text"),
+  mediaUrl: text("media_url"),
+  mediaType: text("media_type"),
+  whatsappMessageId: text("whatsapp_message_id"),
+  sentBy: text("sent_by"),
+  claudeExtracted: text("claude_extracted"), // json
+  createdAt: integer("created_at").notNull().$defaultFn(() => Date.now()),
+});
+export type VendorConversation = typeof vendorConversations.$inferSelect;
+
+// -------- R5.1 WAREHOUSES --------
+export const warehouses = sqliteTable("warehouses", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  code: text("code").notNull().unique(),
+  name: text("name").notNull(),
+  city: text("city"),
+  address: text("address"),
+  contactName: text("contact_name"),
+  contactPhone: text("contact_phone"),
+  isActive: integer("is_active", { mode: "boolean" }).notNull().default(true),
+  createdAt: integer("created_at").notNull().$defaultFn(() => Date.now()),
+});
+export const insertWarehouseSchema = createInsertSchema(warehouses).omit({ id: true, createdAt: true });
+export type InsertWarehouse = z.infer<typeof insertWarehouseSchema>;
+export type Warehouse = typeof warehouses.$inferSelect;
+
+export const warehouseTransfers = sqliteTable("warehouse_transfers", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  fromWarehouseId: integer("from_warehouse_id").notNull(),
+  toWarehouseId: integer("to_warehouse_id").notNull(),
+  partNumber: text("part_number"),
+  qty: real("qty").notNull().default(1),
+  status: text("status").notNull().default("pending"), // pending|dispatched|received
+  notes: text("notes"),
+  dispatchedAt: integer("dispatched_at"),
+  receivedAt: integer("received_at"),
+  createdAt: integer("created_at").notNull().$defaultFn(() => Date.now()),
+});
+export const insertWarehouseTransferSchema = createInsertSchema(warehouseTransfers).omit({ id: true, createdAt: true });
+export type InsertWarehouseTransfer = z.infer<typeof insertWarehouseTransferSchema>;
+export type WarehouseTransfer = typeof warehouseTransfers.$inferSelect;
+
+// -------- R5.6 RATE HISTORY --------
+export const rateHistory = sqliteTable("rate_history", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  partNumber: text("part_number"),
+  brand: text("brand"),
+  vendorId: integer("vendor_id"),
+  rate: real("rate"),
+  moq: real("moq"),
+  leadTimeDays: integer("lead_time_days"),
+  source: text("source").notNull(), // rfq_quote|po|manual
+  sourceId: integer("source_id"),
+  recordedAt: integer("recorded_at").notNull().$defaultFn(() => Date.now()),
+});
+export type RateHistory = typeof rateHistory.$inferSelect;
+
+// -------- R7 MARKETING CRM: LEADS --------
+export const leads = sqliteTable("leads", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  source: text("source").notNull().default("manual"), // instagram|facebook|google_ads|whatsapp|manual|import
+  name: text("name").notNull(),
+  phone: text("phone"),
+  whatsapp: text("whatsapp"),
+  email: text("email"),
+  city: text("city"),
+  state: text("state"),
+  requirement: text("requirement"),
+  stage: text("stage").notNull().default("new"), // new|contacted|qualified|quoted|won|lost
+  ownerId: integer("owner_id"),
+  score: integer("score").notNull().default(0), // 0-100
+  tags: text("tags"),
+  createdAt: integer("created_at").notNull().$defaultFn(() => Date.now()),
+  updatedAt: integer("updated_at").notNull().$defaultFn(() => Date.now()),
+  lastContactAt: integer("last_contact_at"),
+});
+export const insertLeadSchema = createInsertSchema(leads).omit({ id: true, createdAt: true, updatedAt: true });
+export type InsertLead = z.infer<typeof insertLeadSchema>;
+export type Lead = typeof leads.$inferSelect;
+
+export const leadActivities = sqliteTable("lead_activities", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  leadId: integer("lead_id").notNull(),
+  type: text("type").notNull(), // call|whatsapp|email|note|stage_change
+  detail: text("detail"),
+  createdBy: text("created_by"),
+  createdAt: integer("created_at").notNull().$defaultFn(() => Date.now()),
+});
+export const insertLeadActivitySchema = createInsertSchema(leadActivities).omit({ id: true, createdAt: true });
+export type InsertLeadActivity = z.infer<typeof insertLeadActivitySchema>;
+export type LeadActivity = typeof leadActivities.$inferSelect;
+
+export const targets = sqliteTable("targets", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  userId: integer("user_id"),
+  period: text("period").notNull(), // month|quarter
+  periodKey: text("period_key").notNull(), // 2026-06
+  metric: text("metric").notNull(), // quotations|po_value|leads_won
+  targetValue: real("target_value").notNull().default(0),
+  currentValue: real("current_value").notNull().default(0),
+  createdAt: integer("created_at").notNull().$defaultFn(() => Date.now()),
+  updatedAt: integer("updated_at").notNull().$defaultFn(() => Date.now()),
+});
+export const insertTargetSchema = createInsertSchema(targets).omit({ id: true, createdAt: true, updatedAt: true });
+export type InsertTarget = z.infer<typeof insertTargetSchema>;
+export type Target = typeof targets.$inferSelect;
+
+export const announcements = sqliteTable("announcements", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  title: text("title").notNull(),
+  body: text("body"),
+  audience: text("audience").notNull().default("all"), // all|patna|delhi|admin
+  createdBy: text("created_by"),
+  createdAt: integer("created_at").notNull().$defaultFn(() => Date.now()),
+  expiresAt: integer("expires_at"),
+});
+export const insertAnnouncementSchema = createInsertSchema(announcements).omit({ id: true, createdAt: true });
+export type InsertAnnouncement = z.infer<typeof insertAnnouncementSchema>;
+export type Announcement = typeof announcements.$inferSelect;
+
+export const taskItems = sqliteTable("task_items", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  title: text("title").notNull(),
+  description: text("description"),
+  assignedTo: integer("assigned_to"),
+  assignedBy: text("assigned_by"),
+  dueDate: integer("due_date"),
+  status: text("status").notNull().default("open"), // open|doing|done
+  priority: text("priority").notNull().default("normal"),
+  createdAt: integer("created_at").notNull().$defaultFn(() => Date.now()),
+  updatedAt: integer("updated_at").notNull().$defaultFn(() => Date.now()),
+});
+export const insertTaskItemSchema = createInsertSchema(taskItems).omit({ id: true, createdAt: true, updatedAt: true });
+export type InsertTaskItem = z.infer<typeof insertTaskItemSchema>;
+export type TaskItem = typeof taskItems.$inferSelect;
