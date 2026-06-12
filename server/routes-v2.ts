@@ -4587,6 +4587,8 @@ function registerR8Routes(
           qty: it.qty,
           unitPrice: it.unitPrice,
           lineTotal: it.lineTotal,
+          // R17: locked seller NAME only (when a vendor is locked). No vendor rate/cost.
+          vendorName: it.approvedQuoteId != null ? (it.vendorName ?? null) : null,
         })),
       }, company);
       const fname = `PO-${po.poNumber.replace(/\//g, "-")}-customer.pdf`;

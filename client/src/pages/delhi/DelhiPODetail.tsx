@@ -22,6 +22,7 @@ interface Line {
   qty: number;
   rate: number | null;
   line_total: number | null;
+  vendor_name: string | null;
   fulfil_status: string | null;
 }
 interface PO {
@@ -75,6 +76,7 @@ export default function DelhiPODetail() {
         qty: it.qty ?? 0,
         rate: it.rate ?? null,
         line_total: it.line_total ?? null,
+        vendor_name: it.vendor_name ?? it.vendorName ?? null,
         fulfil_status: it.fulfilStatus ?? it.fulfil_status ?? "pending",
       }));
       return {
@@ -232,6 +234,7 @@ export default function DelhiPODetail() {
                     checked={po.lines.length > 0 && po.lines.filter((l) => l.fulfil_status !== "dispatched").every((l) => selected.has(l.id)) && selected.size > 0} /></th>
                   <th className="px-3 py-3 font-semibold">Part</th>
                   <th className="px-3 py-3 font-semibold">Brand</th>
+                  <th className="px-3 py-3 font-semibold">Seller</th>
                   <th className="px-3 py-3 font-semibold text-right">Qty</th>
                   <th className="px-3 py-3 font-semibold text-right">Rate</th>
                   <th className="px-3 py-3 font-semibold text-right">Line Total</th>
@@ -248,6 +251,7 @@ export default function DelhiPODetail() {
                       </td>
                       <td className="px-3 py-3 font-mono font-semibold">{l.part_number || "—"}</td>
                       <td className="px-3 py-3">{l.brand || "—"}</td>
+                      <td className="px-3 py-3">{l.vendor_name || "—"}</td>
                       <td className="px-3 py-3 text-right">{l.qty}</td>
                       <td className="px-3 py-3 text-right">{fmtINR(l.rate)}</td>
                       <td className="px-3 py-3 text-right font-semibold">{fmtINR(l.line_total)}</td>

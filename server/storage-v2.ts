@@ -2181,10 +2181,11 @@ export async function listDelhiCustomers(): Promise<Array<{ id: number; name: st
   `).all() as any[];
 }
 
-// R14.1 — Customer-safe PO detail for Delhi. Surfaces customer name, customer PO#,
-// full ship-to (name/address/phone), per-line customer rate + line total, and the
-// line fulfilment state. Vendor name / vendor rate / purchase cost are NEVER
-// included — they are stripped here at the storage layer, not just hidden in the UI.
+// R14.1 / R17 — Customer-safe PO detail for Delhi. Surfaces customer name, customer PO#,
+// full ship-to (name/address/phone), per-line customer rate + line total, the line
+// fulfilment state, and (R17) the LOCKED SELLER NAME so Delhi knows who to pick up from.
+// Vendor RATE / purchase cost / margin are NEVER included — stripped here at the storage
+// layer, not just hidden in the UI. Vendor phone is intentionally omitted too (name only).
 export async function getDelhiPoDetail(id: number): Promise<any | undefined> {
   const po = db.select().from(purchaseOrdersV2).where(eq(purchaseOrdersV2.id, id)).get();
   if (!po) return undefined;
@@ -2199,6 +2200,9 @@ export async function getDelhiPoDetail(id: number): Promise<any | undefined> {
     qty: it.qty ?? 0,
     rate: it.unitPrice ?? null,            // customer rate (what WE charge)
     line_total: it.lineTotal ?? ((it.unitPrice ?? 0) * (it.qty ?? 0)),
+    // R17: locked seller NAME only — populated by approveQuote once a vendor is locked.
+    // vendorRate / purchaseCost deliberately excluded.
+    vendor_name: it.approvedQuoteId != null ? (it.vendorName ?? null) : null,
     fulfil_status: it.fulfilStatus ?? "pending",
     docket_number: it.docketNumber ?? null,
     carrier: it.carrier ?? null,
