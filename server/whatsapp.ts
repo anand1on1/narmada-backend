@@ -9,6 +9,24 @@ import { notificationLog } from "@shared/schema";
 const AISENSY_API_URL = "https://backend.aisensy.com/campaign/t1/api/v2";
 const AISENSY_API_KEY = process.env.AISENSY_API_KEY || "";
 
+// R19 — safe config snapshot for the admin diagnostic endpoint. Never returns the full key:
+// only whether it is set and its first 4 chars. campaignName/templateName are per-message
+// (the Fire Rate Request path uses "narmada_vendor_rate_batch"); reported here for verification.
+export function getAisensyDiagnostic() {
+  const key = AISENSY_API_KEY || "";
+  const keySet = !!key && key !== "skip";
+  return {
+    apiKeySet: keySet,
+    apiKeyPrefix: keySet ? `${key.slice(0, 4)}...` : null,
+    apiKeyEnvVar: "AISENSY_API_KEY",
+    // Fire Rate Request uses the batch template as both campaignName and templateName.
+    campaignName: "narmada_vendor_rate_batch",
+    templateName: "narmada_vendor_rate_batch",
+    baseUrl: AISENSY_API_URL,
+    freeTextFallbackUrl: "https://backend.aisensy.com/direct-apis/t1/messages",
+  };
+}
+
 // Structured log so Render logs show whether a WhatsApp send was attempted and its outcome.
 function logWa(template: string, phone: string, status: string) {
   console.log(`[whatsapp] template=${template} to=${phone} status=${status}`);
@@ -34,6 +52,14 @@ function interpretAisensyError(body: string, campaignName: string): string {
 // (success:false / warnings / queued) inside a 200, so callers must inspect it.
 async function postAisensy(payload: Record<string, unknown>, retries = 3): Promise<string> {
   const campaignName = String((payload as any).campaignName ?? "");
+  const destination = String((payload as any).destination ?? "");
+  // R19: fail fast (and loudly) when the API key is missing — previously this path fired
+  // a request with apiKey:"" and only surfaced as a generic non-2xx after 3 retries.
+  if (!AISENSY_API_KEY || AISENSY_API_KEY === "skip") {
+    console.error(`[R19 aisensy-out] FAILED template=${campaignName} phone=${destination} reason=AISENSY_API_KEY not configured`);
+    throw new Error("AISENSY_API_KEY not configured");
+  }
+  console.log(`[R19 aisensy-out] calling template=${campaignName} phone=${destination} params=${JSON.stringify((payload as any).templateParams ?? [])}`);
   let lastErr: Error | null = null;
   for (let attempt = 1; attempt <= retries; attempt++) {
     try {
@@ -46,12 +72,15 @@ async function postAisensy(payload: Record<string, unknown>, retries = 3): Promi
       });
       const body = await res.text().catch(() => "");
       if (!res.ok) {
+        console.error(`[R19 aisensy-out] FAILED template=${campaignName} phone=${destination} status=${res.status} body=${body.slice(0, 500)}`);
         const interpreted = interpretAisensyError(body, campaignName);
         throw new Error(interpreted);
       }
+      console.log(`[R19 aisensy-out] OK template=${campaignName} phone=${destination} body=${body.slice(0, 300)}`);
       return body; // success (may still contain a soft-failure payload)
     } catch (e: any) {
       lastErr = e;
+      console.error(`[R19 aisensy-out] attempt ${attempt}/${retries} error template=${campaignName} phone=${destination}: ${e?.message || e}`);
       if (attempt < retries) {
         await new Promise((r) => setTimeout(r, attempt * 1000));
       }

@@ -447,6 +447,15 @@ export function registerV2Routes(app: Express, ctx: V2Context) {
     } catch (e: any) { res.status(500).json({ error: e.message }); }
   });
 
+  // R19 — AiSensy config diagnostic (admin token). Verifies outbound config WITHOUT
+  // exposing the API key (only set/unset + first 4 chars). Use to debug Fire Rate Request.
+  app.get("/api/admin/aisensy-diagnostic", requireAuth, async (_req, res) => {
+    try {
+      const wa = require("./whatsapp") as typeof import("./whatsapp");
+      res.json(wa.getAisensyDiagnostic());
+    } catch (e: any) { res.status(500).json({ error: e.message }); }
+  });
+
   // Admin
   app.get("/api/admin/price-lists", requireAdminRole, async (_req, res) => {
     const lists = await v2.listPriceLists();
@@ -3416,6 +3425,7 @@ function registerR9Routes(
         byVendor = v2.collectPendingQuotesForFire(vendorIds, poIds);
       }
       let firedVendors = 0; let firedItems = 0;
+      console.log(`[R19 rfq-fire] handler called vendors=${byVendor.size} totalItems=${Array.from(byVendor.values()).reduce((s, it) => s + it.length, 0)}`);
       for (const [vendorId, items] of Array.from(byVendor.entries())) {
         if (!items.length) continue;
         const vendor = await v2.getVendor(vendorId);
@@ -3424,7 +3434,7 @@ function registerR9Routes(
           .map((it: any, i: number) => `${i + 1}. ${[it.part_number, it.brand, it.description].filter(Boolean).join(" ")} x${it.qty ?? 1} (PO ${it.po_number})`)
           .join("\n");
         firedVendors++; firedItems += items.length;
-        console.log(`[aisensy] batch RFQ to vendor ${vendorId} for ${items.length} items`);
+        console.log(`[R19 rfq-fire] vendor=${vendorId} name=${vendor?.name || "?"} phone=${phone || "MISSING"} items=${items.length}`);
         const vendorName = vendor?.name || items[0]?.vendor_name || "Seller";
         // Persist outbound copy immediately (so the chat shows it even if AiSensy is slow).
         const taxLine = "Please reply with rate per item. Mention if TAX INCLUSIVE (% included) or EXCLUSIVE (mention GST %).";
@@ -3434,9 +3444,12 @@ function registerR9Routes(
           setImmediate(() => {
             (async () => {
               const wa = require("./whatsapp") as typeof import("./whatsapp");
-              await wa.sendVendorRateBatch(phone, { vendorName, itemsText });
-            })().catch((err) => console.error("[aisensy] batch RFQ failed:", err));
+              const r = await wa.sendVendorRateBatch(phone, { vendorName, itemsText });
+              console.log(`[R19 rfq-fire] vendor=${vendorId} phone=${phone} send result status=${r?.status}`);
+            })().catch((err) => console.error(`[R19 rfq-fire] vendor=${vendorId} phone=${phone} batch RFQ failed:`, err?.message || err));
           });
+        } else {
+          console.error(`[R19 rfq-fire] vendor=${vendorId} has NO phone — skipped (no whatsapp/phone on vendor and no vendor_phone on item)`);
         }
       }
       res.json({ ok: true, firedVendors, firedItems });
