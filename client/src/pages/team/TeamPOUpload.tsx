@@ -32,7 +32,10 @@ type Step = 1 | 2 | 3 | 4;
 export default function TeamPOUpload() {
   const { token } = useTeamAuth();
   const { toast } = useToast();
-  const [, navigate] = useLocation();
+  const [location, navigate] = useLocation();
+
+  // R20.4: manual entry skips the Upload PDF step entirely.
+  const manualMode = location.includes("mode=manual") || (typeof window !== "undefined" && window.location.hash.includes("mode=manual"));
 
   const [step, setStep] = useState<Step>(1);
   const [companyId, setCompanyId] = useState<number | null>(null);
@@ -68,6 +71,7 @@ export default function TeamPOUpload() {
         body: form,
       });
       const j = await r.json();
+      console.log("[R20.5] parse response:", j);
       // 422 = extraction returned 0 items. The server still sends a blank editable
       // row so the operator can type lines manually — fall through and show step 3.
       if (!r.ok && r.status !== 422) {
@@ -78,7 +82,26 @@ export default function TeamPOUpload() {
         toast({ title: "No items auto-detected", description: "Please enter the line items manually.", variant: "destructive" });
       }
       setFileUrl(j.fileUrl || "");
-      const p: ParsedData = j.parsed || { customerName: null, customerPoNumber: null, poDate: null, shipTo: null, items: [] };
+      const raw = j.parsed || {};
+      // Defensive normalization: accept both the canonical camelCase contract and
+      // any snake_case keys that could slip through from upstream changes, so parsed
+      // values always populate the Review & Edit table (R20.5).
+      const rawItems: any[] = Array.isArray(raw.items) ? raw.items : [];
+      const items: ParsedItem[] = rawItems.map((it: any) => ({
+        partNumber: it.partNumber ?? it.part_number ?? null,
+        brand: it.brand ?? null,
+        description: it.description ?? it.desc ?? null,
+        qty: Number(it.qty ?? it.quantity ?? 1) || 1,
+        customerRate: it.customerRate ?? it.customer_rate ?? it.rate ?? null,
+      }));
+      const p: ParsedData = {
+        customerName: raw.customerName ?? raw.customer_name ?? null,
+        customerPoNumber: raw.customerPoNumber ?? raw.customer_po_number ?? null,
+        poDate: raw.poDate ?? raw.po_date ?? null,
+        shipTo: raw.shipTo ?? null,
+        items,
+      };
+      console.log(`[R20.5] normalized ${p.items.length} item(s)`);
       // Ensure at least one editable row exists
       if (!p.items || p.items.length === 0) {
         p.items = [{ partNumber: "", brand: "", description: "", qty: 1, customerRate: null }];
@@ -121,6 +144,18 @@ export default function TeamPOUpload() {
     } finally {
       setCreating(false);
     }
+  }
+
+  // R20.4: jump straight to Review & Edit with a single blank row, no PDF.
+  function startManualEntry() {
+    setParsed({
+      customerName: null,
+      customerPoNumber: null,
+      poDate: null,
+      shipTo: null,
+      items: [{ partNumber: "", brand: "", description: "", qty: 1, customerRate: null }],
+    });
+    setStep(3);
   }
 
   function setItem(idx: number, field: keyof ParsedItem, value: any) {
@@ -181,13 +216,21 @@ export default function TeamPOUpload() {
                 {customers.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
               </select>
             </label>
-            <div className="flex justify-end">
+            <div className="flex justify-between items-center gap-2">
               <button
-                onClick={() => setStep(2)}
+                type="button"
+                onClick={startManualEntry}
+                disabled={!customerId || companyId == null}
+                className="px-4 py-2 border rounded-lg text-sm font-semibold inline-flex items-center gap-2 disabled:opacity-50 hover:bg-muted"
+              >
+                <Plus className="w-4 h-4" /> Enter Manually (No PDF)
+              </button>
+              <button
+                onClick={() => (manualMode ? startManualEntry() : setStep(2))}
                 disabled={!customerId || companyId == null}
                 className="px-6 py-2 bg-accent text-accent-foreground rounded-lg text-sm font-semibold inline-flex items-center gap-2 disabled:opacity-50"
               >
-                Next <ChevronRight className="w-4 h-4" />
+                {manualMode ? "Enter Items" : "Next"} <ChevronRight className="w-4 h-4" />
               </button>
             </div>
           </div>
@@ -340,7 +383,7 @@ export default function TeamPOUpload() {
             </div>
 
             <div className="flex justify-between">
-              <button onClick={() => setStep(2)} className="px-4 py-2 border rounded-lg text-sm inline-flex items-center gap-2">
+              <button onClick={() => setStep(manualMode ? 1 : 2)} className="px-4 py-2 border rounded-lg text-sm inline-flex items-center gap-2">
                 <ChevronLeft className="w-4 h-4" /> Back
               </button>
               <button

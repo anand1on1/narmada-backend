@@ -1069,6 +1069,8 @@ export async function listQuotations(opts: {
   limit?: number;
 } = {}): Promise<{ rows: Quotation[]; total: number }> {
   const conds: any[] = [];
+  // R20.1: exclude soft-deleted quotations.
+  conds.push(sql`deleted_at IS NULL`);
   if (opts.status) conds.push(eq(quotations.status, opts.status));
   if (opts.customerId) conds.push(eq(quotations.customerId, opts.customerId));
   if (opts.createdByUserId) conds.push(eq(quotations.createdByUserId, opts.createdByUserId));
@@ -1192,6 +1194,11 @@ export async function updateQuotationItems(quotationId: number, items: Omit<Inse
 export async function deleteQuotation(id: number): Promise<void> {
   db.delete(quotationItems).where(eq(quotationItems.quotationId, id)).run();
   db.delete(quotations).where(eq(quotations.id, id)).run();
+}
+// R20.1: soft delete — keep the row but hide it from LIST endpoints.
+export async function softDeleteQuotation(id: number): Promise<void> {
+  const now = Date.now();
+  sqlite.prepare(`UPDATE quotations SET deleted_at = ?, updated_at = ? WHERE id = ?`).run(now, now, id);
 }
 export async function duplicateQuotation(id: number): Promise<{ quotation: Quotation; items: QuotationItem[] } | undefined> {
   const result = await getQuotationWithItems(id);

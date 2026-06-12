@@ -542,3 +542,22 @@ export function runR18Migrations() {
 
   console.log("[migrations] R18 tables/columns ensured");
 }
+
+// -------- R20 additive migrations --------
+// Quotation soft-delete: a deleted_at timestamp so LIST endpoints can filter out
+// removed quotations without losing the row. Additive only — no drops/renames.
+export function runR20Migrations() {
+  const stmts: Array<{ desc: string; sql: string }> = [
+    { desc: "quotations.deleted_at", sql: `ALTER TABLE quotations ADD COLUMN deleted_at INTEGER` },
+  ];
+  for (const { desc, sql } of stmts) {
+    console.log(`[migrations] R20: ${desc}`);
+    try {
+      sqlite.exec(sql);
+    } catch (err: any) {
+      console.log(`[migrations] R20: skipped ${desc} —`, err?.message || err);
+    }
+  }
+
+  console.log("[migrations] R20 tables/columns ensured");
+}

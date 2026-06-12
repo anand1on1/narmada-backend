@@ -1,9 +1,11 @@
 import { useState, useMemo } from "react";
 import { TeamLayout } from "./TeamLayout";
 import { teamFetch, useTeamAuth } from "@/lib/team-auth";
-import { Plus, Search, ChevronLeft, ChevronRight, X, Calendar } from "lucide-react";
-import { useQuery } from "@tanstack/react-query";
+import { Plus, Search, ChevronLeft, ChevronRight, X, Calendar, Trash2 } from "lucide-react";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link } from "wouter";
+import { useToast } from "@/hooks/use-toast";
+import { AddVendorModal } from "@/components/team/AddVendorModal";
 
 interface Quotation {
   id: number;
@@ -30,6 +32,7 @@ const STATUS_BADGE: Record<string, string> = {
   draft: "bg-amber-500/15 text-amber-700",
   sent: "bg-blue-500/15 text-blue-700",
   accepted: "bg-emerald-500/15 text-emerald-700",
+  processed: "bg-green-600/15 text-green-700",
   finalized: "bg-blue-500/15 text-blue-700",
   expired: "bg-muted text-muted-foreground",
   cancelled: "bg-red-500/15 text-red-700",
@@ -40,6 +43,7 @@ const STATUS_TABS = [
   { value: "draft", label: "Draft" },
   { value: "sent", label: "Sent / Finalized" },
   { value: "accepted", label: "Accepted" },
+  { value: "processed", label: "Processed" },
   { value: "expired", label: "Expired" },
 ];
 
@@ -69,6 +73,10 @@ const PRESETS: { label: string; range: () => { from: string; to: string } }[] = 
 
 export default function TeamQuotations() {
   const { token } = useTeamAuth();
+  const { toast } = useToast();
+  const queryClient = useQueryClient();
+  const [showAddVendor, setShowAddVendor] = useState(false);
+  const [deletingId, setDeletingId] = useState<number | null>(null);
   const [status, setStatus] = useState("");
   const [search, setSearch] = useState("");
   const [searchActive, setSearchActive] = useState(""); // committed search term
@@ -140,6 +148,25 @@ export default function TeamQuotations() {
 
   const hasActiveFilter = !!(status || searchActive || customerId || fromDate || toDate);
 
+  async function deleteQuotation(q: Quotation) {
+    if (!window.confirm(`Delete quotation ${q.quoteNo}? This removes it from the list.`)) return;
+    setDeletingId(q.id);
+    try {
+      const r = await teamFetch(token, `/api/team/quotations/${q.id}`, { method: "DELETE" });
+      if (!r.ok) {
+        const j = await r.json().catch(() => ({}));
+        toast({ title: "Delete failed", description: j.error || "Could not delete quotation", variant: "destructive" });
+        return;
+      }
+      toast({ title: "Quotation deleted", description: `${q.quoteNo} removed.` });
+      queryClient.invalidateQueries({ queryKey: ["team-quotations"] });
+    } catch (e: any) {
+      toast({ title: "Error", description: e.message, variant: "destructive" });
+    } finally {
+      setDeletingId(null);
+    }
+  }
+
   return (
     <TeamLayout title="Quotations">
       {/* Filter card */}
@@ -184,8 +211,15 @@ export default function TeamQuotations() {
               className="border rounded-lg px-3 py-2 bg-background text-sm w-full" />
           </div>
 
-          {/* New quote button */}
-          <div className="md:col-span-2 flex justify-end">
+          {/* New quote + Add Vendor buttons */}
+          <div className="md:col-span-2 flex justify-end gap-2">
+            <button
+              type="button"
+              onClick={() => setShowAddVendor(true)}
+              className="px-4 py-2 border rounded-lg font-semibold text-sm inline-flex items-center gap-2 whitespace-nowrap hover:bg-muted"
+            >
+              <Plus className="w-4 h-4" /> Add Vendor
+            </button>
             <Link href="/team/quotations/new">
               <a className="px-4 py-2 bg-accent text-accent-foreground rounded-lg font-semibold text-sm inline-flex items-center gap-2 whitespace-nowrap">
                 <Plus className="w-4 h-4" /> New Quotation
@@ -289,9 +323,20 @@ export default function TeamQuotations() {
                     {new Date(q.createdAt).toLocaleDateString("en-IN")}
                   </td>
                   <td className="px-4 py-3 text-right">
-                    <Link href={`/team/quotations/${q.id}`}>
-                      <a className="px-3 py-1.5 border rounded-lg text-xs hover:bg-muted">Edit</a>
-                    </Link>
+                    <div className="inline-flex items-center gap-2">
+                      <Link href={`/team/quotations/${q.id}`}>
+                        <a className="px-3 py-1.5 border rounded-lg text-xs hover:bg-muted">Edit</a>
+                      </Link>
+                      <button
+                        type="button"
+                        onClick={() => deleteQuotation(q)}
+                        disabled={deletingId === q.id}
+                        title="Delete quotation"
+                        className="px-2 py-1.5 border rounded-lg text-xs text-red-600 hover:bg-red-50 disabled:opacity-50 inline-flex items-center"
+                      >
+                        <Trash2 className="w-3.5 h-3.5" />
+                      </button>
+                    </div>
                   </td>
                 </tr>
               ))}
@@ -312,6 +357,17 @@ export default function TeamQuotations() {
             <ChevronRight className="w-4 h-4" />
           </button>
         </div>
+      )}
+
+      {showAddVendor && (
+        <AddVendorModal
+          token={token}
+          onClose={() => setShowAddVendor(false)}
+          onCreated={() => {
+            queryClient.invalidateQueries({ queryKey: ["team-vendors"] });
+            toast({ title: "Vendor created" });
+          }}
+        />
       )}
     </TeamLayout>
   );

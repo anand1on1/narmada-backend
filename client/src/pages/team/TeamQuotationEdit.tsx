@@ -5,7 +5,6 @@ import { teamFetch, useTeamAuth } from "@/lib/team-auth";
 import { useToast } from "@/hooks/use-toast";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { Trash2, Plus, RefreshCw, Download, Send, Search, Sparkles, Truck, Building2, User2, ShoppingCart } from "lucide-react";
-import { CompanyPicker } from "@/components/common/CompanyPicker";
 
 function currencySym(c: string | undefined | null): string {
   if (c === "USD") return "$";
@@ -71,6 +70,7 @@ const STATUS_BADGE: Record<string, string> = {
   draft: "bg-amber-500/15 text-amber-700",
   sent: "bg-blue-500/15 text-blue-700",
   accepted: "bg-emerald-500/15 text-emerald-700",
+  processed: "bg-green-600/15 text-green-700",
   expired: "bg-muted text-muted-foreground",
 };
 
@@ -98,7 +98,6 @@ export default function TeamQuotationEdit() {
   // Round 3: editable header
   const [customerId, setCustomerId] = useState<number | null>(null);
   const [quotingCompanyId, setQuotingCompanyId] = useState<number | null>(null);
-  const [companyId, setCompanyId] = useState<number | null>(null);
 
   // Round 3: shipping
   const [shipOpen, setShipOpen] = useState(false);
@@ -160,7 +159,6 @@ export default function TeamQuotationEdit() {
       setValidUntil(quotation.validUntil?.split("T")[0] || "");
       setCustomerId(quotation.customerId ?? null);
       setQuotingCompanyId((quotation as any).quotingCompanyId ?? null);
-      setCompanyId((quotation as any).companyId ?? null);
       setShippingName(quotation.shippingName || "");
       setShippingAddress(quotation.shippingAddress || "");
       setShippingCity(quotation.shippingCity || "");
@@ -323,7 +321,7 @@ export default function TeamQuotationEdit() {
       const r = await teamFetch(token, `/api/team/quotations/${id}`, {
         method: "PATCH",
         body: JSON.stringify({
-          customerId, quotingCompanyId, companyId,
+          customerId, quotingCompanyId,
           notes, terms, validUntil: validUntil || null,
           shippingName: shippingName.trim() || null,
           shippingAddress: shippingAddress.trim() || null,
@@ -392,6 +390,36 @@ export default function TeamQuotationEdit() {
     onError: (e: Error) => toast({ title: "Convert failed", description: e.message, variant: "destructive" }),
   });
 
+  // R20.1: soft-delete this quotation.
+  const deleteMut = useMutation({
+    mutationFn: async () => {
+      const r = await teamFetch(token, `/api/team/quotations/${id}`, { method: "DELETE" });
+      if (!r.ok) { const e = await r.json().catch(() => ({})); throw new Error(e.error || "Delete failed"); }
+      return r.json();
+    },
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["team-quotations"] });
+      toast({ title: "Quotation deleted" });
+      navigate("/team/quotations");
+    },
+    onError: (e: Error) => toast({ title: "Error", description: e.message, variant: "destructive" }),
+  });
+
+  // R20.1: mark Processed — only valid from Accepted.
+  const markProcessedMut = useMutation({
+    mutationFn: async () => {
+      const r = await teamFetch(token, `/api/team/quotations/${id}/mark-processed`, { method: "POST" });
+      if (!r.ok) { const e = await r.json().catch(() => ({})); throw new Error(e.error || "Could not mark processed"); }
+      return r.json();
+    },
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["team-quotation", id] });
+      qc.invalidateQueries({ queryKey: ["team-quotations"] });
+      toast({ title: "Marked Processed" });
+    },
+    onError: (e: Error) => toast({ title: "Error", description: e.message, variant: "destructive" }),
+  });
+
   if (isLoading) {
     return (
       <TeamLayout title="Quotation">
@@ -447,16 +475,22 @@ export default function TeamQuotationEdit() {
           className="px-4 py-2 bg-accent text-accent-foreground rounded-lg text-sm font-semibold inline-flex items-center gap-2 disabled:opacity-50">
           <Send className="w-4 h-4" /> {finalizeMut.isPending ? "Sending…" : "Save & Share"}
         </button>
+        <button onClick={() => markProcessedMut.mutate()}
+          disabled={markProcessedMut.isPending || quotation.status !== "accepted"}
+          title={quotation.status !== "accepted" ? "Only an Accepted quotation can be marked Processed" : "Mark this quotation Processed"}
+          className="px-4 py-2 bg-green-600 text-white rounded-lg text-sm font-semibold inline-flex items-center gap-2 disabled:opacity-50">
+          {markProcessedMut.isPending ? <RefreshCw className="w-4 h-4 animate-spin" /> : null}
+          Mark Processed
+        </button>
+        <button onClick={() => { if (confirm(`Delete quotation ${quotation.quoteNo}?`)) deleteMut.mutate(); }}
+          disabled={deleteMut.isPending}
+          className="px-4 py-2 border border-red-300 text-red-600 rounded-lg text-sm font-semibold inline-flex items-center gap-2 hover:bg-red-50 disabled:opacity-50">
+          <Trash2 className="w-4 h-4" /> Delete
+        </button>
       </div>
 
-      {/* Editable header cards: ordered company + customer + quoting company */}
+      {/* R20.2: editable header cards — customer + quoting company (Ordered Company removed) */}
       <div className="grid sm:grid-cols-2 gap-3 mb-6">
-        <div className="border rounded-xl p-3 bg-card shadow-sm">
-          <div className="text-xs font-bold uppercase tracking-wider text-muted-foreground mb-1 flex items-center gap-1">
-            <Building2 className="w-3 h-3" /> Ordered Company
-          </div>
-          <CompanyPicker value={companyId} onChange={(v) => { setCompanyId(v); setDirty(true); }} required />
-        </div>
         <div className="border rounded-xl p-3 bg-card shadow-sm">
           <div className="text-xs font-bold uppercase tracking-wider text-muted-foreground mb-1 flex items-center gap-1">
             <User2 className="w-3 h-3" /> Customer

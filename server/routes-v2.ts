@@ -2056,6 +2056,35 @@ export function registerV2Routes(app: Express, ctx: V2Context) {
     } catch (e: any) { res.status(400).json({ error: e.message }); }
   });
 
+  // R20.1: soft-delete a quotation (admin + data team). Keeps the row, hides from lists.
+  app.delete("/api/team/quotations/:id", requireDataTeam, async (req, res) => {
+    try {
+      const id = parseInt(req.params.id as string, 10);
+      const existing = await v2.getQuotation(id);
+      if (!existing) return res.status(404).json({ error: "Quotation not found" });
+      await v2.softDeleteQuotation(id);
+      const teamUser = (req as any).teamUser;
+      await v2.writeAuditLog({ actorType: "data_team", actorId: String(teamUser.id), action: "delete_quotation", entityType: "quotation", entityId: String(id) });
+      res.json({ ok: true });
+    } catch (e: any) { res.status(400).json({ error: e.message }); }
+  });
+
+  // R20.1: mark a quotation Processed — only valid from the Accepted state.
+  app.post("/api/team/quotations/:id/mark-processed", requireDataTeam, async (req, res) => {
+    try {
+      const id = parseInt(req.params.id as string, 10);
+      const existing = await v2.getQuotation(id);
+      if (!existing) return res.status(404).json({ error: "Quotation not found" });
+      if (existing.status !== "accepted") {
+        return res.status(409).json({ error: "Only an Accepted quotation can be marked Processed." });
+      }
+      const updated = await v2.updateQuotation(id, { status: "processed" } as any);
+      const teamUser = (req as any).teamUser;
+      await v2.writeAuditLog({ actorType: "data_team", actorId: String(teamUser.id), action: "mark_processed_quotation", entityType: "quotation", entityId: String(id) });
+      res.json({ quotation: updated });
+    } catch (e: any) { res.status(400).json({ error: e.message }); }
+  });
+
   app.post("/api/team/quotations/:id/finalize", requireDataTeam, async (req, res) => {
     try {
       const id = parseInt(req.params.id as string, 10);

@@ -8,7 +8,6 @@ import {
   ChevronRight, ChevronLeft, Plus, Trash2, Upload, Search, Check,
   FileText, RefreshCw, Sparkles, Truck, X, Loader2,
 } from "lucide-react";
-import { CompanyPicker } from "@/components/common/CompanyPicker";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -82,9 +81,17 @@ export default function TeamQuotationNew() {
   const [step, setStep] = useState(0);
   const [showNewCompany, setShowNewCompany] = useState(false);
   const [selectedCompany, setSelectedCompany] = useState<QuotingCompany | null>(null);
-  const [companyId, setCompanyId] = useState<number | null>(null);
   const [selectedCustomer, setSelectedCustomer] = useState<Customer | null>(null);
   const [customerSearch, setCustomerSearch] = useState("");
+  // R20.3: quick-add customer modal
+  const [showNewCustomer, setShowNewCustomer] = useState(false);
+  const [ncName, setNcName] = useState("");
+  const [ncGstin, setNcGstin] = useState("");
+  const [ncPhone, setNcPhone] = useState("");
+  const [ncEmail, setNcEmail] = useState("");
+  const [ncAddress, setNcAddress] = useState("");
+  const [ncNotes, setNcNotes] = useState("");
+  const [ncSaving, setNcSaving] = useState(false);
   const [importMode, setImportMode] = useState<"manual" | "import">("manual");
   const [items, setItems] = useState<LineItem[]>([emptyLine()]);
   const [currency, setCurrency] = useState("INR");
@@ -385,10 +392,40 @@ export default function TeamQuotationNew() {
 
   // ─── Save ─────────────────────────────────────────────────────────────────
 
+  // R20.3: create a customer from the wizard and auto-select it (no page refresh).
+  async function createCustomer() {
+    if (!ncName.trim()) return;
+    setNcSaving(true);
+    try {
+      const r = await teamFetch(token, "/api/team/customers", {
+        method: "POST",
+        body: JSON.stringify({
+          name: ncName.trim(),
+          gstNumber: ncGstin.trim() || undefined,
+          phone: ncPhone.trim() || undefined,
+          email: ncEmail.trim() || undefined,
+          address: ncAddress.trim() || undefined,
+          notes: ncNotes.trim() || undefined,
+        }),
+      });
+      const j = await r.json().catch(() => ({}));
+      if (!r.ok) { toast({ title: "Failed to add customer", description: j.error || "Could not create customer", variant: "destructive" }); return; }
+      const created: Customer = j.customer || j;
+      toast({ title: "Customer added", description: `${created.name} selected.` });
+      qc.invalidateQueries({ queryKey: ["customers-team"] });
+      setSelectedCustomer(created);
+      setShowNewCustomer(false);
+      setNcName(""); setNcGstin(""); setNcPhone(""); setNcEmail(""); setNcAddress(""); setNcNotes("");
+    } catch (e: any) {
+      toast({ title: "Error", description: e.message, variant: "destructive" });
+    } finally {
+      setNcSaving(false);
+    }
+  }
+
   function buildPayload() {
     return {
       quotingCompanyId: selectedCompany!.id,
-      companyId,
       customerId: selectedCustomer!.id,
       currency,
       fxRate: fxRate || 1,
@@ -458,12 +495,6 @@ export default function TeamQuotationNew() {
         {/* Step 0: Pick company */}
         {step === 0 && (
           <div>
-            <label className="text-xs font-semibold block mb-4">Ordered Company *
-              <div className="mt-1 max-w-sm">
-                <CompanyPicker value={companyId} onChange={setCompanyId} required />
-              </div>
-              <span className="text-xs font-normal text-muted-foreground">Which of our companies this quotation is sent from.</span>
-            </label>
             <div className="flex items-center justify-between mb-4">
               <h2 className="font-semibold text-lg">Select Quoting Company</h2>
               <button onClick={() => setShowNewCompany(true)}
@@ -489,7 +520,7 @@ export default function TeamQuotationNew() {
               </div>
             )}
             <div className="mt-6 flex justify-end">
-              <button onClick={() => setStep(1)} disabled={!selectedCompany || companyId == null}
+              <button onClick={() => setStep(1)} disabled={!selectedCompany}
                 className="px-6 py-2.5 bg-accent text-accent-foreground rounded-lg font-semibold disabled:opacity-50 inline-flex items-center gap-2">
                 Next <ChevronRight className="w-4 h-4" />
               </button>
@@ -501,11 +532,17 @@ export default function TeamQuotationNew() {
         {step === 1 && (
           <div>
             <h2 className="font-semibold text-lg mb-4">Select Customer</h2>
-            <div className="relative mb-3">
-              <Search className="w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground" />
-              <input value={customerSearch} onChange={(e) => setCustomerSearch(e.target.value)}
-                placeholder="Search customers…"
-                className="w-full border rounded-lg pl-9 pr-3 py-2 bg-background text-sm" />
+            <div className="flex items-center gap-2 mb-3">
+              <div className="relative flex-1">
+                <Search className="w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground" />
+                <input value={customerSearch} onChange={(e) => setCustomerSearch(e.target.value)}
+                  placeholder="Search customers…"
+                  className="w-full border rounded-lg pl-9 pr-3 py-2 bg-background text-sm" />
+              </div>
+              <button type="button" onClick={() => setShowNewCustomer(true)}
+                className="px-3 py-2 border rounded-lg text-sm font-semibold inline-flex items-center gap-1.5 hover:bg-muted whitespace-nowrap">
+                <Plus className="w-4 h-4" /> New Customer
+              </button>
             </div>
             <div className="border rounded-xl divide-y max-h-80 overflow-y-auto bg-card shadow-sm">
               {customers.length === 0 ? (
@@ -844,6 +881,48 @@ export default function TeamQuotationNew() {
             toast({ title: "Quoting company created", description: c.name });
           }}
         />
+      )}
+
+      {/* R20.3: quick-add Customer modal */}
+      {showNewCustomer && (
+        <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50 p-4" onClick={() => setShowNewCustomer(false)}>
+          <div className="bg-card rounded-xl p-6 w-full max-w-md max-h-[90vh] overflow-y-auto shadow-xl" onClick={(e) => e.stopPropagation()}>
+            <h2 className="font-bold text-lg mb-4">New Customer</h2>
+            <div className="space-y-3">
+              <label className="text-xs font-semibold block">Name *
+                <input value={ncName} onChange={(e) => setNcName(e.target.value)} autoFocus
+                  className="mt-1 w-full border rounded-lg px-3 py-2 bg-background text-sm font-normal" placeholder="Customer name" />
+              </label>
+              <label className="text-xs font-semibold block">GSTIN
+                <input value={ncGstin} onChange={(e) => setNcGstin(e.target.value)}
+                  className="mt-1 w-full border rounded-lg px-3 py-2 bg-background text-sm font-normal" placeholder="22AAAAA0000A1Z5" />
+              </label>
+              <label className="text-xs font-semibold block">Phone
+                <input value={ncPhone} onChange={(e) => setNcPhone(e.target.value)}
+                  className="mt-1 w-full border rounded-lg px-3 py-2 bg-background text-sm font-normal" placeholder="9876543210" />
+              </label>
+              <label className="text-xs font-semibold block">Email
+                <input value={ncEmail} onChange={(e) => setNcEmail(e.target.value)}
+                  className="mt-1 w-full border rounded-lg px-3 py-2 bg-background text-sm font-normal" placeholder="name@company.com" />
+              </label>
+              <label className="text-xs font-semibold block">Billing Address
+                <textarea value={ncAddress} onChange={(e) => setNcAddress(e.target.value)} rows={3}
+                  className="mt-1 w-full border rounded-lg px-3 py-2 bg-background text-sm font-normal" placeholder="Billing address" />
+              </label>
+              <label className="text-xs font-semibold block">Notes
+                <textarea value={ncNotes} onChange={(e) => setNcNotes(e.target.value)} rows={2}
+                  className="mt-1 w-full border rounded-lg px-3 py-2 bg-background text-sm font-normal" placeholder="Optional notes" />
+              </label>
+            </div>
+            <div className="flex justify-end gap-2 mt-5">
+              <button onClick={() => setShowNewCustomer(false)} className="px-4 py-2 border rounded-lg text-sm">Cancel</button>
+              <button onClick={createCustomer} disabled={!ncName.trim() || ncSaving}
+                className="px-4 py-2 bg-primary text-primary-foreground rounded-lg text-sm font-semibold disabled:opacity-50 hover:opacity-90 inline-flex items-center gap-2">
+                {ncSaving ? <><Loader2 className="w-4 h-4 animate-spin" /> Saving…</> : "Create Customer"}
+              </button>
+            </div>
+          </div>
+        </div>
       )}
     </TeamLayout>
   );

@@ -12,6 +12,7 @@ import {
   Plus, Loader2, Check, X, MessageSquare, Pencil, Send, ChevronRight,
   Globe, Sparkles, Lock, Phone, ExternalLink, ArrowLeft, Square, CheckSquare,
 } from "lucide-react";
+import { AddVendorModal } from "@/components/team/AddVendorModal";
 
 export interface Quote {
   id: number;
@@ -70,6 +71,9 @@ export function LineQuotesPanel({
   const [chatVendor, setChatVendor] = useState<{ vendorId: number; name: string } | null>(null);
   const [showSearch, setShowSearch] = useState(false);
   const [confirmFor, setConfirmFor] = useState<Quote | null>(null);
+  // R20.6: create a brand-new vendor inline, then auto-assign it to this line.
+  const [showNewVendor, setShowNewVendor] = useState(false);
+  const queryClient = useQueryClient();
 
   const { data: quotes = [], refetch } = useQuery<Quote[]>({
     queryKey: ["line-quotes", itemId],
@@ -108,6 +112,23 @@ export function LineQuotesPanel({
     },
     onError: (e: any) => toast({ title: "Error", description: e.message, variant: "destructive" }),
   });
+
+  // R20.6: assign a newly-created vendor (by id) directly to this line item.
+  async function assignNewVendor(vendorId: number) {
+    try {
+      const r = await teamFetch(token, `/api/team/po-items/${itemId}/quotes`, {
+        method: "POST",
+        body: JSON.stringify({ vendor_id: vendorId }),
+      });
+      if (!r.ok) { const j = await r.json().catch(() => ({})); throw new Error(j.error || "Failed to assign vendor"); }
+      queryClient.invalidateQueries({ queryKey: ["team-vendors"] });
+      resetAdd();
+      refetch(); onChanged();
+      toast({ title: "Vendor created & added to line" });
+    } catch (e: any) {
+      toast({ title: "Error", description: e.message, variant: "destructive" });
+    }
+  }
 
   const removeQuote = useMutation({
     mutationFn: async (quoteId: number) => {
@@ -218,10 +239,14 @@ export function LineQuotesPanel({
               <label className="text-xs font-semibold block">Seller</label>
               <select
                 value={pickVendorId}
-                onChange={(e) => setPickVendorId(e.target.value)}
+                onChange={(e) => {
+                  if (e.target.value === "__new__") { setShowNewVendor(true); return; }
+                  setPickVendorId(e.target.value);
+                }}
                 className="w-full border rounded-lg px-2 py-1.5 text-xs bg-background"
               >
                 <option value="">— Select seller —</option>
+                <option value="__new__">+ Create New Vendor…</option>
                 {vendors.map((v) => <option key={v.id} value={v.id}>{v.name}</option>)}
               </select>
               {pickedVendor && (
@@ -294,6 +319,14 @@ export function LineQuotesPanel({
           token={token}
           onClose={() => setManualFor(null)}
           onSaved={() => { setManualFor(null); refetch(); onChanged(); }}
+        />
+      )}
+
+      {showNewVendor && (
+        <AddVendorModal
+          token={token}
+          onClose={() => setShowNewVendor(false)}
+          onCreated={(v) => { if (v?.id) assignNewVendor(v.id); }}
         />
       )}
 
