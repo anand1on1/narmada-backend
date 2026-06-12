@@ -2,16 +2,18 @@ import { TeamLayout } from "./TeamLayout";
 import { teamFetch, useTeamAuth } from "@/lib/team-auth";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { Link } from "wouter";
-import { FileText, Trash2, Loader2 } from "lucide-react";
+import { FileText, Trash2, Loader2, Eye } from "lucide-react";
 import { useState } from "react";
 import { useToast } from "@/hooks/use-toast";
+import { DeviationSummaryModal } from "@/components/team/DeviationSummaryModal";
 
 interface PO {
   id: number; poNumber: string; customerId: number | null; customerName: string | null;
   companyName: string | null; companyLogoUrl: string | null;
   status: string; total: number | null; custTotal: number; costTotal: number; createdAt: number;
   dispatchCarrier: string | null; dispatchBundles: number; dispatchDockets: string[];
-  dispatches: Array<{ docket_number: string | null; docket_slip_url: string | null; carrier: string | null; bundles: number | null }>;
+  dispatches: Array<{ docket_number: string | null; docket_slip_url: string | null; carrier: string | null; bundles: number | null; is_internal_transfer?: number }>;
+  hasDeviation?: boolean; deviationCount?: number; hasInternalTransfer?: boolean;
 }
 const STATUS_COLOR: Record<string, string> = {
   draft: "bg-slate-500/15 text-slate-700", open: "bg-blue-500/15 text-blue-700",
@@ -26,6 +28,7 @@ export default function TeamPOs() {
   const { toast } = useToast();
   const qc = useQueryClient();
   const [confirmDel, setConfirmDel] = useState<PO | null>(null);
+  const [deviationPo, setDeviationPo] = useState<PO | null>(null);
 
   const { data: pos = [] } = useQuery<PO[]>({
     queryKey: ["team-pos"],
@@ -58,6 +61,7 @@ export default function TeamPOs() {
               <th className="px-3 py-3 font-semibold">Company</th>
               <th className="px-3 py-3 font-semibold text-right">Total</th>
               <th className="px-3 py-3 font-semibold">Status</th>
+              <th className="px-3 py-3 font-semibold">Deviation</th>
               <th className="px-3 py-3 font-semibold">Carrier</th>
               <th className="px-3 py-3 font-semibold text-right">Bundles</th>
               <th className="px-3 py-3 font-semibold">Docket #</th>
@@ -78,7 +82,19 @@ export default function TeamPOs() {
                 </td>
                 <td className="px-3 py-3 text-right">{`₹${(p.custTotal ?? p.total ?? 0).toLocaleString("en-IN")}`}</td>
                 <td className="px-3 py-3"><span className={`text-xs font-bold rounded px-2 py-1 ${STATUS_COLOR[p.status] || "bg-muted"}`}>{p.status}</span></td>
-                <td className="px-3 py-3 text-xs">{p.dispatchCarrier || <span className="text-muted-foreground">—</span>}</td>
+                <td className="px-3 py-3 text-xs">
+                  {p.hasDeviation ? (
+                    <span className="inline-flex items-center gap-1.5 font-bold text-orange-700">
+                      Y
+                      <button onClick={() => setDeviationPo(p)} title="View deviation summary"
+                        className="text-orange-600 hover:text-orange-800"><Eye className="w-4 h-4" /></button>
+                    </span>
+                  ) : <span className="text-muted-foreground font-semibold">N</span>}
+                </td>
+                <td className="px-3 py-3 text-xs">
+                  {p.hasInternalTransfer && <span className="inline-block text-[10px] font-bold rounded px-1.5 py-0.5 bg-indigo-500/15 text-indigo-700 mr-1">Internal Transfer</span>}
+                  {p.dispatchCarrier || (!p.hasInternalTransfer && <span className="text-muted-foreground">—</span>)}
+                </td>
                 <td className="px-3 py-3 text-right text-xs">{p.dispatchBundles > 0 ? p.dispatchBundles : <span className="text-muted-foreground">—</span>}</td>
                 <td className="px-3 py-3 text-xs">
                   {p.dispatches && p.dispatches.length > 0 ? (
@@ -111,6 +127,10 @@ export default function TeamPOs() {
           </table>
         )}
       </div>
+
+      {deviationPo && (
+        <DeviationSummaryModal token={token} poId={deviationPo.id} poNumber={deviationPo.poNumber} onClose={() => setDeviationPo(null)} />
+      )}
 
       {confirmDel && (
         <div className="fixed inset-0 z-50 bg-black/40 flex items-center justify-center p-4" onClick={() => setConfirmDel(null)}>

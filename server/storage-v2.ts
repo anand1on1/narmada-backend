@@ -1701,7 +1701,12 @@ export async function listPurchaseOrdersV2WithTotals(opts: { status?: string; cu
     const customer = po.customerId ? db.select().from(customers).where(eq(customers.id, po.customerId)).get() : undefined;
     const company = po.companyId ? db.select().from(companies).where(eq(companies.id, po.companyId)).get() : undefined;
     const { custTotal, costTotal } = computePoTotals(items);
-    return { ...po, customerName: customer?.name ?? null, companyName: company?.name ?? null, companyLogoUrl: company?.logoUrl ?? null, custTotal, costTotal };
+    // R21.2 — surface qty-deviation rollup for the Patna PO list "Deviation" column.
+    const deviationCount = items.filter((it: any) => Number((it as any).isDeviated) === 1).length;
+    return {
+      ...po, customerName: customer?.name ?? null, companyName: company?.name ?? null, companyLogoUrl: company?.logoUrl ?? null, custTotal, costTotal,
+      hasDeviation: deviationCount > 0, deviationCount,
+    };
   });
 }
 // R13: has this quotation already been converted to a PO? Used to lock the quotation's
@@ -2123,18 +2128,33 @@ export function rollupPoLineStages(items: Array<{ fulfilStatus?: string | null }
 // Delhi PO list with rolled-up line state + optional filters (from/to created_at,
 // customer_id, status buckets). status is a comma list of buckets to keep.
 export async function listDelhiPosWithRollup(opts: {
-  from?: number; to?: number; customerId?: number; statuses?: string[];
+  from?: number; to?: number; customerId?: number; statuses?: string[]; q?: string;
 } = {}): Promise<any[]> {
   const conds: string[] = ["po.status NOT IN ('draft','cancelled')"];
   const params: any[] = [];
+  // R21.5 — `from`/`to` arrive as IST day-boundary ms already converted to UTC by the
+  // route handler. `to` is an EXCLUSIVE upper bound (start of the day AFTER the range).
   if (opts.from != null) { conds.push("po.created_at >= ?"); params.push(opts.from); }
-  if (opts.to != null) { conds.push("po.created_at <= ?"); params.push(opts.to); }
+  if (opts.to != null) { conds.push("po.created_at < ?"); params.push(opts.to); }
   if (opts.customerId != null) { conds.push("po.customer_id = ?"); params.push(opts.customerId); }
+  // R21.4 — free-text search across PO#, customer name, customer PO#, and part numbers.
+  const q = (opts.q || "").trim();
+  if (q) {
+    const like = `%${q.toLowerCase()}%`;
+    conds.push(`(
+      lower(po.po_number) LIKE ?
+      OR lower(COALESCE(c.name,'')) LIKE ?
+      OR lower(COALESCE(po.customer_po_number,'')) LIKE ?
+      OR EXISTS (SELECT 1 FROM po_items pi WHERE pi.po_id = po.id AND lower(COALESCE(pi.part_number,'')) LIKE ?)
+    )`);
+    params.push(like, like, like, like);
+  }
   const where = conds.length ? `WHERE ${conds.join(" AND ")}` : "";
   const rows = sqlite.prepare(`
     SELECT po.id, po.po_number, po.status, po.created_at, po.po_date,
            po.customer_po_number, po.is_fully_dispatched, po.dispatch_round,
            po.ship_to_name, po.ship_to_address, po.ship_to_phone,
+           po.urgency, po.delivery_deadline AS deliveryDeadline,
            c.name AS customer_name, c.id AS customer_id
     FROM purchase_orders_v2 po
     LEFT JOIN customers c ON c.id = po.customer_id
@@ -2142,15 +2162,18 @@ export async function listDelhiPosWithRollup(opts: {
     ORDER BY po.created_at DESC
   `).all(...params) as any[];
   const keep = opts.statuses && opts.statuses.length ? new Set(opts.statuses) : null;
+  const TWO_DAYS = 2 * 24 * 60 * 60 * 1000;
   const out: any[] = [];
   for (const po of rows) {
     // Only customer-safe columns are read here (qty + customer unit_price). Vendor
     // name / vendor rate / purchase cost are intentionally never selected.
-    const items = sqlite.prepare(`SELECT fulfil_status AS fulfilStatus, qty, unit_price AS unitPrice, line_total AS lineTotal FROM po_items WHERE po_id = ?`).all(po.id) as any[];
+    const items = sqlite.prepare(`SELECT fulfil_status AS fulfilStatus, qty, unit_price AS unitPrice, line_total AS lineTotal, is_deviated AS isDeviated FROM po_items WHERE po_id = ?`).all(po.id) as any[];
     if (items.length === 0) continue;
     const roll = rollupPoLineStages(items);
     const totalQty = items.reduce((s, it) => s + (Number(it.qty) || 0), 0);
     const custTotal = items.reduce((s, it) => s + (it.lineTotal != null ? Number(it.lineTotal) : (Number(it.unitPrice) || 0) * (Number(it.qty) || 0)), 0);
+    const hasPendingPickup = items.some((it) => (it.fulfilStatus || "pending") === "pending");
+    const pickupPending = hasPendingPickup && po.created_at != null && Date.now() - Number(po.created_at) > TWO_DAYS;
     const row = {
       id: po.id,
       po_number: po.po_number,
@@ -2170,6 +2193,11 @@ export async function listDelhiPosWithRollup(opts: {
       total_qty: totalQty,
       cust_total: custTotal,
       is_fully_dispatched: po.is_fully_dispatched,
+      // R21.7 list-row enhancements.
+      urgency: po.urgency ?? null,
+      delivery_deadline: po.deliveryDeadline ?? null,
+      pickup_pending_days: pickupPending ? Math.floor((Date.now() - Number(po.created_at)) / (24 * 60 * 60 * 1000)) : null,
+      has_deviation: items.some((it) => Number(it.isDeviated) === 1),
     };
     if (keep && !keep.has(roll.bucket)) continue;
     out.push(row);
@@ -2214,8 +2242,18 @@ export async function getDelhiPoDetail(id: number): Promise<any | undefined> {
     docket_number: it.docketNumber ?? null,
     carrier: it.carrier ?? null,
     bundles: it.bundles ?? null,
+    // R21.2 / R21.7.4 — deviation + Patna line note (customer-safe; no vendor cost leaked).
+    original_qty: (it as any).originalQty ?? null,
+    is_deviated: Number((it as any).isDeviated) === 1 ? 1 : 0,
+    deviation_reason: (it as any).deviationReason ?? null,
+    patna_note: (it as any).patnaNote ?? null,
   }));
   const custTotal = safeItems.reduce((s, it) => s + (Number(it.line_total) || 0), 0);
+  // R21.7.6 — pickup-pending: any line still 'pending' AND PO created >2 days ago.
+  const TWO_DAYS = 2 * 24 * 60 * 60 * 1000;
+  const createdAt = po.createdAt ?? null;
+  const hasPendingPickup = safeItems.some((it) => (it.fulfil_status || "pending") === "pending");
+  const pickupPending = hasPendingPickup && createdAt != null && Date.now() - Number(createdAt) > TWO_DAYS;
   return {
     id: po.id,
     po_number: po.poNumber,
@@ -2223,6 +2261,7 @@ export async function getDelhiPoDetail(id: number): Promise<any | undefined> {
     customer_name: customer?.name ?? null,
     customer_po_number: po.customerPoNumber ?? null,
     po_date: po.poDate ?? po.createdAt ?? null,
+    created_at: createdAt,
     status: po.status,
     ship_to_name: po.shipToName ?? null,
     ship_to_address: po.shipToAddress ?? null,
@@ -2231,6 +2270,11 @@ export async function getDelhiPoDetail(id: number): Promise<any | undefined> {
     counts: roll.counts,
     packed_count: roll.packedCount,
     cust_total: custTotal,
+    // R21.7 — customer urgency + delivery deadline (set by Patna).
+    urgency: (po as any).urgency ?? null,
+    delivery_deadline: (po as any).deliveryDeadline ?? null,
+    pickup_pending_days: pickupPending && createdAt != null ? Math.floor((Date.now() - Number(createdAt)) / (24 * 60 * 60 * 1000)) : null,
+    has_deviation: safeItems.some((it) => it.is_deviated === 1),
     items: safeItems,
   };
 }
@@ -2339,6 +2383,59 @@ export async function markPoItemPacked(id: number): Promise<PoItem | undefined> 
   return db.update(poItems).set(patch).where(eq(poItems.id, id)).returning().get();
 }
 
+// R21.2 — Delhi edits a line's qty. Captures the original qty once (first deviation),
+// flags is_deviated when the new qty differs from the original, recomputes line_total,
+// and stamps who/when/why. Returns the updated item.
+export async function deviatePoItemQty(
+  id: number,
+  newQty: number,
+  reason: string | null,
+  userId?: number | null,
+): Promise<PoItem | undefined> {
+  const item = db.select().from(poItems).where(eq(poItems.id, id)).get();
+  if (!item) return undefined;
+  const now = Date.now();
+  // Original qty is whatever Patna placed — capture the first time we deviate.
+  const original = (item as any).originalQty != null ? Number((item as any).originalQty) : Number(item.qty ?? 0);
+  const rate = item.unitPrice != null ? Number(item.unitPrice) : 0;
+  const deviated = Number(newQty) !== original;
+  const patch: any = {
+    qty: newQty,
+    originalQty: original,
+    lineTotal: rate * Number(newQty),
+    isDeviated: deviated ? 1 : 0,
+    deviationReason: deviated ? (reason ?? null) : null,
+    deviationAt: now,
+    deviatedByUserId: userId ?? null,
+  };
+  return db.update(poItems).set(patch).where(eq(poItems.id, id)).returning().get();
+}
+
+// R21.2 — Deviation summary for a PO: every line whose qty differs from the original.
+export function getPoDeviations(poId: number): Array<{
+  id: number; part_number: string | null; original_qty: number | null; new_qty: number;
+  diff: number; reason: string | null; deviation_at: number | null; by: string | null;
+}> {
+  const rows = sqlite.prepare(
+    `SELECT pi.id, pi.part_number AS partNumber, pi.qty, pi.original_qty AS originalQty,
+            pi.deviation_reason AS reason, pi.deviation_at AS deviationAt,
+            u.name AS byName, u.username AS byUsername
+       FROM po_items pi
+       LEFT JOIN data_team_users u ON u.id = pi.deviated_by_user_id
+      WHERE pi.po_id = ? AND pi.is_deviated = 1`,
+  ).all(poId) as any[];
+  return rows.map((r) => ({
+    id: r.id,
+    part_number: r.partNumber ?? null,
+    original_qty: r.originalQty != null ? Number(r.originalQty) : null,
+    new_qty: Number(r.qty ?? 0),
+    diff: Number(r.qty ?? 0) - (r.originalQty != null ? Number(r.originalQty) : 0),
+    reason: r.reason ?? null,
+    deviation_at: r.deviationAt ?? null,
+    by: r.byName ?? r.byUsername ?? null,
+  }));
+}
+
 export async function bulkMarkPoItemsPacked(ids: number[]): Promise<number> {
   let n = 0;
   for (const id of ids) {
@@ -2354,6 +2451,7 @@ export async function bulkMarkPoItemsPacked(ids: number[]): Promise<number> {
 // updates the PO status (fulfilled if all lines now dispatched, else partial).
 export async function dispatchPackedLines(poId: number, data: {
   carrier: string; docketNumber: string; bundles: number; docketSlipUrl: string; submittedBy?: string;
+  isInternalTransfer?: boolean;
 }): Promise<{ dispatched_count: number; remaining_count: number; dispatchId: number }> {
   const po = db.select().from(purchaseOrdersV2).where(eq(purchaseOrdersV2.id, poId)).get();
   if (!po) throw new Error("PO not found");
@@ -2382,14 +2480,15 @@ export async function dispatchPackedLines(poId: number, data: {
   const dispatch = db.insert(dispatches).values({
     poId,
     roundNo: round,
-    docketNo: data.docketNumber,
-    courierName: data.carrier,
-    bundles: data.bundles,
+    docketNo: data.docketNumber || null,
+    courierName: data.carrier || null,
+    bundles: data.bundles || null,
     dispatchDate: now,
-    docketPhotoUrl: data.docketSlipUrl,
+    docketPhotoUrl: data.docketSlipUrl || null,
     submittedBy: data.submittedBy || null,
     submittedAt: now,
     createdAt: now,
+    isInternalTransfer: data.isInternalTransfer ? 1 : 0,
   } as any).returning().get();
 
   const after = db.select().from(poItems).where(eq(poItems.poId, poId)).all();
@@ -2459,26 +2558,29 @@ export function forcePurgePoByNumber(poNumber: string): { purged: number; poNumb
 
 // Per-PO dispatch rollup for the data-team PO list. Returns a map poId -> aggregate.
 export async function getDispatchSummaryForPOs(poIds: number[]): Promise<Record<number, {
-  dispatches: Array<{ docket_number: string | null; docket_slip_url: string | null; carrier: string | null; bundles: number | null; dispatched_at: number | null }>;
-  carrier: string | null; bundles: number; docketNumbers: string[];
+  dispatches: Array<{ docket_number: string | null; docket_slip_url: string | null; carrier: string | null; bundles: number | null; dispatched_at: number | null; is_internal_transfer: number }>;
+  carrier: string | null; bundles: number; docketNumbers: string[]; hasInternalTransfer: boolean;
 }>> {
   const out: Record<number, any> = {};
   if (poIds.length === 0) return out;
   const placeholders = poIds.map(() => "?").join(",");
   const rows = sqlite.prepare(
-    `SELECT po_id, docket_no, courier_name, bundles, docket_photo_url, dispatch_date
+    `SELECT po_id, docket_no, courier_name, bundles, docket_photo_url, dispatch_date, is_internal_transfer
      FROM dispatches WHERE po_id IN (${placeholders}) ORDER BY po_id, dispatch_date DESC, id DESC`
   ).all(...poIds) as any[];
   for (const r of rows) {
-    if (!out[r.po_id]) out[r.po_id] = { dispatches: [], carrier: null, bundles: 0, docketNumbers: [] };
+    if (!out[r.po_id]) out[r.po_id] = { dispatches: [], carrier: null, bundles: 0, docketNumbers: [], hasInternalTransfer: false };
     const bucket = out[r.po_id];
+    const internal = Number(r.is_internal_transfer) === 1;
     bucket.dispatches.push({
       docket_number: r.docket_no, docket_slip_url: r.docket_photo_url,
       carrier: r.courier_name, bundles: r.bundles, dispatched_at: r.dispatch_date,
+      is_internal_transfer: internal ? 1 : 0,
     });
     if (!bucket.carrier && r.courier_name) bucket.carrier = r.courier_name; // most recent
     bucket.bundles += Number(r.bundles) || 0;
     if (r.docket_no) bucket.docketNumbers.push(r.docket_no);
+    if (internal) bucket.hasInternalTransfer = true;
   }
   return out;
 }

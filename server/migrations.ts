@@ -561,3 +561,31 @@ export function runR20Migrations() {
 
   console.log("[migrations] R20 tables/columns ensured");
 }
+
+// -------- R21 additive migrations --------
+// Delhi rebuild: qty-deviation tracking on po_items, customer urgency + delivery
+// deadline on purchase_orders_v2, per-line Patna notes, and an inter-branch
+// transfer flag on dispatches. Additive only — no drops/renames.
+export function runR21Migrations() {
+  const stmts: Array<{ desc: string; sql: string }> = [
+    { desc: "po_items.original_qty", sql: `ALTER TABLE po_items ADD COLUMN original_qty REAL` },
+    { desc: "po_items.deviation_reason", sql: `ALTER TABLE po_items ADD COLUMN deviation_reason TEXT` },
+    { desc: "po_items.deviation_at", sql: `ALTER TABLE po_items ADD COLUMN deviation_at INTEGER` },
+    { desc: "po_items.deviated_by_user_id", sql: `ALTER TABLE po_items ADD COLUMN deviated_by_user_id INTEGER` },
+    { desc: "po_items.is_deviated", sql: `ALTER TABLE po_items ADD COLUMN is_deviated INTEGER DEFAULT 0` },
+    { desc: "po_items.patna_note", sql: `ALTER TABLE po_items ADD COLUMN patna_note TEXT` },
+    { desc: "purchase_orders_v2.urgency", sql: `ALTER TABLE purchase_orders_v2 ADD COLUMN urgency TEXT` },
+    { desc: "purchase_orders_v2.delivery_deadline", sql: `ALTER TABLE purchase_orders_v2 ADD COLUMN delivery_deadline INTEGER` },
+    { desc: "dispatches.is_internal_transfer", sql: `ALTER TABLE dispatches ADD COLUMN is_internal_transfer INTEGER DEFAULT 0` },
+  ];
+  for (const { desc, sql } of stmts) {
+    console.log(`[migrations] R21: ${desc}`);
+    try {
+      sqlite.exec(sql);
+    } catch (err: any) {
+      console.log(`[migrations] R21: skipped ${desc} —`, err?.message || err);
+    }
+  }
+
+  console.log("[migrations] R21 tables/columns ensured");
+}

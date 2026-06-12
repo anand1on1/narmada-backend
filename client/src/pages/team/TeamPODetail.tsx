@@ -12,9 +12,10 @@ import { useToast } from "@/hooks/use-toast";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { useParams } from "wouter";
 import { apiUrl } from "@/lib/queryClient";
-import { Download, Check, Loader2, Package, Pencil, Calendar, Send, Flame, CheckCircle2, X, FileDown } from "lucide-react";
+import { Download, Check, Loader2, Package, Pencil, Calendar, Send, Flame, CheckCircle2, X, FileDown, AlertTriangle } from "lucide-react";
 import { LineQuotesPanel, FireRateRequestModal } from "./R9VendorQuotes";
 import { CompanyPicker } from "@/components/common/CompanyPicker";
+import { DeviationSummaryModal } from "@/components/team/DeviationSummaryModal";
 
 interface PoItem {
   id: number;
@@ -30,6 +31,9 @@ interface PoItem {
   approvedQuoteId: number | null;
   fulfilStatus: string | null;
   shippedStatus: string | null;
+  patnaNote: string | null;
+  isDeviated?: number;
+  originalQty?: number | null;
 }
 
 interface Quote { status: string; }
@@ -51,16 +55,147 @@ interface PO {
   custTotal: number;
   costTotal: number;
   shipToName: string | null;
+  urgency: string | null;
+  deliveryDeadline: number | null;
   items: PoItem[];
-  dispatches?: Array<{ docket_number: string | null; docket_slip_url: string | null; carrier: string | null; bundles: number | null; dispatched_at: number | null }>;
+  dispatches?: Array<{ docket_number: string | null; docket_slip_url: string | null; carrier: string | null; bundles: number | null; dispatched_at: number | null; is_internal_transfer?: number }>;
   dispatchCarrier?: string | null;
   dispatchBundles?: number;
   dispatchDockets?: string[];
+  hasInternalTransfer?: boolean;
 }
 
 interface Vendor { id: number; name: string; phone?: string | null; whatsapp?: string | null; }
 
 const STATUSES = ["draft", "open", "partial", "fulfilled", "cancelled"];
+
+const URGENCY: Record<string, { label: string; cls: string }> = {
+  urgent: { label: "Urgent", cls: "bg-red-500/15 text-red-700" },
+  normal: { label: "Normal", cls: "bg-slate-500/15 text-slate-700" },
+  standby: { label: "Standby", cls: "bg-blue-500/15 text-blue-700" },
+};
+
+// ─── R21.7 — urgency + delivery deadline editor (Patna sets these) ───
+function UrgencyDeadlineEditor({
+  poId, urgency, deadline, readOnly, token, onSaved,
+}: {
+  poId: number; urgency: string | null; deadline: number | null;
+  readOnly: boolean; token: string | null; onSaved: () => void;
+}) {
+  const { toast } = useToast();
+  const [editing, setEditing] = useState(false);
+  const [u, setU] = useState<string>(urgency || "normal");
+  const [d, setD] = useState<string>(deadline ? new Date(deadline).toISOString().slice(0, 10) : "");
+  const [saving, setSaving] = useState(false);
+
+  async function save() {
+    setSaving(true);
+    try {
+      const r = await teamFetch(token, `/api/team/purchase-orders/${poId}`, {
+        method: "PATCH",
+        body: JSON.stringify({ urgency: u, deliveryDeadline: d ? new Date(d + "T00:00:00").getTime() : null }),
+      });
+      if (!r.ok) { const j = await r.json().catch(() => ({})); throw new Error(j.error || "Failed"); }
+      toast({ title: "Updated" });
+      setEditing(false);
+      onSaved();
+    } catch (e: any) {
+      toast({ title: "Error", description: e.message, variant: "destructive" });
+    } finally { setSaving(false); }
+  }
+
+  if (editing && !readOnly) {
+    return (
+      <span className="inline-flex items-center gap-1">
+        <select value={u} onChange={(e) => setU(e.target.value)} className="border rounded-lg px-2 py-1.5 text-sm bg-background">
+          <option value="urgent">Urgent</option>
+          <option value="normal">Normal</option>
+          <option value="standby">Standby</option>
+        </select>
+        <input type="date" value={d} onChange={(e) => setD(e.target.value)} className="border rounded-lg px-2 py-1.5 text-sm bg-background" title="Delivery deadline" />
+        <button onClick={save} disabled={saving}
+          className="px-2 py-1.5 bg-accent text-accent-foreground rounded-lg text-xs font-semibold inline-flex items-center gap-1 disabled:opacity-50">
+          {saving ? <Loader2 className="w-3 h-3 animate-spin" /> : <Check className="w-3 h-3" />}
+        </button>
+        <button onClick={() => { setU(urgency || "normal"); setD(deadline ? new Date(deadline).toISOString().slice(0, 10) : ""); setEditing(false); }}
+          className="px-2 py-1.5 border rounded-lg text-xs">Cancel</button>
+      </span>
+    );
+  }
+
+  const um = URGENCY[urgency || "normal"] || URGENCY.normal;
+  return (
+    <span className="inline-flex items-center gap-1.5">
+      <span className={`text-xs font-bold rounded px-2 py-1 ${um.cls}`}>{um.label}</span>
+      <span className="border rounded-lg px-3 py-1.5 text-sm bg-background inline-flex items-center gap-1.5">
+        <span className="text-muted-foreground">Deadline:</span>
+        <span className="font-semibold">{deadline ? new Date(deadline).toLocaleDateString("en-IN") : "—"}</span>
+        {!readOnly && (
+          <button onClick={() => setEditing(true)} className="text-muted-foreground hover:text-foreground" title="Set urgency / deadline">
+            <Pencil className="w-3 h-3" />
+          </button>
+        )}
+      </span>
+    </span>
+  );
+}
+
+// ─── R21.7 — per-line Patna note editor ───
+function PatnaNoteEditor({
+  itemId, note, token, onSaved,
+}: {
+  itemId: number; note: string | null; token: string | null; onSaved: () => void;
+}) {
+  const { toast } = useToast();
+  const [editing, setEditing] = useState(false);
+  const [val, setVal] = useState(note || "");
+  const [saving, setSaving] = useState(false);
+
+  async function save() {
+    setSaving(true);
+    try {
+      const r = await teamFetch(token, `/api/team/po-items/${itemId}/note`, {
+        method: "PATCH",
+        body: JSON.stringify({ patnaNote: val.trim() || null }),
+      });
+      if (!r.ok) { const j = await r.json().catch(() => ({})); throw new Error(j.error || "Failed"); }
+      toast({ title: "Note saved" });
+      setEditing(false);
+      onSaved();
+    } catch (e: any) {
+      toast({ title: "Error", description: e.message, variant: "destructive" });
+    } finally { setSaving(false); }
+  }
+
+  if (editing) {
+    return (
+      <div className="mt-1 flex items-start gap-1.5">
+        <textarea value={val} onChange={(e) => setVal(e.target.value)} rows={2} placeholder="Note for Delhi team…"
+          className="flex-1 border rounded-lg px-2 py-1 text-xs bg-background" />
+        <button onClick={save} disabled={saving}
+          className="px-2 py-1 bg-accent text-accent-foreground rounded-lg text-xs font-semibold inline-flex items-center gap-1 disabled:opacity-50">
+          {saving ? <Loader2 className="w-3 h-3 animate-spin" /> : <Check className="w-3 h-3" />}
+        </button>
+        <button onClick={() => { setVal(note || ""); setEditing(false); }} className="px-2 py-1 border rounded-lg text-xs">Cancel</button>
+      </div>
+    );
+  }
+
+  return (
+    <div className="mt-1">
+      {note ? (
+        <span className="inline-flex items-center gap-1.5 text-xs text-muted-foreground italic">
+          Note: {note}
+          <button onClick={() => setEditing(true)} className="hover:text-foreground not-italic"><Pencil className="w-3 h-3" /></button>
+        </span>
+      ) : (
+        <button onClick={() => setEditing(true)} className="text-xs text-muted-foreground hover:text-foreground inline-flex items-center gap-1">
+          <Pencil className="w-3 h-3" /> Add note
+        </button>
+      )}
+    </div>
+  );
+}
 
 // ─── PO date editor ───
 function PoDateEditor({
@@ -191,6 +326,7 @@ export default function TeamPODetail() {
   const [showFireRfq, setShowFireRfq] = useState(false);
   const [showProcess, setShowProcess] = useState(false);
   const [processing, setProcessing] = useState(false);
+  const [showDeviations, setShowDeviations] = useState(false);
 
   const { data: po, isLoading } = useQuery<PO>({
     queryKey: ["team-po", poId],
@@ -345,6 +481,18 @@ export default function TeamPODetail() {
 
   return (
     <TeamLayout title={`PO ${po.poNumber}`}>
+      {/* R21.2 — deviation banner (shown when any line was changed by Delhi) */}
+      {po.items.some((it) => Number(it.isDeviated) === 1) && (
+        <div className="bg-orange-50 border border-orange-200 rounded-lg px-4 py-3 mb-3 flex items-center justify-between gap-3">
+          <div className="flex items-center gap-2 text-sm text-orange-800">
+            <AlertTriangle className="w-4 h-4 text-orange-600" />
+            <span className="font-semibold">This PO has deviations from original delivery</span>
+          </div>
+          <button onClick={() => setShowDeviations(true)}
+            className="px-3 py-1.5 rounded-lg text-xs font-semibold border border-orange-300 text-orange-700 hover:bg-orange-100">View Summary</button>
+        </div>
+      )}
+
       {/* Header row */}
       <div className="flex flex-wrap items-center justify-between gap-3 mb-3">
         <div className="flex items-center gap-3">
@@ -362,6 +510,14 @@ export default function TeamPODetail() {
             poId={poId}
             companyName={po.company?.name ?? null}
             companyId={po.companyId ?? po.company?.id ?? null}
+            readOnly={alreadyClosed}
+            token={token}
+            onSaved={refresh}
+          />
+          <UrgencyDeadlineEditor
+            poId={poId}
+            urgency={po.urgency ?? null}
+            deadline={po.deliveryDeadline ?? null}
             readOnly={alreadyClosed}
             token={token}
             onSaved={refresh}
@@ -450,6 +606,12 @@ export default function TeamPODetail() {
       {/* R12 — dispatch info filled by Delhi (Status / Carrier / Bundles / Docket#) */}
       {po.dispatches && po.dispatches.length > 0 && (
         <div className="mb-4 bg-card border rounded-xl p-3 text-sm flex flex-wrap items-center gap-x-8 gap-y-2">
+          {po.hasInternalTransfer && (
+            <div>
+              <div className="text-xs text-muted-foreground">Mode</div>
+              <span className="inline-block text-[10px] font-bold rounded px-1.5 py-0.5 bg-indigo-500/15 text-indigo-700">Internal Transfer</span>
+            </div>
+          )}
           <div>
             <div className="text-xs text-muted-foreground">Carrier</div>
             <div className="font-semibold">{po.dispatchCarrier || "—"}</div>
@@ -478,8 +640,14 @@ export default function TeamPODetail() {
           <div key={item.id} className="bg-card border rounded-xl p-4 shadow-sm">
             <div className="flex flex-wrap items-start gap-3 mb-3">
               <div className="flex-1 min-w-0">
-                <div className="font-semibold text-sm font-mono">{item.partNumber || "—"}</div>
+                <div className="font-semibold text-sm font-mono flex items-center gap-2">
+                  {item.partNumber || "—"}
+                  {Number(item.isDeviated) === 1 && (
+                    <span className="text-[10px] font-bold rounded px-1.5 py-0.5 bg-orange-500/15 text-orange-700">Deviated</span>
+                  )}
+                </div>
                 {item.description && <div className="text-xs text-muted-foreground mt-0.5">{item.description}</div>}
+                <PatnaNoteEditor itemId={item.id} note={item.patnaNote} token={token} onSaved={refresh} />
               </div>
               <div className="flex gap-4 text-xs text-right">
                 <div>
@@ -529,6 +697,10 @@ export default function TeamPODetail() {
           </div>
         )}
       </div>
+
+      {showDeviations && (
+        <DeviationSummaryModal token={token} poId={poId} poNumber={po.poNumber} onClose={() => setShowDeviations(false)} />
+      )}
 
       {showFireRfq && (
         <FireRateRequestModal token={token} defaultPoId={poId} onClose={() => { setShowFireRfq(false); refresh(); }} />

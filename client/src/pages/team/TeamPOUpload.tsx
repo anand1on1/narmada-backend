@@ -18,12 +18,15 @@ interface ParsedItem {
   description: string | null;
   qty: number;
   customerRate: number | null;
+  patnaNote: string | null;
 }
 interface ParsedData {
   customerName: string | null;
   customerPoNumber: string | null;
   poDate: string | null;
   shipTo: { name: string | null; address: string | null; phone: string | null } | null;
+  urgency: string;
+  deliveryDeadline: string | null;
   items: ParsedItem[];
 }
 
@@ -42,7 +45,7 @@ export default function TeamPOUpload() {
   const [customerId, setCustomerId] = useState<string>("");
   const [file, setFile] = useState<File | null>(null);
   const [fileUrl, setFileUrl] = useState<string>("");
-  const [parsed, setParsed] = useState<ParsedData>({ customerName: null, customerPoNumber: null, poDate: null, shipTo: null, items: [] });
+  const [parsed, setParsed] = useState<ParsedData>({ customerName: null, customerPoNumber: null, poDate: null, shipTo: null, urgency: "normal", deliveryDeadline: null, items: [] });
   const [uploading, setUploading] = useState(false);
   const [creating, setCreating] = useState(false);
   const fileRef = useRef<HTMLInputElement>(null);
@@ -93,18 +96,21 @@ export default function TeamPOUpload() {
         description: it.description ?? it.desc ?? null,
         qty: Number(it.qty ?? it.quantity ?? 1) || 1,
         customerRate: it.customerRate ?? it.customer_rate ?? it.rate ?? null,
+        patnaNote: it.patnaNote ?? it.patna_note ?? null,
       }));
       const p: ParsedData = {
         customerName: raw.customerName ?? raw.customer_name ?? null,
         customerPoNumber: raw.customerPoNumber ?? raw.customer_po_number ?? null,
         poDate: raw.poDate ?? raw.po_date ?? null,
         shipTo: raw.shipTo ?? null,
+        urgency: "normal",
+        deliveryDeadline: null,
         items,
       };
       console.log(`[R20.5] normalized ${p.items.length} item(s)`);
       // Ensure at least one editable row exists
       if (!p.items || p.items.length === 0) {
-        p.items = [{ partNumber: "", brand: "", description: "", qty: 1, customerRate: null }];
+        p.items = [{ partNumber: "", brand: "", description: "", qty: 1, customerRate: null, patnaNote: null }];
       }
       setParsed(p);
       setStep(3);
@@ -131,6 +137,8 @@ export default function TeamPOUpload() {
           ship_to_name: parsed.shipTo?.name || "",
           ship_to_address: parsed.shipTo?.address || "",
           ship_to_phone: parsed.shipTo?.phone || "",
+          urgency: parsed.urgency,
+          delivery_deadline: parsed.deliveryDeadline || null,
           items: parsed.items,
         }),
       });
@@ -153,7 +161,9 @@ export default function TeamPOUpload() {
       customerPoNumber: null,
       poDate: null,
       shipTo: null,
-      items: [{ partNumber: "", brand: "", description: "", qty: 1, customerRate: null }],
+      urgency: "normal",
+      deliveryDeadline: null,
+      items: [{ partNumber: "", brand: "", description: "", qty: 1, customerRate: null, patnaNote: null }],
     });
     setStep(3);
   }
@@ -165,7 +175,7 @@ export default function TeamPOUpload() {
   }
 
   function addItem() {
-    setParsed({ ...parsed, items: [...parsed.items, { partNumber: "", brand: "", description: "", qty: 1, customerRate: null }] });
+    setParsed({ ...parsed, items: [...parsed.items, { partNumber: "", brand: "", description: "", qty: 1, customerRate: null, patnaNote: null }] });
   }
 
   function removeItem(idx: number) {
@@ -309,6 +319,25 @@ export default function TeamPOUpload() {
                   placeholder="YYYY-MM-DD"
                 />
               </label>
+              <label className="text-xs font-semibold block">Urgency
+                <select
+                  value={parsed.urgency}
+                  onChange={(e) => setParsed({ ...parsed, urgency: e.target.value })}
+                  className="mt-1 w-full border rounded-lg px-3 py-2 bg-background text-sm font-normal"
+                >
+                  <option value="urgent">Urgent</option>
+                  <option value="normal">Normal</option>
+                  <option value="standby">Standby</option>
+                </select>
+              </label>
+              <label className="text-xs font-semibold block">Delivery Deadline
+                <input
+                  type="date"
+                  value={parsed.deliveryDeadline || ""}
+                  onChange={(e) => setParsed({ ...parsed, deliveryDeadline: e.target.value || null })}
+                  className="mt-1 w-full border rounded-lg px-3 py-2 bg-background text-sm font-normal"
+                />
+              </label>
               <label className="text-xs font-semibold block">Ship To Name
                 <input
                   value={parsed.shipTo?.name || ""}
@@ -343,12 +372,13 @@ export default function TeamPOUpload() {
                       <th className="px-2 py-2 text-left">Description</th>
                       <th className="px-2 py-2 text-right w-16">Qty</th>
                       <th className="px-2 py-2 text-right w-24">Cust. Rate ₹</th>
+                      <th className="px-2 py-2 text-left">Note (Delhi)</th>
                       <th className="w-6"></th>
                     </tr>
                   </thead>
                   <tbody className="divide-y">
                     {parsed.items.length === 0 && (
-                      <tr><td colSpan={6} className="px-3 py-4 text-center text-muted-foreground">No items extracted. Add rows manually.</td></tr>
+                      <tr><td colSpan={7} className="px-3 py-4 text-center text-muted-foreground">No items extracted. Add rows manually.</td></tr>
                     )}
                     {parsed.items.map((item, idx) => (
                       <tr key={idx}>
@@ -371,6 +401,10 @@ export default function TeamPOUpload() {
                         <td className="px-2 py-1">
                           <input type="number" value={item.customerRate ?? ""} onChange={(e) => setItem(idx, "customerRate", e.target.value ? parseFloat(e.target.value) : null)}
                             className="w-full border rounded px-1.5 py-1 bg-background text-right" placeholder="0" />
+                        </td>
+                        <td className="px-2 py-1">
+                          <input value={item.patnaNote || ""} onChange={(e) => setItem(idx, "patnaNote", e.target.value || null)}
+                            className="w-full border rounded px-1.5 py-1 bg-background" placeholder="Note for Delhi" />
                         </td>
                         <td className="px-1 py-1">
                           <button type="button" onClick={() => removeItem(idx)} className="text-red-500 hover:text-red-700"><X className="w-3 h-3" /></button>

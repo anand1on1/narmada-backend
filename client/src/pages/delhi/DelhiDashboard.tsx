@@ -50,8 +50,28 @@ interface PoRow {
   total_qty: number;
   cust_total: number;
   is_fully_dispatched: number;
+  // R21.7
+  urgency: string | null;
+  delivery_deadline: number | null;
+  pickup_pending_days: number | null;
+  has_deviation: boolean;
 }
 interface CustomerOpt { id: number; name: string; }
+
+// R21.7.1 — customer urgency pill colours.
+const URGENCY: Record<string, { label: string; color: string }> = {
+  urgent: { label: "Urgent", color: "bg-red-500/15 text-red-700" },
+  normal: { label: "Normal", color: "bg-slate-500/15 text-slate-700" },
+  standby: { label: "Standby", color: "bg-blue-500/15 text-blue-700" },
+};
+function deadlineMeta(ms: number | null): { text: string; color: string } | null {
+  if (ms == null) return null;
+  const days = Math.ceil((ms - Date.now()) / (24 * 60 * 60 * 1000));
+  let color = "bg-emerald-500/15 text-emerald-700";
+  if (days < 2) color = "bg-red-500/15 text-red-700";
+  else if (days < 5) color = "bg-amber-500/15 text-amber-700";
+  return { text: new Date(ms).toLocaleDateString("en-IN"), color };
+}
 
 const fmtINR = (v: number | null | undefined) =>
   v == null ? "—" : `Rs. ${Number(v).toLocaleString("en-IN", { maximumFractionDigits: 0 })}`;
@@ -84,6 +104,13 @@ export default function DelhiDashboard() {
   const [customerIds, setCustomerIds] = useState<number[]>([]);
   const [custOpen, setCustOpen] = useState(false);
   const [custSearch, setCustSearch] = useState("");
+  // R21.4 — PO search (PO#, customer, customer PO#, part #) with a 300ms debounce.
+  const [search, setSearch] = useState("");
+  const [debouncedSearch, setDebouncedSearch] = useState("");
+  useEffect(() => {
+    const t = setTimeout(() => setDebouncedSearch(search.trim()), 300);
+    return () => clearTimeout(t);
+  }, [search]);
   // Status chips — default first 4 ON (incl. To Dispatch), Dispatched OFF.
   const [statusOn, setStatusOn] = useState<Record<string, boolean>>({
     pending: true, collected: true, packed: true, to_dispatch: true, dispatched: false,
@@ -114,32 +141,29 @@ export default function DelhiDashboard() {
     enabled: !!token,
   });
 
-  const fromMs = useMemo(() => new Date(fromDate + "T00:00:00").getTime(), [fromDate]);
-  const toMs = useMemo(() => new Date(toDate + "T23:59:59").getTime(), [toDate]);
-
   const { data: pos = [], isLoading } = useQuery<PoRow[]>({
-    queryKey: ["delhi-pos-list", fromMs, toMs, customerIds.join(",")],
+    queryKey: ["delhi-pos-list", fromDate, toDate, customerIds.join(","), debouncedSearch],
     queryFn: async () => {
       const params = new URLSearchParams();
-      params.set("from", String(fromMs));
-      params.set("to", String(toMs));
+      // R21.5 — send IST date strings; the backend converts to UTC day bounds.
+      params.set("from_date", fromDate);
+      params.set("to_date", toDate);
       if (customerIds.length === 1) params.set("customer_id", String(customerIds[0]));
+      if (debouncedSearch) params.set("q", debouncedSearch);
       const r = await teamFetch(token, `/api/delhi/pos/list?${params.toString()}`);
       return r.ok ? r.json() : [];
     },
     enabled: !!token, refetchInterval: 20_000,
   });
 
-  // Client-side: multi-customer filter (server takes a single customer_id) + status chip filter.
+  // R21.3 fixed toggle state — the previous filter computed a dead `chipKey` variable and
+  // mixed the "to_dispatch" chip into the "packed" bucket inconsistently, so toggling a chip
+  // off did not reliably hide its POs. A PO's bucket is one of pending/collected/packed/
+  // dispatched. A 'packed' PO shows when EITHER the Packed or the To Dispatch chip is on.
   const filtered = useMemo(() => {
     return pos.filter((p) => {
       if (customerIds.length > 0 && (p.customer_id == null || !customerIds.includes(p.customer_id))) return false;
-      // A PO matches if its bucket chip is ON. "to_dispatch" chip == bucket 'packed' that is ready to dispatch.
-      const chipKey = p.bucket === "packed" ? (statusOn.packed || statusOn.to_dispatch ? p.bucket : null) : p.bucket;
-      if (p.bucket === "packed") {
-        if (!statusOn.packed && !statusOn.to_dispatch) return false;
-        return true;
-      }
+      if (p.bucket === "packed") return !!(statusOn.packed || statusOn.to_dispatch);
       return !!statusOn[p.bucket];
     });
   }, [pos, customerIds, statusOn]);
@@ -207,6 +231,15 @@ export default function DelhiDashboard() {
                 <Icon className="w-3.5 h-3.5" /> {label}
               </button>
             ))}
+          </div>
+
+          {/* R21.4 — PO search */}
+          <div className="flex items-center gap-1.5 border rounded-lg px-2 py-1.5 bg-background min-w-[220px]">
+            <Search className="w-3.5 h-3.5 text-muted-foreground" />
+            <input value={search} onChange={(e) => setSearch(e.target.value)}
+              placeholder="Search PO#, customer, part #…"
+              className="text-xs bg-transparent outline-none flex-1" />
+            {search && <button onClick={() => setSearch("")} className="text-muted-foreground hover:text-foreground"><X className="w-3.5 h-3.5" /></button>}
           </div>
 
           {/* Date range */}
@@ -297,6 +330,20 @@ function PoTable({ pos, onOpen }: { pos: PoRow[]; onOpen: (id: number) => void }
             <td className="px-3 py-3 font-semibold">
               {p.po_number}
               {p.customer_po_number ? <div className="text-[11px] font-normal text-muted-foreground">Cust PO {p.customer_po_number}</div> : null}
+              <div className="flex flex-wrap gap-1 mt-1">
+                {p.urgency && URGENCY[p.urgency] && (
+                  <span className={`text-[10px] font-bold rounded-full px-1.5 py-0.5 ${URGENCY[p.urgency].color}`}>{URGENCY[p.urgency].label}</span>
+                )}
+                {(() => { const dm = deadlineMeta(p.delivery_deadline); return dm ? (
+                  <span className={`text-[10px] font-bold rounded-full px-1.5 py-0.5 ${dm.color}`}>Due {dm.text}</span>
+                ) : null; })()}
+                {p.pickup_pending_days != null && (
+                  <span className="text-[10px] font-bold rounded-full px-1.5 py-0.5 bg-yellow-400/25 text-yellow-800">Pickup {p.pickup_pending_days}d</span>
+                )}
+                {p.has_deviation && (
+                  <span className="text-[10px] font-bold rounded-full px-1.5 py-0.5 bg-orange-500/15 text-orange-700">Deviated</span>
+                )}
+              </div>
             </td>
             <td className="px-3 py-3">{p.customer_name || "—"}</td>
             <td className="px-3 py-3 text-xs text-muted-foreground">{p.ship_to_name || "—"}</td>

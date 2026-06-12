@@ -5,7 +5,6 @@ import { Plus, Search, ChevronLeft, ChevronRight, X, Calendar, Trash2 } from "lu
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link } from "wouter";
 import { useToast } from "@/hooks/use-toast";
-import { AddVendorModal } from "@/components/team/AddVendorModal";
 
 interface Quotation {
   id: number;
@@ -75,7 +74,6 @@ export default function TeamQuotations() {
   const { token } = useTeamAuth();
   const { toast } = useToast();
   const queryClient = useQueryClient();
-  const [showAddVendor, setShowAddVendor] = useState(false);
   const [deletingId, setDeletingId] = useState<number | null>(null);
   const [status, setStatus] = useState("");
   const [search, setSearch] = useState("");
@@ -211,15 +209,8 @@ export default function TeamQuotations() {
               className="border rounded-lg px-3 py-2 bg-background text-sm w-full" />
           </div>
 
-          {/* New quote + Add Vendor buttons */}
+          {/* R21.8 — vendor creation lives in the PO "Add Seller" flow, not here. */}
           <div className="md:col-span-2 flex justify-end gap-2">
-            <button
-              type="button"
-              onClick={() => setShowAddVendor(true)}
-              className="px-4 py-2 border rounded-lg font-semibold text-sm inline-flex items-center gap-2 whitespace-nowrap hover:bg-muted"
-            >
-              <Plus className="w-4 h-4" /> Add Vendor
-            </button>
             <Link href="/team/quotations/new">
               <a className="px-4 py-2 bg-accent text-accent-foreground rounded-lg font-semibold text-sm inline-flex items-center gap-2 whitespace-nowrap">
                 <Plus className="w-4 h-4" /> New Quotation
@@ -359,16 +350,6 @@ export default function TeamQuotations() {
         </div>
       )}
 
-      {showAddVendor && (
-        <AddVendorModal
-          token={token}
-          onClose={() => setShowAddVendor(false)}
-          onCreated={() => {
-            queryClient.invalidateQueries({ queryKey: ["team-vendors"] });
-            toast({ title: "Vendor created" });
-          }}
-        />
-      )}
     </TeamLayout>
   );
 }

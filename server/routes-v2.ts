@@ -2571,6 +2571,19 @@ export function registerV2Routes(app: Express, ctx: V2Context) {
   console.log("[v2] R4.4→R7 routes registered: ai-ledger, vendors, companies, warehouses, purchase-orders, rfqs, vendor-inbox, webhooks, delhi, rates, leads, targets, announcements, tasks, vendor-discovery, outreach, catalogue");
 }
 
+// R21.5 — Convert a `YYYY-MM-DD` IST calendar day to the UTC-ms instant at which that
+// IST day begins (00:00:00 IST = 18:30 UTC of the prior day). Adding 24h yields the
+// exclusive upper bound for an IST day. Returns NaN-safe fallback (epoch) on bad input.
+const IST_OFFSET_MS = (5 * 60 + 30) * 60 * 1000; // +05:30
+function istDayStartUtcMs(dateStr: string): number {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(dateStr.trim());
+  if (!m) return 0;
+  const [, y, mo, d] = m;
+  // Midnight IST for the given calendar day, expressed in UTC ms.
+  const utcMidnight = Date.UTC(parseInt(y, 10), parseInt(mo, 10) - 1, parseInt(d, 10));
+  return utcMidnight - IST_OFFSET_MS;
+}
+
 // ============================================================================
 // R4.4 → R7 route registration (separate fn to keep registerV2Routes readable)
 // ============================================================================
@@ -2845,6 +2858,7 @@ function registerR4toR7Routes(
         dispatchCarrier: s?.carrier || null,
         dispatchBundles: s?.bundles || 0,
         dispatchDockets: s?.docketNumbers || [],
+        hasInternalTransfer: s?.hasInternalTransfer || false,
       };
     }));
   });
@@ -2860,6 +2874,7 @@ function registerR4toR7Routes(
       dispatchCarrier: s?.carrier || null,
       dispatchBundles: s?.bundles || 0,
       dispatchDockets: s?.docketNumbers || [],
+      hasInternalTransfer: s?.hasInternalTransfer || false,
     });
   });
   app.post("/api/team/purchase-orders", requireDataTeam, async (req, res) => {
@@ -2876,6 +2891,23 @@ function registerR4toR7Routes(
       if (!existing) return res.status(404).json({ error: "Not found" });
 
       const body = { ...(req.body || {}) } as any;
+
+      // R21.7 — normalize urgency + delivery deadline if the Patna edit form sends them.
+      if (body.urgency != null) {
+        body.urgency = ["urgent", "normal", "standby"].includes(String(body.urgency)) ? String(body.urgency) : null;
+      }
+      if (body.delivery_deadline !== undefined || body.deliveryDeadline !== undefined) {
+        const raw = body.delivery_deadline !== undefined ? body.delivery_deadline : body.deliveryDeadline;
+        delete body.delivery_deadline;
+        if (raw == null || raw === "") {
+          body.deliveryDeadline = null;
+        } else if (typeof raw === "number") {
+          body.deliveryDeadline = raw;
+        } else {
+          const t = Date.parse(String(raw).trim());
+          body.deliveryDeadline = Number.isNaN(t) ? null : t;
+        }
+      }
 
       // R13: company_id (which billing entity the order is for) is locked once the PO
       // is processed or dispatched — by then PDFs/branding have gone out the door.
@@ -4229,6 +4261,7 @@ function registerR8Routes(
       const {
         customer_id, customer_po_number, customer_po_url, po_date,
         ship_to_name, ship_to_address, ship_to_phone, company_id,
+        urgency, delivery_deadline,
         items,
       } = req.body || {};
 
@@ -4257,7 +4290,17 @@ function registerR8Routes(
         qty: Number(it.qty) || 1,
         unitPrice: Number(it.customerRate || it.rate || 0),
         lineTotal: (Number(it.qty) || 1) * Number(it.customerRate || it.rate || 0),
+        // R21.7.4 — per-line note authored by Patna, shown to Delhi.
+        patnaNote: it.patnaNote || it.patna_note || null,
       }));
+
+      // R21.7 — customer urgency (urgent|normal|standby) + delivery deadline (date string).
+      const urgencyVal = ["urgent", "normal", "standby"].includes(String(urgency)) ? String(urgency) : null;
+      let deadlineMs: number | null = null;
+      if (delivery_deadline && String(delivery_deadline).trim()) {
+        const t = Date.parse(String(delivery_deadline).trim());
+        if (!Number.isNaN(t)) deadlineMs = t;
+      }
 
       const subtotal = poItems2.reduce((s: number, it: any) => s + (it.lineTotal || 0), 0);
 
@@ -4271,6 +4314,8 @@ function registerR8Routes(
           shipToName: ship_to_name || null,
           shipToAddress: ship_to_address || null,
           shipToPhone: ship_to_phone || null,
+          urgency: urgencyVal,
+          deliveryDeadline: deadlineMs,
           subtotal,
           total: subtotal,
           createdBy: u?.username,
@@ -4283,6 +4328,18 @@ function registerR8Routes(
     } catch (e: any) {
       res.status(500).json({ error: e.message });
     }
+  });
+
+  // ---- PATCH /api/team/po-items/:id/note ---- (R21.7.4 per-line Patna note)
+  app.patch("/api/team/po-items/:id/note", requireDataTeam, async (req: any, res: any) => {
+    try {
+      const id = parseInt(req.params.id as string, 10);
+      const raw = req.body?.patnaNote ?? req.body?.note;
+      const note = typeof raw === "string" ? raw.trim() : "";
+      const item = await v2.updatePoItem(id, { patnaNote: note || null } as any);
+      if (!item) return res.status(404).json({ error: "Item not found" });
+      res.json(item);
+    } catch (e: any) { res.status(500).json({ error: e.message }); }
   });
 
   // ---- POST /api/team/po-items/:id/assign-vendor ----
@@ -4561,12 +4618,19 @@ function registerR8Routes(
   app.get("/api/delhi/pos/list", requireDelhi, async (req: any, res: any) => {
     try {
       res.set("Cache-Control", "no-cache, no-store, must-revalidate");
-      const from = req.query.from ? parseInt(req.query.from as string, 10) : undefined;
-      const to = req.query.to ? parseInt(req.query.to as string, 10) : undefined;
+      // R21.5 — prefer IST date strings (from_date/to_date as YYYY-MM-DD). A given IST day
+      // begins at 18:30 UTC of the PREVIOUS calendar day, so we convert here and use an
+      // EXCLUSIVE upper bound (start of the day AFTER `to_date`). Legacy ms `from`/`to`
+      // remain accepted as a fallback.
+      const fromDate = (req.query.from_date as string | undefined)?.trim();
+      const toDate = (req.query.to_date as string | undefined)?.trim();
+      const from = fromDate ? istDayStartUtcMs(fromDate) : (req.query.from ? parseInt(req.query.from as string, 10) : undefined);
+      const to = toDate ? istDayStartUtcMs(toDate) + 24 * 60 * 60 * 1000 : (req.query.to ? parseInt(req.query.to as string, 10) : undefined);
       const customerId = req.query.customer_id ? parseInt(req.query.customer_id as string, 10) : undefined;
       const statusRaw = (req.query.status as string | undefined) || "";
       const statuses = statusRaw ? statusRaw.split(",").map((s) => s.trim()).filter(Boolean) : undefined;
-      res.json(await v2.listDelhiPosWithRollup({ from, to, customerId, statuses }));
+      const q = (req.query.q as string | undefined) || undefined;
+      res.json(await v2.listDelhiPosWithRollup({ from, to, customerId, statuses, q }));
     } catch (e: any) { res.status(500).json({ error: e.message }); }
   });
 
@@ -4604,6 +4668,43 @@ function registerR8Routes(
     } catch (e: any) { res.status(500).json({ error: e.message }); }
   });
 
+  // ---- PATCH /api/delhi/po-items/:id/qty ---- (R21.2 deviation flow)
+  // Delhi adjusts a line's quantity (e.g. short material received). Body { qty, reason }.
+  // reason is required only when qty differs from the original ordered qty.
+  app.patch("/api/delhi/po-items/:id/qty", requireDelhi, async (req: any, res: any) => {
+    try {
+      const id = parseInt(req.params.id as string, 10);
+      const u = (req as any).teamUser;
+      const newQty = Number(req.body?.qty);
+      const reason = typeof req.body?.reason === "string" ? req.body.reason.trim() : "";
+      if (!Number.isFinite(newQty) || newQty < 0) return res.status(400).json({ error: "Valid qty required" });
+      const existing = await v2.getPoItem(id);
+      if (!existing) return res.status(404).json({ error: "Item not found" });
+      if ((existing.fulfilStatus || "pending") === "dispatched") {
+        return res.status(409).json({ error: "Cannot change qty on a dispatched line" });
+      }
+      const original = (existing as any).originalQty != null ? Number((existing as any).originalQty) : Number(existing.qty ?? 0);
+      if (newQty !== original && !reason) {
+        return res.status(400).json({ error: "A reason is required when changing the quantity" });
+      }
+      const updated = await v2.deviatePoItemQty(id, newQty, reason || null, u?.id ?? null);
+      await v2.writeAuditLog({
+        actorType: "delhi", actorId: u?.username, action: "po_item.qty_deviation",
+        entityType: "po_item", entityId: String(id),
+        afterJson: JSON.stringify({ original_qty: original, new_qty: newQty, reason: reason || null }),
+      });
+      res.json(updated);
+    } catch (e: any) { res.status(500).json({ error: e.message }); }
+  });
+
+  // ---- GET /api/team/purchase-orders/:id/deviations ---- (R21.2 Patna summary modal)
+  app.get("/api/team/purchase-orders/:id/deviations", requireDataTeam, async (req: any, res: any) => {
+    try {
+      const id = parseInt(req.params.id as string, 10);
+      res.json(v2.getPoDeviations(id));
+    } catch (e: any) { res.status(500).json({ error: e.message }); }
+  });
+
   // ---- POST /api/delhi/po-items/bulk-mark-packed ---- ({ids:[]})
   app.post("/api/delhi/po-items/bulk-mark-packed", requireDelhi, async (req: any, res: any) => {
     try {
@@ -4621,25 +4722,33 @@ function registerR8Routes(
       const u = (req as any).teamUser;
       const carrier = String(req.body?.courier || req.body?.carrier || "").trim();
       const docketNumber = String(req.body?.docketNumber || req.body?.docketNo || "").trim();
-      const bundles = parseInt(String(req.body?.bundles || ""), 10);
+      const bundlesRaw = String(req.body?.bundles || "").trim();
+      const bundles = parseInt(bundlesRaw, 10);
       const file = req.file;
-      if (!carrier) return res.status(400).json({ error: "Courier is required" });
-      if (!docketNumber) return res.status(400).json({ error: "Docket number is required" });
-      if (!Number.isInteger(bundles) || bundles < 1) return res.status(400).json({ error: "Bundles count (min 1) is required" });
-      if (!file) return res.status(400).json({ error: "Docket slip upload is required" });
+      // R21.6 — Inter-Branch Transfer (Patna) uses our own carrier, so carrier/docket/
+      // bundles/slip are all OPTIONAL. External carrier dispatch keeps every field mandatory.
+      const isInternalTransfer = req.body?.isInternalTransfer === "1" || req.body?.isInternalTransfer === "true" || req.body?.is_internal_transfer === "1";
+      if (!isInternalTransfer) {
+        if (!carrier) return res.status(400).json({ error: "Courier is required" });
+        if (!docketNumber) return res.status(400).json({ error: "Docket number is required" });
+        if (!Number.isInteger(bundles) || bundles < 1) return res.status(400).json({ error: "Bundles count (min 1) is required" });
+        if (!file) return res.status(400).json({ error: "Docket slip upload is required" });
+      }
 
       const proto = "https";
       const host = req.get("host") || "narmada-backend.onrender.com";
-      const docketSlipUrl = `${proto}://${host}/uploads/docket-slips/${file.filename}`;
+      const docketSlipUrl = file ? `${proto}://${host}/uploads/docket-slips/${file.filename}` : "";
 
       const result = await v2.dispatchPackedLines(poId, {
-        carrier, docketNumber, bundles, docketSlipUrl, submittedBy: u?.username,
+        carrier: carrier || (isInternalTransfer ? "Inter-Branch Transfer" : carrier),
+        docketNumber, bundles: Number.isInteger(bundles) && bundles > 0 ? bundles : 0,
+        docketSlipUrl, submittedBy: u?.username, isInternalTransfer,
       });
 
       await v2.writeAuditLog({
         actorType: "delhi", actorId: u?.username, action: "po.dispatch",
         entityType: "purchase_order", entityId: String(poId),
-        afterJson: JSON.stringify({ carrier, docketNumber, bundles, ...result }),
+        afterJson: JSON.stringify({ carrier, docketNumber, bundles, isInternalTransfer, ...result }),
       });
 
       res.json(result);

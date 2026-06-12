@@ -1,7 +1,7 @@
 /**
  * R20.6 — Shared quick-add Vendor modal.
- * Used from the Quotations dashboard top bar and the PO processing "Add Seller"
- * flow. Fields: name (required), phone, GSTIN, address. POSTs to /api/team/sellers.
+ * Used from the PO processing "Add Seller" flow. R21.8: Name AND Phone are
+ * mandatory; GSTIN + address optional. POSTs to /api/team/sellers.
  */
 import { useState } from "react";
 import { teamFetch } from "@/lib/team-auth";
@@ -33,7 +33,8 @@ export function AddVendorModal({
   const [saving, setSaving] = useState(false);
 
   async function save() {
-    if (!name.trim()) return;
+    if (!name.trim()) { toast({ title: "Name is required", variant: "destructive" }); return; }
+    if (!phone.trim()) { toast({ title: "Phone is required", variant: "destructive" }); return; }
     setSaving(true);
     try {
       const r = await teamFetch(token, `/api/team/sellers`, {
@@ -64,7 +65,7 @@ export function AddVendorModal({
             <input value={name} onChange={(e) => setName(e.target.value)} autoFocus
               className="mt-1 w-full border rounded-lg px-3 py-2 bg-background text-sm font-normal" placeholder="Vendor name" />
           </label>
-          <label className="text-xs font-semibold block">Phone
+          <label className="text-xs font-semibold block">Phone *
             <input value={phone} onChange={(e) => setPhone(e.target.value)}
               className="mt-1 w-full border rounded-lg px-3 py-2 bg-background text-sm font-normal" placeholder="9876543210" />
           </label>
@@ -79,7 +80,7 @@ export function AddVendorModal({
         </div>
         <div className="flex justify-end gap-2 mt-5">
           <button onClick={onClose} className="px-4 py-2 border rounded-lg text-sm">Cancel</button>
-          <button onClick={save} disabled={!name.trim() || saving}
+          <button onClick={save} disabled={!name.trim() || !phone.trim() || saving}
             className="px-4 py-2 bg-primary text-primary-foreground rounded-lg text-sm font-semibold disabled:opacity-50 hover:opacity-90 inline-flex items-center gap-2">
             {saving ? <><Loader2 className="w-4 h-4 animate-spin" /> Saving…</> : "Create Vendor"}
           </button>

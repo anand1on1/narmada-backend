@@ -775,6 +775,9 @@ export const purchaseOrdersV2 = sqliteTable("purchase_orders_v2", {
   // A partial unique index on po_number WHERE deleted_at IS NULL lets a po_number be reused
   // once the prior row is soft-deleted.
   deletedAt: integer("deleted_at"),
+  // R21.7 additions — customer urgency tag + delivery deadline (set by Patna, shown to Delhi).
+  urgency: text("urgency"), // urgent|normal|standby (default normal at read time)
+  deliveryDeadline: integer("delivery_deadline"), // unix-ms; nullable
 });
 export const insertPurchaseOrderV2Schema = createInsertSchema(purchaseOrdersV2).omit({ id: true, createdAt: true, updatedAt: true });
 export type InsertPurchaseOrderV2 = z.infer<typeof insertPurchaseOrderV2Schema>;
@@ -820,6 +823,14 @@ export const poItems = sqliteTable("po_items", {
   carrier: text("carrier"),
   bundles: integer("bundles"),
   receivedAt: integer("received_at"),
+  // R21.2 additions — qty deviation tracking (Delhi edits qty vs. what Patna ordered).
+  originalQty: real("original_qty"),
+  deviationReason: text("deviation_reason"),
+  deviationAt: integer("deviation_at"),
+  deviatedByUserId: integer("deviated_by_user_id"),
+  isDeviated: integer("is_deviated").default(0),
+  // R21.7.4 addition — per-line note from Patna shown to Delhi.
+  patnaNote: text("patna_note"),
 });
 export const insertPoItemSchema = createInsertSchema(poItems).omit({ id: true });
 export type InsertPoItem = z.infer<typeof insertPoItemSchema>;
@@ -1084,6 +1095,8 @@ export const dispatches = sqliteTable("dispatches", {
   submittedBy: text("submitted_by"),
   submittedAt: integer("submitted_at"),
   createdAt: integer("created_at").notNull().$defaultFn(() => Date.now()),
+  // R21.6 addition — inter-branch transfer (Patna) dispatch with optional fields.
+  isInternalTransfer: integer("is_internal_transfer").default(0),
 });
 export const insertDispatchSchema = createInsertSchema(dispatches).omit({ id: true, createdAt: true });
 export type InsertDispatch = z.infer<typeof insertDispatchSchema>;
