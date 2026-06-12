@@ -3080,12 +3080,11 @@ export function processPurchaseOrder(poId: number): {
     let pendingPo: any = null;
     if (unconfirmed.length > 0) {
       // New internal NM/PO number; keep the same customer PO number.
-      const yy = String(new Date().getFullYear()).slice(-2);
-      const pfx = `NM/PO/${yy}/`;
-      const cntRow = sqlite.prepare(
-        `SELECT COUNT(*) AS c FROM purchase_orders_v2 WHERE po_number LIKE ?`
-      ).get(`${pfx}%`) as any;
-      const newPoNumber = `${pfx}${String(((cntRow?.c as number) || 0) + 1).padStart(4, "0")}`;
+      // R16: use the robust MAX(seq)+1 allocator (R13.6) — the legacy COUNT(*)+1 here
+      // collided (UNIQUE constraint failed) whenever the row count differed from the
+      // highest sequence. Allocation runs inside this transaction, so SELECT-then-INSERT
+      // stays atomic.
+      const newPoNumber = nextPoNumber("NM/PO");
       const now = Date.now();
       const dateStr = new Date().toISOString().slice(0, 10);
       const notes = `Split from ${orig.po_number} on ${dateStr}`;
