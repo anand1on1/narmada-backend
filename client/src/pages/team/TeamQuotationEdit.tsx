@@ -233,6 +233,14 @@ export default function TeamQuotationEdit() {
     setAcResults([]); setAcIdx(null);
   }
 
+  // Dismiss the suggestion dropdown without touching the typed value. The free-text the
+  // user already typed is committed to state on every keystroke via updateLine, so simply
+  // hiding the list leaves their value intact — they can save any part name, in DB or not.
+  function closeAc() {
+    if (acTimerRef.current) clearTimeout(acTimerRef.current);
+    setAcResults([]); setAcIdx(null);
+  }
+
   async function handleMatchPrices() {
     setMatchingPrices(true);
     try {
@@ -531,6 +539,8 @@ export default function TeamQuotationEdit() {
                   <td className="px-1 py-1 relative">
                     <input value={line.partNumber} onChange={(e) => onPartNumberChange(idx, e.target.value)}
                       onFocus={() => line.partNumber.length >= 2 && triggerAutocomplete(idx, line.partNumber, "part")}
+                      onKeyDown={(e) => { if (e.key === "Escape" || e.key === "Enter") { e.preventDefault(); closeAc(); } }}
+                      onBlur={() => setTimeout(closeAc, 150)}
                       className="w-full border rounded px-1.5 py-1 bg-background font-mono text-xs" />
                     {acIdx === idx && acField === "part" && acResults.length > 0 && (
                       <AcDropdown results={acResults} onPick={(p) => applyAcResult(idx, p)} />
@@ -539,6 +549,8 @@ export default function TeamQuotationEdit() {
                   <td className="px-1 py-1 relative">
                     <input value={line.productName} onChange={(e) => onProductNameChange(idx, e.target.value)}
                       onFocus={() => line.productName.length >= 2 && triggerAutocomplete(idx, line.productName, "name")}
+                      onKeyDown={(e) => { if (e.key === "Escape" || e.key === "Enter") { e.preventDefault(); closeAc(); } }}
+                      onBlur={() => setTimeout(closeAc, 150)}
                       className="w-full border rounded px-1.5 py-1 bg-background text-xs" />
                     {acIdx === idx && acField === "name" && acResults.length > 0 && (
                       <AcDropdown results={acResults} onPick={(p) => applyAcResult(idx, p)} />
@@ -670,6 +682,9 @@ function AcDropdown({ results, onPick }: { results: any[]; onPick: (p: any) => v
           </button>
         );
       })}
+      <div className="px-3 py-1.5 text-[11px] text-muted-foreground bg-muted/40 border-t">
+        Suggestions only — keep typing to enter a new part. Press Enter or Esc to use what you typed.
+      </div>
     </div>
   );
 }
