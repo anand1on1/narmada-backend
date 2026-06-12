@@ -3439,14 +3439,16 @@ function registerR9Routes(
               phone = vendor?.whatsapp || vendor?.phone || null;
             }
             if (!phone) return;
-            const summary = q?.vendor_id
-              ? v2.getConfirmedItemsForVendorOnPo(poId, q.vendor_id)
-              : { poNumber: "-", itemsText: "", totalAmount: 0, count: 0 };
+            // R22.1 — live template confirms a single line: vendor, PO#, part, qty, rate.
+            const po = await v2.getPurchaseOrderV2(poId);
+            const line = result.item;
+            const partName = [line?.part_number, line?.brand].filter(Boolean).join(" ") || (q?.vendor_name || "item");
             await wa.sendVendorRateConfirmed(phone, {
               vendorName: q?.vendor_name || "Seller",
-              ourPoNumber: summary.poNumber,
-              itemsText: summary.itemsText || `${q?.vendor_name || "item"}`,
-              totalAmount: String(summary.totalAmount || q?.rate || 0),
+              ourPoNumber: po?.poNumber || `PO#${poId}`,
+              partName,
+              qty: String(line?.qty ?? 1),
+              rate: String(q?.rate ?? line?.vendor_rate ?? 0),
             });
           })().catch((err) => console.error("[approve] rate-confirmed WA failed:", err));
         });
@@ -3491,21 +3493,27 @@ function registerR9Routes(
         if (!items.length) continue;
         const vendor = await v2.getVendor(vendorId);
         const phone = vendor?.whatsapp || vendor?.phone || items[0]?.vendor_phone;
-        const itemsText = items
-          .map((it: any, i: number) => `${i + 1}. ${[it.part_number, it.brand, it.description].filter(Boolean).join(" ")} x${it.qty ?? 1} (PO ${it.po_number})`)
+        // R22.1 — numbered pipe format ("1) <part> | <brand> | Qty: <qty>"); line order
+        // matches the saved rfq_lines order so a numbered/positional vendor reply maps back.
+        const batchLines = items.map((it: any) => ({
+          partName: [it.part_number, it.description].filter(Boolean).join(" ") || "-",
+          brand: it.brand || "-",
+          qty: it.qty ?? 1,
+        }));
+        const itemsText = batchLines
+          .map((l: any, i: number) => `${i + 1}) ${l.partName} | ${l.brand} | Qty: ${l.qty}`)
           .join("\n");
         firedVendors++; firedItems += items.length;
         console.log(`[R19 rfq-fire] vendor=${vendorId} name=${vendor?.name || "?"} phone=${phone || "MISSING"} items=${items.length}`);
         const vendorName = vendor?.name || items[0]?.vendor_name || "Seller";
         // Persist outbound copy immediately (so the chat shows it even if AiSensy is slow).
-        const taxLine = "Please reply with rate per item. Mention if TAX INCLUSIVE (% included) or EXCLUSIVE (mention GST %).";
-        const outBody = `Hello ${vendorName},\nNarmada Mobility requests your best rate for the following items:\n${itemsText}\n\n${taxLine}`;
+        const outBody = `Namaste ${vendorName},\nPlease share your best landed price + GST + availability:\n${itemsText}\nReply with rates in this chat. Our team is standing by.\n— Team Narmada Mobility`;
         v2.addRfqMessage({ vendorId, vendorPhone: phone || null, direction: "out", body: outBody });
         if (phone) {
           setImmediate(() => {
             (async () => {
               const wa = require("./whatsapp") as typeof import("./whatsapp");
-              const r = await wa.sendVendorRateBatch(phone, { vendorName, itemsText });
+              const r = await wa.sendVendorRateBatch(phone, { vendorName, lines: batchLines });
               console.log(`[R19 rfq-fire] vendor=${vendorId} phone=${phone} send result status=${r?.status}`);
             })().catch((err) => console.error(`[R19 rfq-fire] vendor=${vendorId} phone=${phone} batch RFQ failed:`, err?.message || err));
           });

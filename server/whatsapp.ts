@@ -577,9 +577,10 @@ export async function sendVendorPaymentConfirmation(phone: string, vendorName: s
   }
 }
 
-// R8-v2 — vendor rate request fired when a seller is assigned to a PO line item.
+// R8-v2 / R22.1 — vendor rate request fired when a seller is assigned to a PO line item.
 // Campaign `narmada_vendor_rate_request_enkx0` (env-overridable) → text fallback.
-// params: {{1}}=vendor_name {{2}}=part_number {{3}}=brand {{4}}=qty {{5}}=our_po_number {{6}}=our_company
+// Live template has exactly 4 vars: {{1}}=vendor {{2}}=part {{3}}=brand {{4}}=qty.
+// All values MUST be strings (AiSensy rejects nulls/numbers); brand falls back to "-".
 export async function sendVendorRateRequest(
   phone: string,
   p: { vendorName: string; partNumber: string; brand: string; qty: string; ourPoNumber: string },
@@ -587,13 +588,14 @@ export async function sendVendorRateRequest(
   const templateName = AISENSY_CAMPAIGN_SINGLE;
   const ourCompany = "Narmada Mobility";
   const normalized = normalizePhone(phone);
-  const body = `Hello ${p.vendorName},\n${ourCompany} requests your best rate for:\nPart: ${p.partNumber}${p.brand ? ` (${p.brand})` : ""}\nQty: ${p.qty}\nRef PO: ${p.ourPoNumber}\nPlease reply with rate, MOQ and lead time.`;
+  const brand = p.brand && String(p.brand).trim() ? String(p.brand) : "-";
+  const body = `Namaste ${p.vendorName},\nWe need your best rate for:\nPart: ${p.partNumber}\nBrand: ${brand}\nQty: ${p.qty}\nPlease reply with landed price + GST + availability.`;
   try {
     const raw = await postAisensy({
       campaignName: templateName,
       destination: normalized,
       userName: ourCompany,
-      templateParams: [p.vendorName, p.partNumber, p.brand, p.qty, p.ourPoNumber, ourCompany],
+      templateParams: [String(p.vendorName), String(p.partNumber), brand, String(p.qty)],
       source: "narmada-backend",
       media: {}, buttons: [], carouselCards: [], location: {}, attributes: {},
       paramsFallbackValue: { FirstName: p.vendorName },
@@ -607,55 +609,60 @@ export async function sendVendorRateRequest(
   }
 }
 
-// R9 — consolidated batched rate request to a single seller covering many line items
-// across one or more POs. Template `narmada_vendor_rate_batch` (may not be Meta-approved yet)
-// → free-text fallback. params: {{1}}=vendor_name {{2}}=items_text {{3}}=our_company
-// The body (for log/backup) always carries the full items list AND the tax-question line.
+// R9 / R22.1 — consolidated batched rate request to a single seller covering many line items.
+// Live template `narmada_vendor_rate_batch` has exactly 2 vars: {{1}}=vendor_name {{2}}=parts_list.
+// parts_list is a single newline-joined string in the numbered pipe format the AI reply parser
+// expects ("1) <part> | <brand> | Qty: <qty>"), so vendors can reply "1) 450, 2) 320". Brand
+// falls back to "-" so the pipe count stays stable. Line order MUST match the caller's rfq_lines
+// order so a positional/numbered reply maps back to the right line.
 export async function sendVendorRateBatch(
   phone: string,
-  p: { vendorName: string; itemsText: string },
-): Promise<{ status: string; body: string }> {
+  p: { vendorName: string; lines: Array<{ partName: string; brand?: string | null; qty: number | string }> },
+): Promise<{ status: string; body: string; partsList: string }> {
   const templateName = "narmada_vendor_rate_batch";
   const ourCompany = "Narmada Mobility";
   const normalized = normalizePhone(phone);
-  const taxLine = "Please reply with rate per item. Mention if TAX INCLUSIVE (% included) or EXCLUSIVE (mention GST %).";
-  const body = `Hello ${p.vendorName},\n${ourCompany} requests your best rate for the following items:\n${p.itemsText}\n\n${taxLine}`;
+  const partsList = p.lines
+    .map((l, i) => `${i + 1}) ${l.partName || "-"} | ${l.brand && String(l.brand).trim() ? l.brand : "-"} | Qty: ${l.qty}`)
+    .join("\n");
+  const body = `Namaste ${p.vendorName},\nPlease share your best landed price + GST + availability:\n${partsList}\nReply with rates in this chat. Our team is standing by.\n— Team Narmada Mobility`;
   try {
     const raw = await postAisensy({
       campaignName: templateName,
       destination: normalized,
       userName: ourCompany,
-      templateParams: [p.vendorName, p.itemsText, ourCompany],
+      templateParams: [p.vendorName, partsList],
       source: "narmada-backend",
       media: {}, buttons: [], carouselCards: [], location: {}, attributes: {},
       paramsFallbackValue: { FirstName: p.vendorName },
     });
     const status = logAisensyResult(normalized, templateName, body, raw);
-    if (status === "failed") return { status: await sendFreeTextWa(phone, body, "vendor_rate_batch_fallback"), body };
-    return { status, body };
+    if (status === "failed") return { status: await sendFreeTextWa(phone, body, "vendor_rate_batch_fallback"), body, partsList };
+    return { status, body, partsList };
   } catch (e: any) {
     console.error(`[whatsapp] sendVendorRateBatch failed for ${normalized}:`, e?.message);
-    return { status: await sendFreeTextWa(phone, body, "vendor_rate_batch_fallback"), body };
+    return { status: await sendFreeTextWa(phone, body, "vendor_rate_batch_fallback"), body, partsList };
   }
 }
 
-// R11 — rate-confirmed message fired when a seller's quote is locked for a PO line.
-// Template `narmada_vendor_rate_confirmed` (NOT yet Meta-approved) → free-text fallback.
-// params: {{1}}=vendor_name {{2}}=our_po_number {{3}}=items_text {{4}}=total_amount
+// R11 / R22.1 — rate-confirmed message fired when a seller's quote is locked for a PO line.
+// Live template `narmada_vendor_rate_confirmed` has exactly 5 vars:
+// {{1}}=vendor {{2}}=po_no {{3}}=part {{4}}=qty {{5}}=rate. Rate is a plain number (the
+// template already prints the ₹). All values MUST be strings.
 export async function sendVendorRateConfirmed(
   phone: string,
-  p: { vendorName: string; ourPoNumber: string; itemsText: string; totalAmount: string },
+  p: { vendorName: string; ourPoNumber: string; partName: string; qty: string; rate: string },
 ): Promise<{ status: string; body: string }> {
   const templateName = "narmada_vendor_rate_confirmed";
   const ourCompany = "Narmada Mobility";
   const normalized = normalizePhone(phone);
-  const body = `Hello ${p.vendorName},\n${ourCompany} has CONFIRMED your rate for PO ${p.ourPoNumber}:\n${p.itemsText}\n\nTotal: ₹${p.totalAmount}\nWe will share dispatch details shortly. Thank you.`;
+  const body = `Namaste ${p.vendorName},\nYour rate has been accepted for the following order:\nPO #: ${p.ourPoNumber}\nPart: ${p.partName}\nQty: ${p.qty}\nRate: ₹${p.rate}`;
   try {
     const raw = await postAisensy({
       campaignName: templateName,
       destination: normalized,
       userName: ourCompany,
-      templateParams: [p.vendorName, p.ourPoNumber, p.itemsText, p.totalAmount],
+      templateParams: [String(p.vendorName), String(p.ourPoNumber), String(p.partName), String(p.qty), String(p.rate)],
       source: "narmada-backend",
       media: {}, buttons: [], carouselCards: [], location: {}, attributes: {},
       paramsFallbackValue: { FirstName: p.vendorName },

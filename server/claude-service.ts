@@ -576,11 +576,24 @@ export async function ledgerNlToSql(question: string): Promise<{ sql: string; pa
   return { sql: r.sql, params: Array.isArray(r.params) ? r.params : [], explanation: r.explanation || "" };
 }
 
-// R5.4 / R5.5 — extract a vendor quote from a free-text WhatsApp reply.
+// R5.4 / R5.5 / R22.1 — extract a vendor price quote from a free-text WhatsApp reply.
+// R22.1: vendors now reply against a numbered outbound parts list ("1) <part> | <brand> | Qty: <qty>"),
+// so a single reply may carry several rates. Recognize, in priority order:
+//   - Numbered: "1) 450", "2. 320", "Line 1: 450"  → rate keyed by line number
+//   - Named:    "Brake Pad 450, Clutch Plate 320"   → fuzzy-match part name
+//   - Positional: bare numbers in reply order        → same order as the outbound numbered list
+// `rate` stays the single best/first rate (back-compat with the existing R18 webhook schema);
+// `rates_by_line` is an additive map {lineNumber(1-based as string): rate} for batch replies.
 const VENDOR_EXTRACT_SYSTEM = `You extract a vendor price quote from a WhatsApp message (English or Hindi).
-Return ONLY JSON: {"part_number": string|null, "brand": string|null, "rate": number|null, "moq": number|null, "lead_time_days": number|null, "notes": string|null, "confidence": number}
-confidence is 0..1. If a field is absent, use null. rate/moq are numbers (strip currency symbols and commas).`;
+Return ONLY JSON: {"part_number": string|null, "brand": string|null, "rate": number|null, "moq": number|null, "lead_time_days": number|null, "notes": string|null, "confidence": number, "rates_by_line": {"<n>": number}|null}
+confidence is 0..1. If a field is absent, use null. rate/moq/rates are numbers (strip currency symbols like ₹/Rs and commas).
+The vendor was sent a NUMBERED parts list ("1) <part> | <brand> | Qty: <qty>"). Their reply may quote several lines at once.
+Extract per-line rates into rates_by_line (keys are the 1-based line numbers as strings), recognizing in priority order:
+1) Numbered: "1) 450", "2. 320", "1. 450 2. 320", "Line 1: 450".
+2) Named: "Brake Pad 450, Clutch Plate 320" — match the part name to the line it refers to.
+3) Positional: bare numbers in reply order map to lines 1,2,3,... in the outbound order.
+Set "rate" to the first/primary line rate for back-compat. If only one rate is present, rates_by_line may be {"1": <rate>}. If no rate is present, rate=null and rates_by_line=null.`;
 
-export async function extractVendorQuote(rawText: string, productContext?: string): Promise<{ part_number: string | null; brand: string | null; rate: number | null; moq: number | null; lead_time_days: number | null; notes: string | null; confidence: number } | null> {
+export async function extractVendorQuote(rawText: string, productContext?: string): Promise<{ part_number: string | null; brand: string | null; rate: number | null; moq: number | null; lead_time_days: number | null; notes: string | null; confidence: number; rates_by_line?: Record<string, number> | null } | null> {
   return claudeJSON(VENDOR_EXTRACT_SYSTEM, `Product context: ${productContext || "(none)"}\n\nVendor message:\n${rawText}`);
 }

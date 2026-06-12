@@ -5,6 +5,8 @@ import { registerRoutes } from "./routes";
 import { serveStatic } from "./static";
 import { createServer } from "node:http";
 
+console.log("[R22.1] AiSensy param fix loaded — batch=2, single=4, confirmed=5");
+
 const app = express();
 const httpServer = createServer(app);
 
