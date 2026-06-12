@@ -2241,6 +2241,39 @@ export async function deletePoCascade(poId: number): Promise<{ poNumber: string 
   return { poNumber: po.poNumber };
 }
 
+// R13.5: diagnostic — fetch the raw PO row for an EXACT po_number with no soft-delete
+// filter, plus its line-item count. Returns the first matching row (there should be at
+// most one active, but orphan/soft-deleted rows may coexist under the legacy unique).
+export function getPoByNumberRaw(poNumber: string): { po: any | null; lineItemCount: number } {
+  const po = sqlite.prepare(`SELECT * FROM purchase_orders_v2 WHERE po_number = ?`).get(poNumber) as any;
+  if (!po) return { po: null, lineItemCount: 0 };
+  const cnt = sqlite.prepare(`SELECT COUNT(*) AS c FROM po_items WHERE po_id = ?`).get(po.id) as any;
+  return { po, lineItemCount: (cnt?.c as number) || 0 };
+}
+
+// R13.5: hard-delete EVERY PO row carrying a po_number (active OR soft-deleted), cascading
+// po_items, po_item_vendor_quotes, and dispatches — mirroring the deletePoCascade pattern.
+// Idempotent: returns purged=0 when nothing matches. Used to clear orphan rows that block
+// po_number reuse but were not caught by the R13.4 deleted_at-only purge.
+export function forcePurgePoByNumber(poNumber: string): { purged: number; poNumber: string } {
+  const rows = sqlite.prepare(`SELECT id, deleted_at FROM purchase_orders_v2 WHERE po_number = ?`).all(poNumber) as any[];
+  if (rows.length === 0) return { purged: 0, poNumber };
+  const tx = sqlite.transaction(() => {
+    for (const row of rows) {
+      const items = sqlite.prepare(`SELECT id FROM po_items WHERE po_id = ?`).all(row.id) as any[];
+      for (const it of items) {
+        sqlite.prepare(`DELETE FROM po_item_vendor_quotes WHERE po_item_id = ?`).run(it.id);
+      }
+      sqlite.prepare(`DELETE FROM po_items WHERE po_id = ?`).run(row.id);
+      sqlite.prepare(`DELETE FROM dispatches WHERE po_id = ?`).run(row.id);
+      sqlite.prepare(`DELETE FROM purchase_orders_v2 WHERE id = ?`).run(row.id);
+      console.log(`[R13.5] Force-purged PO id=${row.id} po_number=${poNumber} deleted_at=${row.deleted_at ?? "NULL"}`);
+    }
+  });
+  tx();
+  return { purged: rows.length, poNumber };
+}
+
 // Per-PO dispatch rollup for the data-team PO list. Returns a map poId -> aggregate.
 export async function getDispatchSummaryForPOs(poIds: number[]): Promise<Record<number, {
   dispatches: Array<{ docket_number: string | null; docket_slip_url: string | null; carrier: string | null; bundles: number | null; dispatched_at: number | null }>;

@@ -4406,6 +4406,43 @@ function registerR8Routes(
     } catch (e: any) { res.status(500).json({ error: e.message }); }
   });
 
+  // ---- GET /api/admin/po-by-number?po_number=... ---- (R13.5 diagnostic)
+  // Returns the raw PO row for an EXACT po_number with NO soft-delete filter, to inspect
+  // the state of an orphan row that may be blocking po_number reuse.
+  app.get("/api/admin/po-by-number", requireAuth, async (req: any, res: any) => {
+    try {
+      const poNumber = String(req.query.po_number || "").trim();
+      if (!poNumber) return res.status(400).json({ error: "po_number required" });
+      const { po, lineItemCount } = v2.getPoByNumberRaw(poNumber);
+      res.json({
+        found: !!po,
+        po: po || null,
+        lineItemCount,
+        deletedAt: po ? (po.deleted_at ?? null) : null,
+      });
+    } catch (e: any) { res.status(500).json({ error: e.message }); }
+  });
+
+  // ---- POST /api/admin/force-purge-po ---- (R13.5 orphan cleanup)
+  // Hard-deletes EVERY PO row matching po_number (active OR soft-deleted) plus cascade
+  // children. Idempotent: purged=0 when nothing matches. Wrapped in a transaction inside
+  // the storage helper.
+  app.post("/api/admin/force-purge-po", requireAuth, async (req: any, res: any) => {
+    try {
+      const poNumber = String(req.body?.po_number || "").trim();
+      if (!poNumber) return res.status(400).json({ error: "po_number required" });
+      const result = v2.forcePurgePoByNumber(poNumber);
+      if (result.purged === 0) return res.json({ ok: true, purged: 0 });
+      const u = (req as any).user as TokenInfo;
+      await v2.writeAuditLog({
+        actorType: "admin", actorId: u?.username, action: "po.force_purge",
+        entityType: "purchase_order", entityId: poNumber,
+        beforeJson: JSON.stringify({ poNumber, purged: result.purged }),
+      });
+      res.json({ ok: true, purged: result.purged, poNumber: result.poNumber });
+    } catch (e: any) { res.status(500).json({ error: e.message }); }
+  });
+
   // ---- GET /api/team/rfq/active-chats?since= ---- (data-team chat hub)
   app.get("/api/team/rfq/active-chats", requireDataTeam, async (req: any, res: any) => {
     try {
