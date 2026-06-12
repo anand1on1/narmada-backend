@@ -34,6 +34,13 @@ function PoEditRedirect() {
   return null;
 }
 
+// R24.1 — AI Discovery rebranded to Market Radar; redirect the legacy URL.
+function MarketRadarRedirect() {
+  const [, navigate] = useLocation();
+  navigate("/admin/market-radar", { replace: true });
+  return null;
+}
+
 function SeoLandingResolver() {
   const { slug } = useParams<{ slug: string }>();
   const m = /^([a-z0-9-]+?)-spare-parts-(.+)$/i.exec(slug);
@@ -82,6 +89,9 @@ import AdminAdsGoogle from "@/pages/admin/AdminAdsGoogle";
 // Round 8 — new admin pages
 import AdminParts from "@/pages/admin/AdminParts";
 import AdminPurchaseHistory from "@/pages/admin/AdminPurchaseHistory";
+// R23/R24 — Command Center + WhatsApp-web Chats
+import AdminCommandCenter from "@/pages/admin/AdminCommandCenter";
+import AdminChats from "@/pages/admin/AdminChats";
 
 import { CustomerAuthProvider } from "@/lib/customer-auth";
 import CustomerLogin from "@/pages/portal/CustomerLogin";
@@ -201,6 +211,13 @@ function AppRouter() {
         {/* Round 8 — new admin routes */}
         <Route path="/admin/parts" component={AdminParts} />
         <Route path="/admin/purchase-history" component={AdminPurchaseHistory} />
+        {/* R23.1 — owner Command Center */}
+        <Route path="/admin/command-center" component={AdminCommandCenter} />
+        {/* R24.4 — WhatsApp-web style Chats */}
+        <Route path="/admin/chats" component={AdminChats} />
+        {/* R24.1 — Market Radar rebrand (vendor-discovery → market-radar, keep old URL working) */}
+        <Route path="/admin/market-radar" component={AdminVendorDiscovery} />
+        <Route path="/admin/discovery" component={MarketRadarRedirect} />
         <Route component={NotFound} />
       </Switch>
       </ErrorBoundary>

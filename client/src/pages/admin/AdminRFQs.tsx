@@ -38,6 +38,12 @@ export default function AdminRFQs() {
     })();
   }, [token]);
   useEffect(() => { load(); }, [token, filter]); // eslint-disable-line
+  // R24.5 — 30s auto-refresh of the RFQ list, no page reload.
+  useEffect(() => {
+    if (!token) return;
+    const id = setInterval(() => load(), 30000);
+    return () => clearInterval(id);
+  }, [token, filter]); // eslint-disable-line
 
   async function updateStatus(id: number, status: string) {
     if (!token) return;

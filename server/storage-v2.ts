@@ -3025,6 +3025,33 @@ export function addRfqMessageExternal(data: {
   }
 }
 
+// R22.x webhook: apply an AI-extracted vendor rate to the most recent OPEN quote row
+// for this vendor (status requested|received). Returns the updated quote row, or null if
+// the vendor has no open quote line. Used by the inbound webhook so a WhatsApp rate reply
+// flows straight into the procurement chat as a received quote. Additive — touches existing
+// po_item_vendor_quotes only via UPDATE.
+export function applyInboundRateToLatestQuote(
+  vendorId: number,
+  rate: number,
+  notes?: string | null,
+): any | null {
+  if (vendorId == null || rate == null) return null;
+  const open = sqlite.prepare(
+    `SELECT * FROM po_item_vendor_quotes
+     WHERE vendor_id = ? AND status IN ('requested','received')
+     ORDER BY requested_at DESC, id DESC LIMIT 1`
+  ).get(vendorId) as any;
+  if (!open) return null;
+  const now = Date.now();
+  sqlite.prepare(
+    `UPDATE po_item_vendor_quotes
+     SET rate = ?, notes = COALESCE(?, notes), status = 'received',
+         received_at = COALESCE(received_at, ?)
+     WHERE id = ?`
+  ).run(rate, notes ?? null, now, open.id);
+  return getVendorQuote(open.id);
+}
+
 // Update delivery status for the message bearing this external id. No-op if not found.
 export function updateRfqMessageStatusByExternalId(externalId: string, status: string): void {
   if (!externalId) return;
@@ -3325,4 +3352,309 @@ export function processPurchaseOrder(poId: number): {
     };
   });
   return tx();
+}
+
+// ============================================================
+// R22 — Consignment: Delhi-dispatched POs visible category
+// ============================================================
+// POs Delhi has marked dispatched (delhi_submitted_at set) that are not yet completed in
+// the consignment view. Returns lightweight rows with live totals for the "From Delhi" tab.
+export function listDelhiDispatchedForConsignment(): any[] {
+  const rows = sqlite.prepare(
+    `SELECT * FROM purchase_orders_v2
+     WHERE delhi_submitted_at IS NOT NULL
+       AND deleted_at IS NULL
+       AND (consignment_status IS NULL OR consignment_status != 'completed')
+     ORDER BY delhi_submitted_at DESC`
+  ).all() as any[];
+  return rows.map((po) => {
+    const items = sqlite.prepare(`SELECT * FROM po_items WHERE po_id = ?`).all(po.id) as any[];
+    const customer = po.customer_id
+      ? (sqlite.prepare(`SELECT name, phone FROM customers WHERE id = ?`).get(po.customer_id) as any)
+      : null;
+    let custTotal = 0, costTotal = 0;
+    for (const it of items) {
+      const qty = Number(it.qty ?? 0) || 0;
+      custTotal += (it.unit_price != null ? Number(it.unit_price) : 0) * qty;
+      const cost = it.vendor_rate != null ? Number(it.vendor_rate) : (it.purchase_cost != null ? Number(it.purchase_cost) : 0);
+      costTotal += cost * qty;
+    }
+    return {
+      id: po.id, poNumber: po.po_number, customerId: po.customer_id,
+      customerName: customer?.name ?? null, customerPhone: customer?.phone ?? null,
+      status: po.status, delhiSubmittedAt: po.delhi_submitted_at,
+      consignmentStatus: po.consignment_status ?? null,
+      consignmentReceivedAt: po.consignment_received_at ?? null,
+      itemCount: items.length, custTotal, costTotal,
+    };
+  });
+}
+
+// Set the consignment marker on a PO (received|processing|completed). Additive — does NOT
+// touch the PO lifecycle status. Stamps consignment_received_at on first 'received'.
+export function setConsignmentStatus(poId: number, status: string): any {
+  const now = Date.now();
+  const stampReceived = status === "received" ? now : null;
+  sqlite.prepare(
+    `UPDATE purchase_orders_v2
+     SET consignment_status = ?,
+         consignment_received_at = COALESCE(consignment_received_at, ?)
+     WHERE id = ?`
+  ).run(status, stampReceived, poId);
+  return sqlite.prepare(`SELECT id, po_number, consignment_status, consignment_received_at FROM purchase_orders_v2 WHERE id = ?`).get(poId);
+}
+
+// ============================================================
+// R23 — Command Center aggregates + ledger + margin
+// ============================================================
+export function commandCenterWidgets(): any {
+  const dayStart = new Date(); dayStart.setHours(0, 0, 0, 0);
+  const todayMs = dayStart.getTime();
+  const weekAgo = Date.now() - 7 * 24 * 60 * 60 * 1000;
+  const monthAgo = Date.now() - 30 * 24 * 60 * 60 * 1000;
+
+  // Pull active POs once and compute totals in JS (mirrors computePoTotals).
+  const activePos = sqlite.prepare(
+    `SELECT * FROM purchase_orders_v2 WHERE deleted_at IS NULL`
+  ).all() as any[];
+  const itemsByPo = new Map<number, any[]>();
+  const allItems = sqlite.prepare(`SELECT * FROM po_items`).all() as any[];
+  for (const it of allItems) {
+    if (!itemsByPo.has(it.po_id)) itemsByPo.set(it.po_id, []);
+    itemsByPo.get(it.po_id)!.push(it);
+  }
+  const totalsFor = (poId: number) => {
+    const items = itemsByPo.get(poId) || [];
+    let cust = 0, cost = 0;
+    for (const it of items) {
+      const qty = Number(it.qty ?? 0) || 0;
+      cust += (it.unit_price != null ? Number(it.unit_price) : 0) * qty;
+      const c = it.vendor_rate != null ? Number(it.vendor_rate) : (it.purchase_cost != null ? Number(it.purchase_cost) : 0);
+      cost += c * qty;
+    }
+    return { cust, cost };
+  };
+
+  // 1. Today's revenue (sum custTotal of POs created today)
+  let todayRevenue = 0;
+  for (const po of activePos) {
+    if (Number(po.created_at) >= todayMs) todayRevenue += totalsFor(po.id).cust;
+  }
+  // 2. Open POs
+  const openPos = activePos.filter((p) => ["open", "draft", "processed", "sent", "partial"].includes(String(p.status)));
+  let openValue = 0; for (const p of openPos) openValue += totalsFor(p.id).cust;
+  // 3. Pending dispatches
+  const pendingDispatch = activePos.filter((p) => Number(p.is_fully_dispatched) !== 1 && p.delhi_submitted_at == null);
+  // 4. Low margin alerts (<5%)
+  const lowMargin: any[] = [];
+  for (const po of activePos) {
+    const { cust, cost } = totalsFor(po.id);
+    if (cust > 0) {
+      const margin = (cust - cost) / cust;
+      if (margin < 0.05) {
+        const customer = po.customer_id ? (sqlite.prepare(`SELECT name FROM customers WHERE id = ?`).get(po.customer_id) as any) : null;
+        lowMargin.push({ id: po.id, poNumber: po.po_number, customerName: customer?.name ?? null, marginPct: Math.round(margin * 1000) / 10, custTotal: cust });
+      }
+    }
+  }
+  lowMargin.sort((a, b) => b.id - a.id);
+  // 5. Recent vendor replies
+  const recentReplies = (sqlite.prepare(
+    `SELECT m.id, m.vendor_id, m.vendor_phone, m.body, m.created_at, v.name AS vendor_name
+     FROM vendor_rfq_messages m LEFT JOIN vendors v ON v.id = m.vendor_id
+     WHERE m.direction = 'in' ORDER BY m.created_at DESC LIMIT 5`
+  ).all() as any[]).map((r) => ({
+    id: r.id, vendorName: r.vendor_name || r.vendor_phone || "Unknown",
+    snippet: String(r.body || "").slice(0, 80), createdAt: r.created_at,
+  }));
+  // 6. This week's quotations (sent + accepted)
+  const quotesSent = (sqlite.prepare(`SELECT COUNT(*) AS n FROM quotations WHERE created_at >= ? AND (deleted_at IS NULL)`).get(weekAgo) as any)?.n ?? 0;
+  let quotesAccepted = 0;
+  try { quotesAccepted = (sqlite.prepare(`SELECT COUNT(*) AS n FROM quotations WHERE created_at >= ? AND status = 'accepted' AND (deleted_at IS NULL)`).get(weekAgo) as any)?.n ?? 0; } catch { /* status col may differ */ }
+  // 7. Active RFQs awaiting rates
+  const awaitingRates = (sqlite.prepare(
+    `SELECT COUNT(*) AS n FROM po_item_vendor_quotes WHERE status = 'requested' AND rate IS NULL AND requested_at >= ?`
+  ).get(weekAgo) as any)?.n ?? 0;
+  // 8. Top customers (30d)
+  const topCustomers: any[] = [];
+  {
+    const byCust = new Map<number, number>();
+    for (const po of activePos) {
+      if (Number(po.created_at) >= monthAgo && po.customer_id) {
+        byCust.set(po.customer_id, (byCust.get(po.customer_id) || 0) + totalsFor(po.id).cust);
+      }
+    }
+    const sorted = Array.from(byCust.entries()).sort((a, b) => b[1] - a[1]).slice(0, 5);
+    for (const [cid, total] of sorted) {
+      const c = sqlite.prepare(`SELECT name FROM customers WHERE id = ?`).get(cid) as any;
+      topCustomers.push({ customerId: cid, customerName: c?.name ?? `#${cid}`, total: Math.round(total) });
+    }
+  }
+  // 9. Top vendors by spend (30d) — vendor_rate * qty on po_items of recent POs
+  const topVendors: any[] = [];
+  {
+    const byVendor = new Map<number, number>();
+    for (const po of activePos) {
+      if (Number(po.created_at) < monthAgo) continue;
+      for (const it of (itemsByPo.get(po.id) || [])) {
+        if (it.vendor_id && it.vendor_rate != null) {
+          byVendor.set(it.vendor_id, (byVendor.get(it.vendor_id) || 0) + Number(it.vendor_rate) * (Number(it.qty) || 0));
+        }
+      }
+    }
+    const sorted = Array.from(byVendor.entries()).sort((a, b) => b[1] - a[1]).slice(0, 5);
+    for (const [vid, spend] of sorted) {
+      const v = sqlite.prepare(`SELECT name FROM vendors WHERE id = ?`).get(vid) as any;
+      topVendors.push({ vendorId: vid, vendorName: v?.name ?? `#${vid}`, spend: Math.round(spend) });
+    }
+  }
+
+  return {
+    todayRevenue: Math.round(todayRevenue),
+    openPos: { count: openPos.length, value: Math.round(openValue) },
+    pendingDispatches: pendingDispatch.length,
+    lowMarginAlerts: lowMargin.slice(0, 10),
+    recentVendorReplies: recentReplies,
+    weekQuotations: { sent: quotesSent, accepted: quotesAccepted },
+    awaitingRates,
+    topCustomers,
+    topVendors,
+  };
+}
+
+// R23 — margin summary over a window with per-company + per-customer breakdown.
+export function marginSummary(fromMs: number, toMs: number): any {
+  const pos = sqlite.prepare(
+    `SELECT * FROM purchase_orders_v2 WHERE deleted_at IS NULL AND created_at >= ? AND created_at <= ?`
+  ).all(fromMs, toMs) as any[];
+  let revenue = 0, cost = 0;
+  const byCompany = new Map<number, { revenue: number; cost: number }>();
+  const byCustomer = new Map<number, { revenue: number; cost: number }>();
+  for (const po of pos) {
+    const items = sqlite.prepare(`SELECT * FROM po_items WHERE po_id = ?`).all(po.id) as any[];
+    let cust = 0, cst = 0;
+    for (const it of items) {
+      const qty = Number(it.qty ?? 0) || 0;
+      cust += (it.unit_price != null ? Number(it.unit_price) : 0) * qty;
+      const c = it.vendor_rate != null ? Number(it.vendor_rate) : (it.purchase_cost != null ? Number(it.purchase_cost) : 0);
+      cst += c * qty;
+    }
+    revenue += cust; cost += cst;
+    if (po.company_id) {
+      const e = byCompany.get(po.company_id) || { revenue: 0, cost: 0 };
+      e.revenue += cust; e.cost += cst; byCompany.set(po.company_id, e);
+    }
+    if (po.customer_id) {
+      const e = byCustomer.get(po.customer_id) || { revenue: 0, cost: 0 };
+      e.revenue += cust; e.cost += cst; byCustomer.set(po.customer_id, e);
+    }
+  }
+  const pct = (r: number, c: number) => (r > 0 ? Math.round(((r - c) / r) * 1000) / 10 : 0);
+  const companies = Array.from(byCompany.entries()).map(([id, e]) => {
+    const row = sqlite.prepare(`SELECT name FROM companies WHERE id = ?`).get(id) as any;
+    return { companyId: id, name: row?.name ?? `#${id}`, revenue: Math.round(e.revenue), cost: Math.round(e.cost), marginPct: pct(e.revenue, e.cost) };
+  }).sort((a, b) => b.revenue - a.revenue);
+  const customersBd = Array.from(byCustomer.entries()).map(([id, e]) => {
+    const row = sqlite.prepare(`SELECT name FROM customers WHERE id = ?`).get(id) as any;
+    return { customerId: id, name: row?.name ?? `#${id}`, revenue: Math.round(e.revenue), cost: Math.round(e.cost), marginPct: pct(e.revenue, e.cost) };
+  }).sort((a, b) => b.revenue - a.revenue);
+  return {
+    totalRevenue: Math.round(revenue), totalCost: Math.round(cost),
+    grossMarginPct: pct(revenue, cost),
+    byCompany: companies, byCustomer: customersBd,
+  };
+}
+
+// R23 — idempotent ledger write on PO fulfilment. Writes a customer debit + company credit
+// keyed by (po_id, entry_type) so re-running is a no-op. Returns true if a NEW entry was made.
+export function writePoFulfilmentLedger(poId: number): boolean {
+  const po = sqlite.prepare(`SELECT * FROM purchase_orders_v2 WHERE id = ?`).get(poId) as any;
+  if (!po) return false;
+  const existing = sqlite.prepare(
+    `SELECT id FROM po_fulfilment_ledger WHERE po_id = ? AND entry_type = 'po_fulfilment'`
+  ).get(poId);
+  if (existing) return false; // idempotent — already written
+  const items = sqlite.prepare(`SELECT * FROM po_items WHERE po_id = ?`).all(poId) as any[];
+  let custTotal = 0;
+  for (const it of items) custTotal += (it.unit_price != null ? Number(it.unit_price) : 0) * (Number(it.qty) || 0);
+  const now = Date.now();
+  const ref = `PO ${po.po_number}`;
+  sqlite.prepare(
+    `INSERT INTO po_fulfilment_ledger (po_id, customer_id, company_id, entry_type, debit, credit, reference, source, created_at)
+     VALUES (?, ?, ?, 'po_fulfilment', ?, ?, ?, 'po_fulfilment', ?)`
+  ).run(poId, po.customer_id ?? null, po.company_id ?? null, custTotal, custTotal, ref, now);
+  return true;
+}
+
+// ============================================================
+// R24 — Market Radar: lead convert + marketing send log + chats
+// ============================================================
+export function convertLeadToCustomer(leadId: number): { customerId: number } | null {
+  const lead = sqlite.prepare(`SELECT * FROM leads WHERE id = ?`).get(leadId) as any;
+  if (!lead) return null;
+  if (lead.converted_to_customer_id) return { customerId: lead.converted_to_customer_id };
+  const now = Date.now();
+  const info = sqlite.prepare(
+    `INSERT INTO customers (name, phone, email, city, state, notes, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?)`
+  ).run(lead.name, lead.phone ?? lead.whatsapp ?? null, lead.email ?? null, lead.city ?? null, lead.state ?? null, lead.notes ?? lead.requirement ?? null, now);
+  const customerId = Number(info.lastInsertRowid);
+  sqlite.prepare(
+    `UPDATE leads SET converted_to_customer_id = ?, status = 'converted', stage = 'won', updated_at = ? WHERE id = ?`
+  ).run(customerId, now, leadId);
+  return { customerId };
+}
+
+export function logMarketingSend(data: { leadId?: number | null; phone?: string | null; template?: string | null; vars?: string | null; status: string; error?: string | null; sentBy?: string | null }): any {
+  const info = sqlite.prepare(
+    `INSERT INTO marketing_sends (lead_id, phone, template, vars, status, error, sent_by, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+  ).run(data.leadId ?? null, data.phone ?? null, data.template ?? null, data.vars ?? null, data.status, data.error ?? null, data.sentBy ?? null, Date.now());
+  return sqlite.prepare(`SELECT * FROM marketing_sends WHERE id = ?`).get(Number(info.lastInsertRowid));
+}
+
+export function updateMarketingSendStatus(id: number, status: string, error?: string | null): void {
+  sqlite.prepare(`UPDATE marketing_sends SET status = ?, error = ? WHERE id = ?`).run(status, error ?? null, id);
+}
+
+// R24 — unified chat conversation list from vendor_rfq_messages: one row per vendor/phone
+// with last message + unread (inbound, no later outbound) count.
+export function listChatConversations(): any[] {
+  const rows = sqlite.prepare(
+    `SELECT m.vendor_id, m.vendor_phone,
+            MAX(m.created_at) AS last_at,
+            COUNT(*) AS msg_count
+     FROM vendor_rfq_messages m
+     GROUP BY COALESCE(m.vendor_id, m.vendor_phone)
+     ORDER BY last_at DESC`
+  ).all() as any[];
+  return rows.map((r) => {
+    const last = sqlite.prepare(
+      `SELECT body, direction, created_at FROM vendor_rfq_messages
+       WHERE (vendor_id IS ? OR vendor_phone IS ?) ORDER BY created_at DESC, id DESC LIMIT 1`
+    ).get(r.vendor_id, r.vendor_phone) as any;
+    const unread = (sqlite.prepare(
+      `SELECT COUNT(*) AS n FROM vendor_rfq_messages
+       WHERE (vendor_id IS ? OR vendor_phone IS ?) AND direction = 'in'
+         AND created_at > COALESCE((SELECT MAX(created_at) FROM vendor_rfq_messages WHERE (vendor_id IS ? OR vendor_phone IS ?) AND direction = 'out'), 0)`
+    ).get(r.vendor_id, r.vendor_phone, r.vendor_id, r.vendor_phone) as any)?.n ?? 0;
+    const vendor = r.vendor_id ? (sqlite.prepare(`SELECT id, name, phone FROM vendors WHERE id = ?`).get(r.vendor_id) as any) : null;
+    return {
+      vendorId: r.vendor_id ?? null,
+      phone: r.vendor_phone ?? vendor?.phone ?? null,
+      name: vendor?.name ?? r.vendor_phone ?? "Unknown",
+      lastMessage: String(last?.body || "").slice(0, 120),
+      lastDirection: last?.direction ?? null,
+      lastMessageAt: r.last_at,
+      unreadCount: unread,
+      messageCount: r.msg_count,
+    };
+  });
+}
+
+export function listChatThread(vendorId: number): any[] {
+  return sqlite.prepare(
+    `SELECT id, vendor_id, vendor_phone, direction, body, status, created_at
+     FROM vendor_rfq_messages WHERE vendor_id = ? ORDER BY created_at ASC, id ASC`
+  ).all(vendorId) as any[];
 }

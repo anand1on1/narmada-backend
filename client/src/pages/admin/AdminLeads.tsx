@@ -3,7 +3,7 @@ import { AdminLayout } from "./AdminLayout";
 import { adminFetch, useAdminAuth } from "@/lib/admin-auth";
 import { useToast } from "@/hooks/use-toast";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { Plus, Upload, MessageSquare, Send, Loader2, LayoutGrid, List } from "lucide-react";
+import { Plus, Upload, MessageSquare, Send, Loader2, LayoutGrid, List, UserPlus, Megaphone } from "lucide-react";
 
 interface Lead {
   id: number;
@@ -90,6 +90,30 @@ export default function AdminLeads() {
     onError: (e: any) => toast({ title: "Error", description: e.message, variant: "destructive" }),
   });
 
+  // R24.2 — convert a lead into a customer record.
+  const convert = useMutation({
+    mutationFn: async (id: number) => {
+      const r = await adminFetch(token, `/api/admin/leads/${id}/convert`, { method: "POST" });
+      const d = await r.json();
+      if (!r.ok) throw new Error(d.error || "Convert failed");
+      return d;
+    },
+    onSuccess: (d: any) => { qc.invalidateQueries({ queryKey: ["admin-leads"] }); toast({ title: "Converted to customer", description: d.customerId ? `Customer #${d.customerId}` : undefined }); },
+    onError: (e: any) => toast({ title: "Error", description: e.message, variant: "destructive" }),
+  });
+
+  // R24.3 — send a marketing WhatsApp (AiSensy) to a lead.
+  const marketing = useMutation({
+    mutationFn: async (id: number) => {
+      const r = await adminFetch(token, `/api/admin/leads/send-marketing`, { method: "POST", body: JSON.stringify({ lead_ids: [id] }) });
+      const d = await r.json();
+      if (!r.ok) throw new Error(d.error || "Send failed");
+      return d;
+    },
+    onSuccess: (d: any) => toast({ title: "Marketing queued", description: `${d.queued ?? 1} message(s)` }),
+    onError: (e: any) => toast({ title: "Error", description: e.message, variant: "destructive" }),
+  });
+
   return (
     <AdminLayout title="Leads CRM">
       <div className="flex flex-wrap gap-2 mb-4 items-center">
@@ -149,6 +173,8 @@ export default function AdminLeads() {
                   </td>
                   <td className="px-3 py-3 text-right whitespace-nowrap">
                     <button onClick={() => setOutreachFor(l)} className="p-1.5 rounded hover:bg-muted" title="AI Outreach"><MessageSquare className="w-4 h-4" /></button>
+                    <button onClick={() => marketing.mutate(l.id)} disabled={marketing.isPending} className="p-1.5 rounded hover:bg-muted disabled:opacity-50" title="Send marketing WhatsApp"><Megaphone className="w-4 h-4" /></button>
+                    <button onClick={() => convert.mutate(l.id)} disabled={convert.isPending} className="p-1.5 rounded hover:bg-muted disabled:opacity-50" title="Convert to customer"><UserPlus className="w-4 h-4" /></button>
                   </td>
                 </tr>
               ))}</tbody>

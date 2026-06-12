@@ -1,9 +1,32 @@
 import { useState } from "react";
+import { Link } from "wouter";
 import { AdminLayout } from "./AdminLayout";
 import { adminFetch, useAdminAuth } from "@/lib/admin-auth";
 import { useToast } from "@/hooks/use-toast";
 import { useMutation } from "@tanstack/react-query";
 import { Search, Loader2, Plus, Send } from "lucide-react";
+
+// R24.1 — Market Radar tab bar. Discover is this page; the others reuse existing pages.
+function MarketRadarTabs({ active }: { active: "discover" | "leads" | "campaigns" | "analytics" }) {
+  const tabs: Array<{ key: typeof active; label: string; href: string }> = [
+    { key: "discover", label: "Discover", href: "/admin/market-radar" },
+    { key: "leads", label: "Leads", href: "/admin/leads" },
+    { key: "campaigns", label: "Campaigns", href: "/admin/chats" },
+    { key: "analytics", label: "Analytics", href: "/admin/command-center" },
+  ];
+  return (
+    <div className="flex gap-1 mb-5 border-b">
+      {tabs.map((t) => (
+        <Link key={t.key} href={t.href}
+          className={"px-4 py-2 text-sm font-semibold border-b-2 -mb-px " +
+            (t.key === active ? "border-accent text-foreground" : "border-transparent text-muted-foreground hover:text-foreground")}
+          data-testid={`tab-radar-${t.key}`}>
+          {t.label}
+        </Link>
+      ))}
+    </div>
+  );
+}
 
 interface Candidate {
   name: string;
@@ -102,7 +125,8 @@ export default function AdminVendorDiscovery() {
   const selectedCandidates = Array.from(selected).map((i) => candidates[i]);
 
   return (
-    <AdminLayout title="AI Vendor Discovery">
+    <AdminLayout title="Market Radar">
+      <MarketRadarTabs active="discover" />
       <div className="bg-card border rounded-xl p-5 shadow-sm mb-6">
         <p className="text-sm text-muted-foreground mb-3">
           Find new sellers / manufacturers via AI web search (Perplexity).

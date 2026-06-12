@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { AdminLayout } from "./AdminLayout";
 import { adminFetch, useAdminAuth, getAdminToken } from "@/lib/admin-auth";
 import { apiUrl } from "@/lib/queryClient";
-import { Plus, Edit3, Trash2, Truck, Search } from "lucide-react";
+import { Plus, Edit3, Trash2, Truck, Search, PackageCheck } from "lucide-react";
 
 interface Consignment {
   id: number;
@@ -53,8 +53,27 @@ interface CustomerOption {
   email: string | null;
 }
 
+// R22.1 — a PO that Delhi has dispatched, surfaced in the consignment view.
+interface FromDelhiPO {
+  id: number;
+  poNumber: string;
+  customerId: number | null;
+  customerName: string | null;
+  customerPhone: string | null;
+  status: string;
+  delhiSubmittedAt: number | null;
+  consignmentStatus: string | null;
+  consignmentReceivedAt: number | null;
+  itemCount: number;
+  custTotal: number;
+  costTotal: number;
+}
+
 export default function AdminConsignments() {
   const { token } = useAdminAuth();
+  const [tab, setTab] = useState<"consignments" | "from-delhi">("consignments");
+  const [delhiPos, setDelhiPos] = useState<FromDelhiPO[]>([]);
+  const [delhiBusy, setDelhiBusy] = useState<number | null>(null);
   const [items, setItems] = useState<Consignment[]>([]);
   const [filter, setFilter] = useState<"all" | Consignment["status"]>("all");
   const [q, setQ] = useState("");
@@ -120,6 +139,34 @@ export default function AdminConsignments() {
   }
   useEffect(() => { load(); }, [token, filter]); // eslint-disable-line
 
+  // R22.1 — load Delhi-dispatched POs and poll while the tab is open.
+  async function loadDelhi() {
+    if (!token) return;
+    try {
+      const r = await adminFetch(token, "/api/admin/consignment/from-delhi");
+      const _d = await r.json();
+      setDelhiPos(Array.isArray(_d) ? _d : []);
+    } catch { /* keep last */ }
+  }
+  useEffect(() => {
+    if (tab !== "from-delhi") return;
+    loadDelhi();
+    const id = setInterval(loadDelhi, 20000);
+    return () => clearInterval(id);
+  }, [tab, token]); // eslint-disable-line
+
+  async function setDelhiStatus(poId: number, status: "received" | "processing" | "completed") {
+    if (!token) return;
+    setDelhiBusy(poId);
+    try {
+      const r = await adminFetch(token, `/api/admin/consignment/${poId}/status`, {
+        method: "POST", body: JSON.stringify({ status }),
+      });
+      if (!r.ok) { const e = await r.json().catch(() => ({})); alert(e.error || "Update failed"); return; }
+      await loadDelhi();
+    } finally { setDelhiBusy(null); }
+  }
+
   async function save() {
     if (!token || !open) return;
     setSaving(true);
@@ -180,6 +227,19 @@ export default function AdminConsignments() {
 
   return (
     <AdminLayout title="Consignments">
+      <div className="flex gap-1 mb-4 border-b">
+        <button onClick={() => setTab("consignments")}
+          className={"px-4 py-2 text-sm font-semibold border-b-2 -mb-px " + (tab === "consignments" ? "border-accent text-foreground" : "border-transparent text-muted-foreground hover:text-foreground")}
+          data-testid="tab-consignments">Consignments</button>
+        <button onClick={() => setTab("from-delhi")}
+          className={"px-4 py-2 text-sm font-semibold border-b-2 -mb-px inline-flex items-center gap-1.5 " + (tab === "from-delhi" ? "border-accent text-foreground" : "border-transparent text-muted-foreground hover:text-foreground")}
+          data-testid="tab-from-delhi"><PackageCheck className="w-4 h-4" /> From Delhi{delhiPos.length > 0 && <span className="bg-emerald-600 text-white text-[10px] px-1.5 rounded-full">{delhiPos.length}</span>}</button>
+      </div>
+
+      {tab === "from-delhi" ? (
+        <FromDelhiTab pos={delhiPos} busyId={delhiBusy} onStatus={setDelhiStatus} />
+      ) : (
+      <>
       <div className="flex gap-2 mb-4 flex-wrap items-center">
         <button onClick={() => setFilter("all")}
           className={`px-3 py-1.5 rounded-lg text-xs font-bold uppercase tracking-wider ${filter === "all" ? "bg-accent text-accent-foreground" : "bg-card border hover:bg-muted"}`}
@@ -250,6 +310,8 @@ export default function AdminConsignments() {
           </table>
         )}
       </div>
+      </>
+      )}
 
       {open && (
         <div className="fixed inset-0 bg-black/60 z-50 flex items-center justify-center p-4">
@@ -426,6 +488,72 @@ function Field({ label, children }: { label: string; children: any }) {
     <div>
       <div className="text-xs uppercase tracking-wider text-muted-foreground font-semibold mb-1.5">{label}</div>
       {children}
+    </div>
+  );
+}
+
+const inr = (n: number) => "₹" + (Number(n) || 0).toLocaleString("en-IN");
+
+// R22.1 — POs dispatched by Delhi, with Mark Received / Process / Complete actions.
+function FromDelhiTab({
+  pos, busyId, onStatus,
+}: {
+  pos: FromDelhiPO[];
+  busyId: number | null;
+  onStatus: (poId: number, status: "received" | "processing" | "completed") => void;
+}) {
+  const statusBadge = (s: string | null) => {
+    if (!s) return <span className="text-[10px] px-2 py-0.5 rounded uppercase tracking-wider font-bold bg-slate-500/15 text-slate-700">awaiting</span>;
+    const map: Record<string, string> = {
+      received: "bg-blue-500/15 text-blue-700",
+      processing: "bg-amber-500/15 text-amber-700",
+      completed: "bg-emerald-500/15 text-emerald-700",
+    };
+    return <span className={`text-[10px] px-2 py-0.5 rounded uppercase tracking-wider font-bold ${map[s] || "bg-muted"}`}>{s}</span>;
+  };
+  return (
+    <div className="bg-card border rounded-xl overflow-x-auto">
+      {pos.length === 0 ? (
+        <div className="p-12 text-center text-muted-foreground">No POs dispatched from Delhi awaiting consignment.</div>
+      ) : (
+        <table className="w-full text-sm">
+          <thead>
+            <tr className="bg-muted/50 text-left">
+              <th className="px-4 py-3 font-semibold">PO #</th>
+              <th className="px-4 py-3 font-semibold">Customer</th>
+              <th className="px-4 py-3 font-semibold">Items</th>
+              <th className="px-4 py-3 font-semibold">Value</th>
+              <th className="px-4 py-3 font-semibold">Consignment</th>
+              <th className="px-4 py-3 font-semibold text-right">Actions</th>
+            </tr>
+          </thead>
+          <tbody className="divide-y">
+            {pos.map((p) => (
+              <tr key={p.id} data-testid={`delhi-po-${p.id}`}>
+                <td className="px-4 py-3 font-mono font-bold">{p.poNumber}</td>
+                <td className="px-4 py-3">{p.customerName || "—"}{p.customerPhone ? <div className="text-xs text-muted-foreground">{p.customerPhone}</div> : null}</td>
+                <td className="px-4 py-3">{p.itemCount}</td>
+                <td className="px-4 py-3">{inr(p.custTotal)}</td>
+                <td className="px-4 py-3">{statusBadge(p.consignmentStatus)}</td>
+                <td className="px-4 py-3 text-right whitespace-nowrap">
+                  {p.consignmentStatus !== "received" && p.consignmentStatus !== "processing" && p.consignmentStatus !== "completed" && (
+                    <button onClick={() => onStatus(p.id, "received")} disabled={busyId === p.id}
+                      className="px-2.5 py-1 border rounded text-xs font-semibold hover:bg-muted disabled:opacity-50 mr-2" data-testid={`btn-received-${p.id}`}>Mark Received</button>
+                  )}
+                  {p.consignmentStatus !== "processing" && p.consignmentStatus !== "completed" && (
+                    <button onClick={() => onStatus(p.id, "processing")} disabled={busyId === p.id}
+                      className="px-2.5 py-1 border rounded text-xs font-semibold hover:bg-muted disabled:opacity-50 mr-2" data-testid={`btn-process-${p.id}`}>Process</button>
+                  )}
+                  {p.consignmentStatus !== "completed" && (
+                    <button onClick={() => onStatus(p.id, "completed")} disabled={busyId === p.id}
+                      className="px-2.5 py-1 bg-emerald-600 text-white rounded text-xs font-semibold hover:bg-emerald-700 disabled:opacity-50" data-testid={`btn-complete-${p.id}`}>Complete</button>
+                  )}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
     </div>
   );
 }

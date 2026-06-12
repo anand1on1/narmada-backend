@@ -1,6 +1,6 @@
-import { ReactNode, useEffect } from "react";
+import { ReactNode, useEffect, useState } from "react";
 import { Link, useLocation } from "wouter";
-import { useAdminAuth, AdminRole } from "@/lib/admin-auth";
+import { useAdminAuth, AdminRole, adminFetch } from "@/lib/admin-auth";
 import { Logo } from "@/components/Logo";
 import {
   LayoutDashboard, Package, MessageSquare, Map, Settings, LogOut, ExternalLink,
@@ -8,6 +8,7 @@ import {
   UserSquare, Wallet, CreditCard, FileQuestion, FileSpreadsheet, ShoppingCart, Landmark,
   Building2, UserCog, ScrollText, ClipboardList, Bell,
   Factory, Inbox, Search, Target, Megaphone, CheckSquare, Sparkles, Facebook, History,
+  Gauge, Radar,
 } from "lucide-react";
 
 // Session A V2: 4-role sidebar matrix.
@@ -17,12 +18,13 @@ import {
 // sales     = dashboard + future customers/rfqs (Session B) + price lists + products + contacts
 const ROLE_PAGES: Record<AdminRole, Set<string>> = {
   admin: new Set([
+    "/admin/command-center", "/admin/chats",
     "/admin/dashboard", "/admin/products", "/admin/blog", "/admin/price-lists",
     "/admin/consignments", "/admin/contacts", "/admin/sitemap", "/admin/team", "/admin/settings",
     "/admin/customers", "/admin/ledger", "/admin/payments",
     "/admin/rfqs", "/admin/quotes", "/admin/parts", "/admin/purchase-orders", "/admin/purchase-history", "/admin/bank",
     "/admin/quoting-companies", "/admin/data-team", "/admin/audit-logs", "/admin/notification-log", "/admin/account-requests",
-    "/admin/vendors", "/admin/vendor-ledger", "/admin/vendor-inbox", "/admin/vendor-discovery", "/admin/companies",
+    "/admin/vendors", "/admin/vendor-ledger", "/admin/vendor-inbox", "/admin/market-radar", "/admin/companies",
     "/admin/ai-ledger", "/admin/leads", "/admin/targets", "/admin/announcements", "/admin/tasks",
     "/admin/ads-meta", "/admin/ads-google",
   ]),
@@ -48,11 +50,29 @@ const ROLE_BADGE: Record<AdminRole, string> = {
 export function AdminLayout({ children, title }: { children: ReactNode; title: string }) {
   const { token, username, role, displayName, clear, ready } = useAdminAuth();
   const [location, navigate] = useLocation();
+  const [unreadChats, setUnreadChats] = useState(0);
 
   useEffect(() => {
     // Only redirect once auth state is hydrated, otherwise we kick the user out during refresh
     if (ready && !token) navigate("/admin");
   }, [ready, token, navigate]);
+
+  // R24.4 — sidebar unread badge for Chats, polled every 30s.
+  useEffect(() => {
+    if (!token) return;
+    let alive = true;
+    const tick = async () => {
+      try {
+        const res = await adminFetch(token, "/api/admin/chats");
+        if (!res.ok || !alive) return;
+        const list: Array<{ unreadCount?: number }> = await res.json();
+        if (alive) setUnreadChats(list.reduce((s, c) => s + (Number(c.unreadCount) || 0), 0));
+      } catch { /* ignore */ }
+    };
+    tick();
+    const id = setInterval(tick, 30000);
+    return () => { alive = false; clearInterval(id); };
+  }, [token]);
 
   if (!ready) {
     // Brief loading state while /api/admin/me validates token on first paint
@@ -65,7 +85,9 @@ export function AdminLayout({ children, title }: { children: ReactNode; title: s
   if (!token) return null;
 
   const allItems = [
+    { href: "/admin/command-center", label: "Command Center", icon: Gauge },
     { href: "/admin/dashboard", label: "Dashboard", icon: LayoutDashboard },
+    { href: "/admin/chats", label: "Chats", icon: MessageSquare, badge: unreadChats },
     { href: "/admin/customers", label: "Customers", icon: UserSquare },
     { href: "/admin/ledger", label: "Ledger", icon: Wallet },
     { href: "/admin/payments", label: "Payments", icon: CreditCard },
@@ -79,7 +101,7 @@ export function AdminLayout({ children, title }: { children: ReactNode; title: s
     { href: "/admin/vendors", label: "Vendors", icon: Factory },
     { href: "/admin/vendor-ledger", label: "Vendor Ledger", icon: Wallet },
     { href: "/admin/vendor-inbox", label: "Vendor Inbox", icon: Inbox },
-    { href: "/admin/vendor-discovery", label: "Vendor Discovery", icon: Search },
+    { href: "/admin/market-radar", label: "Market Radar", icon: Radar },
     { href: "/admin/leads", label: "Leads", icon: Target },
     { href: "/admin/ai-ledger", label: "AI Ledger", icon: Sparkles },
     { href: "/admin/targets", label: "Targets", icon: Target },
@@ -131,7 +153,12 @@ export function AdminLayout({ children, title }: { children: ReactNode; title: s
                 data-testid={`link-admin-${n.label.toLowerCase()}`}
               >
                 <n.icon className="w-4 h-4" />
-                {n.label}
+                <span className="flex-1">{n.label}</span>
+                {"badge" in n && (n as any).badge > 0 && (
+                  <span className="bg-emerald-600 text-white text-[10px] font-bold px-1.5 py-0.5 rounded-full" data-testid="badge-unread-chats">
+                    {(n as any).badge}
+                  </span>
+                )}
               </Link>
             );
           })}

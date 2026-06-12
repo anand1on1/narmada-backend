@@ -589,3 +589,85 @@ export function runR21Migrations() {
 
   console.log("[migrations] R21 tables/columns ensured");
 }
+
+// -------- R22 additive migrations --------
+// Consignment visibility + ledger idempotency. We do NOT add a separate consignment portal;
+// instead Delhi-dispatched POs (delhi_submitted_at set) become a visible category, and we add
+// a consignment_status marker so a consignment view can mark rows received/processed without
+// touching the PO lifecycle. Additive only — no drops/renames.
+export function runR22Migrations() {
+  const stmts: Array<{ desc: string; sql: string }> = [
+    { desc: "purchase_orders_v2.consignment_status", sql: `ALTER TABLE purchase_orders_v2 ADD COLUMN consignment_status TEXT` },
+    { desc: "purchase_orders_v2.consignment_received_at", sql: `ALTER TABLE purchase_orders_v2 ADD COLUMN consignment_received_at INTEGER` },
+  ];
+  for (const { desc, sql } of stmts) {
+    console.log(`[migrations] R22: ${desc}`);
+    try { sqlite.exec(sql); } catch (err: any) { console.log(`[migrations] R22: skipped ${desc} —`, err?.message || err); }
+  }
+  console.log("[migrations] R22 tables/columns ensured");
+}
+
+// -------- R23 additive migrations --------
+// Command Center + bug bundle. ledger_entries gets a po_id + idempotency-friendly source so a
+// fulfilled-PO transition can write exactly once. Additive only.
+export function runR23Migrations() {
+  const stmts: Array<{ desc: string; sql: string }> = [
+    {
+      // NOTE: distinct from the Session B customer `ledger_entries` table. This is a
+      // separate, additive PO-fulfilment audit table keyed by (po_id, entry_type).
+      desc: "po_fulfilment_ledger table (idempotent PO ledger)",
+      sql: `CREATE TABLE IF NOT EXISTS po_fulfilment_ledger (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        po_id INTEGER,
+        customer_id INTEGER,
+        company_id INTEGER,
+        entry_type TEXT NOT NULL,
+        debit REAL NOT NULL DEFAULT 0,
+        credit REAL NOT NULL DEFAULT 0,
+        reference TEXT,
+        source TEXT,
+        created_at INTEGER NOT NULL
+      )`,
+    },
+    // Idempotency: at most one PO-fulfilment ledger entry per (po_id, entry_type).
+    { desc: "uq po_fulfilment_ledger(po_id, entry_type)", sql: `CREATE UNIQUE INDEX IF NOT EXISTS po_fulfilment_ledger_po_type_uq ON po_fulfilment_ledger(po_id, entry_type) WHERE po_id IS NOT NULL` },
+    { desc: "idx po_fulfilment_ledger(customer_id)", sql: `CREATE INDEX IF NOT EXISTS po_fulfilment_ledger_customer_idx ON po_fulfilment_ledger(customer_id)` },
+  ];
+  for (const { desc, sql } of stmts) {
+    console.log(`[migrations] R23: ${desc}`);
+    try { sqlite.exec(sql); } catch (err: any) { console.log(`[migrations] R23: skipped ${desc} —`, err?.message || err); }
+  }
+  console.log("[migrations] R23 tables/columns ensured");
+}
+
+// -------- R24 additive migrations --------
+// Market Radar: extend the existing leads table (status/notes/assignment/conversion) instead of
+// creating a parallel table, and add marketing_sends for campaign tracking. Additive only.
+export function runR24Migrations() {
+  const stmts: Array<{ desc: string; sql: string }> = [
+    { desc: "leads.status", sql: `ALTER TABLE leads ADD COLUMN status TEXT` },
+    { desc: "leads.notes", sql: `ALTER TABLE leads ADD COLUMN notes TEXT` },
+    { desc: "leads.assigned_to_user_id", sql: `ALTER TABLE leads ADD COLUMN assigned_to_user_id INTEGER` },
+    { desc: "leads.converted_to_customer_id", sql: `ALTER TABLE leads ADD COLUMN converted_to_customer_id INTEGER` },
+    {
+      desc: "marketing_sends table",
+      sql: `CREATE TABLE IF NOT EXISTS marketing_sends (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        lead_id INTEGER,
+        phone TEXT,
+        template TEXT,
+        vars TEXT,
+        status TEXT NOT NULL DEFAULT 'queued',
+        error TEXT,
+        sent_by TEXT,
+        created_at INTEGER NOT NULL
+      )`,
+    },
+    { desc: "idx marketing_sends(lead_id)", sql: `CREATE INDEX IF NOT EXISTS marketing_sends_lead_idx ON marketing_sends(lead_id)` },
+  ];
+  for (const { desc, sql } of stmts) {
+    console.log(`[migrations] R24: ${desc}`);
+    try { sqlite.exec(sql); } catch (err: any) { console.log(`[migrations] R24: skipped ${desc} —`, err?.message || err); }
+  }
+  console.log("[migrations] R24 tables/columns ensured");
+}

@@ -778,6 +778,9 @@ export const purchaseOrdersV2 = sqliteTable("purchase_orders_v2", {
   // R21.7 additions — customer urgency tag + delivery deadline (set by Patna, shown to Delhi).
   urgency: text("urgency"), // urgent|normal|standby (default normal at read time)
   deliveryDeadline: integer("delivery_deadline"), // unix-ms; nullable
+  // R22 additions — consignment view marker (independent of the PO lifecycle status).
+  consignmentStatus: text("consignment_status"), // null|received|processing|completed
+  consignmentReceivedAt: integer("consignment_received_at"),
 });
 export const insertPurchaseOrderV2Schema = createInsertSchema(purchaseOrdersV2).omit({ id: true, createdAt: true, updatedAt: true });
 export type InsertPurchaseOrderV2 = z.infer<typeof insertPurchaseOrderV2Schema>;
@@ -1020,6 +1023,12 @@ export const leads = sqliteTable("leads", {
   createdAt: integer("created_at").notNull().$defaultFn(() => Date.now()),
   updatedAt: integer("updated_at").notNull().$defaultFn(() => Date.now()),
   lastContactAt: integer("last_contact_at"),
+  // R24 additions — Market Radar lead pipeline (status mirrors stage for the new UI, plus
+  // free-text notes, assignment, and conversion link). Additive only.
+  status: text("status"), // new|contacted|qualified|converted|lost
+  notes: text("notes"),
+  assignedToUserId: integer("assigned_to_user_id"),
+  convertedToCustomerId: integer("converted_to_customer_id"),
 });
 export const insertLeadSchema = createInsertSchema(leads).omit({ id: true, createdAt: true, updatedAt: true });
 export type InsertLead = z.infer<typeof insertLeadSchema>;
@@ -1033,6 +1042,20 @@ export const leadActivities = sqliteTable("lead_activities", {
   createdBy: text("created_by"),
   createdAt: integer("created_at").notNull().$defaultFn(() => Date.now()),
 });
+
+// R24 — marketing campaign send log (one row per lead per send). Fire-and-forget AiSensy.
+export const marketingSends = sqliteTable("marketing_sends", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  leadId: integer("lead_id"),
+  phone: text("phone"),
+  template: text("template"),
+  vars: text("vars"),
+  status: text("status").notNull().default("queued"), // queued|sent|failed
+  error: text("error"),
+  sentBy: text("sent_by"),
+  createdAt: integer("created_at").notNull().$defaultFn(() => Date.now()),
+});
+export type MarketingSend = typeof marketingSends.$inferSelect;
 export const insertLeadActivitySchema = createInsertSchema(leadActivities).omit({ id: true, createdAt: true });
 export type InsertLeadActivity = z.infer<typeof insertLeadActivitySchema>;
 export type LeadActivity = typeof leadActivities.$inferSelect;

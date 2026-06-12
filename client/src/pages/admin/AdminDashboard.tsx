@@ -19,7 +19,8 @@ export default function AdminDashboard() {
 
   useEffect(() => {
     if (!token) return;
-    (async () => {
+    let alive = true;
+    const refresh = async () => {
       try {
         const [prodRes, contactRes, settingsRes, sitemapRes] = await Promise.all([
           adminFetch(token, "/api/admin/products"),
@@ -31,6 +32,7 @@ export default function AdminDashboard() {
         const contacts = await contactRes.json();
         const settings = await settingsRes.json();
         const sitemap = await sitemapRes.json();
+        if (!alive) return;
         setStats({
           products: products.length,
           contacts: contacts.length,
@@ -42,7 +44,10 @@ export default function AdminDashboard() {
       } catch (e) {
         console.error(e);
       }
-    })();
+    };
+    refresh();
+    const id = setInterval(refresh, 30000); // R24.5 — 30s auto-refresh, no page reload
+    return () => { alive = false; clearInterval(id); };
   }, [token]);
 
   const cards = [

@@ -681,3 +681,33 @@ export async function sendTextMessage(phone: string, text: string, eventKey = "f
   const status = await sendFreeTextWa(phone, text, eventKey);
   return { status };
 }
+
+// R24.3 — marketing campaign send. Template name is env-configurable (the AiSensy campaign
+// must exist + be approved). templateParams default to [name] unless explicit vars passed.
+// Fire-and-forget at the caller; this resolves to a status string and never throws.
+const AISENSY_CAMPAIGN_MARKETING = process.env.AISENSY_CAMPAIGN_MARKETING || "narmada_marketing_v1";
+export async function sendMarketingMessage(
+  phone: string,
+  p: { name?: string; templateParams?: string[]; template?: string },
+): Promise<{ status: string }> {
+  const templateName = p.template || AISENSY_CAMPAIGN_MARKETING;
+  const normalized = normalizePhone(phone);
+  const name = p.name || "there";
+  const params = p.templateParams && p.templateParams.length ? p.templateParams.map(String) : [name];
+  try {
+    const raw = await postAisensy({
+      campaignName: templateName,
+      destination: normalized,
+      userName: "Narmada Mobility",
+      templateParams: params,
+      source: "narmada-backend",
+      media: {}, buttons: [], carouselCards: [], location: {}, attributes: {},
+      paramsFallbackValue: { FirstName: name },
+    });
+    const status = logAisensyResult(normalized, templateName, `marketing:${params.join("|")}`, raw);
+    return { status };
+  } catch (e: any) {
+    console.error(`[whatsapp] sendMarketingMessage failed for ${normalized}:`, e?.message);
+    return { status: "failed" };
+  }
+}

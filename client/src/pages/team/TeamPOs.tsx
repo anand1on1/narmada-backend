@@ -34,6 +34,7 @@ export default function TeamPOs() {
     queryKey: ["team-pos"],
     queryFn: async () => { const r = await teamFetch(token, `/api/team/purchase-orders`); return r.ok ? r.json() : []; },
     enabled: !!token,
+    refetchInterval: 30000, // R24.5 — 30s auto-refresh, no page reload
   });
 
   const delMut = useMutation({

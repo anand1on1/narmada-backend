@@ -96,7 +96,7 @@ app.use((req, res, next) => {
   // ---- R4.4→R7: ensure additive tables + seed defaults on boot ----
   console.log("[boot] step: pre-migrations");
   try {
-    const { runR4toR7Migrations, runR8Migrations, runR9Migrations, runR10Migrations, runR11Migrations, runR11_1Migrations, runR12Migrations, runR13Migrations, runR13_4Migrations, runR18Migrations, runR20Migrations, runR21Migrations } = await import("./migrations");
+    const { runR4toR7Migrations, runR8Migrations, runR9Migrations, runR10Migrations, runR11Migrations, runR11_1Migrations, runR12Migrations, runR13Migrations, runR13_4Migrations, runR18Migrations, runR20Migrations, runR21Migrations, runR22Migrations, runR23Migrations, runR24Migrations } = await import("./migrations");
     runR4toR7Migrations();
     console.log("[boot] step: post-R4-R7 migrations");
     runR8Migrations();
@@ -121,6 +121,12 @@ app.use((req, res, next) => {
     console.log("[boot] step: post-R20 migrations");
     runR21Migrations();
     console.log("[boot] step: post-R21 migrations");
+    runR22Migrations();
+    console.log("[boot] step: post-R22 migrations");
+    runR23Migrations();
+    console.log("[boot] step: post-R23 migrations");
+    runR24Migrations();
+    console.log("[boot] step: post-R24 migrations");
     const { seedR5Defaults } = await import("./seed-r5");
     await seedR5Defaults();
     console.log("[boot] step: post-seed");

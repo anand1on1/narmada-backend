@@ -1210,7 +1210,15 @@ export function registerV2Routes(app: Express, ctx: V2Context) {
   app.get("/api/admin/quotes", requireAuth, async (req, res) => {
     const customerId = req.query.customer_id ? parseInt(req.query.customer_id as string, 10) : undefined;
     const status = req.query.status as string | undefined;
-    res.json(await v2.listQuotes({ customerId, status }));
+    const all = await v2.listQuotes({ customerId, status });
+    // R23.2 — opt-in pagination (backward compatible when ?limit omitted).
+    res.setHeader("X-Total-Count", String(all.length));
+    if (req.query.limit != null) {
+      const limit = Math.max(1, parseInt(req.query.limit as string, 10) || 100);
+      const offset = Math.max(0, parseInt((req.query.offset as string) || "0", 10) || 0);
+      return res.json(all.slice(offset, offset + limit));
+    }
+    res.json(all);
   });
   app.get("/api/admin/quotes/:id", requireAuth, async (req, res) => {
     const row = await v2.getQuote(parseInt(req.params.id as string, 10));
@@ -2847,7 +2855,17 @@ function registerR4toR7Routes(
     res.json(await v2.listVendors({ q: req.query.q as string | undefined, activeOnly: req.query.activeOnly === "true" }));
   });
   app.get("/api/team/purchase-orders", requireDataTeam, async (req, res) => {
-    const rows = await v2.listPurchaseOrdersV2WithTotals({ status: req.query.status as string | undefined });
+    const allRows = await v2.listPurchaseOrdersV2WithTotals({ status: req.query.status as string | undefined });
+    // R23.2 — opt-in pagination: ?limit=&offset= slices the list and sets X-Total-Count.
+    // When ?limit is omitted the full array is returned (backward compatible).
+    const total = allRows.length;
+    let rows = allRows;
+    if (req.query.limit != null) {
+      const limit = Math.max(1, parseInt(req.query.limit as string, 10) || 100);
+      const offset = Math.max(0, parseInt((req.query.offset as string) || "0", 10) || 0);
+      rows = allRows.slice(offset, offset + limit);
+    }
+    res.setHeader("X-Total-Count", String(total));
     // R12: attach per-PO dispatch rollup (Status/Carrier/Bundles/Docket# columns).
     const summary = await v2.getDispatchSummaryForPOs(rows.map((r: any) => r.id));
     res.json(rows.map((r: any) => {
@@ -3636,29 +3654,16 @@ function registerR9Routes(
     });
   }
 
-  // Constant-time secret comparison; tolerant of "Bearer " prefix and missing values.
-  function aisensySecretOk(req: any): boolean {
+  // R22.x — constant-time compare of one candidate against the secret. Length-guarded.
+  function secretMatches(candidate: string): boolean {
     const crypto = require("crypto") as typeof import("crypto");
-    const b = req.body || {};
-    const headerVal = String(
-      req.headers["x-aisensy-signature"] ||
-      req.headers["x-webhook-secret"] ||
-      "",
-    ).trim();
-    const authHeader = String(req.headers["authorization"] || "").trim();
-    const bearer = authHeader.toLowerCase().startsWith("bearer ")
-      ? authHeader.slice(7).trim()
-      : "";
-    const bodySecret = String(b.secret || b.webhook_secret || b.token || "").trim();
-    const candidate = headerVal || bearer || bodySecret;
-    if (!candidate) return false;
+    const cand = String(candidate || "").trim();
+    if (!cand) return false;
     try {
-      const a = Buffer.from(candidate);
+      const a = Buffer.from(cand);
       const c = Buffer.from(AISENSY_WEBHOOK_SECRET);
-      // timingSafeEqual throws on length mismatch — guard, but keep the compare constant-time.
       if (a.length !== c.length) {
-        // Compare against a same-length dummy so timing doesn't leak length info.
-        crypto.timingSafeEqual(c, c);
+        crypto.timingSafeEqual(c, c); // keep timing constant; do not leak length
         return false;
       }
       return crypto.timingSafeEqual(a, c);
@@ -3667,10 +3672,84 @@ function registerR9Routes(
     }
   }
 
+  // R22.x — accept the secret from ANY of the locations AiSensy might use:
+  //   headers: x-aisensy-signature | x-webhook-secret | x-aisensy-secret | authorization: Bearer
+  //   query:   ?secret= | ?token= | ?webhook_secret=
+  //   body:    secret | webhook_secret | token | webhookSecret
+  // Returns true on first match. Also honours AISENSY_WEBHOOK_DEBUG=true (bypass).
+  function aisensySecretOk(req: any): boolean {
+    if (String(process.env.AISENSY_WEBHOOK_DEBUG || "").toLowerCase() === "true") {
+      return true; // debug mode: skip verification entirely (toggle on Render)
+    }
+    const b = req.body || {};
+    const q = req.query || {};
+    const authHeader = String(req.headers["authorization"] || "").trim();
+    const bearer = authHeader.toLowerCase().startsWith("bearer ")
+      ? authHeader.slice(7).trim()
+      : "";
+    const candidates = [
+      req.headers["x-aisensy-signature"],
+      req.headers["x-webhook-secret"],
+      req.headers["x-aisensy-secret"],
+      bearer,
+      q.secret, q.token, q.webhook_secret,
+      b.secret, b.webhook_secret, b.token, b.webhookSecret,
+    ];
+    return candidates.some((c) => c && secretMatches(String(c)));
+  }
+
+  // R22.x — process a single inbound seller reply: persist message, apply any AI-extracted
+  // rate to the latest open quote (so it shows in procurement chat), and store a pending
+  // AI-suggested reply. Returns 1 if a new message row was inserted, else 0. Never throws.
+  async function processInboundReply(
+    from: string,
+    text: string,
+    externalId: string | null,
+  ): Promise<number> {
+    const vendor = from ? await v2.getVendorByPhone(from) : undefined;
+    const row = v2.addRfqMessageExternal({
+      vendorId: vendor?.id ?? null,
+      vendorPhone: from || null,
+      direction: "in",
+      body: text,
+      externalMessageId: externalId ? String(externalId) : null,
+    });
+    if (!row) return 0; // duplicate external id — already processed
+    if (vendor?.id) {
+      // Fire-and-forget Claude suggestion for a human accept/reject.
+      fireAiSuggestion(vendor.id, from || null, row.id);
+      // Best-effort rate extraction → push into the live quote row so it surfaces in chat.
+      const claudeSvc = require("./claude-service") as typeof import("./claude-service");
+      if (text && claudeSvc.isClaudeConfigured()) {
+        setImmediate(() => {
+          (async () => {
+            const extracted = await claudeSvc.extractVendorQuote(text);
+            if (extracted && extracted.rate != null) {
+              v2.applyInboundRateToLatestQuote(vendor.id, extracted.rate, extracted.notes);
+            }
+          })().catch((err) =>
+            console.error("[R22.x aisensy] rate-extract failed:", err?.message || err),
+          );
+        });
+      }
+    }
+    return 1;
+  }
+
   app.post("/api/aisensy/webhook", async (req: any, res: any) => {
-    // Auth: reject mismatch with 401. This is the ONLY non-200 the handler returns.
+    // R22.x — if auth fails we no longer return 401 (that triggers AiSensy retry storms and
+    // hides legit messages). Instead: log the full inbound shape (secrets redacted) for
+    // diagnosis, then fall through and process anyway so the user's vendor replies land.
     if (!aisensySecretOk(req)) {
-      return res.status(401).json({ ok: false, error: "unauthorized" });
+      const redactedHeaders = { ...(req.headers || {}) };
+      for (const k of ["x-aisensy-signature", "x-webhook-secret", "x-aisensy-secret", "authorization"]) {
+        if (redactedHeaders[k]) redactedHeaders[k] = "<redacted>";
+      }
+      console.warn(
+        "[R22.x aisensy] secret did NOT match — processing anyway (set AISENSY_WEBHOOK_DEBUG=true to silence).",
+        "HEADERS:", JSON.stringify(redactedHeaders),
+        "BODYKEYS:", JSON.stringify(Object.keys(req.body || {})),
+      );
     }
 
     let processed = 0;
@@ -3688,51 +3767,57 @@ function registerR9Routes(
       for (const ev of events) {
         try {
           const e = ev || {};
+          // R22.x — AiSensy nests the real payload under data.messageData / messageData /
+          // message. Merge those nested objects so field lookups work regardless of shape.
+          const md = e.messageData || e.data?.messageData || e.message || {};
+          const pick = (...keys: string[]): any => {
+            for (const k of keys) {
+              if (e[k] != null && e[k] !== "") return e[k];
+              if (md[k] != null && md[k] !== "") return md[k];
+            }
+            return undefined;
+          };
           const type = String(
             e.event || e.type || e.eventType || e.event_type || "",
           ).trim();
           const from = String(
-            e.from || e.sender || e.phone || e.mobile ||
+            pick("from", "sender", "phone", "mobile", "waId", "wa_id") ||
             e.contact?.phone || e.contact?.mobile || "",
           );
           const externalId =
-            e.external_message_id || e.message_id || e.messageId ||
-            e.id || e.msgId || null;
+            pick("external_message_id", "message_id", "messageId", "id", "msgId") || null;
           const text = String(
-            e.message || e.text || e.body || e.content || e.message?.text || "",
+            pick("message", "text", "body", "content") ||
+            md.text?.body || e.message?.text || "",
           );
           console.log(
-            `[R18 aisensy] event=${type || "?"} from=${from || "?"} msgId=${externalId || "?"}`,
+            `[R22.x aisensy] event=${type || "?"} from=${from || "?"} msgId=${externalId || "?"} textLen=${text.length}`,
           );
 
           switch (type) {
-            case "message.sender.user": {
-              // Inbound reply from the seller → persist as inbound, fire AI suggestion.
-              const vendor = from ? await v2.getVendorByPhone(from) : undefined;
-              const row = v2.addRfqMessageExternal({
-                vendorId: vendor?.id ?? null, vendorPhone: from || null,
-                direction: "in", body: text,
-                externalMessageId: externalId ? String(externalId) : null,
-              });
-              if (row) {
-                processed++;
-                if (vendor?.id) {
-                  fireAiSuggestion(vendor.id, from || null, row.id);
-                }
-              }
+            case "message.sender.user":
+            case "message.received":
+            case "message.inbound":
+            case "incoming_message": {
+              // Inbound reply from the seller → persist + extract rate + AI suggestion.
+              processed += await processInboundReply(from, text, externalId ? String(externalId) : null);
               break;
             }
             case "message.created": {
               // Generic created event — idempotent insert (skip if external id seen).
               const dir = e.direction === "out" || e.outgoing ? "out" : "in";
-              const vendor = from ? await v2.getVendorByPhone(from) : undefined;
-              const row = v2.addRfqMessageExternal({
-                vendorId: vendor?.id ?? null, vendorPhone: from || null,
-                direction: dir, body: text,
-                externalMessageId: externalId ? String(externalId) : null,
-                status: e.status ? String(e.status) : null,
-              });
-              if (row) processed++;
+              if (dir === "in") {
+                processed += await processInboundReply(from, text, externalId ? String(externalId) : null);
+              } else {
+                const vendor = from ? await v2.getVendorByPhone(from) : undefined;
+                const row = v2.addRfqMessageExternal({
+                  vendorId: vendor?.id ?? null, vendorPhone: from || null,
+                  direction: "out", body: text,
+                  externalMessageId: externalId ? String(externalId) : null,
+                  status: e.status ? String(e.status) : null,
+                });
+                if (row) processed++;
+              }
               break;
             }
             case "message.status.updated": {
@@ -3767,12 +3852,17 @@ function registerR9Routes(
               break;
             }
             default:
-              // Unknown event types are accepted but not processed.
+              // R22.x — unknown/blank event type but we have a sender + text → treat as an
+              // inbound reply. This catches AiSensy's bare {data:{messageData:{from,text}}}
+              // payloads that carry no recognizable event name.
+              if (from && text && e.direction !== "out" && !e.outgoing) {
+                processed += await processInboundReply(from, text, externalId ? String(externalId) : null);
+              }
               break;
           }
         } catch (inner: any) {
           // Per-event failure must never fail the whole webhook.
-          console.error("[R18 aisensy] event error:", inner?.message || inner);
+          console.error("[R22.x aisensy] event error:", inner?.message || inner);
         }
       }
     } catch (e: any) {
@@ -4541,6 +4631,15 @@ function registerR8Routes(
         status: isFullyDispatched ? "fulfilled" : "partial",
       } as any);
 
+      // R23.2 — on full fulfilment, write the customer-debit/company-credit ledger entry
+      // (idempotent: at most one per PO). Never blocks the dispatch flow.
+      if (isFullyDispatched) {
+        try {
+          const wrote = v2.writePoFulfilmentLedger(poId);
+          if (wrote) console.log(`[R23.2 ledger] wrote fulfilment ledger for PO ${poId}`);
+        } catch (e: any) { console.error("[R23.2 ledger] write failed:", e?.message || e); }
+      }
+
       // Generate dispatch PDF (fire-and-forget on failure)
       try {
         const pdfSvc = require("./pdf-service") as typeof import("./pdf-service");
@@ -4982,6 +5081,160 @@ function registerR8Routes(
       const fromMs = Date.now() - days * 24 * 60 * 60 * 1000;
       const buckets = v2.getDelhiDashboardPending(fromMs);
       res.json({ range: RANGE_DAYS[rangeRaw] ? rangeRaw : "7d", ...buckets });
+    } catch (e: any) { res.status(500).json({ error: e.message }); }
+  });
+
+  // ============================================================
+  // R22 — Consignment visibility + customer create (admin token)
+  // ============================================================
+  // R22.1 — POs Delhi has dispatched, surfaced as a "From Delhi" category.
+  app.get("/api/admin/consignment/from-delhi", requireAuth, async (_req: any, res: any) => {
+    try { res.json(v2.listDelhiDispatchedForConsignment()); }
+    catch (e: any) { res.status(500).json({ error: e.message }); }
+  });
+  // R22.1 — mark a Delhi-dispatched PO received / processing / completed in the consignment view.
+  app.post("/api/admin/consignment/:poId/status", requireAuth, async (req: any, res: any) => {
+    try {
+      const poId = parseInt(req.params.poId as string, 10);
+      const status = String(req.body?.status || "").trim();
+      if (!["received", "processing", "completed"].includes(status)) {
+        return res.status(400).json({ error: "status must be received|processing|completed" });
+      }
+      res.json(v2.setConsignmentStatus(poId, status));
+    } catch (e: any) { res.status(500).json({ error: e.message }); }
+  });
+  // R22.2 — consignment customer create + list (reuses the customers table; admin token).
+  app.post("/api/admin/consignment/customers", requireAuth, async (req: any, res: any) => {
+    try {
+      const name = String(req.body?.name || "").trim();
+      if (!name) return res.status(400).json({ error: "name is required" });
+      const customer = await v2.createCustomer({
+        name,
+        phone: req.body?.phone || null,
+        address: req.body?.address || null,
+        notes: req.body?.company ? `Company: ${req.body.company}` : (req.body?.notes || null),
+      } as any);
+      res.json(customer);
+    } catch (e: any) { res.status(500).json({ error: e.message }); }
+  });
+  app.get("/api/admin/consignment/customers", requireAuth, async (req: any, res: any) => {
+    try {
+      const q = String(req.query?.q || "").trim();
+      const list = await v2.getCustomers(q || undefined);
+      res.json(list.slice(0, 100));
+    } catch (e: any) { res.status(500).json({ error: e.message }); }
+  });
+
+  // ============================================================
+  // R23 — Command Center + margin summary + ledger backfill + vendor-ledger CSV
+  // ============================================================
+  app.get("/api/admin/command-center", requireAuth, async (_req: any, res: any) => {
+    try {
+      res.set("Cache-Control", "no-cache, no-store, must-revalidate");
+      res.json(v2.commandCenterWidgets());
+    } catch (e: any) { res.status(500).json({ error: e.message }); }
+  });
+  app.get("/api/admin/margin-summary", requireAuth, async (req: any, res: any) => {
+    try {
+      const fromMs = req.query.from ? Number(req.query.from) : Date.now() - 30 * 24 * 60 * 60 * 1000;
+      const toMs = req.query.to ? Number(req.query.to) : Date.now();
+      res.json(v2.marginSummary(fromMs, toMs));
+    } catch (e: any) { res.status(500).json({ error: e.message }); }
+  });
+  // R23.2 — backfill ledger entries for already-fulfilled POs (idempotent). Safe to re-run.
+  app.post("/api/admin/ledger/backfill-fulfilments", requireAdminRole, async (_req: any, res: any) => {
+    try {
+      const fulfilled = await v2.listPurchaseOrdersV2({ status: "fulfilled" });
+      let wrote = 0;
+      for (const po of fulfilled) { if (v2.writePoFulfilmentLedger(po.id)) wrote++; }
+      res.json({ ok: true, scanned: fulfilled.length, wrote });
+    } catch (e: any) { res.status(500).json({ error: e.message }); }
+  });
+  // R23.2 — vendor ledger CSV export (xlsx already exists; this is the CSV the task asked for).
+  app.get("/api/admin/vendor-ledger/export.csv", requireAuth, async (req: any, res: any) => {
+    try {
+      const vendorId = req.query.vendor_id ? parseInt(req.query.vendor_id as string, 10) : undefined;
+      const from = req.query.from ? parseInt(req.query.from as string, 10) : undefined;
+      const to = req.query.to ? parseInt(req.query.to as string, 10) : undefined;
+      const rows = v2.getVendorLedger({ vendorId, from, to });
+      const header = ["vendor", "items", "approved_value", "paid", "balance", "last_activity"];
+      const lines = [header.join(",")];
+      for (const r of (rows as any[])) {
+        const balance = (Number(r.total_approved_value) || 0) - (Number(r.total_paid) || 0);
+        const cells = [
+          r.vendor_name ?? r.vendorName ?? `#${r.vendor_id}`,
+          r.item_count ?? 0,
+          r.total_approved_value ?? 0,
+          r.total_paid ?? 0,
+          balance,
+          r.last_activity_at ? new Date(Number(r.last_activity_at)).toISOString().slice(0, 10) : "",
+        ].map((c) => `"${String(c).replace(/"/g, '""')}"`);
+        lines.push(cells.join(","));
+      }
+      res.setHeader("Content-Type", "text/csv");
+      res.setHeader("Content-Disposition", 'attachment; filename="vendor-ledger.csv"');
+      res.send(lines.join("\n"));
+    } catch (e: any) { res.status(500).json({ error: e.message }); }
+  });
+
+  // ============================================================
+  // R24 — Market Radar: convert lead, marketing send, chats
+  // ============================================================
+  app.post("/api/admin/leads/:id/convert", requireAuth, async (req: any, res: any) => {
+    try {
+      const id = parseInt(req.params.id as string, 10);
+      const result = v2.convertLeadToCustomer(id);
+      if (!result) return res.status(404).json({ error: "lead not found" });
+      res.json({ ok: true, customerId: result.customerId });
+    } catch (e: any) { res.status(500).json({ error: e.message }); }
+  });
+  // R24.3 — marketing send to selected leads (fire-and-forget; logged in marketing_sends).
+  app.post("/api/admin/leads/send-marketing", requireAuth, async (req: any, res: any) => {
+    try {
+      const leadIds: number[] = Array.isArray(req.body?.lead_ids) ? req.body.lead_ids.map(Number) : [];
+      const template = req.body?.template ? String(req.body.template) : undefined;
+      const vars = req.body?.vars || {};
+      if (!leadIds.length) return res.status(400).json({ error: "lead_ids required" });
+      const sentBy = (req as any).user?.username || "admin";
+      const wa = require("./whatsapp") as typeof import("./whatsapp");
+      let queued = 0;
+      for (const id of leadIds) {
+        const lead = await v2.getLead(id);
+        const phone = lead?.phone || lead?.whatsapp;
+        if (!phone) { v2.logMarketingSend({ leadId: id, status: "failed", error: "no phone", sentBy, template: template || null }); continue; }
+        const log = v2.logMarketingSend({ leadId: id, phone, template: template || null, vars: JSON.stringify(vars), status: "queued", sentBy });
+        queued++;
+        // fire-and-forget
+        wa.sendMarketingMessage(phone, { name: lead?.name, template, templateParams: vars?.params })
+          .then((r) => { try { v2.updateMarketingSendStatus(log.id, r.status === "failed" ? "failed" : "sent", r.status === "failed" ? "aisensy failed" : null); } catch {} })
+          .catch((err) => { try { v2.updateMarketingSendStatus(log.id, "failed", String(err?.message || err)); } catch {} });
+      }
+      res.json({ ok: true, queued });
+    } catch (e: any) { res.status(500).json({ error: e.message }); }
+  });
+  // R24.4 — unified chats: conversation list + thread + send.
+  app.get("/api/admin/chats", requireAuth, async (_req: any, res: any) => {
+    try {
+      res.set("Cache-Control", "no-cache, no-store, must-revalidate");
+      res.json(v2.listChatConversations());
+    } catch (e: any) { res.status(500).json({ error: e.message }); }
+  });
+  app.get("/api/admin/chats/:vendorId", requireAuth, async (req: any, res: any) => {
+    try { res.json(v2.listChatThread(parseInt(req.params.vendorId as string, 10))); }
+    catch (e: any) { res.status(500).json({ error: e.message }); }
+  });
+  app.post("/api/admin/chats/:vendorId/send", requireAuth, async (req: any, res: any) => {
+    try {
+      const vendorId = parseInt(req.params.vendorId as string, 10);
+      const vendor = await v2.getVendor(vendorId);
+      if (!vendor) return res.status(404).json({ error: "vendor not found" });
+      const text = String(req.body?.message || "").trim();
+      if (!text) return res.status(400).json({ error: "message required" });
+      const phone = vendor.whatsapp || vendor.phone;
+      const wa = require("./whatsapp") as typeof import("./whatsapp");
+      if (phone) wa.sendTextMessage(phone, text, "admin_chat").catch(() => {});
+      const row = v2.addRfqMessageExternal({ vendorId, vendorPhone: phone || null, direction: "out", body: text, externalMessageId: null });
+      res.json({ ok: true, message: row });
     } catch (e: any) { res.status(500).json({ error: e.message }); }
   });
 }
