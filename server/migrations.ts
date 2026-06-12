@@ -474,3 +474,29 @@ export function runR13Migrations() {
 
   console.log("[migrations] R13 tables/columns ensured");
 }
+
+// -------- R13.4 additive migrations --------
+// Allow a po_number to be reused once the prior PO is soft-deleted. We add a soft-delete
+// marker column and a PARTIAL unique index that only constrains active rows
+// (deleted_at IS NULL). The legacy column-level UNIQUE on po_number is an SQLite
+// auto-index that cannot be dropped without rebuilding the table (which the additive-only
+// rule forbids); the defensive purge in createPurchaseOrderV2 covers reuse against that
+// legacy constraint, while this partial index is the forward-looking guard. The DROP
+// INDEX is attempted defensively in case a named (non-auto) unique index exists.
+export function runR13_4Migrations() {
+  const stmts: Array<{ desc: string; sql: string }> = [
+    { desc: "purchase_orders_v2.deleted_at", sql: `ALTER TABLE purchase_orders_v2 ADD COLUMN deleted_at INTEGER` },
+    { desc: "drop legacy named unique index on po_number (if any)", sql: `DROP INDEX IF EXISTS purchase_orders_v2_po_number_unique` },
+    { desc: "partial unique index po_number WHERE deleted_at IS NULL", sql: `CREATE UNIQUE INDEX IF NOT EXISTS purchase_orders_v2_po_number_active_uq ON purchase_orders_v2(po_number) WHERE deleted_at IS NULL` },
+  ];
+  for (const { desc, sql } of stmts) {
+    console.log(`[migrations] R13.4: ${desc}`);
+    try {
+      sqlite.exec(sql);
+    } catch (err: any) {
+      console.log(`[migrations] R13.4: skipped ${desc} —`, err?.message || err);
+    }
+  }
+
+  console.log("[migrations] R13.4 tables/columns ensured");
+}

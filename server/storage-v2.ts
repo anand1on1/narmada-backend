@@ -1699,6 +1699,26 @@ export function computePoTotals(items: PoItem[]): { custTotal: number; costTotal
 export async function createPurchaseOrderV2(data: Partial<InsertPurchaseOrderV2>, items: Partial<InsertPoItem>[] = []): Promise<PurchaseOrderV2> {
   const poNumber = data.poNumber || seqNumber(purchaseOrdersV2, purchaseOrdersV2.poNumber, "NM/PO");
   const now = Date.now();
+  // R13.4: a soft-deleted PO still occupies po_number under the legacy UNIQUE constraint,
+  // which blocks reuse. Purge any soft-deleted row carrying this po_number (with its child
+  // rows) inside a transaction before inserting. Active (deleted_at IS NULL) duplicates are
+  // intentionally left alone so the insert still fails for genuine active-duplicate attempts.
+  const stale = sqlite
+    .prepare(`SELECT id FROM purchase_orders_v2 WHERE po_number = ? AND deleted_at IS NOT NULL`)
+    .all(poNumber) as Array<{ id: number }>;
+  for (const row of stale) {
+    const itemIds = sqlite.prepare(`SELECT id FROM po_items WHERE po_id = ?`).all(row.id) as Array<{ id: number }>;
+    const purge = sqlite.transaction(() => {
+      for (const it of itemIds) {
+        sqlite.prepare(`DELETE FROM po_item_vendor_quotes WHERE po_item_id = ?`).run(it.id);
+      }
+      sqlite.prepare(`DELETE FROM po_items WHERE po_id = ?`).run(row.id);
+      sqlite.prepare(`DELETE FROM dispatches WHERE po_id = ?`).run(row.id);
+      sqlite.prepare(`DELETE FROM purchase_orders_v2 WHERE id = ?`).run(row.id);
+    });
+    purge();
+    console.log(`[R13.4] Purged soft-deleted PO ${row.id} with po_number=${poNumber} before reuse`);
+  }
   const po = db.insert(purchaseOrdersV2).values({ ...data, poNumber, createdAt: now, updatedAt: now } as any).returning().get();
   for (const it of items) {
     db.insert(poItems).values({ ...it, poId: po.id } as any).run();

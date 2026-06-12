@@ -771,6 +771,10 @@ export const purchaseOrdersV2 = sqliteTable("purchase_orders_v2", {
   notifiedDelhiAt: integer("notified_delhi_at"),
   // R9 addition — editable PO date (back/forward date)
   poDate: integer("po_date"),
+  // R13.4 addition — soft-delete marker. NULL = active; a unix-ms timestamp = soft-deleted.
+  // A partial unique index on po_number WHERE deleted_at IS NULL lets a po_number be reused
+  // once the prior row is soft-deleted.
+  deletedAt: integer("deleted_at"),
 });
 export const insertPurchaseOrderV2Schema = createInsertSchema(purchaseOrdersV2).omit({ id: true, createdAt: true, updatedAt: true });
 export type InsertPurchaseOrderV2 = z.infer<typeof insertPurchaseOrderV2Schema>;
