@@ -1746,9 +1746,9 @@ export function registerV2Routes(app: Express, ctx: V2Context) {
   app.post("/api/admin/data-team-users/:id/reset-password", requireAdminRole, async (req, res) => {
     try {
       const id = parseInt(req.params.id as string, 10);
-      const newPassword = req.body?.newPassword;
-      if (!newPassword || String(newPassword).length < 8) return res.status(400).json({ error: "newPassword must be at least 8 characters" });
-      const row = await v2.updateDataTeamUser(id, { passwordHash: hashPassword(String(newPassword)) });
+      const pwd = req.body?.newPassword ?? req.body?.password;
+      if (!pwd || String(pwd).length < 8) return res.status(400).json({ error: "Password must be at least 8 characters" });
+      const row = await v2.updateDataTeamUser(id, { passwordHash: hashPassword(String(pwd)) });
       if (!row) return res.status(404).json({ error: "Not found" });
       res.json({ ok: true });
     } catch (e: any) { res.status(400).json({ error: e.message }); }
