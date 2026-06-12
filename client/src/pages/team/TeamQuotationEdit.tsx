@@ -5,6 +5,7 @@ import { teamFetch, useTeamAuth } from "@/lib/team-auth";
 import { useToast } from "@/hooks/use-toast";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { Trash2, Plus, RefreshCw, Download, Send, Search, Sparkles, Truck, Building2, User2, ShoppingCart } from "lucide-react";
+import { CompanyPicker } from "@/components/common/CompanyPicker";
 
 function currencySym(c: string | undefined | null): string {
   if (c === "USD") return "$";
@@ -35,6 +36,7 @@ interface Quotation {
   customerId: number;
   customerName: string;
   quotingCompanyId?: number | null;
+  companyId?: number | null;
   currency: string;
   fxRate: number;
   notes: string | null;
@@ -96,6 +98,7 @@ export default function TeamQuotationEdit() {
   // Round 3: editable header
   const [customerId, setCustomerId] = useState<number | null>(null);
   const [quotingCompanyId, setQuotingCompanyId] = useState<number | null>(null);
+  const [companyId, setCompanyId] = useState<number | null>(null);
 
   // Round 3: shipping
   const [shipOpen, setShipOpen] = useState(false);
@@ -157,6 +160,7 @@ export default function TeamQuotationEdit() {
       setValidUntil(quotation.validUntil?.split("T")[0] || "");
       setCustomerId(quotation.customerId ?? null);
       setQuotingCompanyId((quotation as any).quotingCompanyId ?? null);
+      setCompanyId((quotation as any).companyId ?? null);
       setShippingName(quotation.shippingName || "");
       setShippingAddress(quotation.shippingAddress || "");
       setShippingCity(quotation.shippingCity || "");
@@ -311,7 +315,7 @@ export default function TeamQuotationEdit() {
       const r = await teamFetch(token, `/api/team/quotations/${id}`, {
         method: "PATCH",
         body: JSON.stringify({
-          customerId, quotingCompanyId,
+          customerId, quotingCompanyId, companyId,
           notes, terms, validUntil: validUntil || null,
           shippingName: shippingName.trim() || null,
           shippingAddress: shippingAddress.trim() || null,
@@ -437,8 +441,14 @@ export default function TeamQuotationEdit() {
         </button>
       </div>
 
-      {/* Editable header cards: customer + quoting company */}
+      {/* Editable header cards: ordered company + customer + quoting company */}
       <div className="grid sm:grid-cols-2 gap-3 mb-6">
+        <div className="border rounded-xl p-3 bg-card shadow-sm">
+          <div className="text-xs font-bold uppercase tracking-wider text-muted-foreground mb-1 flex items-center gap-1">
+            <Building2 className="w-3 h-3" /> Ordered Company
+          </div>
+          <CompanyPicker value={companyId} onChange={(v) => { setCompanyId(v); setDirty(true); }} required />
+        </div>
         <div className="border rounded-xl p-3 bg-card shadow-sm">
           <div className="text-xs font-bold uppercase tracking-wider text-muted-foreground mb-1 flex items-center gap-1">
             <User2 className="w-3 h-3" /> Customer

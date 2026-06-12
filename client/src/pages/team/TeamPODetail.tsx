@@ -14,6 +14,7 @@ import { useParams } from "wouter";
 import { apiUrl } from "@/lib/queryClient";
 import { Download, Check, Loader2, Package, Pencil, Calendar, Send, Flame, CheckCircle2, X } from "lucide-react";
 import { LineQuotesPanel, FireRateRequestModal } from "./R9VendorQuotes";
+import { CompanyPicker } from "@/components/common/CompanyPicker";
 
 interface PoItem {
   id: number;
@@ -45,6 +46,8 @@ interface PO {
   customerName: string | null;
   customerPoNumber: string | null;
   poDate: number | null;
+  companyId: number | null;
+  company: { id: number; name: string; logo_url: string | null } | null;
   custTotal: number;
   costTotal: number;
   shipToName: string | null;
@@ -115,6 +118,66 @@ function PoDateEditor({
       {poDate ? new Date(poDate).toLocaleDateString("en-IN") : "Set PO date"}
       <Pencil className="w-3 h-3 opacity-60" />
     </button>
+  );
+}
+
+// ─── R13 Ordered-company badge + inline editor ───
+// Shows "Company: <name>" with a pencil to change it (CompanyPicker). Hidden/read-only
+// once the PO is processed or dispatched (server also enforces this).
+function CompanyBadgeEditor({
+  poId, companyName, companyId, readOnly, token, onSaved,
+}: {
+  poId: number; companyName: string | null; companyId: number | null;
+  readOnly: boolean; token: string | null; onSaved: () => void;
+}) {
+  const { toast } = useToast();
+  const [editing, setEditing] = useState(false);
+  const [val, setVal] = useState<number | null>(companyId);
+  const [saving, setSaving] = useState(false);
+
+  async function save() {
+    if (val == null) { toast({ title: "Pick a company", variant: "destructive" }); return; }
+    setSaving(true);
+    try {
+      const r = await teamFetch(token, `/api/team/purchase-orders/${poId}`, {
+        method: "PATCH",
+        body: JSON.stringify({ companyId: val }),
+      });
+      if (!r.ok) {
+        const j = await r.json().catch(() => ({}));
+        throw new Error(j.error || "Failed");
+      }
+      toast({ title: "Company updated" });
+      setEditing(false);
+      onSaved();
+    } catch (e: any) {
+      toast({ title: "Error", description: e.message, variant: "destructive" });
+    } finally { setSaving(false); }
+  }
+
+  if (editing && !readOnly) {
+    return (
+      <span className="inline-flex items-center gap-1">
+        <span className="min-w-[180px]"><CompanyPicker value={val} onChange={setVal} /></span>
+        <button onClick={save} disabled={saving}
+          className="px-2 py-1.5 bg-accent text-accent-foreground rounded-lg text-xs font-semibold inline-flex items-center gap-1 disabled:opacity-50">
+          {saving ? <Loader2 className="w-3 h-3 animate-spin" /> : <Check className="w-3 h-3" />}
+        </button>
+        <button onClick={() => { setVal(companyId); setEditing(false); }} className="px-2 py-1.5 border rounded-lg text-xs">Cancel</button>
+      </span>
+    );
+  }
+
+  return (
+    <span className="border rounded-lg px-3 py-1.5 text-sm bg-background inline-flex items-center gap-1.5">
+      <span className="text-muted-foreground">Company:</span>
+      <span className="font-semibold">{companyName || "—"}</span>
+      {!readOnly && (
+        <button onClick={() => setEditing(true)} className="text-muted-foreground hover:text-foreground" title="Change company">
+          <Pencil className="w-3 h-3" />
+        </button>
+      )}
+    </span>
   );
 }
 
@@ -285,6 +348,14 @@ export default function TeamPODetail() {
             {STATUSES.map((s) => <option key={s} value={s}>{s}</option>)}
           </select>
           <PoDateEditor poId={poId} poDate={po.poDate} token={token} onSaved={refresh} />
+          <CompanyBadgeEditor
+            poId={poId}
+            companyName={po.company?.name ?? null}
+            companyId={po.companyId ?? po.company?.id ?? null}
+            readOnly={alreadyClosed}
+            token={token}
+            onSaved={refresh}
+          />
         </div>
         <div className="flex items-center gap-2">
           <button

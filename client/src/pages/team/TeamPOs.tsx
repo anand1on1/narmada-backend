@@ -8,6 +8,7 @@ import { useToast } from "@/hooks/use-toast";
 
 interface PO {
   id: number; poNumber: string; customerId: number | null; customerName: string | null;
+  companyName: string | null; companyLogoUrl: string | null;
   status: string; total: number | null; custTotal: number; costTotal: number; createdAt: number;
   dispatchCarrier: string | null; dispatchBundles: number; dispatchDockets: string[];
   dispatches: Array<{ docket_number: string | null; docket_slip_url: string | null; carrier: string | null; bundles: number | null }>;
@@ -54,6 +55,7 @@ export default function TeamPOs() {
             <thead><tr className="bg-muted/50 text-left">
               <th className="px-3 py-3 font-semibold">PO Number</th>
               <th className="px-3 py-3 font-semibold">Customer</th>
+              <th className="px-3 py-3 font-semibold">Company</th>
               <th className="px-3 py-3 font-semibold text-right">Total</th>
               <th className="px-3 py-3 font-semibold">Status</th>
               <th className="px-3 py-3 font-semibold">Carrier</th>
@@ -66,6 +68,14 @@ export default function TeamPOs() {
               <tr key={p.id} className="hover:bg-muted/30">
                 <td className="px-3 py-3 font-semibold">{p.poNumber}</td>
                 <td className="px-3 py-3">{p.customerName ?? (p.customerId ?? "—")}</td>
+                <td className="px-3 py-3 text-xs">
+                  {p.companyName ? (
+                    <span className="inline-flex items-center gap-1.5">
+                      {p.companyLogoUrl ? <img src={p.companyLogoUrl} alt="" className="h-4 w-4 rounded object-contain" /> : null}
+                      <span className="truncate max-w-[120px]">{p.companyName}</span>
+                    </span>
+                  ) : <span className="text-muted-foreground">—</span>}
+                </td>
                 <td className="px-3 py-3 text-right">{`₹${(p.custTotal ?? p.total ?? 0).toLocaleString("en-IN")}`}</td>
                 <td className="px-3 py-3"><span className={`text-xs font-bold rounded px-2 py-1 ${STATUS_COLOR[p.status] || "bg-muted"}`}>{p.status}</span></td>
                 <td className="px-3 py-3 text-xs">{p.dispatchCarrier || <span className="text-muted-foreground">—</span>}</td>

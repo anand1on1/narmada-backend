@@ -19,6 +19,47 @@ import {
 import type { AdminUser, AdminRole } from "@shared/schema";
 import { eq } from "drizzle-orm";
 
+// R13: normalize a quotation's ordered-company into the flat shape the PDF generator
+// expects. Prefers the unified `companies` entry (companyId) when set, then the legacy
+// quoting_companies entry (quotingCompanyId). Returns null if neither resolves, so the
+// PDF falls back to its built-in default header.
+type PdfCompany = {
+  name: string; gstin: string | null; address: string | null; city: string | null;
+  state: string | null; phone: string | null; email: string | null;
+  bankName: string | null; bankAccount: string | null; bankIfsc: string | null;
+};
+async function resolvePdfCompany(quotation: any): Promise<PdfCompany | null> {
+  if (quotation?.companyId) {
+    const c: any = await v2.getCompany(quotation.companyId);
+    if (c) {
+      return {
+        name: c.name,
+        gstin: c.gstin ?? null,
+        address: [c.addressLine1, c.addressLine2].filter(Boolean).join(", ") || null,
+        city: c.city ?? null,
+        state: c.state ?? null,
+        phone: c.signatoryPhone ?? null,
+        email: c.signatoryEmail ?? null,
+        bankName: c.bankName ?? null,
+        bankAccount: c.accountNo ?? null,
+        bankIfsc: c.ifsc ?? null,
+      };
+    }
+  }
+  if (quotation?.quotingCompanyId) {
+    const q: any = await v2.getQuotingCompany(quotation.quotingCompanyId);
+    if (q) {
+      return {
+        name: q.name, gstin: q.gstin ?? null, address: q.address ?? null,
+        city: q.city ?? null, state: q.state ?? null, phone: q.phone ?? null,
+        email: q.email ?? null, bankName: q.bankName ?? null,
+        bankAccount: q.bankAccount ?? null, bankIfsc: q.bankIfsc ?? null,
+      };
+    }
+  }
+  return null;
+}
+
 // ============================================================================
 // AUTH / SESSIONS (Phase 3)
 // We extend the in-memory token map from routes.ts via a shared registry passed in.
@@ -1734,6 +1775,10 @@ export function registerV2Routes(app: Express, ctx: V2Context) {
         const c = await v2.getCustomer(cid as number);
         if (c) custMap[cid as number] = c.name;
       }
+      // R13: resolve ordered-company name/logo for the list "Company" column.
+      const allCompanies = await v2.listCompanies();
+      const compMap: Record<number, { name: string; logoUrl: string | null }> = {};
+      for (const c of allCompanies as any[]) compMap[c.id] = { name: c.name, logoUrl: c.logoUrl ?? null };
       // For any quote whose stored grandTotal is 0/null, compute it live from its items
       // (mirrors the PDF service fallback so the list view never shows ₹0 for a real quote).
       const quotations = await Promise.all(rows.map(async (r: any) => {
@@ -1767,6 +1812,8 @@ export function registerV2Routes(app: Express, ctx: V2Context) {
           ...r,
           subtotal, totalDiscount, totalTax, grandTotal,
           customerName: custMap[r.customerId] || null,
+          companyName: r.companyId ? (compMap[r.companyId]?.name ?? null) : null,
+          companyLogoUrl: r.companyId ? (compMap[r.companyId]?.logoUrl ?? null) : null,
         };
       }));
       res.json({ quotations, total, pages: Math.ceil(total / limit) });
@@ -1836,8 +1883,10 @@ export function registerV2Routes(app: Express, ctx: V2Context) {
   app.post("/api/team/quotations", requireDataTeam, async (req, res) => {
     try {
       const teamUser = (req as any).teamUser;
-      const { items: rawItems, ...quotationData } = req.body || {};
+      const { items: rawItems, company_id, ...quotationData } = req.body || {};
       if (!quotationData.customerId) return res.status(400).json({ error: "customerId required" });
+      // R13: accept either companyId (camel) or company_id (snake) for the ordered/billing entity.
+      if (quotationData.companyId == null && company_id != null) quotationData.companyId = parseInt(String(company_id), 10);
       const items = Array.isArray(rawItems) ? rawItems : [];
       let fxRate = 1;
       let fxLockedAt: number | null = null;
@@ -1878,7 +1927,15 @@ export function registerV2Routes(app: Express, ctx: V2Context) {
   app.patch("/api/team/quotations/:id", requireDataTeam, async (req, res) => {
     try {
       const id = parseInt(req.params.id as string, 10);
-      const { items: rawItems, ...patchData } = req.body || {};
+      const { items: rawItems, company_id, ...patchData } = req.body || {};
+      // R13: normalize ordered-company; lock it once the quotation has become a PO.
+      if (patchData.companyId == null && company_id != null) patchData.companyId = parseInt(String(company_id), 10);
+      if (patchData.companyId !== undefined) {
+        if (await v2.quotationHasPO(id)) {
+          return res.status(409).json({ error: "Company cannot be changed after the quotation is converted to a PO." });
+        }
+        patchData.companyId = patchData.companyId != null ? parseInt(String(patchData.companyId), 10) : null;
+      }
       const updated = await v2.updateQuotation(id, patchData);
       if (!updated) return res.status(404).json({ error: "Quotation not found" });
       let savedItems = undefined;
@@ -1905,7 +1962,9 @@ export function registerV2Routes(app: Express, ctx: V2Context) {
       const { quotation, items } = result;
       const customer = await v2.getCustomer(quotation.customerId);
       if (!customer) return res.status(404).json({ error: "Customer not found" });
-      const company = quotation.quotingCompanyId ? await v2.getQuotingCompany(quotation.quotingCompanyId) : null;
+      // R13: prefer the unified ordered-company (companies table) when set, else fall
+      // back to the legacy quoting_companies entry. mapPdfCompany normalizes both shapes.
+      const company = await resolvePdfCompany(quotation);
       const { generateQuotationPDF } = await import("./pdf-service");
       await generateQuotationPDF(
         {
@@ -2003,7 +2062,7 @@ export function registerV2Routes(app: Express, ctx: V2Context) {
         const { quotation, items } = result;
         const customer = await v2.getCustomer(quotation.customerId);
         if (!customer) return res.status(404).json({ error: "Customer not found for this quotation" });
-        const company = quotation.quotingCompanyId ? await v2.getQuotingCompany(quotation.quotingCompanyId) : null;
+        const company = await resolvePdfCompany(quotation);
         const { generateQuotationPDF } = await import("./pdf-service");
         await generateQuotationPDF(
           {
@@ -2596,6 +2655,24 @@ function registerR4toR7Routes(
     res.json({ ok: true });
   });
 
+  // ---------------- R13 ORDERED-COMPANY PICKER ----------------
+  // Public, compact list consumed by the CompanyPicker on PO/quotation forms. Returns
+  // active companies only (default first) in a flat shape the picker can render directly.
+  app.get("/api/companies", async (_req, res) => {
+    try {
+      const list = await v2.listCompanies(true);
+      res.json(list.map((c: any) => ({
+        id: c.id,
+        name: c.name,
+        logo_url: c.logoUrl ?? null,
+        gst: c.gstin ?? null,
+        address: [c.addressLine1, c.addressLine2, c.city, c.state, c.pincode].filter(Boolean).join(", ") || null,
+        email: c.signatoryEmail ?? null,
+        phone: c.signatoryPhone ?? null,
+      })));
+    } catch (e: any) { res.status(500).json({ error: e.message }); }
+  });
+
   // ---------------- WAREHOUSES (admin + team) ----------------
   app.get("/api/admin/warehouses", requireAuth, async (_req, res) => res.json(await v2.listWarehouses()));
   app.get("/api/team/warehouses", requireDataTeam, async (_req, res) => res.json(await v2.listWarehouses(true)));
@@ -2662,9 +2739,33 @@ function registerR4toR7Routes(
     } catch (e: any) { res.status(500).json({ error: e.message }); }
   });
   app.patch("/api/team/purchase-orders/:id", requireDataTeam, async (req, res) => {
-    const po = await v2.updatePurchaseOrderV2(parseInt(req.params.id as string, 10), req.body || {});
-    if (!po) return res.status(404).json({ error: "Not found" });
-    res.json(po);
+    try {
+      const id = parseInt(req.params.id as string, 10);
+      const existing = await v2.getPurchaseOrderV2(id);
+      if (!existing) return res.status(404).json({ error: "Not found" });
+
+      const body = { ...(req.body || {}) } as any;
+
+      // R13: company_id (which billing entity the order is for) is locked once the PO
+      // is processed or dispatched — by then PDFs/branding have gone out the door.
+      if (body.companyId != null || body.company_id != null) {
+        const newCompanyId = body.companyId != null ? body.companyId : body.company_id;
+        delete body.company_id;
+        const summary = await v2.getDispatchSummaryForPOs([id]);
+        const hasDispatch = (summary[id]?.dispatches?.length || 0) > 0;
+        const locked = existing.status === "processed" || existing.status === "dispatched" || hasDispatch;
+        if (locked) {
+          return res.status(409).json({ error: "Company cannot be changed once the PO is processed or dispatched." });
+        }
+        body.companyId = newCompanyId != null ? parseInt(String(newCompanyId), 10) : null;
+      }
+
+      const po = await v2.updatePurchaseOrderV2(id, body);
+      if (!po) return res.status(404).json({ error: "Not found" });
+      const u = (req as any).teamUser;
+      await v2.writeAuditLog({ actorType: "data_team", actorId: String(u?.id ?? ""), action: "update_po", entityType: "purchase_order_v2", entityId: String(id), afterJson: JSON.stringify(body) });
+      res.json(po);
+    } catch (e: any) { res.status(500).json({ error: e.message }); }
   });
   app.post("/api/team/quotations/:id/convert-to-po", requireDataTeam, async (req, res) => {
     try {
@@ -2677,9 +2778,10 @@ function registerR4toR7Routes(
         qty: it.qty, unitPrice: it.mrp ?? it.unitPrice ?? 0, discountPct: it.discount ?? 0,
         taxPct: it.gstPct ?? 18, lineTotal: it.lineTotal ?? 0,
       }));
-      const company = await v2.getDefaultCompany();
+      // R13: carry the quotation's ordered-company onto the PO; fall back to default.
+      const companyId = (quote as any).companyId ?? (await v2.getDefaultCompany())?.id;
       const po = await v2.createPurchaseOrderV2({
-        quotationId, customerId: quote.customerId, companyId: company?.id,
+        quotationId, customerId: quote.customerId, companyId,
         subtotal: quote.subtotal ?? 0, discount: quote.totalDiscount ?? 0,
         tax: quote.totalTax ?? 0, total: quote.grandTotal ?? 0,
         createdBy: (req as any).teamUser?.username,
@@ -3695,6 +3797,9 @@ function registerR8Routes(
       if (!req.file) return res.status(400).json({ error: "No file uploaded" });
 
       const customerId = req.body?.customer_id ? parseInt(req.body.customer_id, 10) : null;
+      // R13: which of our billing entities this order is for. Echoed back so the
+      // Review & Edit step can carry it into create-from-parsed.
+      const companyId = req.body?.company_id ? parseInt(req.body.company_id, 10) : null;
       const proto = req.protocol || "https";
       const host = req.get("host") || "narmada-backend.onrender.com";
       const fileUrl = `${proto}://${host}/uploads/customer-pos/${req.file.filename}`;
@@ -3748,6 +3853,7 @@ function registerR8Routes(
           error: "Could not extract line items. Edit manually.",
           fileUrl,
           customerId,
+          companyId,
           parsed: {
             ...parsed,
             items: [{ partNumber: "", brand: "", description: "", qty: 1, customerRate: null }],
@@ -3759,6 +3865,7 @@ function registerR8Routes(
         ok: true,
         fileUrl,
         customerId,
+        companyId,
         parsed,
       });
     } catch (e: any) {
@@ -3773,12 +3880,20 @@ function registerR8Routes(
       const u = (req as any).teamUser;
       const {
         customer_id, customer_po_number, customer_po_url, po_date,
-        ship_to_name, ship_to_address, ship_to_phone,
+        ship_to_name, ship_to_address, ship_to_phone, company_id,
         items,
       } = req.body || {};
 
       if (!items || !Array.isArray(items) || items.length === 0) {
         return res.status(400).json({ error: "items array required" });
+      }
+
+      // R13: tag the PO with the ordered (billing) company. The UI always sends one,
+      // but never reject if missing — fall back to the default/first company.
+      let companyId: number | null = company_id ? parseInt(String(company_id), 10) : null;
+      if (!companyId) {
+        const def = await v2.getDefaultCompany();
+        companyId = def?.id ?? null;
       }
 
       let poDateMs: number | null = null;
@@ -3801,6 +3916,7 @@ function registerR8Routes(
       const po = await v2.createPurchaseOrderV2(
         {
           customerId: customer_id ? parseInt(customer_id, 10) : null,
+          companyId,
           customerPoNumber: customer_po_number || null,
           customerPoUrl: customer_po_url || null,
           poDate: poDateMs,
@@ -4017,7 +4133,7 @@ function registerR8Routes(
         const pdfSvc = require("./pdf-service") as typeof import("./pdf-service");
         const emailSvc = require("./email") as typeof import("./email");
         const wa = require("./whatsapp") as typeof import("./whatsapp");
-        const company = await v2.getDefaultCompany();
+        const company = (poFull as any).companyId ? await v2.getCompany((poFull as any).companyId) : await v2.getDefaultCompany();
         const pdfBuf = await pdfSvc.generatePOPDF({
           poNumber: `${poFull.poNumber}-D${currentRound}`,
           createdAt: Date.now(),

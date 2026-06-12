@@ -532,6 +532,7 @@ export const quotations = sqliteTable("quotations", {
   id: integer("id").primaryKey({ autoIncrement: true }),
   quoteNo: text("quote_no").notNull().unique(),
   quotingCompanyId: integer("quoting_company_id"),
+  companyId: integer("company_id"),
   customerId: integer("customer_id").notNull(),
   status: text("status").notNull().default("draft"),   // draft | sent | accepted | expired
   currency: text("currency").notNull().default("INR"), // INR | USD | EUR | AED

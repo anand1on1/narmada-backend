@@ -11,6 +11,8 @@ interface Quotation {
   status: string;
   customerName: string;
   customerId: number;
+  companyName?: string | null;
+  companyLogoUrl?: string | null;
   grandTotal: number;
   currency: string;
   validUntil: string | null;
@@ -246,6 +248,7 @@ export default function TeamQuotations() {
               <tr className="bg-muted/50 text-left">
                 <th className="px-4 py-3 font-semibold">Quote #</th>
                 <th className="px-4 py-3 font-semibold">Customer</th>
+                <th className="px-4 py-3 font-semibold">Company</th>
                 <th className="px-4 py-3 font-semibold">Status</th>
                 <th className="px-4 py-3 font-semibold text-right">Total</th>
                 <th className="px-4 py-3 font-semibold">Valid Until</th>
@@ -262,6 +265,14 @@ export default function TeamQuotations() {
                     </Link>
                   </td>
                   <td className="px-4 py-3">{q.customerName || "—"}</td>
+                  <td className="px-4 py-3 text-xs">
+                    {q.companyName ? (
+                      <span className="inline-flex items-center gap-1.5">
+                        {q.companyLogoUrl ? <img src={q.companyLogoUrl} alt="" className="h-4 w-4 rounded object-contain" /> : null}
+                        <span className="truncate max-w-[120px]">{q.companyName}</span>
+                      </span>
+                    ) : <span className="text-muted-foreground">—</span>}
+                  </td>
                   <td className="px-4 py-3">
                     <span className={`text-[10px] uppercase font-bold px-2 py-0.5 rounded ${STATUS_BADGE[q.status] || STATUS_BADGE.draft}`}>
                       {q.status}

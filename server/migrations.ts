@@ -452,3 +452,25 @@ export function runR12Migrations() {
 
   console.log("[migrations] R12 tables/columns ensured");
 }
+
+// -------- R13 additive migrations --------
+// Ordered-company picker: tag each PO and quotation with which of our billing entities
+// (Narmada Motors, Narmada Mobility, …) the order belongs to. Additive only — the id is
+// used to look up name/branding for PDFs/lists; no FK enforcement. purchase_orders_v2
+// already carries company_id from an earlier round, so that ALTER is expected to skip.
+export function runR13Migrations() {
+  const stmts: Array<{ desc: string; sql: string }> = [
+    { desc: "purchase_orders_v2.company_id", sql: `ALTER TABLE purchase_orders_v2 ADD COLUMN company_id INTEGER` },
+    { desc: "quotations.company_id", sql: `ALTER TABLE quotations ADD COLUMN company_id INTEGER` },
+  ];
+  for (const { desc, sql } of stmts) {
+    console.log(`[migrations] R13: ${desc}`);
+    try {
+      sqlite.exec(sql);
+    } catch (err: any) {
+      console.log(`[migrations] R13: skipped ${desc} —`, err?.message || err);
+    }
+  }
+
+  console.log("[migrations] R13 tables/columns ensured");
+}

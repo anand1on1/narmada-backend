@@ -8,6 +8,7 @@ import {
   ChevronRight, ChevronLeft, Plus, Trash2, Upload, Search, Check,
   FileText, RefreshCw, Sparkles, Truck,
 } from "lucide-react";
+import { CompanyPicker } from "@/components/common/CompanyPicker";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -79,6 +80,7 @@ export default function TeamQuotationNew() {
 
   const [step, setStep] = useState(0);
   const [selectedCompany, setSelectedCompany] = useState<QuotingCompany | null>(null);
+  const [companyId, setCompanyId] = useState<number | null>(null);
   const [selectedCustomer, setSelectedCustomer] = useState<Customer | null>(null);
   const [customerSearch, setCustomerSearch] = useState("");
   const [importMode, setImportMode] = useState<"manual" | "import">("manual");
@@ -376,6 +378,7 @@ export default function TeamQuotationNew() {
   function buildPayload() {
     return {
       quotingCompanyId: selectedCompany!.id,
+      companyId,
       customerId: selectedCustomer!.id,
       currency,
       fxRate: fxRate || 1,
@@ -445,6 +448,12 @@ export default function TeamQuotationNew() {
         {/* Step 0: Pick company */}
         {step === 0 && (
           <div>
+            <label className="text-xs font-semibold block mb-4">Ordered Company *
+              <div className="mt-1 max-w-sm">
+                <CompanyPicker value={companyId} onChange={setCompanyId} required />
+              </div>
+              <span className="text-xs font-normal text-muted-foreground">Which of our companies this quotation is sent from.</span>
+            </label>
             <h2 className="font-semibold text-lg mb-4">Select Quoting Company</h2>
             {companies.length === 0 ? (
               <div className="p-12 text-center text-muted-foreground border rounded-xl bg-card">
@@ -464,7 +473,7 @@ export default function TeamQuotationNew() {
               </div>
             )}
             <div className="mt-6 flex justify-end">
-              <button onClick={() => setStep(1)} disabled={!selectedCompany}
+              <button onClick={() => setStep(1)} disabled={!selectedCompany || companyId == null}
                 className="px-6 py-2.5 bg-accent text-accent-foreground rounded-lg font-semibold disabled:opacity-50 inline-flex items-center gap-2">
                 Next <ChevronRight className="w-4 h-4" />
               </button>

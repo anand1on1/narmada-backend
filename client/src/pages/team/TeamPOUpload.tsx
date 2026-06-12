@@ -9,6 +9,7 @@ import { useQuery } from "@tanstack/react-query";
 import { useLocation } from "wouter";
 import { useToast } from "@/hooks/use-toast";
 import { Upload, ChevronRight, ChevronLeft, Check, Loader2, X, Plus } from "lucide-react";
+import { CompanyPicker } from "@/components/common/CompanyPicker";
 
 interface Customer { id: number; name: string; }
 interface ParsedItem {
@@ -34,6 +35,7 @@ export default function TeamPOUpload() {
   const [, navigate] = useLocation();
 
   const [step, setStep] = useState<Step>(1);
+  const [companyId, setCompanyId] = useState<number | null>(null);
   const [customerId, setCustomerId] = useState<string>("");
   const [file, setFile] = useState<File | null>(null);
   const [fileUrl, setFileUrl] = useState<string>("");
@@ -59,6 +61,7 @@ export default function TeamPOUpload() {
       const form = new FormData();
       form.append("file", file);
       form.append("customer_id", customerId);
+      if (companyId != null) form.append("company_id", String(companyId));
       const r = await fetch(`${(window as any).__API_BASE__ || ""}/api/team/po/upload-customer-po`, {
         method: "POST",
         headers: { "x-team-token": token || "" },
@@ -98,6 +101,7 @@ export default function TeamPOUpload() {
         method: "POST",
         body: JSON.stringify({
           customer_id: customerId,
+          company_id: companyId,
           customer_po_number: parsed.customerPoNumber || "",
           po_date: parsed.poDate || "",
           customer_po_url: fileUrl,
@@ -160,20 +164,27 @@ export default function TeamPOUpload() {
         {/* Step 1: Select Customer */}
         {step === 1 && (
           <div className="space-y-4">
-            <h2 className="font-bold text-lg">Step 1: Select Customer</h2>
-            <p className="text-sm text-muted-foreground">Choose the customer whose purchase order you're uploading.</p>
-            <select
-              value={customerId}
-              onChange={(e) => setCustomerId(e.target.value)}
-              className="w-full border rounded-lg px-3 py-2.5 bg-background text-sm"
-            >
-              <option value="">— Select customer —</option>
-              {customers.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
-            </select>
+            <h2 className="font-bold text-lg">Step 1: Select Company & Customer</h2>
+            <p className="text-sm text-muted-foreground">Choose which of our companies the order is for, then the customer.</p>
+            <label className="text-xs font-semibold block">Ordered Company *
+              <div className="mt-1">
+                <CompanyPicker value={companyId} onChange={setCompanyId} required />
+              </div>
+            </label>
+            <label className="text-xs font-semibold block">Customer *
+              <select
+                value={customerId}
+                onChange={(e) => setCustomerId(e.target.value)}
+                className="mt-1 w-full border rounded-lg px-3 py-2.5 bg-background text-sm font-normal"
+              >
+                <option value="">— Select customer —</option>
+                {customers.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
+              </select>
+            </label>
             <div className="flex justify-end">
               <button
                 onClick={() => setStep(2)}
-                disabled={!customerId}
+                disabled={!customerId || companyId == null}
                 className="px-6 py-2 bg-accent text-accent-foreground rounded-lg text-sm font-semibold inline-flex items-center gap-2 disabled:opacity-50"
               >
                 Next <ChevronRight className="w-4 h-4" />
