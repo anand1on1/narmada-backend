@@ -12,14 +12,16 @@ import { useToast } from "@/hooks/use-toast";
 import { useQuery } from "@tanstack/react-query";
 import { apiUrl } from "@/lib/queryClient";
 import { Logo } from "@/components/Logo";
-import { ArrowLeft, Loader2, Truck, PackageCheck, Upload, X } from "lucide-react";
+import { ArrowLeft, Loader2, Truck, PackageCheck, Upload, X, FileDown } from "lucide-react";
 
 interface Line {
   id: number;
   part_number: string | null;
   brand: string | null;
+  description: string | null;
   qty: number;
-  vendor_name: string | null;
+  rate: number | null;
+  line_total: number | null;
   fulfil_status: string | null;
 }
 interface PO {
@@ -31,9 +33,15 @@ interface PO {
   status: string;
   bucket: string;
   ship_to_name: string | null;
+  ship_to_address: string | null;
+  ship_to_phone: string | null;
   total_qty: number;
+  cust_total: number;
   lines: Line[];
 }
+
+const fmtINR = (v: number | null | undefined) =>
+  v == null ? "—" : `Rs. ${Number(v).toLocaleString("en-IN", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 
 const STATUS_LABEL: Record<string, string> = { pending: "To Pick Up", collected: "Received", packed: "Packed", dispatched: "Dispatched" };
 const STATUS_COLOR: Record<string, string> = {
@@ -51,6 +59,7 @@ export default function DelhiPODetail() {
   const [selected, setSelected] = useState<Set<number>>(new Set());
   const [busy, setBusy] = useState(false);
   const [showDispatch, setShowDispatch] = useState(false);
+  const [downloadingPdf, setDownloadingPdf] = useState(false);
 
   const { data: po, isLoading, refetch } = useQuery<PO | null>({
     queryKey: ["delhi-po", poId],
@@ -62,8 +71,10 @@ export default function DelhiPODetail() {
         id: it.id,
         part_number: it.partNumber ?? it.part_number ?? null,
         brand: it.brand ?? null,
+        description: it.description ?? null,
         qty: it.qty ?? 0,
-        vendor_name: it.vendorName ?? it.vendor_name ?? null,
+        rate: it.rate ?? null,
+        line_total: it.line_total ?? null,
         fulfil_status: it.fulfilStatus ?? it.fulfil_status ?? "pending",
       }));
       return {
@@ -75,7 +86,10 @@ export default function DelhiPODetail() {
         status: d.status,
         bucket: d.bucket,
         ship_to_name: d.shipToName ?? d.ship_to_name ?? null,
+        ship_to_address: d.shipToAddress ?? d.ship_to_address ?? null,
+        ship_to_phone: d.shipToPhone ?? d.ship_to_phone ?? null,
         total_qty: lines.reduce((s, l) => s + (Number(l.qty) || 0), 0),
+        cust_total: d.cust_total ?? lines.reduce((s, l) => s + (Number(l.line_total) || 0), 0),
         lines,
       };
     },
@@ -100,6 +114,27 @@ export default function DelhiPODetail() {
       await refetch();
     } catch (e: any) { toast({ title: "Error", description: e.message, variant: "destructive" }); }
     finally { setBusy(false); }
+  }
+
+  async function downloadCustomerPdf() {
+    if (!po) return;
+    setDownloadingPdf(true);
+    try {
+      const r = await fetch(apiUrl(`/api/team/pos/${po.id}/customer-pdf`), {
+        headers: { "x-team-token": token || "" },
+      });
+      if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error || "Download failed");
+      const blob = await r.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `PO-${po.po_number.replace(/\//g, "-")}-customer.pdf`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+    } catch (e: any) { toast({ title: "Error", description: e.message, variant: "destructive" }); }
+    finally { setDownloadingPdf(false); }
   }
 
   async function bulkMarkPacked() {
@@ -149,19 +184,34 @@ export default function DelhiPODetail() {
         ) : (
           <>
             {/* Header */}
-            <div className="bg-card border rounded-xl p-4 mb-4 shadow-sm flex flex-wrap items-center justify-between gap-4">
-              <div>
-                <div className="text-lg font-bold">{po.po_number}</div>
-                <div className="text-xs text-muted-foreground mt-0.5">
-                  {po.customer_name || "—"}
-                  {po.customer_po_number ? ` · Cust PO ${po.customer_po_number}` : ""}
-                  {po.po_date ? ` · ${new Date(po.po_date).toLocaleDateString("en-IN")}` : ""}
-                  {po.ship_to_name ? ` · Ship To ${po.ship_to_name}` : ""}
+            <div className="bg-card border rounded-xl p-4 mb-4 shadow-sm">
+              <div className="flex flex-wrap items-start justify-between gap-4">
+                <div>
+                  <div className="text-lg font-bold">{po.po_number}</div>
+                  <div className="text-xs text-muted-foreground mt-0.5">
+                    {po.customer_name || "—"}
+                    {po.customer_po_number ? ` · Cust PO ${po.customer_po_number}` : ""}
+                    {po.po_date ? ` · ${new Date(po.po_date).toLocaleDateString("en-IN")}` : ""}
+                  </div>
+                  {(po.ship_to_name || po.ship_to_address || po.ship_to_phone) && (
+                    <div className="text-xs text-muted-foreground mt-1.5">
+                      <span className="font-semibold text-foreground">Ship To: </span>
+                      {[po.ship_to_name, po.ship_to_address, po.ship_to_phone].filter(Boolean).join(" · ")}
+                    </div>
+                  )}
+                </div>
+                <div className="flex items-center gap-4 text-sm">
+                  <div className="text-right"><div className="text-xs text-muted-foreground">Total Qty</div><div className="font-bold">{po.total_qty}</div></div>
+                  <div className="text-right"><div className="text-xs text-muted-foreground">Order Value</div><div className="font-bold">{fmtINR(po.cust_total)}</div></div>
+                  <span className={`text-xs font-bold rounded px-2 py-1 ${STATUS_COLOR[po.bucket] || "bg-muted"}`}>{STATUS_LABEL[po.bucket] || po.bucket}</span>
                 </div>
               </div>
-              <div className="flex items-center gap-4 text-sm">
-                <div className="text-right"><div className="text-xs text-muted-foreground">Total Qty</div><div className="font-bold">{po.total_qty}</div></div>
-                <span className={`text-xs font-bold rounded px-2 py-1 ${STATUS_COLOR[po.bucket] || "bg-muted"}`}>{STATUS_LABEL[po.bucket] || po.bucket}</span>
+              <div className="mt-3 pt-3 border-t flex justify-end">
+                <button onClick={downloadCustomerPdf} disabled={downloadingPdf}
+                  className="px-3 py-1.5 rounded-lg text-xs font-semibold border bg-background hover:bg-muted disabled:opacity-50 inline-flex items-center gap-1.5">
+                  {downloadingPdf ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <FileDown className="w-3.5 h-3.5" />}
+                  Download PO PDF (Customer Rates)
+                </button>
               </div>
             </div>
 
@@ -183,7 +233,8 @@ export default function DelhiPODetail() {
                   <th className="px-3 py-3 font-semibold">Part</th>
                   <th className="px-3 py-3 font-semibold">Brand</th>
                   <th className="px-3 py-3 font-semibold text-right">Qty</th>
-                  <th className="px-3 py-3 font-semibold">Seller</th>
+                  <th className="px-3 py-3 font-semibold text-right">Rate</th>
+                  <th className="px-3 py-3 font-semibold text-right">Line Total</th>
                   <th className="px-3 py-3 font-semibold">Status</th>
                   <th className="px-3 py-3 font-semibold text-right">Action</th>
                 </tr></thead>
@@ -198,7 +249,8 @@ export default function DelhiPODetail() {
                       <td className="px-3 py-3 font-mono font-semibold">{l.part_number || "—"}</td>
                       <td className="px-3 py-3">{l.brand || "—"}</td>
                       <td className="px-3 py-3 text-right">{l.qty}</td>
-                      <td className="px-3 py-3 text-xs">{l.vendor_name || <span className="text-muted-foreground">—</span>}</td>
+                      <td className="px-3 py-3 text-right">{fmtINR(l.rate)}</td>
+                      <td className="px-3 py-3 text-right font-semibold">{fmtINR(l.line_total)}</td>
                       <td className="px-3 py-3"><span className={`text-xs font-bold rounded px-2 py-1 ${STATUS_COLOR[st]}`}>{STATUS_LABEL[st] || st}</span></td>
                       <td className="px-3 py-3 text-right">
                         {st === "dispatched" ? <span className="text-xs text-emerald-600 font-semibold">Dispatched</span> :

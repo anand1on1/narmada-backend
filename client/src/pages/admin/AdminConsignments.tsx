@@ -21,7 +21,7 @@ interface Consignment {
   etaDate: string | null;
   deliveredDate: string | null;
   status: "pending" | "in_transit" | "out_for_delivery" | "delivered" | "cancelled";
-  internalNotes: string | null;
+  notes: string | null;
   invoiceUrl?: string | null;
   docketUrl?: string | null;
   createdBy: string | null;
@@ -34,7 +34,7 @@ const emptyConsignment: Partial<Consignment> = {
   docketNumber: "", carrier: "", origin: "Patna", destination: "",
   customerName: "", customerPhone: "", customerEmail: "", bundlesCount: 1,
   invoiceNumber: "", invoiceAmount: 0, dispatchDate: "", etaDate: "",
-  deliveredDate: "", status: "pending", internalNotes: "",
+  deliveredDate: "", status: "pending", notes: "",
 };
 
 interface CustomerOption {
@@ -208,6 +208,7 @@ export default function AdminConsignments() {
                 <th className="px-4 py-3 font-semibold">Customer</th>
                 <th className="px-4 py-3 font-semibold">Bundles</th>
                 <th className="px-4 py-3 font-semibold">Invoice</th>
+                <th className="px-4 py-3 font-semibold">Docs</th>
                 <th className="px-4 py-3 font-semibold">ETA</th>
                 <th className="px-4 py-3"></th>
               </tr>
@@ -221,6 +222,14 @@ export default function AdminConsignments() {
                   <td className="px-4 py-3">{c.customerName || "—"}</td>
                   <td className="px-4 py-3">{c.bundlesCount ?? "—"}</td>
                   <td className="px-4 py-3 text-muted-foreground text-xs">{c.invoiceNumber || "—"}</td>
+                  <td className="px-4 py-3 text-xs whitespace-nowrap">
+                    {c.invoiceUrl ? (
+                      <a href={c.invoiceUrl} target="_blank" rel="noreferrer" className="text-accent hover:underline mr-2" data-testid={`link-invoice-${c.id}`}>Invoice</a>
+                    ) : <span className="text-muted-foreground mr-2">—</span>}
+                    {c.docketUrl ? (
+                      <a href={c.docketUrl} target="_blank" rel="noreferrer" className="text-accent hover:underline" data-testid={`link-docket-${c.id}`}>Docket</a>
+                    ) : <span className="text-muted-foreground">—</span>}
+                  </td>
                   <td className="px-4 py-3 text-muted-foreground">{c.etaDate || "—"}</td>
                   <td className="px-4 py-3 text-right whitespace-nowrap">
                     <button onClick={() => setOpen(c)} className="p-2 hover:bg-muted rounded" data-testid={`button-edit-${c.id}`}><Edit3 className="w-4 h-4" /></button>
@@ -359,7 +368,7 @@ export default function AdminConsignments() {
                 </Field>
               </div>
               <Field label="Internal Notes">
-                <textarea value={open.internalNotes || ""} onChange={(e) => setOpen({ ...open, internalNotes: e.target.value })}
+                <textarea value={open.notes || ""} onChange={(e) => setOpen({ ...open, notes: e.target.value })}
                   rows={3} className="w-full border rounded-lg px-3 py-2 bg-background" data-testid="input-notes" />
               </Field>
 

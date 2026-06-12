@@ -1532,6 +1532,21 @@ export function registerV2Routes(app: Express, ctx: V2Context) {
     catch (e: any) { res.status(500).json({ error: e.message }); }
   });
 
+  // R14.5 — data team can create a quoting company inline during PO / quotation
+  // creation (was admin-only). Reuses the same createQuotingCompany storage helper.
+  app.post("/api/team/quoting-companies", requireDataTeam, async (req, res) => {
+    try {
+      const u = (req as any).teamUser;
+      const created = await v2.createQuotingCompany(req.body || {});
+      await v2.writeAuditLog({
+        actorType: "data_team", actorId: u?.username, action: "quoting_company.create",
+        entityType: "quoting_company", entityId: String(created.id),
+        afterJson: JSON.stringify({ name: created.name }),
+      });
+      res.json(created);
+    } catch (e: any) { res.status(400).json({ error: e.message }); }
+  });
+
   app.get("/api/team/customers", requireDataTeam, async (req, res) => {
     try {
       const q = req.query.q as string | undefined;
@@ -4313,13 +4328,15 @@ function registerR8Routes(
   });
 
   // ---- GET /api/delhi/po/:id ---- (PO detail for Delhi)
+  // R14.1: serve customer-safe detail — customer name, customer PO#, full ship-to,
+  // per-line CUSTOMER rate + line total. Vendor name / vendor rate / cost are stripped
+  // server-side by getDelhiPoDetail (never sent to Delhi).
   app.get("/api/delhi/po/:id", requireDelhi, async (req: any, res: any) => {
     try {
       res.set("Cache-Control", "no-cache, no-store, must-revalidate");
-      const po = await v2.getPurchaseOrderV2(parseInt(req.params.id as string, 10));
+      const po = await v2.getDelhiPoDetail(parseInt(req.params.id as string, 10));
       if (!po) return res.status(404).json({ error: "PO not found" });
-      const roll = v2.rollupPoLineStages(po.items as any);
-      res.json({ ...po, bucket: roll.bucket, counts: roll.counts, packed_count: roll.packedCount });
+      res.json(po);
     } catch (e: any) { res.status(500).json({ error: e.message }); }
   });
 
@@ -4518,5 +4535,79 @@ function registerR8Routes(
     } catch (e: any) {
       res.status(500).json({ error: e.message });
     }
+  });
+
+  // R14.2 — Customer-rate PO PDF. Authorized for admin token OR data-team token OR
+  // Delhi token (both Delhi AND data team can download). The PDF uses the CUSTOMER
+  // rate only — no vendor name, no vendor rate, no internal cost columns.
+  async function requireAdminOrTeam(req: any, res: any, next: any): Promise<void> {
+    // Try team/Delhi token first (x-team-token / Bearer).
+    const teamToken = (req.headers["x-team-token"] as string | undefined)
+      || (req.headers["authorization"] as string | undefined)?.replace("Bearer ", "");
+    if (teamToken) {
+      try {
+        const session = await v2.getDataTeamSession(teamToken);
+        if (session) {
+          const user = await v2.getDataTeamUser(session.userId);
+          if (user && user.active) { (req as any).teamUser = user; return next(); }
+        }
+      } catch { /* fall through to admin check */ }
+    }
+    // Fall back to admin token.
+    if (req.headers["x-admin-token"]) return requireAuth(req, res, next);
+    res.status(401).json({ error: "Unauthorized" });
+  }
+
+  app.get("/api/team/pos/:id/customer-pdf", requireAdminOrTeam, async (req: any, res: any) => {
+    try {
+      const poId = parseInt(req.params.id as string, 10);
+      const po = await v2.getPurchaseOrderV2(poId);
+      if (!po) return res.status(404).json({ error: "PO not found" });
+      const pdfSvc = require("./pdf-service") as typeof import("./pdf-service");
+      const company = (po as any).companyId ? await v2.getCompany((po as any).companyId) : await v2.getDefaultCompany();
+      const customer = (po as any).customerId ? await v2.getCustomer((po as any).customerId) : null;
+      const pdfBuf = await pdfSvc.generateCustomerPOPDF({
+        poNumber: po.poNumber,
+        createdAt: (po as any).createdAt ?? null,
+        poDate: (po as any).poDate ?? (po as any).createdAt ?? null,
+        status: po.status,
+        subtotal: (po as any).subtotal ?? null,
+        discount: (po as any).discount ?? null,
+        tax: (po as any).tax ?? null,
+        total: (po as any).total ?? null,
+        customerName: po.customerName ?? customer?.name ?? null,
+        customerPoNumber: (po as any).customerPoNumber ?? null,
+        shipToName: (po as any).shipToName ?? null,
+        shipToAddress: (po as any).shipToAddress ?? null,
+        shipToPhone: (po as any).shipToPhone ?? null,
+        items: (po.items || []).map((it: any) => ({
+          partNumber: it.partNumber,
+          brand: it.brand,
+          description: it.description,
+          qty: it.qty,
+          unitPrice: it.unitPrice,
+          lineTotal: it.lineTotal,
+        })),
+      }, company);
+      const fname = `PO-${po.poNumber.replace(/\//g, "-")}-customer.pdf`;
+      res.setHeader("Content-Type", "application/pdf");
+      res.setHeader("Content-Disposition", `attachment; filename="${fname}"`);
+      res.send(pdfBuf);
+    } catch (e: any) { res.status(500).json({ error: e.message }); }
+  });
+
+  // R14.6 — Delhi dashboard pending buckets (single payload). range ∈ {1d,3d,7d,30d},
+  // falls back to 7d for anything else. Filters by notified_delhi_at (falling back to
+  // created_at) within the window.
+  app.get("/api/delhi/dashboard-pending", requireDelhi, async (req: any, res: any) => {
+    try {
+      res.set("Cache-Control", "no-cache, no-store, must-revalidate");
+      const rangeRaw = String(req.query.range || "7d");
+      const RANGE_DAYS: Record<string, number> = { "1d": 1, "3d": 3, "7d": 7, "30d": 30 };
+      const days = RANGE_DAYS[rangeRaw] ?? 7;
+      const fromMs = Date.now() - days * 24 * 60 * 60 * 1000;
+      const buckets = v2.getDelhiDashboardPending(fromMs);
+      res.json({ range: RANGE_DAYS[rangeRaw] ? rangeRaw : "7d", ...buckets });
+    } catch (e: any) { res.status(500).json({ error: e.message }); }
   });
 }

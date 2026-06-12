@@ -6,7 +6,7 @@
  * customer (multi-select), and status chips. All views share GET /api/delhi/pos/list.
  * Opening a PO routes to /delhi/po/:id (DelhiPODetail) for marking lines packed + dispatch.
  */
-import { useState, useEffect, useMemo } from "react";
+import { useState, useEffect, useMemo, lazy, Suspense } from "react";
 import { useLocation } from "wouter";
 import { useTeamAuth, teamFetch } from "@/lib/team-auth";
 import { useQuery } from "@tanstack/react-query";
@@ -18,6 +18,9 @@ import {
 
 type ViewMode = "table" | "kanban" | "tabs";
 const VIEW_KEY = "delhi_view_mode";
+
+// R14.6 — lazy-loaded pending widgets (heavy module loaded only when dashboard mounts).
+const DelhiPendingWidgets = lazy(() => import("./DelhiPendingWidgets"));
 
 // Buckets map to po_item fulfil_status stages rolled up per-PO.
 const BUCKETS = [
@@ -37,14 +40,21 @@ interface PoRow {
   created_at: number;
   po_date: number | null;
   status: string;
+  ship_to_name: string | null;
+  ship_to_address: string | null;
+  ship_to_phone: string | null;
   bucket: string;
   counts: { pending: number; collected: number; packed: number; dispatched: number };
   packed_count: number;
   line_count: number;
   total_qty: number;
+  cust_total: number;
   is_fully_dispatched: number;
 }
 interface CustomerOpt { id: number; name: string; }
+
+const fmtINR = (v: number | null | undefined) =>
+  v == null ? "—" : `Rs. ${Number(v).toLocaleString("en-IN", { maximumFractionDigits: 0 })}`;
 
 function fmt(d: number | null) {
   if (!d) return "—";
@@ -182,6 +192,11 @@ export default function DelhiDashboard() {
       )}
 
       <div className="p-4 sm:p-6 max-w-[1400px] mx-auto">
+        {/* R14.6 — pending work widgets */}
+        <Suspense fallback={<div className="mb-5 text-xs text-muted-foreground">Loading pending work…</div>}>
+          <DelhiPendingWidgets onOpen={openPo} />
+        </Suspense>
+
         {/* Top bar: view switcher + filters */}
         <div className="bg-card border rounded-xl p-3 mb-5 flex flex-wrap items-center gap-3 shadow-sm">
           {/* View switcher (segmented) */}
@@ -267,22 +282,29 @@ function PoTable({ pos, onOpen }: { pos: PoRow[]; onOpen: (id: number) => void }
       <thead><tr className="bg-muted/50 text-left">
         <th className="px-3 py-3 font-semibold">PO #</th>
         <th className="px-3 py-3 font-semibold">Customer</th>
+        <th className="px-3 py-3 font-semibold">Ship To</th>
         <th className="px-3 py-3 font-semibold">Date</th>
         <th className="px-3 py-3 font-semibold">Status</th>
         <th className="px-3 py-3 font-semibold">Lines</th>
         <th className="px-3 py-3 font-semibold text-right">Total Qty</th>
+        <th className="px-3 py-3 font-semibold text-right">Value</th>
         <th className="px-3 py-3 font-semibold text-right">Open</th>
       </tr></thead>
       <tbody className="divide-y">{pos.map((p) => {
         const m = bucketMeta(p.bucket);
         return (
           <tr key={p.id} className="hover:bg-muted/30 cursor-pointer" onClick={() => onOpen(p.id)}>
-            <td className="px-3 py-3 font-semibold">{p.po_number}</td>
+            <td className="px-3 py-3 font-semibold">
+              {p.po_number}
+              {p.customer_po_number ? <div className="text-[11px] font-normal text-muted-foreground">Cust PO {p.customer_po_number}</div> : null}
+            </td>
             <td className="px-3 py-3">{p.customer_name || "—"}</td>
+            <td className="px-3 py-3 text-xs text-muted-foreground">{p.ship_to_name || "—"}</td>
             <td className="px-3 py-3 text-xs text-muted-foreground">{fmt(p.po_date || p.created_at)}</td>
             <td className="px-3 py-3"><span className={`text-xs font-bold rounded px-2 py-1 ${m.color}`}>{m.label}</span></td>
             <td className="px-3 py-3 text-xs">{linesSummary(p)}</td>
             <td className="px-3 py-3 text-right">{p.total_qty}</td>
+            <td className="px-3 py-3 text-right text-xs font-semibold">{fmtINR(p.cust_total)}</td>
             <td className="px-3 py-3 text-right">
               <button onClick={(e) => { e.stopPropagation(); onOpen(p.id); }}
                 className="text-accent font-semibold hover:underline text-xs inline-flex items-center gap-1">

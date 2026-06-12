@@ -12,7 +12,7 @@ import { useToast } from "@/hooks/use-toast";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { useParams } from "wouter";
 import { apiUrl } from "@/lib/queryClient";
-import { Download, Check, Loader2, Package, Pencil, Calendar, Send, Flame, CheckCircle2, X } from "lucide-react";
+import { Download, Check, Loader2, Package, Pencil, Calendar, Send, Flame, CheckCircle2, X, FileDown } from "lucide-react";
 import { LineQuotesPanel, FireRateRequestModal } from "./R9VendorQuotes";
 import { CompanyPicker } from "@/components/common/CompanyPicker";
 
@@ -304,6 +304,16 @@ export default function TeamPODetail() {
       .catch(() => toast({ title: "Error", description: "Could not load PDF", variant: "destructive" }));
   }
 
+  function downloadCustomerPdf() {
+    const t = getTeamToken();
+    fetch(apiUrl(`/api/team/pos/${poId}/customer-pdf`), {
+      headers: t ? { "x-team-token": t } : {},
+    })
+      .then(async (r) => { if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error || "Failed"); return r.blob(); })
+      .then((b) => { const u = URL.createObjectURL(b); window.open(u, "_blank"); })
+      .catch((e) => toast({ title: "Error", description: e.message || "Could not load PDF", variant: "destructive" }));
+  }
+
   function refresh() {
     qc.invalidateQueries({ queryKey: ["team-po", poId] });
     qc.invalidateQueries({ queryKey: ["team-po-has-requested", poId] });
@@ -362,7 +372,14 @@ export default function TeamPODetail() {
             onClick={downloadPdf}
             className="px-4 py-2 border rounded-lg text-sm font-semibold inline-flex items-center gap-2 hover:bg-muted"
           >
-            <Download className="w-4 h-4" /> PDF
+            <Download className="w-4 h-4" /> Internal PDF
+          </button>
+          <button
+            onClick={downloadCustomerPdf}
+            title="PO PDF with customer rates only — no vendor pricing"
+            className="px-4 py-2 border rounded-lg text-sm font-semibold inline-flex items-center gap-2 hover:bg-muted"
+          >
+            <FileDown className="w-4 h-4" /> Customer PDF
           </button>
           <button
             onClick={notifyDelhi}

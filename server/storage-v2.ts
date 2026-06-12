@@ -2127,7 +2127,8 @@ export async function listDelhiPosWithRollup(opts: {
   const rows = sqlite.prepare(`
     SELECT po.id, po.po_number, po.status, po.created_at, po.po_date,
            po.customer_po_number, po.is_fully_dispatched, po.dispatch_round,
-           po.ship_to_name, c.name AS customer_name, c.id AS customer_id
+           po.ship_to_name, po.ship_to_address, po.ship_to_phone,
+           c.name AS customer_name, c.id AS customer_id
     FROM purchase_orders_v2 po
     LEFT JOIN customers c ON c.id = po.customer_id
     ${where}
@@ -2136,10 +2137,13 @@ export async function listDelhiPosWithRollup(opts: {
   const keep = opts.statuses && opts.statuses.length ? new Set(opts.statuses) : null;
   const out: any[] = [];
   for (const po of rows) {
-    const items = sqlite.prepare(`SELECT fulfil_status AS fulfilStatus, qty FROM po_items WHERE po_id = ?`).all(po.id) as any[];
+    // Only customer-safe columns are read here (qty + customer unit_price). Vendor
+    // name / vendor rate / purchase cost are intentionally never selected.
+    const items = sqlite.prepare(`SELECT fulfil_status AS fulfilStatus, qty, unit_price AS unitPrice, line_total AS lineTotal FROM po_items WHERE po_id = ?`).all(po.id) as any[];
     if (items.length === 0) continue;
     const roll = rollupPoLineStages(items);
     const totalQty = items.reduce((s, it) => s + (Number(it.qty) || 0), 0);
+    const custTotal = items.reduce((s, it) => s + (it.lineTotal != null ? Number(it.lineTotal) : (Number(it.unitPrice) || 0) * (Number(it.qty) || 0)), 0);
     const row = {
       id: po.id,
       po_number: po.po_number,
@@ -2149,11 +2153,15 @@ export async function listDelhiPosWithRollup(opts: {
       created_at: po.created_at,
       po_date: po.po_date,
       status: po.status,
+      ship_to_name: po.ship_to_name ?? null,
+      ship_to_address: po.ship_to_address ?? null,
+      ship_to_phone: po.ship_to_phone ?? null,
       bucket: roll.bucket,
       counts: roll.counts,
       packed_count: roll.packedCount,
       line_count: roll.total,
       total_qty: totalQty,
+      cust_total: custTotal,
       is_fully_dispatched: po.is_fully_dispatched,
     };
     if (keep && !keep.has(roll.bucket)) continue;
@@ -2171,6 +2179,130 @@ export async function listDelhiCustomers(): Promise<Array<{ id: number; name: st
     WHERE po.status NOT IN ('draft','cancelled')
     ORDER BY c.name COLLATE NOCASE ASC
   `).all() as any[];
+}
+
+// R14.1 — Customer-safe PO detail for Delhi. Surfaces customer name, customer PO#,
+// full ship-to (name/address/phone), per-line customer rate + line total, and the
+// line fulfilment state. Vendor name / vendor rate / purchase cost are NEVER
+// included — they are stripped here at the storage layer, not just hidden in the UI.
+export async function getDelhiPoDetail(id: number): Promise<any | undefined> {
+  const po = db.select().from(purchaseOrdersV2).where(eq(purchaseOrdersV2.id, id)).get();
+  if (!po) return undefined;
+  const customer = po.customerId ? db.select().from(customers).where(eq(customers.id, po.customerId)).get() : undefined;
+  const items = db.select().from(poItems).where(eq(poItems.poId, id)).all();
+  const roll = rollupPoLineStages(items as any);
+  const safeItems = items.map((it) => ({
+    id: it.id,
+    part_number: it.partNumber ?? null,
+    brand: it.brand ?? null,
+    description: it.description ?? null,
+    qty: it.qty ?? 0,
+    rate: it.unitPrice ?? null,            // customer rate (what WE charge)
+    line_total: it.lineTotal ?? ((it.unitPrice ?? 0) * (it.qty ?? 0)),
+    fulfil_status: it.fulfilStatus ?? "pending",
+    docket_number: it.docketNumber ?? null,
+    carrier: it.carrier ?? null,
+    bundles: it.bundles ?? null,
+  }));
+  const custTotal = safeItems.reduce((s, it) => s + (Number(it.line_total) || 0), 0);
+  return {
+    id: po.id,
+    po_number: po.poNumber,
+    customer_id: po.customerId ?? null,
+    customer_name: customer?.name ?? null,
+    customer_po_number: po.customerPoNumber ?? null,
+    po_date: po.poDate ?? po.createdAt ?? null,
+    status: po.status,
+    ship_to_name: po.shipToName ?? null,
+    ship_to_address: po.shipToAddress ?? null,
+    ship_to_phone: po.shipToPhone ?? null,
+    bucket: roll.bucket,
+    counts: roll.counts,
+    packed_count: roll.packedCount,
+    cust_total: custTotal,
+    items: safeItems,
+  };
+}
+
+// R14.6 — Delhi dashboard pending buckets within a created_at window.
+//  1. pendingDispatch: notified-to-Delhi / active POs not yet fully dispatched and
+//     with no docket recorded (no dispatch row, no per-line docket number).
+//  2. pendingPickup: line items still awaiting pickup (fulfil_status = 'pending').
+//  3. pendingUploadDispatch: POs that are dispatched/packed but missing dispatch
+//     details — either a packed PO with no dispatch row, or a dispatch row missing
+//     docket / courier / bundles.
+export function getDelhiDashboardPending(fromMs: number): {
+  range_from: number;
+  pending_dispatch: any[];
+  pending_pickup: any[];
+  pending_upload_dispatch: any[];
+} {
+  const pos = sqlite.prepare(`
+    SELECT po.id, po.po_number, po.created_at, po.notified_delhi_at, po.po_date,
+           po.customer_po_number, po.is_fully_dispatched, c.name AS customer_name
+    FROM purchase_orders_v2 po
+    LEFT JOIN customers c ON c.id = po.customer_id
+    WHERE po.status NOT IN ('draft','cancelled')
+      AND COALESCE(po.notified_delhi_at, po.created_at) >= ?
+    ORDER BY COALESCE(po.notified_delhi_at, po.created_at) DESC
+  `).all(fromMs) as any[];
+
+  const pendingDispatch: any[] = [];
+  const pendingUpload: any[] = [];
+  const pendingPickup: any[] = [];
+
+  for (const po of pos) {
+    const items = sqlite.prepare(
+      `SELECT fulfil_status AS fulfilStatus, qty, docket_number AS docketNumber, carrier, bundles, part_number AS partNumber, brand
+         FROM po_items WHERE po_id = ?`,
+    ).all(po.id) as any[];
+    if (items.length === 0) continue;
+    const roll = rollupPoLineStages(items as any);
+    const dispatchRows = sqlite.prepare(`SELECT docket_no AS docketNo, courier_name AS courierName, bundles FROM dispatches WHERE po_id = ?`).all(po.id) as any[];
+    const hasDispatchRow = dispatchRows.length > 0;
+    const anyLineDocket = items.some((it) => it.docketNumber && String(it.docketNumber).trim());
+    const meta = {
+      id: po.id,
+      po_number: po.po_number,
+      customer_name: po.customer_name,
+      customer_po_number: po.customer_po_number,
+      created_at: po.created_at,
+      notified_delhi_at: po.notified_delhi_at,
+      po_date: po.po_date,
+      bucket: roll.bucket,
+      line_count: roll.total,
+      packed_count: roll.packedCount,
+    };
+
+    // 1) Pending Dispatch — active, not fully dispatched, nothing dispatched yet.
+    if (!po.is_fully_dispatched && roll.bucket !== "dispatched" && !hasDispatchRow && !anyLineDocket) {
+      pendingDispatch.push(meta);
+    }
+
+    // 2) Pending Pickup — count lines still at 'pending' (awaiting pickup).
+    const pickupLines = items.filter((it) => (it.fulfilStatus || "pending") === "pending");
+    if (pickupLines.length > 0) {
+      pendingPickup.push({ ...meta, pending_pickup_lines: pickupLines.length });
+    }
+
+    // 3) Pending Upload Dispatch-Details —
+    //    (a) dispatched/has-dispatch-row but missing docket / courier / bundles, OR
+    //    (b) packed lines exist but no dispatch row submitted yet.
+    const dispatchMissingFields = dispatchRows.some(
+      (d) => !d.docketNo || !String(d.docketNo).trim() || !d.courierName || !String(d.courierName).trim() || d.bundles == null,
+    );
+    const packedNoDispatch = roll.packedCount > 0 && !hasDispatchRow;
+    if (dispatchMissingFields || packedNoDispatch) {
+      pendingUpload.push({ ...meta, reason: packedNoDispatch ? "packed_not_dispatched" : "missing_dispatch_fields" });
+    }
+  }
+
+  return {
+    range_from: fromMs,
+    pending_dispatch: pendingDispatch,
+    pending_pickup: pendingPickup,
+    pending_upload_dispatch: pendingUpload,
+  };
 }
 
 // Distinct carriers used on past dispatches, for the dispatch-modal autocomplete.

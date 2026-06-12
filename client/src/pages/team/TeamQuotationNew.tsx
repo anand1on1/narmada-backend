@@ -3,10 +3,10 @@ import { useLocation } from "wouter";
 import { TeamLayout } from "./TeamLayout";
 import { teamFetch, useTeamAuth } from "@/lib/team-auth";
 import { useToast } from "@/hooks/use-toast";
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   ChevronRight, ChevronLeft, Plus, Trash2, Upload, Search, Check,
-  FileText, RefreshCw, Sparkles, Truck,
+  FileText, RefreshCw, Sparkles, Truck, X, Loader2,
 } from "lucide-react";
 import { CompanyPicker } from "@/components/common/CompanyPicker";
 
@@ -77,8 +77,10 @@ export default function TeamQuotationNew() {
   const { token } = useTeamAuth();
   const { toast } = useToast();
   const [, navigate] = useLocation();
+  const qc = useQueryClient();
 
   const [step, setStep] = useState(0);
+  const [showNewCompany, setShowNewCompany] = useState(false);
   const [selectedCompany, setSelectedCompany] = useState<QuotingCompany | null>(null);
   const [companyId, setCompanyId] = useState<number | null>(null);
   const [selectedCustomer, setSelectedCustomer] = useState<Customer | null>(null);
@@ -462,10 +464,16 @@ export default function TeamQuotationNew() {
               </div>
               <span className="text-xs font-normal text-muted-foreground">Which of our companies this quotation is sent from.</span>
             </label>
-            <h2 className="font-semibold text-lg mb-4">Select Quoting Company</h2>
+            <div className="flex items-center justify-between mb-4">
+              <h2 className="font-semibold text-lg">Select Quoting Company</h2>
+              <button onClick={() => setShowNewCompany(true)}
+                className="px-3 py-1.5 border rounded-lg text-xs font-semibold inline-flex items-center gap-1.5 hover:bg-muted">
+                <Plus className="w-3.5 h-3.5" /> New Company
+              </button>
+            </div>
             {companies.length === 0 ? (
               <div className="p-12 text-center text-muted-foreground border rounded-xl bg-card">
-                No quoting companies configured. Ask admin to add one.
+                No quoting companies configured. Click "New Company" to add one.
               </div>
             ) : (
               <div className="grid sm:grid-cols-2 gap-3">
@@ -824,7 +832,86 @@ export default function TeamQuotationNew() {
           </div>
         )}
       </div>
+
+      {showNewCompany && (
+        <NewQuotingCompanyModal
+          token={token}
+          onClose={() => setShowNewCompany(false)}
+          onCreated={(c) => {
+            setShowNewCompany(false);
+            qc.invalidateQueries({ queryKey: ["quoting-companies-team"] });
+            if (c.active) setSelectedCompany(c);
+            toast({ title: "Quoting company created", description: c.name });
+          }}
+        />
+      )}
     </TeamLayout>
+  );
+}
+
+// ─── New Quoting Company modal (R14.5 — data-team inline create) ─────────────────
+function NewQuotingCompanyModal({ token, onClose, onCreated }: {
+  token: string | null; onClose: () => void; onCreated: (c: QuotingCompany) => void;
+}) {
+  const { toast } = useToast();
+  const [name, setName] = useState("");
+  const [gstin, setGstin] = useState("");
+  const [quotePrefix, setQuotePrefix] = useState("");
+  const [saving, setSaving] = useState(false);
+
+  async function submit() {
+    if (!name.trim()) { toast({ title: "Company name is required", variant: "destructive" }); return; }
+    setSaving(true);
+    try {
+      const r = await teamFetch(token, "/api/team/quoting-companies", {
+        method: "POST",
+        body: JSON.stringify({
+          name: name.trim(),
+          gstin: gstin.trim() || null,
+          quotePrefix: quotePrefix.trim() || null,
+          active: true,
+        }),
+      });
+      const j = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(j.error || "Create failed");
+      onCreated(j as QuotingCompany);
+    } catch (e: any) { toast({ title: "Error", description: e.message, variant: "destructive" }); }
+    finally { setSaving(false); }
+  }
+
+  return (
+    <div className="fixed inset-0 z-50 bg-black/40 flex items-center justify-center p-4" onClick={onClose}>
+      <div className="bg-card rounded-xl shadow-xl max-w-md w-full p-6" onClick={(e) => e.stopPropagation()}>
+        <div className="flex items-center justify-between mb-4">
+          <h3 className="text-lg font-bold">New Quoting Company</h3>
+          <button onClick={onClose} className="text-muted-foreground hover:text-foreground"><X className="w-5 h-5" /></button>
+        </div>
+        <div className="space-y-3">
+          <div>
+            <label className="text-xs font-semibold">Name <span className="text-red-500">*</span></label>
+            <input value={name} onChange={(e) => setName(e.target.value)} autoFocus
+              className="w-full border rounded-lg px-3 py-2 text-sm mt-1 bg-background" placeholder="Company legal name" />
+          </div>
+          <div>
+            <label className="text-xs font-semibold">GSTIN</label>
+            <input value={gstin} onChange={(e) => setGstin(e.target.value)}
+              className="w-full border rounded-lg px-3 py-2 text-sm mt-1 bg-background" placeholder="Optional" />
+          </div>
+          <div>
+            <label className="text-xs font-semibold">Quote Prefix</label>
+            <input value={quotePrefix} onChange={(e) => setQuotePrefix(e.target.value)}
+              className="w-full border rounded-lg px-3 py-2 text-sm mt-1 bg-background" placeholder="e.g. NM" />
+          </div>
+        </div>
+        <div className="flex justify-end gap-2 mt-5">
+          <button onClick={onClose} className="px-4 py-2 rounded-lg text-sm font-semibold hover:bg-muted">Cancel</button>
+          <button onClick={submit} disabled={saving}
+            className="px-4 py-2 rounded-lg text-sm font-semibold bg-accent text-accent-foreground hover:opacity-90 disabled:opacity-60 inline-flex items-center gap-2">
+            {saving && <Loader2 className="w-4 h-4 animate-spin" />} Create
+          </button>
+        </div>
+      </div>
+    </div>
   );
 }
 
