@@ -1568,6 +1568,84 @@ export function registerV2Routes(app: Express, ctx: V2Context) {
     } catch (e: any) { res.status(400).json({ error: e.message }); }
   });
 
+  // ---------------- R13.1 TEAM SELLERS ----------------
+  // Team-scoped mirror of the admin vendor (seller) CRUD. Shares the same v2 storage
+  // helpers so there is no logic duplication; auth is requireDataTeam instead of admin.
+  app.get("/api/team/sellers", requireDataTeam, async (req, res) => {
+    try {
+      const rows = await v2.listVendors({
+        q: req.query.q as string | undefined,
+        brand: req.query.brand as string | undefined,
+        category: req.query.category as string | undefined,
+        activeOnly: req.query.activeOnly === "true",
+      });
+      res.json(rows);
+    } catch (e: any) { res.status(500).json({ error: e.message }); }
+  });
+  app.post("/api/team/sellers", requireDataTeam, async (req, res) => {
+    try {
+      const seller = await v2.createVendor(req.body || {});
+      const teamUser = (req as any).teamUser;
+      Promise.resolve(v2.writeAuditLog({
+        actorType: "data_team", actorId: String(teamUser?.id || ""), action: "create_seller",
+        entityType: "vendor", entityId: String(seller.id),
+        afterJson: JSON.stringify({ id: seller.id, name: seller.name }),
+      })).catch((e: any) => console.error("[audit] team seller create failed:", e?.message));
+      res.json(seller);
+    } catch (e: any) { res.status(500).json({ error: e.message }); }
+  });
+  app.patch("/api/team/sellers/:id", requireDataTeam, async (req, res) => {
+    try {
+      const id = parseInt(req.params.id as string, 10);
+      const seller = await v2.updateVendor(id, req.body || {});
+      if (!seller) return res.status(404).json({ error: "Not found" });
+      const teamUser = (req as any).teamUser;
+      Promise.resolve(v2.writeAuditLog({
+        actorType: "data_team", actorId: String(teamUser?.id || ""), action: "update_seller",
+        entityType: "vendor", entityId: String(id),
+      })).catch((e: any) => console.error("[audit] team seller update failed:", e?.message));
+      res.json(seller);
+    } catch (e: any) { res.status(500).json({ error: e.message }); }
+  });
+  app.delete("/api/team/sellers/:id", requireDataTeam, async (req, res) => {
+    try {
+      const id = parseInt(req.params.id as string, 10);
+      const n = v2.countSellerQuotes(id);
+      if (n > 0) return res.status(400).json({ error: `Used on ${n} quotes; remove or replace first` });
+      await v2.deleteVendor(id);
+      const teamUser = (req as any).teamUser;
+      Promise.resolve(v2.writeAuditLog({
+        actorType: "data_team", actorId: String(teamUser?.id || ""), action: "delete_seller",
+        entityType: "vendor", entityId: String(id),
+      })).catch((e: any) => console.error("[audit] team seller delete failed:", e?.message));
+      res.json({ ok: true });
+    } catch (e: any) { res.status(500).json({ error: e.message }); }
+  });
+  app.post("/api/team/sellers/bulk-import", requireDataTeam, async (req, res) => {
+    try {
+      const csv = String(req.body?.csv || "");
+      if (!csv.trim()) return res.status(400).json({ error: "csv required" });
+      const parsed = Papa.parse(csv.trim(), { header: true, skipEmptyLines: true, transformHeader: (h: string) => h.trim().toLowerCase().replace(/\s+/g, "_") });
+      let n = 0;
+      for (const r of parsed.data as any[]) {
+        if (!r.name && !r.code) continue;
+        await v2.createVendor({
+          code: r.code || undefined, name: r.name, gstin: r.gstin, pan: r.pan,
+          address: r.address, city: r.city, state: r.state, pincode: r.pincode,
+          phone: r.phone, whatsapp: r.whatsapp || r.phone, email: r.email,
+          paymentTerms: r.payment_terms, brands: r.brands, categories: r.categories,
+        } as any);
+        n++;
+      }
+      const teamUser = (req as any).teamUser;
+      Promise.resolve(v2.writeAuditLog({
+        actorType: "data_team", actorId: String(teamUser?.id || ""), action: "bulk_import_sellers",
+        entityType: "vendor", entityId: "", afterJson: JSON.stringify({ inserted: n }),
+      })).catch((e: any) => console.error("[audit] team seller bulk-import failed:", e?.message));
+      res.json({ inserted: n });
+    } catch (e: any) { res.status(500).json({ error: e.message }); }
+  });
+
   // Round 3: AI-driven natural-language editor for the quotation line items.
   // Body: { prompt: string, items: AiQuoteItem[], context?: { customerName, currency } }
   // Returns: { items, explanation, ok, error? }

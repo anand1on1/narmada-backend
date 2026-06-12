@@ -105,6 +105,7 @@ import TeamQuotationNew from "@/pages/team/TeamQuotationNew";
 import TeamQuotationEdit from "@/pages/team/TeamQuotationEdit";
 import TeamParts from "@/pages/team/TeamParts";
 import TeamCustomers from "@/pages/team/TeamCustomers";
+import TeamSellers from "@/pages/team/TeamSellers";
 // Rounds 4.4–7 — team PO/RFQ pages
 import TeamPOs from "@/pages/team/TeamPOs";
 import TeamPODetail from "@/pages/team/TeamPODetail";
@@ -250,6 +251,7 @@ function AppRouter() {
         <Route path="/team/quotations/:id" component={TeamQuotationEdit} />
         <Route path="/team/quotations" component={TeamQuotations} />
         <Route path="/team/customers" component={TeamCustomers} />
+        <Route path="/team/sellers" component={TeamSellers} />
         <Route path="/team/parts" component={TeamParts} />
         {/* R10 — merged View+Assign; legacy /edit redirects to /:id */}
         <Route path="/team/purchase-orders/:id/edit" component={PoEditRedirect} />

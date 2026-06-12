@@ -1533,6 +1533,7 @@ import {
   rfqsV2, rfqItems, rfqVendors, rfqQuotes, vendorConversations,
   warehouses, warehouseTransfers, rateHistory, leads, leadActivities,
   targets, announcements, taskItems, ledgerQueries, dispatches,
+  poItemVendorQuotes,
 } from "@shared/schema";
 import type {
   Vendor, InsertVendor, VendorContact,
@@ -1584,6 +1585,10 @@ export async function updateVendor(id: number, data: Partial<InsertVendor>): Pro
 }
 export async function deleteVendor(id: number): Promise<void> {
   db.delete(vendors).where(eq(vendors.id, id)).run();
+}
+export function countSellerQuotes(vendorId: number): number {
+  const rows = db.select().from(poItemVendorQuotes).where(eq(poItemVendorQuotes.vendorId, vendorId)).all();
+  return rows.length;
 }
 export async function listVendorContacts(vendorId: number): Promise<VendorContact[]> {
   return db.select().from(vendorContacts).where(eq(vendorContacts.vendorId, vendorId)).all();
