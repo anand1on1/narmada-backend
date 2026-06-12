@@ -2881,6 +2881,98 @@ export function getRfqMessagesByIds(vendorId: number, ids: number[]): any[] {
   return rows;
 }
 
+// -------- R18: AiSensy webhook message helpers --------
+// True if a message with this external (AiSensy) id already exists — idempotency guard.
+export function rfqMessageExistsByExternalId(externalId: string): boolean {
+  if (!externalId) return false;
+  const row = sqlite.prepare(
+    `SELECT 1 FROM vendor_rfq_messages WHERE external_message_id = ? LIMIT 1`
+  ).get(externalId);
+  return !!row;
+}
+
+// Insert a chat message carrying an external (AiSensy) id + optional delivery status.
+// Returns the inserted row, or null if the external id already existed (dup skipped).
+export function addRfqMessageExternal(data: {
+  vendorId?: number | null; vendorPhone?: string | null; direction: "out" | "in";
+  body?: string | null; externalMessageId?: string | null; status?: string | null;
+}): any | null {
+  if (data.externalMessageId && rfqMessageExistsByExternalId(data.externalMessageId)) return null;
+  const now = Date.now();
+  try {
+    const info = sqlite.prepare(
+      `INSERT INTO vendor_rfq_messages (vendor_id, vendor_phone, direction, body, aisensy_msg_id, external_message_id, status, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+    ).run(
+      data.vendorId ?? null, data.vendorPhone ?? null, data.direction,
+      data.body ?? null, data.externalMessageId ?? null,
+      data.externalMessageId ?? null, data.status ?? null, now,
+    );
+    return sqlite.prepare(`SELECT * FROM vendor_rfq_messages WHERE id = ?`).get(Number(info.lastInsertRowid));
+  } catch (e: any) {
+    // Unique-index race: another delivery inserted the same external id first → treat as dup.
+    if (String(e?.message || "").includes("UNIQUE")) return null;
+    throw e;
+  }
+}
+
+// Update delivery status for the message bearing this external id. No-op if not found.
+export function updateRfqMessageStatusByExternalId(externalId: string, status: string): void {
+  if (!externalId) return;
+  sqlite.prepare(
+    `UPDATE vendor_rfq_messages SET status = ? WHERE external_message_id = ?`
+  ).run(status, externalId);
+}
+
+// Mark the most recent message for a phone as manually handled (operator intervened in chat).
+export function markRfqChatManuallyHandled(vendorPhone: string): void {
+  if (!vendorPhone) return;
+  const norm = vendorPhone.replace(/[^0-9]/g, "").slice(-10);
+  if (!norm) return;
+  sqlite.prepare(
+    `UPDATE vendor_rfq_messages SET manually_handled = 1
+     WHERE id IN (
+       SELECT id FROM vendor_rfq_messages
+       WHERE REPLACE(REPLACE(vendor_phone,'+',''),' ','') LIKE ?
+       ORDER BY created_at DESC, id DESC LIMIT 1
+     )`
+  ).run(`%${norm}`);
+}
+
+// -------- R18: AI suggested replies --------
+export function createAiSuggestion(data: {
+  vendorId?: number | null; vendorPhone?: string | null; poId?: number | null;
+  triggeredByMessageId?: number | null; suggestedText: string;
+}): any {
+  const now = Date.now();
+  const info = sqlite.prepare(
+    `INSERT INTO ai_suggested_replies (vendor_id, vendor_phone, po_id, triggered_by_message_id, suggested_text, status, created_at)
+     VALUES (?, ?, ?, ?, ?, 'pending', ?)`
+  ).run(
+    data.vendorId ?? null, data.vendorPhone ?? null, data.poId ?? null,
+    data.triggeredByMessageId ?? null, data.suggestedText, now,
+  );
+  return sqlite.prepare(`SELECT * FROM ai_suggested_replies WHERE id = ?`).get(Number(info.lastInsertRowid));
+}
+
+// Most recent pending suggestion for a vendor (newest first), default just the latest.
+export function listPendingAiSuggestions(vendorId: number, limit = 1): any[] {
+  return sqlite.prepare(
+    `SELECT * FROM ai_suggested_replies WHERE vendor_id = ? AND status = 'pending' ORDER BY created_at DESC, id DESC LIMIT ?`
+  ).all(vendorId, limit) as any[];
+}
+
+export function getAiSuggestion(id: number): any | undefined {
+  return sqlite.prepare(`SELECT * FROM ai_suggested_replies WHERE id = ?`).get(id);
+}
+
+export function decideAiSuggestion(id: number, status: "accepted" | "rejected"): any | undefined {
+  sqlite.prepare(
+    `UPDATE ai_suggested_replies SET status = ?, decided_at = ? WHERE id = ? AND status = 'pending'`
+  ).run(status, Date.now(), id);
+  return getAiSuggestion(id);
+}
+
 // -------- Vendor payments --------
 export function addVendorPayment(data: {
   vendorId: number; paidOn: number; amount: number; method: string;

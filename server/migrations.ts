@@ -500,3 +500,45 @@ export function runR13_4Migrations() {
 
   console.log("[migrations] R13.4 tables/columns ensured");
 }
+
+// -------- R18 additive migrations --------
+// Part A (AiSensy webhook): track external message id (for idempotent inserts), delivery
+// status, and a manual-intervention flag on the embedded-chat message table. Part B
+// (AI accept/reject): a new ai_suggested_replies table holding fire-and-forget Claude
+// drafts pending a human accept/reject. All additive — no drops/renames.
+export function runR18Migrations() {
+  const stmts: Array<{ desc: string; sql: string }> = [
+    // Part A — vendor_rfq_messages columns
+    { desc: "vendor_rfq_messages.external_message_id", sql: `ALTER TABLE vendor_rfq_messages ADD COLUMN external_message_id TEXT` },
+    { desc: "vendor_rfq_messages.status", sql: `ALTER TABLE vendor_rfq_messages ADD COLUMN status TEXT` },
+    { desc: "vendor_rfq_messages.manually_handled", sql: `ALTER TABLE vendor_rfq_messages ADD COLUMN manually_handled INTEGER DEFAULT 0` },
+    // Idempotency guard: partial unique index so dup webhook deliveries are silently skipped.
+    { desc: "unique index on external_message_id", sql: `CREATE UNIQUE INDEX IF NOT EXISTS vendor_rfq_messages_external_id_uq ON vendor_rfq_messages(external_message_id) WHERE external_message_id IS NOT NULL` },
+    // Part B — ai_suggested_replies table
+    {
+      desc: "ai_suggested_replies table",
+      sql: `CREATE TABLE IF NOT EXISTS ai_suggested_replies (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        vendor_id INTEGER,
+        vendor_phone TEXT,
+        po_id INTEGER,
+        triggered_by_message_id INTEGER,
+        suggested_text TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'pending',
+        created_at INTEGER NOT NULL,
+        decided_at INTEGER
+      )`,
+    },
+    { desc: "index ai_suggested_replies(vendor_id, status)", sql: `CREATE INDEX IF NOT EXISTS ai_suggested_replies_vendor_status_idx ON ai_suggested_replies(vendor_id, status)` },
+  ];
+  for (const { desc, sql } of stmts) {
+    console.log(`[migrations] R18: ${desc}`);
+    try {
+      sqlite.exec(sql);
+    } catch (err: any) {
+      console.log(`[migrations] R18: skipped ${desc} —`, err?.message || err);
+    }
+  }
+
+  console.log("[migrations] R18 tables/columns ensured");
+}

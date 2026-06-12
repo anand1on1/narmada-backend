@@ -617,6 +617,48 @@ export function VendorChatDrawer({
     refetchInterval: 15000,
   });
 
+  // R18 Part B — pending AI-suggested reply (piggybacks on the same 15s poll).
+  const { data: aiSuggestions = [], refetch: refetchSuggestion } = useQuery<any[]>({
+    queryKey: ["ai-suggestion", vendorId],
+    queryFn: async () => {
+      const r = await teamFetch(token, `/api/team/ai-suggestions/pending?vendorId=${vendorId}`);
+      return r.ok ? r.json() : [];
+    },
+    enabled: !!token,
+    refetchInterval: 15000,
+  });
+  const [dismissedSuggestion, setDismissedSuggestion] = useState<number | null>(null);
+  const [decidingSuggestion, setDecidingSuggestion] = useState(false);
+  const pendingSuggestion = (aiSuggestions || []).find((s: any) => s.id !== dismissedSuggestion) || null;
+
+  async function acceptSuggestion(s: any) {
+    setDecidingSuggestion(true);
+    setDismissedSuggestion(s.id); // optimistic: banner disappears immediately
+    try {
+      const r = await teamFetch(token, `/api/team/ai-suggestions/${s.id}/accept`, { method: "POST" });
+      if (!r.ok) { const j = await r.json().catch(() => ({})); throw new Error(j.error || "Accept failed"); }
+      toast({ title: "Suggestion sent" });
+      refetchMsgs();
+      refetchSuggestion();
+    } catch (e: any) {
+      setDismissedSuggestion(null); // restore banner on failure
+      toast({ title: "Error", description: e.message, variant: "destructive" });
+    } finally { setDecidingSuggestion(false); }
+  }
+
+  async function rejectSuggestion(s: any) {
+    setDecidingSuggestion(true);
+    setDismissedSuggestion(s.id); // optimistic: banner disappears immediately
+    try {
+      const r = await teamFetch(token, `/api/team/ai-suggestions/${s.id}/reject`, { method: "POST" });
+      if (!r.ok) { const j = await r.json().catch(() => ({})); throw new Error(j.error || "Reject failed"); }
+      refetchSuggestion();
+    } catch (e: any) {
+      setDismissedSuggestion(null);
+      toast({ title: "Error", description: e.message, variant: "destructive" });
+    } finally { setDecidingSuggestion(false); }
+  }
+
   function toggleAi() {
     const next = !aiOn;
     setAiOn(next);
@@ -737,6 +779,26 @@ export function VendorChatDrawer({
               className="ml-auto px-2 py-0.5 rounded-full border bg-background font-semibold inline-flex items-center gap-1">
               <Sparkles className="w-3 h-3" /> Use as AI context
             </button>
+          </div>
+        )}
+        {pendingSuggestion && (
+          <div className="px-4 py-3 border-b bg-violet-50 dark:bg-violet-950/30 space-y-2">
+            <div className="text-xs font-semibold inline-flex items-center gap-1 text-violet-700 dark:text-violet-300">
+              <Sparkles className="w-3.5 h-3.5" /> AI Suggested Reply
+            </div>
+            <div className="text-xs whitespace-pre-wrap bg-background border rounded-lg px-2 py-1.5">
+              {pendingSuggestion.suggested_text}
+            </div>
+            <div className="flex gap-2">
+              <button onClick={() => acceptSuggestion(pendingSuggestion)} disabled={decidingSuggestion}
+                className="flex-1 px-2 py-1.5 bg-emerald-600 text-white rounded-lg text-xs font-semibold inline-flex items-center justify-center gap-1 disabled:opacity-50">
+                {decidingSuggestion ? <Loader2 className="w-3 h-3 animate-spin" /> : <Send className="w-3 h-3" />} Accept &amp; Send
+              </button>
+              <button onClick={() => rejectSuggestion(pendingSuggestion)} disabled={decidingSuggestion}
+                className="px-3 py-1.5 border rounded-lg text-xs font-semibold inline-flex items-center justify-center gap-1 disabled:opacity-50">
+                <X className="w-3 h-3" /> Reject
+              </button>
+            </div>
           </div>
         )}
         <div className="flex-1 overflow-y-auto p-4 space-y-2">

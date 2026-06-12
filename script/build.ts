@@ -1,6 +1,6 @@
 import { build as esbuild } from "esbuild";
 import { build as viteBuild } from "vite";
-import { rm, readFile, cp } from "node:fs/promises";
+import { rm, readFile, cp, access } from "node:fs/promises";
 
 // server deps to bundle to reduce openat(2) syscalls
 // which helps cold start times
@@ -35,6 +35,16 @@ async function buildAll() {
 
   console.log("building client...");
   await viteBuild();
+
+  // Vite's publicDir copy skips dotfiles, so .htaccess (SPA rewrite + cache headers
+  // for the GoDaddy frontend) is copied explicitly into dist/public.
+  try {
+    await access("client/public/.htaccess");
+    await cp("client/public/.htaccess", "dist/public/.htaccess");
+    console.log("copied client/public/.htaccess -> dist/public/.htaccess");
+  } catch {
+    console.log("no client/public/.htaccess to copy");
+  }
 
   console.log("building server...");
   const pkg = JSON.parse(await readFile("package.json", "utf-8"));

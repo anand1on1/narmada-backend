@@ -3465,26 +3465,239 @@ function registerR9Routes(
     } catch (e: any) { res.status(500).json({ error: e.message }); }
   });
 
-  // Public AiSensy inbound webhook for the R9 embedded chat. Persists every inbound message
-  // to vendor_rfq_messages so the chat drawer shows vendor replies. Distinct path from the
-  // existing R5.5 webhook (/api/webhooks/aisensy) to avoid double-registration.
+  // ---- R18 Part B — AI suggested replies (accept/reject) ----
+  // Latest pending suggestion for a vendor (the chat drawer polls this alongside messages).
+  app.get("/api/team/ai-suggestions/pending", requireDataTeam, async (req: any, res: any) => {
+    try {
+      const vendorId = parseInt(String(req.query.vendorId || ""), 10);
+      if (!Number.isInteger(vendorId) || vendorId <= 0) return res.json([]);
+      res.json(v2.listPendingAiSuggestions(vendorId, 1));
+    } catch (e: any) { res.status(500).json({ error: e.message }); }
+  });
+
+  // Accept → mark accepted, send via AiSensy (fire-and-forget), record outbound message.
+  app.post("/api/team/ai-suggestions/:id/accept", requireDataTeam, async (req: any, res: any) => {
+    try {
+      const id = parseInt(req.params.id as string, 10);
+      const sug = v2.getAiSuggestion(id);
+      if (!sug) return res.status(404).json({ error: "suggestion not found" });
+      if (sug.status !== "pending") return res.status(409).json({ error: `already ${sug.status}` });
+      const text = String(sug.suggested_text || "").trim();
+      const vendorId = sug.vendor_id != null ? Number(sug.vendor_id) : null;
+      const vendor = vendorId ? await v2.getVendor(vendorId) : undefined;
+      const phone = vendor?.whatsapp || vendor?.phone || sug.vendor_phone || null;
+      v2.decideAiSuggestion(id, "accepted");
+      const row = v2.addRfqMessage({ vendorId, vendorPhone: phone, direction: "out", body: text });
+      if (phone && text) {
+        setImmediate(() => {
+          (async () => {
+            const wa = require("./whatsapp") as typeof import("./whatsapp");
+            await wa.sendTextMessage(phone, text, "rfq_chat_reply");
+          })().catch((err) => console.error("[R18 ai-accept] send failed:", err?.message || err));
+        });
+      }
+      res.json({ ok: true, message: row, sent: !!(phone && text) });
+    } catch (e: any) { res.status(500).json({ error: e.message }); }
+  });
+
+  // Reject → mark rejected; nothing is sent.
+  app.post("/api/team/ai-suggestions/:id/reject", requireDataTeam, async (req: any, res: any) => {
+    try {
+      const id = parseInt(req.params.id as string, 10);
+      const sug = v2.getAiSuggestion(id);
+      if (!sug) return res.status(404).json({ error: "suggestion not found" });
+      if (sug.status !== "pending") return res.status(409).json({ error: `already ${sug.status}` });
+      v2.decideAiSuggestion(id, "rejected");
+      res.json({ ok: true });
+    } catch (e: any) { res.status(500).json({ error: e.message }); }
+  });
+
+  // ============================================================
+  // R18 Part A — AiSensy inbound webhook (upgraded R9 handler in place).
+  // Auth via shared secret (constant-time compare). Handles 5 event types,
+  // idempotent on external_message_id, ALWAYS returns 200 except 401 on auth
+  // failure — never 5xx to AiSensy. Distinct path from R5.5 (/api/webhooks/aisensy).
+  // ============================================================
+  const AISENSY_WEBHOOK_SECRET =
+    process.env.AISENSY_WEBHOOK_SECRET ||
+    "e444feeb8fc924a6134c1493c11d61d8da151fae9e2a51afa66a0ac5f8dc1568";
+
+  // R18 Part B — fire-and-forget: on a fresh inbound reply, ask Claude for the most
+  // likely next message and store it as a PENDING suggestion for a human to accept/reject.
+  // Never throws; lazy-loads claude-service so the webhook path stays light.
+  function fireAiSuggestion(vendorId: number, vendorPhone: string | null, triggeredByMessageId: number) {
+    setImmediate(() => {
+      (async () => {
+        const claude = require("./claude-service") as typeof import("./claude-service");
+        if (!claude.isClaudeConfigured()) return;
+        const history = v2.listRfqMessages(vendorId, 20); // oldest→newest
+        if (!history.length) return;
+        const transcript = history
+          .map((m: any) => `${m.direction === "out" ? "Us" : "Seller"}: ${String(m.body || "").trim()}`)
+          .join("\n");
+        const latest = history[history.length - 1];
+        const system =
+          "You draft the next WhatsApp message a procurement team should send to a spare-parts seller. " +
+          "Reply with ONLY the suggested message text — no preamble, no quotes.";
+        const userMsg =
+          `Based on this vendor's latest reply, what's the most likely next message we should send to ask for missing info OR confirm the rate? ` +
+          `Keep it under 200 chars, business-Hindi+English casual tone matching existing chat. ` +
+          `If reply already contains a clean rate, suggest a confirmation. If vague, suggest a clarifying question.\n\n` +
+          `Recent chat (oldest first):\n${transcript}\n\nLatest seller reply: ${String(latest?.body || "").trim()}`;
+        const suggestion = await claude.claudeText(system, userMsg, 256);
+        const clean = String(suggestion || "").trim().slice(0, 400);
+        if (!clean) return;
+        v2.createAiSuggestion({
+          vendorId, vendorPhone, triggeredByMessageId, suggestedText: clean,
+        });
+      })().catch((err) => console.error("[R18 ai-suggest] failed:", err?.message || err));
+    });
+  }
+
+  // Constant-time secret comparison; tolerant of "Bearer " prefix and missing values.
+  function aisensySecretOk(req: any): boolean {
+    const crypto = require("crypto") as typeof import("crypto");
+    const b = req.body || {};
+    const headerVal = String(
+      req.headers["x-aisensy-signature"] ||
+      req.headers["x-webhook-secret"] ||
+      "",
+    ).trim();
+    const authHeader = String(req.headers["authorization"] || "").trim();
+    const bearer = authHeader.toLowerCase().startsWith("bearer ")
+      ? authHeader.slice(7).trim()
+      : "";
+    const bodySecret = String(b.secret || b.webhook_secret || b.token || "").trim();
+    const candidate = headerVal || bearer || bodySecret;
+    if (!candidate) return false;
+    try {
+      const a = Buffer.from(candidate);
+      const c = Buffer.from(AISENSY_WEBHOOK_SECRET);
+      // timingSafeEqual throws on length mismatch — guard, but keep the compare constant-time.
+      if (a.length !== c.length) {
+        // Compare against a same-length dummy so timing doesn't leak length info.
+        crypto.timingSafeEqual(c, c);
+        return false;
+      }
+      return crypto.timingSafeEqual(a, c);
+    } catch {
+      return false;
+    }
+  }
+
   app.post("/api/aisensy/webhook", async (req: any, res: any) => {
+    // Auth: reject mismatch with 401. This is the ONLY non-200 the handler returns.
+    if (!aisensySecretOk(req)) {
+      return res.status(401).json({ ok: false, error: "unauthorized" });
+    }
+
+    let processed = 0;
     try {
       const b = req.body || {};
-      const from = String(b.from || b.sender || b.phone || b.mobile || "");
-      const message = String(b.message || b.text || b.body || "");
-      const messageId = b.message_id || b.messageId || b.id || null;
-      if (!from) return res.json({ ok: true, ignored: "no from" });
-      const vendor = await v2.getVendorByPhone(from);
-      v2.addRfqMessage({
-        vendorId: vendor?.id ?? null, vendorPhone: from, direction: "in",
-        body: message, aisensyMsgId: messageId,
-      });
-      res.json({ ok: true, vendor: vendor?.id ?? null });
+      // AiSensy may wrap events in an array or send a single object.
+      const events: any[] = Array.isArray(b)
+        ? b
+        : Array.isArray(b.events)
+          ? b.events
+          : Array.isArray(b.data)
+            ? b.data
+            : [b];
+
+      for (const ev of events) {
+        try {
+          const e = ev || {};
+          const type = String(
+            e.event || e.type || e.eventType || e.event_type || "",
+          ).trim();
+          const from = String(
+            e.from || e.sender || e.phone || e.mobile ||
+            e.contact?.phone || e.contact?.mobile || "",
+          );
+          const externalId =
+            e.external_message_id || e.message_id || e.messageId ||
+            e.id || e.msgId || null;
+          const text = String(
+            e.message || e.text || e.body || e.content || e.message?.text || "",
+          );
+          console.log(
+            `[R18 aisensy] event=${type || "?"} from=${from || "?"} msgId=${externalId || "?"}`,
+          );
+
+          switch (type) {
+            case "message.sender.user": {
+              // Inbound reply from the seller → persist as inbound, fire AI suggestion.
+              const vendor = from ? await v2.getVendorByPhone(from) : undefined;
+              const row = v2.addRfqMessageExternal({
+                vendorId: vendor?.id ?? null, vendorPhone: from || null,
+                direction: "in", body: text,
+                externalMessageId: externalId ? String(externalId) : null,
+              });
+              if (row) {
+                processed++;
+                if (vendor?.id) {
+                  fireAiSuggestion(vendor.id, from || null, row.id);
+                }
+              }
+              break;
+            }
+            case "message.created": {
+              // Generic created event — idempotent insert (skip if external id seen).
+              const dir = e.direction === "out" || e.outgoing ? "out" : "in";
+              const vendor = from ? await v2.getVendorByPhone(from) : undefined;
+              const row = v2.addRfqMessageExternal({
+                vendorId: vendor?.id ?? null, vendorPhone: from || null,
+                direction: dir, body: text,
+                externalMessageId: externalId ? String(externalId) : null,
+                status: e.status ? String(e.status) : null,
+              });
+              if (row) processed++;
+              break;
+            }
+            case "message.status.updated": {
+              // Delivery/read receipt → update the status column for this external id.
+              const status = String(e.status || e.deliveryStatus || "").trim();
+              if (externalId && status) {
+                v2.updateRfqMessageStatusByExternalId(String(externalId), status);
+                processed++;
+              }
+              break;
+            }
+            case "contact.created": {
+              // New contact → auto-create a vendor if the phone is unknown.
+              if (from) {
+                const existing = await v2.getVendorByPhone(from);
+                if (!existing) {
+                  const name = String(
+                    e.name || e.contact?.name || e.profileName || "WhatsApp Contact",
+                  );
+                  await v2.createVendor({ name, phone: from, whatsapp: from } as any);
+                  processed++;
+                }
+              }
+              break;
+            }
+            case "contact.chat.intervened": {
+              // Operator manually took over the chat → mark messages so automation backs off.
+              if (from) {
+                v2.markRfqChatManuallyHandled(from);
+                processed++;
+              }
+              break;
+            }
+            default:
+              // Unknown event types are accepted but not processed.
+              break;
+          }
+        } catch (inner: any) {
+          // Per-event failure must never fail the whole webhook.
+          console.error("[R18 aisensy] event error:", inner?.message || inner);
+        }
+      }
     } catch (e: any) {
-      console.error("[webhook:aisensy-r9]", e?.message);
-      res.json({ ok: false, error: e?.message });
+      // Top-level failure: still return 200 so AiSensy does not retry-storm us.
+      console.error("[R18 aisensy] webhook error:", e?.message || e);
     }
+    return res.json({ ok: true, processed });
   });
 
   // Fallback: pull recent inbound from AiSensy API (when webhook isn't wired). Best-effort.
