@@ -1648,11 +1648,37 @@ export async function listPurchaseOrdersV2(opts: { status?: string; customerId?:
   const base = db.select().from(purchaseOrdersV2);
   return conds.length ? base.where(and(...conds)).orderBy(desc(purchaseOrdersV2.createdAt)).all() : base.orderBy(desc(purchaseOrdersV2.createdAt)).all();
 }
-export async function getPurchaseOrderV2(id: number): Promise<(PurchaseOrderV2 & { items: PoItem[] }) | undefined> {
+// R10 — list with live customer/cost totals + customer name for the team PO list.
+export async function listPurchaseOrdersV2WithTotals(opts: { status?: string; customerId?: number } = {}): Promise<Array<PurchaseOrderV2 & { customerName: string | null; custTotal: number; costTotal: number }>> {
+  const rows = await listPurchaseOrdersV2(opts);
+  return rows.map((po) => {
+    const items = db.select().from(poItems).where(eq(poItems.poId, po.id)).all();
+    const customer = po.customerId ? db.select().from(customers).where(eq(customers.id, po.customerId)).get() : undefined;
+    const { custTotal, costTotal } = computePoTotals(items);
+    return { ...po, customerName: customer?.name ?? null, custTotal, costTotal };
+  });
+}
+export async function getPurchaseOrderV2(id: number): Promise<(PurchaseOrderV2 & { items: PoItem[]; customerName: string | null; custTotal: number; costTotal: number }) | undefined> {
   const po = db.select().from(purchaseOrdersV2).where(eq(purchaseOrdersV2.id, id)).get();
   if (!po) return undefined;
   const items = db.select().from(poItems).where(eq(poItems.poId, id)).all();
-  return { ...po, items };
+  const customer = po.customerId ? db.select().from(customers).where(eq(customers.id, po.customerId)).get() : undefined;
+  const { custTotal, costTotal } = computePoTotals(items);
+  return { ...po, items, customerName: customer?.name ?? null, custTotal, costTotal };
+}
+
+// Live PO totals (R10): cost = Σ(approved vendor rate × qty); customer = Σ(customer rate × qty).
+export function computePoTotals(items: PoItem[]): { custTotal: number; costTotal: number } {
+  let custTotal = 0;
+  let costTotal = 0;
+  for (const it of items) {
+    const qty = Number(it.qty ?? 0) || 0;
+    const cust = it.unitPrice != null ? Number(it.unitPrice) : 0;
+    custTotal += cust * qty;
+    const cost = it.vendorRate != null ? Number(it.vendorRate) : (it.purchaseCost != null ? Number(it.purchaseCost) : 0);
+    costTotal += cost * qty;
+  }
+  return { custTotal, costTotal };
 }
 export async function createPurchaseOrderV2(data: Partial<InsertPurchaseOrderV2>, items: Partial<InsertPoItem>[] = []): Promise<PurchaseOrderV2> {
   const poNumber = data.poNumber || seqNumber(purchaseOrdersV2, purchaseOrdersV2.poNumber, "NM/PO");

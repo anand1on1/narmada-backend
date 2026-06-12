@@ -2,9 +2,9 @@ import { TeamLayout } from "./TeamLayout";
 import { teamFetch, useTeamAuth } from "@/lib/team-auth";
 import { useQuery } from "@tanstack/react-query";
 import { Link } from "wouter";
-import { FileText, Pencil } from "lucide-react";
+import { FileText } from "lucide-react";
 
-interface PO { id: number; poNumber: string; customerId: number | null; status: string; total: number | null; createdAt: number; }
+interface PO { id: number; poNumber: string; customerId: number | null; customerName: string | null; status: string; total: number | null; custTotal: number; costTotal: number; createdAt: number; }
 const STATUS_COLOR: Record<string, string> = { draft: "bg-slate-500/15 text-slate-700", open: "bg-blue-500/15 text-blue-700", fulfilled: "bg-emerald-500/15 text-emerald-700", cancelled: "bg-red-500/15 text-red-700" };
 
 function fmt(d: number) { return new Date(d).toLocaleDateString("en-IN", { day: "2-digit", month: "short", year: "numeric" }); }
@@ -33,17 +33,14 @@ export default function TeamPOs() {
             <tbody className="divide-y">{pos.map((p) => (
               <tr key={p.id} className="hover:bg-muted/30">
                 <td className="px-3 py-3 font-semibold">{p.poNumber}</td>
-                <td className="px-3 py-3">{p.customerId ?? "—"}</td>
-                <td className="px-3 py-3 text-right">{p.total != null ? `₹${p.total.toLocaleString("en-IN")}` : "—"}</td>
+                <td className="px-3 py-3">{p.customerName ?? (p.customerId ?? "—")}</td>
+                <td className="px-3 py-3 text-right">{`₹${(p.custTotal ?? p.total ?? 0).toLocaleString("en-IN")}`}</td>
                 <td className="px-3 py-3"><span className={`text-xs font-bold rounded px-2 py-1 ${STATUS_COLOR[p.status] || "bg-muted"}`}>{p.status}</span></td>
                 <td className="px-3 py-3 text-xs text-muted-foreground">{fmt(p.createdAt)}</td>
                 <td className="px-3 py-3 text-right">
                   <div className="flex items-center justify-end gap-3">
                     <Link href={`/team/purchase-orders/${p.id}`}>
-                      <a className="text-accent font-semibold inline-flex items-center gap-1 hover:underline text-xs"><FileText className="w-3.5 h-3.5" /> View</a>
-                    </Link>
-                    <Link href={`/team/purchase-orders/${p.id}/edit`}>
-                      <a className="text-muted-foreground font-semibold inline-flex items-center gap-1 hover:text-foreground text-xs"><Pencil className="w-3.5 h-3.5" /> Assign</a>
+                      <a className="text-accent font-semibold inline-flex items-center gap-1 hover:underline text-xs"><FileText className="w-3.5 h-3.5" /> Open</a>
                     </Link>
                   </div>
                 </td>

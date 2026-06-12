@@ -152,6 +152,9 @@ export const consignments = sqliteTable("consignments", {
   createdBy: text("created_by"),
   createdAt: integer("created_at").notNull(),
   updatedAt: integer("updated_at").notNull(),
+  // R10 — uploaded invoice / docket documents
+  invoiceUrl: text("invoice_url"),
+  docketUrl: text("docket_url"),
 });
 export const insertConsignmentSchema = createInsertSchema(consignments).omit({
   id: true,

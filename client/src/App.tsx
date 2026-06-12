@@ -25,6 +25,15 @@ import PriceChecker from "@/pages/PriceChecker";
 import TrackConsignment from "@/pages/TrackConsignment";
 import { useParams } from "wouter";
 
+// R10 — the old PO "Assign" page was merged into the detail page. Redirect the
+// legacy /:id/edit URL to the merged /:id page.
+function PoEditRedirect() {
+  const { id } = useParams<{ id: string }>();
+  const [, navigate] = useLocation();
+  navigate(`/team/purchase-orders/${id}`, { replace: true });
+  return null;
+}
+
 function SeoLandingResolver() {
   const { slug } = useParams<{ slug: string }>();
   const m = /^([a-z0-9-]+?)-spare-parts-(.+)$/i.exec(slug);
@@ -103,7 +112,6 @@ import TeamRFQs from "@/pages/team/TeamRFQs";
 import TeamRFQDetail from "@/pages/team/TeamRFQDetail";
 // Round 8 — new team pages
 import TeamPOUpload from "@/pages/team/TeamPOUpload";
-import TeamPOEdit from "@/pages/team/TeamPOEdit";
 // Delhi warehouse portal
 import DelhiLogin from "@/pages/delhi/DelhiLogin";
 import DelhiDashboard from "@/pages/delhi/DelhiDashboard";
@@ -238,8 +246,8 @@ function AppRouter() {
         <Route path="/team/quotations" component={TeamQuotations} />
         <Route path="/team/customers" component={TeamCustomers} />
         <Route path="/team/parts" component={TeamParts} />
-        {/* Round 8 — edit route BEFORE :id catch-all */}
-        <Route path="/team/purchase-orders/:id/edit" component={TeamPOEdit} />
+        {/* R10 — merged View+Assign; legacy /edit redirects to /:id */}
+        <Route path="/team/purchase-orders/:id/edit" component={PoEditRedirect} />
         <Route path="/team/purchase-orders/:id" component={TeamPODetail} />
         <Route path="/team/purchase-orders" component={TeamPOs} />
         <Route path="/team/rfqs/:id" component={TeamRFQDetail} />

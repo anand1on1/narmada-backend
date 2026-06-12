@@ -239,6 +239,123 @@ ${customerContext || "(no account data available)"}`.trim();
   }
 }
 
+// ============================================================
+// R10 — Full customer-PO extraction (header + per-item rate/brand)
+// The legacy extractPartsFromPdf/Image return only {part_number,name,qty}.
+// This richer extractor also pulls customer_po_number, po_date and per-line
+// customer_rate (a.k.a. Rate / Unit Price / MRP / Net Rate / Per Unit on Indian POs).
+// ============================================================
+export interface ParsedCustomerPO {
+  customer_name: string | null;
+  customer_po_number: string | null;
+  po_date: string | null;
+  items: Array<{
+    part_number: string | null;
+    brand: string | null;
+    description: string | null;
+    qty: number;
+    customer_rate: number | null;
+  }>;
+}
+
+const CUSTOMER_PO_SYSTEM = `You extract a customer Purchase Order from an automotive (truck/bus) spare-parts document or image (often Indian POs).
+Return ONLY valid JSON — no explanations, no markdown fences. Use this exact shape:
+{"customer_name": string|null, "customer_po_number": string|null, "po_date": string|null,
+ "items": [{"part_number": string|null, "brand": string|null, "description": string|null, "qty": number, "customer_rate": number|null}]}
+
+Rules:
+- customer_po_number: the buyer's PO number / order number printed on the document (labels like "PO No", "Purchase Order No", "Order No", "P.O. #").
+- po_date: the PO date if shown; return as ISO yyyy-mm-dd when possible, else the raw string.
+- For each line, customer_rate is the PER-UNIT price the customer is paying. It may be labelled "Rate", "Unit Price", "Net Rate", "Per Unit", "MRP", or "Price". Pick the per-unit rate (not the line total/amount). If only a line total and qty are shown, divide to get the per-unit rate.
+- Strip currency symbols and thousands separators from numbers (₹, Rs, commas). customer_rate and qty must be plain numbers. If a value is not visible, use null (qty defaults to 1).
+- brand: the part brand/make if shown (e.g. TATA, Bosch, Lucas), else null.
+- Output JSON ONLY.`;
+
+function parseRateNumber(raw: any): number | null {
+  if (raw == null || raw === "") return null;
+  if (typeof raw === "number") return isFinite(raw) ? raw : null;
+  const cleaned = String(raw).replace(/[₹$]|rs\.?/gi, "").replace(/,/g, "").trim();
+  const n = parseFloat(cleaned);
+  const parsed = isFinite(n) ? n : null;
+  console.log(`[po-parse] rate raw=${JSON.stringify(raw)} parsed=${parsed}`);
+  return parsed;
+}
+
+function normalizeParsedCustomerPO(obj: any): ParsedCustomerPO {
+  const itemsRaw = Array.isArray(obj?.items) ? obj.items : [];
+  return {
+    customer_name: obj?.customer_name ? String(obj.customer_name) : null,
+    customer_po_number: obj?.customer_po_number ? String(obj.customer_po_number) : null,
+    po_date: obj?.po_date ? String(obj.po_date) : null,
+    items: itemsRaw.map((it: any) => ({
+      part_number: it?.part_number ?? it?.partNumber ?? null,
+      brand: it?.brand ?? null,
+      description: it?.description ?? it?.name ?? null,
+      qty: Number(it?.qty ?? it?.quantity ?? 1) || 1,
+      customer_rate: parseRateNumber(it?.customer_rate ?? it?.rate ?? it?.unit_price ?? it?.mrp),
+    })),
+  };
+}
+
+export async function extractCustomerPOFromImage(imagePath: string): Promise<ParsedCustomerPO | null> {
+  if (!isClaudeConfigured()) return null;
+  const imageBuffer = fs.readFileSync(imagePath);
+  const base64 = imageBuffer.toString("base64");
+  const ext = path.extname(imagePath).toLowerCase();
+  const mediaTypeMap: Record<string, "image/jpeg" | "image/png" | "image/gif" | "image/webp"> = {
+    ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".png": "image/png", ".gif": "image/gif", ".webp": "image/webp",
+  };
+  const mediaType = mediaTypeMap[ext] || "image/jpeg";
+  try {
+    const client = getClient();
+    const message = await client.messages.create({
+      model: MODEL,
+      max_tokens: 4096,
+      system: CUSTOMER_PO_SYSTEM,
+      messages: [{
+        role: "user",
+        content: [
+          { type: "image", source: { type: "base64", media_type: mediaType, data: base64 } },
+          { type: "text", text: "Extract the purchase order header and line items (with per-unit customer rate and brand). Return JSON object only." },
+        ],
+      }],
+    });
+    const text = message.content[0].type === "text" ? message.content[0].text : "";
+    const cleaned = text.replace(/```(?:json)?\n?/gi, "").trim();
+    return normalizeParsedCustomerPO(JSON.parse(cleaned));
+  } catch (e: any) {
+    console.error("[claude] extractCustomerPOFromImage error:", e?.message);
+    return null;
+  }
+}
+
+export async function extractCustomerPOFromPdf(pdfPath: string): Promise<ParsedCustomerPO | null> {
+  if (!isClaudeConfigured()) return null;
+  const pdfBuffer = fs.readFileSync(pdfPath);
+  const base64 = pdfBuffer.toString("base64");
+  try {
+    const client = getClient();
+    const message = await client.messages.create({
+      model: MODEL,
+      max_tokens: 4096,
+      system: CUSTOMER_PO_SYSTEM,
+      messages: [{
+        role: "user",
+        content: [
+          { type: "document", source: { type: "base64", media_type: "application/pdf", data: base64 } } as any,
+          { type: "text", text: "Extract the purchase order header and line items (with per-unit customer rate and brand). Return JSON object only." },
+        ],
+      }],
+    });
+    const text = message.content[0].type === "text" ? message.content[0].text : "";
+    const cleaned = text.replace(/```(?:json)?\n?/gi, "").trim();
+    return normalizeParsedCustomerPO(JSON.parse(cleaned));
+  } catch (e: any) {
+    console.error("[claude] extractCustomerPOFromPdf error:", e?.message);
+    return null;
+  }
+}
+
 // Helper: parse JSON array from Claude response text
 function parsePartsJSON(text: string): ParsedPart[] {
   try {

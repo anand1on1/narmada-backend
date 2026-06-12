@@ -494,6 +494,43 @@ export function registerV2Routes(app: Express, ctx: V2Context) {
     res.json(list);
   });
 
+  // R10 — consignment document uploads (invoice + docket). Stored under
+  // <uploads>/consignments and persisted as invoice_url / docket_url.
+  const consignDocsDir = path.join(ctx.uploadsDir || "./uploads", "consignments");
+  if (!fs.existsSync(consignDocsDir)) fs.mkdirSync(consignDocsDir, { recursive: true });
+  const multerConsign = multer({
+    storage: multer.diskStorage({
+      destination: (_req: any, _file: any, cb: any) => cb(null, consignDocsDir),
+      filename: (_req: any, file: any, cb: any) => cb(null, `${Date.now()}-${file.originalname.replace(/[^a-zA-Z0-9._-]/g, "_")}`),
+    }),
+    limits: { fileSize: 20 * 1024 * 1024 },
+    fileFilter: (_req: any, file: any, cb: any) => {
+      if (file.mimetype === "application/pdf" || file.mimetype === "image/jpeg" || file.mimetype === "image/png") cb(null, true);
+      else cb(new Error("Only PDF/JPG/PNG allowed"));
+    },
+  });
+  app.post(
+    "/api/admin/consignments/:id/upload",
+    requireAuth,
+    multerConsign.fields([{ name: "invoice", maxCount: 1 }, { name: "docket", maxCount: 1 }]),
+    async (req: any, res: any) => {
+      try {
+        const id = parseInt(req.params.id as string, 10);
+        const existing = await v2.getConsignmentById(id);
+        if (!existing) return res.status(404).json({ error: "Consignment not found" });
+        const proto = req.protocol || "https";
+        const host = req.get("host") || "narmada-backend.onrender.com";
+        const files = (req.files || {}) as Record<string, any[]>;
+        const patch: any = {};
+        if (files.invoice?.[0]) patch.invoiceUrl = `${proto}://${host}/uploads/consignments/${files.invoice[0].filename}`;
+        if (files.docket?.[0]) patch.docketUrl = `${proto}://${host}/uploads/consignments/${files.docket[0].filename}`;
+        if (Object.keys(patch).length === 0) return res.status(400).json({ error: "No invoice or docket file provided" });
+        const updated = await v2.updateConsignment(id, patch);
+        res.json(updated);
+      } catch (e: any) { res.status(400).json({ error: e.message }); }
+    },
+  );
+
   // Admin — create (both admin + logistics)
   app.post("/api/admin/consignments", requireAuth, async (req, res) => {
     try {
@@ -533,6 +570,8 @@ export function registerV2Routes(app: Express, ctx: V2Context) {
         invoiceAmount: created.invoiceAmount ?? undefined,
         bundlesCount: created.bundlesCount ?? undefined,
         carrier: created.carrier ?? undefined,
+        invoiceUrl: created.invoiceUrl ?? undefined,
+        docketUrl: created.docketUrl ?? undefined,
         trackingLink,
       }).catch((e: any) => console.error("[notifications] send error:", e.message));
 
@@ -632,6 +671,8 @@ export function registerV2Routes(app: Express, ctx: V2Context) {
             invoiceAmount: updated.invoiceAmount ?? undefined,
             bundlesCount: updated.bundlesCount ?? undefined,
             carrier: updated.carrier ?? undefined,
+            invoiceUrl: updated.invoiceUrl ?? undefined,
+            docketUrl: updated.docketUrl ?? undefined,
             trackingLink,
           }).catch((e: any) => console.error("[notifications] send error:", e.message));
 
@@ -2135,6 +2176,29 @@ export function registerV2Routes(app: Express, ctx: V2Context) {
     } catch (e: any) { res.status(500).json({ error: e.message }); }
   });
 
+  // -------- PUBLIC: FEATURE CONFIG (R10) --------
+  // Exposes runtime feature flags so the SPA can hide unfinished integrations
+  // without a rebuild. MARKETING_OAUTH_ENABLED gates the Meta/Google connect UI.
+  app.get("/api/public/config", (_req, res) => {
+    res.json({ marketingOauthEnabled: process.env.MARKETING_OAUTH_ENABLED === "true" });
+  });
+
+  // -------- MARKETING OAUTH (R10) — guarded stubs --------
+  // Return 503 until the integration env vars are configured. These exist so the
+  // frontend "Connect" buttons have a real endpoint to hit once enabled.
+  app.get("/api/admin/marketing/meta/connect", requireAuth, (_req, res) => {
+    if (process.env.MARKETING_OAUTH_ENABLED !== "true" || !process.env.META_APP_ID) {
+      return res.status(503).json({ error: "Meta integration not configured" });
+    }
+    res.json({ ok: true });
+  });
+  app.get("/api/admin/marketing/google/connect", requireAuth, (_req, res) => {
+    if (process.env.MARKETING_OAUTH_ENABLED !== "true" || !process.env.GOOGLE_ADS_CLIENT_ID) {
+      return res.status(503).json({ error: "Google integration not configured" });
+    }
+    res.json({ ok: true });
+  });
+
   // -------- PUBLIC: ACCOUNT REGISTRATION (Option A) --------
   app.post("/api/public/register", async (req, res) => {
     try {
@@ -2562,7 +2626,7 @@ function registerR4toR7Routes(
     res.json(await v2.listVendors({ q: req.query.q as string | undefined, activeOnly: req.query.activeOnly === "true" }));
   });
   app.get("/api/team/purchase-orders", requireDataTeam, async (req, res) => {
-    res.json(await v2.listPurchaseOrdersV2({ status: req.query.status as string | undefined }));
+    res.json(await v2.listPurchaseOrdersV2WithTotals({ status: req.query.status as string | undefined }));
   });
   app.get("/api/team/purchase-orders/:id", requireDataTeam, async (req, res) => {
     const po = await v2.getPurchaseOrderV2(parseInt(req.params.id as string, 10));
@@ -3363,43 +3427,44 @@ function registerR8Routes(
       const host = req.get("host") || "narmada-backend.onrender.com";
       const fileUrl = `${proto}://${host}/uploads/customer-pos/${req.file.filename}`;
 
-      // Try Claude extraction. claude-service returns ParsedPart[] in the shape
-      // { part_number, name, qty }. Normalize into the canonical client contract:
-      //   { customerName, customerPo, poDate, items:[{partNumber,brand,description,qty,customerRate}] }
+      // R10: richer Claude extraction — pulls customer_po_number, po_date and per-line
+      // customer_rate + brand (the legacy parts-only prompt left rates/PO# null).
+      // Normalize into the canonical client contract:
+      //   { customerName, customerPoNumber, poDate, items:[{partNumber,brand,description,qty,customerRate}] }
       const claude = require("./claude-service") as typeof import("./claude-service");
-      let extracted: any[] = [];
+      let po: import("./claude-service").ParsedCustomerPO | null = null;
       if (claude.isClaudeConfigured()) {
         const ext = path2.extname(req.file.filename).toLowerCase();
         try {
           if (ext === ".pdf") {
-            extracted = (await claude.extractPartsFromPdf(req.file.path)) || [];
+            po = await claude.extractCustomerPOFromPdf(req.file.path);
           } else {
-            extracted = (await claude.extractPartsFromImage(req.file.path)) || [];
+            po = await claude.extractCustomerPOFromImage(req.file.path);
           }
         } catch (claudeErr: any) {
-          console.error("[R8] Claude extraction error:", claudeErr.message);
+          console.error("[R10] Claude PO extraction error:", claudeErr.message);
         }
       }
 
-      const items = (extracted || []).map((p: any) => ({
-        partNumber: p.part_number ?? p.partNumber ?? null,
+      const items = (po?.items || []).map((p) => ({
+        partNumber: p.part_number ?? null,
         brand: p.brand ?? null,
-        description: p.name ?? p.description ?? null,
-        qty: Number(p.qty ?? p.quantity ?? 1) || 1,
-        customerRate: null,
+        description: p.description ?? null,
+        qty: Number(p.qty ?? 1) || 1,
+        customerRate: p.customer_rate ?? null,
       }));
 
-      console.log("[po-parse] claude raw:", JSON.stringify(extracted).slice(0, 1000));
-      console.log(`[po-parse] normalized ${items.length} item(s)`);
+      console.log("[po-parse] claude raw:", JSON.stringify(po).slice(0, 1500));
+      console.log(`[po-parse] field customer_po_number raw=${JSON.stringify(po?.customer_po_number)} parsed=${po?.customer_po_number ?? null}`);
+      console.log(`[po-parse] field po_date raw=${JSON.stringify(po?.po_date)} parsed=${po?.po_date ?? null}`);
+      console.log(`[po-parse] normalized ${items.length} item(s); rates filled=${items.filter((i) => i.customerRate != null).length}`);
 
-      // Canonical shape the frontend consumes. customerPoNumber/shipTo are not
-      // reliably extractable from a parts-only prompt, so they start null and the
-      // operator fills them on the Review & Edit screen.
+      // Canonical shape the frontend consumes. shipTo is not reliably extractable
+      // and is left for the operator to fill on the Review & Edit screen.
       const parsed = {
-        customerName: null as string | null,
-        customerPo: null as string | null,
-        customerPoNumber: null as string | null,
-        poDate: null as string | null,
+        customerName: po?.customer_name ?? null as string | null,
+        customerPoNumber: po?.customer_po_number ?? null as string | null,
+        poDate: po?.po_date ?? null as string | null,
         shipTo: null as { name: string | null; address: string | null; phone: string | null } | null,
         items,
       };
@@ -3435,13 +3500,19 @@ function registerR8Routes(
     try {
       const u = (req as any).teamUser;
       const {
-        customer_id, customer_po_number, customer_po_url,
+        customer_id, customer_po_number, customer_po_url, po_date,
         ship_to_name, ship_to_address, ship_to_phone,
         items,
       } = req.body || {};
 
       if (!items || !Array.isArray(items) || items.length === 0) {
         return res.status(400).json({ error: "items array required" });
+      }
+
+      let poDateMs: number | null = null;
+      if (po_date && String(po_date).trim()) {
+        const t = Date.parse(String(po_date).trim());
+        if (!Number.isNaN(t)) poDateMs = t;
       }
 
       const poItems2 = items.map((it: any) => ({
@@ -3460,6 +3531,7 @@ function registerR8Routes(
           customerId: customer_id ? parseInt(customer_id, 10) : null,
           customerPoNumber: customer_po_number || null,
           customerPoUrl: customer_po_url || null,
+          poDate: poDateMs,
           shipToName: ship_to_name || null,
           shipToAddress: ship_to_address || null,
           shipToPhone: ship_to_phone || null,

@@ -19,7 +19,9 @@ interface ParsedItem {
   customerRate: number | null;
 }
 interface ParsedData {
+  customerName: string | null;
   customerPoNumber: string | null;
+  poDate: string | null;
   shipTo: { name: string | null; address: string | null; phone: string | null } | null;
   items: ParsedItem[];
 }
@@ -35,7 +37,7 @@ export default function TeamPOUpload() {
   const [customerId, setCustomerId] = useState<string>("");
   const [file, setFile] = useState<File | null>(null);
   const [fileUrl, setFileUrl] = useState<string>("");
-  const [parsed, setParsed] = useState<ParsedData>({ customerPoNumber: null, shipTo: null, items: [] });
+  const [parsed, setParsed] = useState<ParsedData>({ customerName: null, customerPoNumber: null, poDate: null, shipTo: null, items: [] });
   const [uploading, setUploading] = useState(false);
   const [creating, setCreating] = useState(false);
   const fileRef = useRef<HTMLInputElement>(null);
@@ -73,7 +75,7 @@ export default function TeamPOUpload() {
         toast({ title: "No items auto-detected", description: "Please enter the line items manually.", variant: "destructive" });
       }
       setFileUrl(j.fileUrl || "");
-      const p: ParsedData = j.parsed || { customerPoNumber: null, shipTo: null, items: [] };
+      const p: ParsedData = j.parsed || { customerName: null, customerPoNumber: null, poDate: null, shipTo: null, items: [] };
       // Ensure at least one editable row exists
       if (!p.items || p.items.length === 0) {
         p.items = [{ partNumber: "", brand: "", description: "", qty: 1, customerRate: null }];
@@ -97,6 +99,7 @@ export default function TeamPOUpload() {
         body: JSON.stringify({
           customer_id: customerId,
           customer_po_number: parsed.customerPoNumber || "",
+          po_date: parsed.poDate || "",
           customer_po_url: fileUrl,
           ship_to_name: parsed.shipTo?.name || "",
           ship_to_address: parsed.shipTo?.address || "",
@@ -231,6 +234,9 @@ export default function TeamPOUpload() {
         {step === 3 && (
           <div className="space-y-4">
             <h2 className="font-bold text-lg">Step 3: Review & Edit Extracted Data</h2>
+            <div className="rounded-lg border border-amber-300 bg-amber-50 px-3 py-2 text-xs font-medium text-amber-800">
+              Parsed values shown. Verify before saving.
+            </div>
             <div className="grid grid-cols-2 gap-3">
               <label className="text-xs font-semibold block">Customer PO Number
                 <input
@@ -238,6 +244,14 @@ export default function TeamPOUpload() {
                   onChange={(e) => setParsed({ ...parsed, customerPoNumber: e.target.value })}
                   className="mt-1 w-full border rounded-lg px-3 py-2 bg-background text-sm font-normal"
                   placeholder="e.g. PO/2026/001"
+                />
+              </label>
+              <label className="text-xs font-semibold block">PO Date
+                <input
+                  value={parsed.poDate || ""}
+                  onChange={(e) => setParsed({ ...parsed, poDate: e.target.value })}
+                  className="mt-1 w-full border rounded-lg px-3 py-2 bg-background text-sm font-normal"
+                  placeholder="YYYY-MM-DD"
                 />
               </label>
               <label className="text-xs font-semibold block">Ship To Name
@@ -335,6 +349,7 @@ export default function TeamPOUpload() {
             <div className="bg-muted/30 rounded-lg p-4 text-sm space-y-1">
               <div><span className="font-semibold">Customer:</span> {selectedCustomer?.name}</div>
               <div><span className="font-semibold">Customer PO #:</span> {parsed.customerPoNumber || "—"}</div>
+              <div><span className="font-semibold">PO Date:</span> {parsed.poDate || "—"}</div>
               <div><span className="font-semibold">Ship To:</span> {parsed.shipTo?.name || "—"} {parsed.shipTo?.address ? `— ${parsed.shipTo.address}` : ""}</div>
               <div><span className="font-semibold">Items:</span> {parsed.items.length} line item(s)</div>
             </div>

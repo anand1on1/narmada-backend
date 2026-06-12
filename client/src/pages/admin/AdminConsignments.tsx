@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { AdminLayout } from "./AdminLayout";
-import { adminFetch, useAdminAuth } from "@/lib/admin-auth";
+import { adminFetch, useAdminAuth, getAdminToken } from "@/lib/admin-auth";
+import { apiUrl } from "@/lib/queryClient";
 import { Plus, Edit3, Trash2, Truck, Search } from "lucide-react";
 
 interface Consignment {
@@ -21,6 +22,8 @@ interface Consignment {
   deliveredDate: string | null;
   status: "pending" | "in_transit" | "out_for_delivery" | "delivered" | "cancelled";
   internalNotes: string | null;
+  invoiceUrl?: string | null;
+  docketUrl?: string | null;
   createdBy: string | null;
   createdAt: string;
 }
@@ -48,6 +51,7 @@ export default function AdminConsignments() {
   const [q, setQ] = useState("");
   const [open, setOpen] = useState<Partial<Consignment> | null>(null);
   const [saving, setSaving] = useState(false);
+  const [uploadingDocs, setUploadingDocs] = useState(false);
   const [savingCustomer, setSavingCustomer] = useState(false);
   const [customers, setCustomers] = useState<CustomerOption[]>([]);
   const [pickerOpen, setPickerOpen] = useState(false);
@@ -125,6 +129,25 @@ export default function AdminConsignments() {
         setOpen(null);
       }
     } finally { setSaving(false); }
+  }
+
+  async function uploadDocs(kind: "invoice" | "docket", file: File) {
+    if (!open?.id) return;
+    setUploadingDocs(true);
+    try {
+      const form = new FormData();
+      form.append(kind, file);
+      const t = getAdminToken();
+      const r = await fetch(apiUrl(`/api/admin/consignments/${open.id}/upload`), {
+        method: "POST",
+        headers: t ? { "x-admin-token": t } : {},
+        body: form,
+      });
+      const j = await r.json();
+      if (!r.ok) { alert(j.error || "Upload failed"); return; }
+      setOpen((prev) => prev ? { ...prev, invoiceUrl: j.invoiceUrl ?? prev.invoiceUrl, docketUrl: j.docketUrl ?? prev.docketUrl } : prev);
+      await load();
+    } finally { setUploadingDocs(false); }
   }
 
   async function del(id: number) {
@@ -339,6 +362,33 @@ export default function AdminConsignments() {
                 <textarea value={open.internalNotes || ""} onChange={(e) => setOpen({ ...open, internalNotes: e.target.value })}
                   rows={3} className="w-full border rounded-lg px-3 py-2 bg-background" data-testid="input-notes" />
               </Field>
+
+              {/* R10 — invoice & docket document uploads */}
+              <div className="border-t pt-4">
+                <div className="text-xs uppercase tracking-wider text-muted-foreground font-semibold mb-2">Documents</div>
+                {!open.id ? (
+                  <p className="text-xs text-muted-foreground">Save the consignment first, then re-open it to attach invoice / docket files.</p>
+                ) : (
+                  <div className="grid sm:grid-cols-2 gap-4">
+                    <Field label="Invoice (PDF/JPG/PNG)">
+                      {open.invoiceUrl && (
+                        <a href={open.invoiceUrl} target="_blank" rel="noreferrer" className="block text-xs text-accent hover:underline mb-1 truncate">View current invoice</a>
+                      )}
+                      <input type="file" accept=".pdf,image/jpeg,image/png" disabled={uploadingDocs}
+                        onChange={(e) => { const f = e.target.files?.[0]; if (f) uploadDocs("invoice", f); }}
+                        className="w-full text-xs" data-testid="input-invoice-file" />
+                    </Field>
+                    <Field label="Docket (PDF/JPG/PNG)">
+                      {open.docketUrl && (
+                        <a href={open.docketUrl} target="_blank" rel="noreferrer" className="block text-xs text-accent hover:underline mb-1 truncate">View current docket</a>
+                      )}
+                      <input type="file" accept=".pdf,image/jpeg,image/png" disabled={uploadingDocs}
+                        onChange={(e) => { const f = e.target.files?.[0]; if (f) uploadDocs("docket", f); }}
+                        className="w-full text-xs" data-testid="input-docket-file" />
+                    </Field>
+                  </div>
+                )}
+              </div>
             </div>
             <div className="sticky bottom-0 bg-card border-t px-6 py-4 flex justify-end gap-3">
               <button onClick={() => { setOpen(null); setPickerOpen(false); }} className="px-4 py-2 border rounded-lg text-sm font-semibold">Cancel</button>

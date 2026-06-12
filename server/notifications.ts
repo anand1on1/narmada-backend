@@ -101,6 +101,8 @@ export interface NotificationContext {
   invoiceAmount?: string | number;
   bundlesCount?: number;
   carrier?: string;
+  invoiceUrl?: string;
+  docketUrl?: string;
 }
 
 export function buildTrackingLink(docket: string): string {
@@ -131,7 +133,15 @@ export async function sendNotification(eventKey: string, ctx: NotificationContex
     invoiceAmount: ctx.invoiceAmount != null && ctx.invoiceAmount !== "" ? String(ctx.invoiceAmount) : "",
     bundlesCount: ctx.bundlesCount != null ? String(ctx.bundlesCount) : "",
     carrier: ctx.carrier || "",
+    invoiceUrl: ctx.invoiceUrl || "",
+    docketUrl: ctx.docketUrl || "",
   };
+
+  // R10 — append download links for uploaded documents to the rendered body.
+  const docLinks: string[] = [];
+  if (ctx.invoiceUrl) docLinks.push(`Download Invoice: ${ctx.invoiceUrl}`);
+  if (ctx.docketUrl) docLinks.push(`Download Docket: ${ctx.docketUrl}`);
+  const docLinksBlock = docLinks.length ? `\n\n${docLinks.join("\n")}` : "";
 
   for (const t of templates) {
     if (!t.enabled) continue;
@@ -152,7 +162,7 @@ export async function sendNotification(eventKey: string, ctx: NotificationContex
         continue;
       }
       const subject = renderTemplate(t.subject || "Narmada Mobility Update", vars);
-      const body = renderTemplate(t.body, vars);
+      const body = renderTemplate(t.body, vars) + docLinksBlock;
       const tx = getTransporter();
       if (!tx) {
         await v2.logNotification({

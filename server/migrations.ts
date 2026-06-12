@@ -362,3 +362,25 @@ export function runR9Migrations() {
 
   console.log("[migrations] R9 tables/columns ensured");
 }
+
+export function runR10Migrations() {
+  const stmts: Array<{ desc: string; sql: string }> = [
+    // consignments — uploaded invoice / docket documents
+    { desc: "consignments.invoice_url", sql: `ALTER TABLE consignments ADD COLUMN invoice_url TEXT` },
+    { desc: "consignments.docket_url", sql: `ALTER TABLE consignments ADD COLUMN docket_url TEXT` },
+    // po_items — explicit customer rate column (data flow stays on unit_price)
+    { desc: "po_items.customer_rate", sql: `ALTER TABLE po_items ADD COLUMN customer_rate REAL` },
+    { desc: "po_items.customer_po_number", sql: `ALTER TABLE po_items ADD COLUMN customer_po_number TEXT` },
+    { desc: "purchase_orders_v2.customer_po_number", sql: `ALTER TABLE purchase_orders_v2 ADD COLUMN customer_po_number TEXT` },
+  ];
+  for (const { desc, sql } of stmts) {
+    console.log(`[migrations] R10: ${desc}`);
+    try {
+      sqlite.exec(sql);
+    } catch (err: any) {
+      console.log(`[migrations] R10: skipped ${desc} —`, err?.message || err);
+    }
+  }
+
+  console.log("[migrations] R10 tables/columns ensured");
+}

@@ -188,11 +188,15 @@ export function LineQuotesPanel({
           </div>
           <button
             onClick={() => addVendor.mutate()}
-            disabled={addVendor.isPending}
+            disabled={addVendor.isPending || (!pickVendorId && !freeName.trim())}
+            title={!pickVendorId && !freeName.trim() ? "Pick a seller or type a name first" : undefined}
             className="px-3 py-1.5 bg-accent text-accent-foreground rounded-lg text-xs font-semibold inline-flex items-center gap-1 disabled:opacity-50"
           >
             {addVendor.isPending ? <Loader2 className="w-3 h-3 animate-spin" /> : <Plus className="w-3 h-3" />} Add
           </button>
+          {freeName.trim() && !freePhone.trim() && (
+            <p className="w-full text-[11px] text-amber-600">No phone — this seller can't be messaged on WhatsApp.</p>
+          )}
         </div>
       )}
 
@@ -410,11 +414,12 @@ export function VendorChatDrawer({
 // ─────────────────────────────────────────────
 // Fire Rate Request modal
 // ─────────────────────────────────────────────
-export function FireRateRequestModal({ token, onClose }: { token: string | null; onClose: () => void }) {
+export function FireRateRequestModal({ token, onClose, defaultPoId }: { token: string | null; onClose: () => void; defaultPoId?: number }) {
   const { toast } = useToast();
   const [selectedVendor, setSelectedVendor] = useState<number | null>(null);
   const [checkedPos, setCheckedPos] = useState<Set<number>>(new Set());
   const [firing, setFiring] = useState(false);
+  const [autoApplied, setAutoApplied] = useState(false);
 
   const { data: pendingVendors = [], isLoading } = useQuery<any[]>({
     queryKey: ["rfq-pending-vendors"],
@@ -424,6 +429,17 @@ export function FireRateRequestModal({ token, onClose }: { token: string | null;
     },
     enabled: !!token,
   });
+
+  // When opened scoped to a PO, auto-select the first seller that has this PO
+  // pending and pre-check only that PO.
+  if (defaultPoId && !autoApplied && !selectedVendor && pendingVendors.length > 0) {
+    const v = pendingVendors.find((x) => (x.pos || []).some((p: any) => p.po_id === defaultPoId));
+    if (v) {
+      setSelectedVendor(v.vendor_id);
+      setCheckedPos(new Set([defaultPoId]));
+    }
+    setAutoApplied(true);
+  }
 
   const current = pendingVendors.find((v) => v.vendor_id === selectedVendor);
 
