@@ -8,6 +8,9 @@ import { notificationLog } from "@shared/schema";
 
 const AISENSY_API_URL = "https://backend.aisensy.com/campaign/t1/api/v2";
 const AISENSY_API_KEY = process.env.AISENSY_API_KEY || "";
+// R21.9 — single-item vendor rate request campaign. Meta wouldn't approve the original
+// name "narmada_vendor_rate_request", so the live campaign is "..._enkx0". Override via env.
+const AISENSY_CAMPAIGN_SINGLE = process.env.AISENSY_CAMPAIGN_SINGLE || "narmada_vendor_rate_request_enkx0";
 
 // R19 — safe config snapshot for the admin diagnostic endpoint. Never returns the full key:
 // only whether it is set and its first 4 chars. campaignName/templateName are per-message
@@ -22,6 +25,8 @@ export function getAisensyDiagnostic() {
     // Fire Rate Request uses the batch template as both campaignName and templateName.
     campaignName: "narmada_vendor_rate_batch",
     templateName: "narmada_vendor_rate_batch",
+    // R21.9 — single-item rate request campaign (env-overridable via AISENSY_CAMPAIGN_SINGLE).
+    singleCampaignName: AISENSY_CAMPAIGN_SINGLE,
     baseUrl: AISENSY_API_URL,
     freeTextFallbackUrl: "https://backend.aisensy.com/direct-apis/t1/messages",
   };
@@ -573,13 +578,13 @@ export async function sendVendorPaymentConfirmation(phone: string, vendorName: s
 }
 
 // R8-v2 — vendor rate request fired when a seller is assigned to a PO line item.
-// Template `narmada_vendor_rate_request` (may not be Meta-approved yet) → text fallback.
+// Campaign `narmada_vendor_rate_request_enkx0` (env-overridable) → text fallback.
 // params: {{1}}=vendor_name {{2}}=part_number {{3}}=brand {{4}}=qty {{5}}=our_po_number {{6}}=our_company
 export async function sendVendorRateRequest(
   phone: string,
   p: { vendorName: string; partNumber: string; brand: string; qty: string; ourPoNumber: string },
 ): Promise<{ status: string }> {
-  const templateName = "narmada_vendor_rate_request";
+  const templateName = AISENSY_CAMPAIGN_SINGLE;
   const ourCompany = "Narmada Mobility";
   const normalized = normalizePhone(phone);
   const body = `Hello ${p.vendorName},\n${ourCompany} requests your best rate for:\nPart: ${p.partNumber}${p.brand ? ` (${p.brand})` : ""}\nQty: ${p.qty}\nRef PO: ${p.ourPoNumber}\nPlease reply with rate, MOQ and lead time.`;
