@@ -425,3 +425,30 @@ export function runR11_1Migrations() {
   }
   console.log("[migrations] R11.1: schema already good (no ALTERs needed)");
 }
+
+// -------- R12 additive migrations --------
+// PO-centric Delhi dispatch: per-line dispatch snapshot columns + lifecycle timestamps,
+// and a bundles count on the dispatch record. All additive; some columns may already exist
+// from earlier rounds (docket_no/courier/packed_at/dispatched_at) so try/catch skips them.
+export function runR12Migrations() {
+  const stmts: Array<{ desc: string; sql: string }> = [
+    { desc: "po_items.docket_number", sql: `ALTER TABLE po_items ADD COLUMN docket_number TEXT` },
+    { desc: "po_items.docket_slip_url", sql: `ALTER TABLE po_items ADD COLUMN docket_slip_url TEXT` },
+    { desc: "po_items.carrier", sql: `ALTER TABLE po_items ADD COLUMN carrier TEXT` },
+    { desc: "po_items.bundles", sql: `ALTER TABLE po_items ADD COLUMN bundles INTEGER` },
+    { desc: "po_items.dispatched_at", sql: `ALTER TABLE po_items ADD COLUMN dispatched_at INTEGER` },
+    { desc: "po_items.packed_at", sql: `ALTER TABLE po_items ADD COLUMN packed_at INTEGER` },
+    { desc: "po_items.received_at", sql: `ALTER TABLE po_items ADD COLUMN received_at INTEGER` },
+    { desc: "dispatches.bundles", sql: `ALTER TABLE dispatches ADD COLUMN bundles INTEGER` },
+  ];
+  for (const { desc, sql } of stmts) {
+    console.log(`[migrations] R12: ${desc}`);
+    try {
+      sqlite.exec(sql);
+    } catch (err: any) {
+      console.log(`[migrations] R12: skipped ${desc} —`, err?.message || err);
+    }
+  }
+
+  console.log("[migrations] R12 tables/columns ensured");
+}

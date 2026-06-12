@@ -2000,6 +2000,267 @@ export async function listDispatches(poId: number): Promise<Dispatch[]> {
   return db.select().from(dispatches).where(eq(dispatches.poId, poId)).orderBy(dispatches.roundNo).all();
 }
 
+export async function updateDispatch(id: number, data: Partial<InsertDispatch>): Promise<Dispatch | undefined> {
+  return db.update(dispatches).set(data as any).where(eq(dispatches.id, id)).returning().get();
+}
+
+// ============================================================
+// R12: PO-CENTRIC DELHI DISPATCH
+// Lifecycle on po_items.fulfil_status: pending (To Pick Up) -> collected (Received)
+//   -> packed (Packed) -> dispatched (Dispatched).
+// "Mark Packed" auto-receives: any line below 'packed' jumps straight to 'packed'.
+// Dispatch acts on the currently-'packed' lines only (partial dispatch); the rest stay.
+// ============================================================
+
+const PO_ITEM_STAGE_ORDER: Record<string, number> = { pending: 0, collected: 1, packed: 2, dispatched: 3 };
+
+// Roll a PO's line statuses up to a single bucket = the EARLIEST (lowest) stage among any
+// line that has not yet reached 'dispatched'. If every line is dispatched, bucket is
+// 'dispatched'. Returns the bucket plus per-stage counts for the UI.
+export function rollupPoLineStages(items: Array<{ fulfilStatus?: string | null }>): {
+  bucket: string;
+  counts: { pending: number; collected: number; packed: number; dispatched: number };
+  packedCount: number;
+  total: number;
+} {
+  const counts = { pending: 0, collected: 0, packed: 0, dispatched: 0 };
+  for (const it of items) {
+    const s = (it.fulfilStatus || "pending") as keyof typeof counts;
+    if (s in counts) counts[s]++; else counts.pending++;
+  }
+  const total = items.length;
+  let bucket = "dispatched";
+  // earliest non-dispatched stage
+  for (const stage of ["pending", "collected", "packed"] as const) {
+    if (counts[stage] > 0) { bucket = stage; break; }
+  }
+  return { bucket, counts, packedCount: counts.packed, total };
+}
+
+// Delhi PO list with rolled-up line state + optional filters (from/to created_at,
+// customer_id, status buckets). status is a comma list of buckets to keep.
+export async function listDelhiPosWithRollup(opts: {
+  from?: number; to?: number; customerId?: number; statuses?: string[];
+} = {}): Promise<any[]> {
+  const conds: string[] = ["po.status NOT IN ('draft','cancelled')"];
+  const params: any[] = [];
+  if (opts.from != null) { conds.push("po.created_at >= ?"); params.push(opts.from); }
+  if (opts.to != null) { conds.push("po.created_at <= ?"); params.push(opts.to); }
+  if (opts.customerId != null) { conds.push("po.customer_id = ?"); params.push(opts.customerId); }
+  const where = conds.length ? `WHERE ${conds.join(" AND ")}` : "";
+  const rows = sqlite.prepare(`
+    SELECT po.id, po.po_number, po.status, po.created_at, po.po_date,
+           po.customer_po_number, po.is_fully_dispatched, po.dispatch_round,
+           po.ship_to_name, c.name AS customer_name, c.id AS customer_id
+    FROM purchase_orders_v2 po
+    LEFT JOIN customers c ON c.id = po.customer_id
+    ${where}
+    ORDER BY po.created_at DESC
+  `).all(...params) as any[];
+  const keep = opts.statuses && opts.statuses.length ? new Set(opts.statuses) : null;
+  const out: any[] = [];
+  for (const po of rows) {
+    const items = sqlite.prepare(`SELECT fulfil_status AS fulfilStatus, qty FROM po_items WHERE po_id = ?`).all(po.id) as any[];
+    if (items.length === 0) continue;
+    const roll = rollupPoLineStages(items);
+    const totalQty = items.reduce((s, it) => s + (Number(it.qty) || 0), 0);
+    const row = {
+      id: po.id,
+      po_number: po.po_number,
+      customer_id: po.customer_id,
+      customer_name: po.customer_name,
+      customer_po_number: po.customer_po_number,
+      created_at: po.created_at,
+      po_date: po.po_date,
+      status: po.status,
+      bucket: roll.bucket,
+      counts: roll.counts,
+      packed_count: roll.packedCount,
+      line_count: roll.total,
+      total_qty: totalQty,
+      is_fully_dispatched: po.is_fully_dispatched,
+    };
+    if (keep && !keep.has(roll.bucket)) continue;
+    out.push(row);
+  }
+  return out;
+}
+
+// Distinct list of customers that have at least one non-draft PO (for the Delhi filter).
+export async function listDelhiCustomers(): Promise<Array<{ id: number; name: string }>> {
+  return sqlite.prepare(`
+    SELECT DISTINCT c.id, c.name
+    FROM purchase_orders_v2 po
+    JOIN customers c ON c.id = po.customer_id
+    WHERE po.status NOT IN ('draft','cancelled')
+    ORDER BY c.name COLLATE NOCASE ASC
+  `).all() as any[];
+}
+
+// Distinct carriers used on past dispatches, for the dispatch-modal autocomplete.
+export async function listDispatchCarriers(): Promise<string[]> {
+  const rows = sqlite.prepare(
+    `SELECT DISTINCT courier_name AS c FROM dispatches WHERE courier_name IS NOT NULL AND TRIM(courier_name) <> '' ORDER BY courier_name COLLATE NOCASE ASC`
+  ).all() as any[];
+  return rows.map((r) => r.c as string);
+}
+
+// Mark a single line packed. Auto-receives: any stage below 'packed' jumps to 'packed'
+// and we backfill collected_at/received_at/packed_at as needed. Already dispatched lines
+// are left untouched.
+export async function markPoItemPacked(id: number): Promise<PoItem | undefined> {
+  const item = db.select().from(poItems).where(eq(poItems.id, id)).get();
+  if (!item) return undefined;
+  const cur = item.fulfilStatus || "pending";
+  if (cur === "dispatched" || cur === "packed") return item;
+  const now = Date.now();
+  const patch: any = { fulfilStatus: "packed", packedAt: now };
+  if (!item.collectedAt) patch.collectedAt = now;
+  if (!(item as any).receivedAt) patch.receivedAt = now;
+  return db.update(poItems).set(patch).where(eq(poItems.id, id)).returning().get();
+}
+
+export async function bulkMarkPoItemsPacked(ids: number[]): Promise<number> {
+  let n = 0;
+  for (const id of ids) {
+    const r = await markPoItemPacked(id);
+    if (r) n++;
+  }
+  return n;
+}
+
+// Dispatch the currently-'packed' lines of a PO. Stamps each with the dispatch snapshot
+// (carrier, docket number, bundles, docket slip url) and flips status to 'dispatched'.
+// Lines not in 'packed' are left in place (partial dispatch). Records a dispatch row and
+// updates the PO status (fulfilled if all lines now dispatched, else partial).
+export async function dispatchPackedLines(poId: number, data: {
+  carrier: string; docketNumber: string; bundles: number; docketSlipUrl: string; submittedBy?: string;
+}): Promise<{ dispatched_count: number; remaining_count: number; dispatchId: number }> {
+  const po = db.select().from(purchaseOrdersV2).where(eq(purchaseOrdersV2.id, poId)).get();
+  if (!po) throw new Error("PO not found");
+  const items = db.select().from(poItems).where(eq(poItems.poId, poId)).all();
+  const packed = items.filter((it) => (it.fulfilStatus || "pending") === "packed");
+  if (packed.length === 0) throw new Error("No packed lines to dispatch");
+  const now = Date.now();
+  const round = (po as any).dispatchRound || 1;
+
+  for (const it of packed) {
+    db.update(poItems).set({
+      fulfilStatus: "dispatched",
+      dispatchedAt: now,
+      carrier: data.carrier,
+      courier: data.carrier,
+      docketNumber: data.docketNumber,
+      docketNo: data.docketNumber,
+      bundles: data.bundles,
+      docketSlipUrl: data.docketSlipUrl,
+      shippedStatus: "shipped",
+      shippedAt: now,
+      dispatchRoundShipped: round,
+    } as any).where(eq(poItems.id, it.id)).run();
+  }
+
+  const dispatch = db.insert(dispatches).values({
+    poId,
+    roundNo: round,
+    docketNo: data.docketNumber,
+    courierName: data.carrier,
+    bundles: data.bundles,
+    dispatchDate: now,
+    docketPhotoUrl: data.docketSlipUrl,
+    submittedBy: data.submittedBy || null,
+    submittedAt: now,
+    createdAt: now,
+  } as any).returning().get();
+
+  const after = db.select().from(poItems).where(eq(poItems.poId, poId)).all();
+  const remaining = after.filter((it) => (it.fulfilStatus || "pending") !== "dispatched").length;
+  const fullyDispatched = remaining === 0;
+  db.update(purchaseOrdersV2).set({
+    dispatchRound: round + 1,
+    isFullyDispatched: fullyDispatched ? 1 : 0,
+    delhiSubmittedAt: now,
+    status: fullyDispatched ? "fulfilled" : "partial",
+    updatedAt: now,
+  } as any).where(eq(purchaseOrdersV2.id, poId)).run();
+
+  return { dispatched_count: packed.length, remaining_count: remaining, dispatchId: dispatch.id };
+}
+
+// Hard-delete a PO and cascade po_items + po_item_vendor_quotes. Returns the po_number for
+// the audit log / confirmation, or undefined if the PO does not exist.
+export async function deletePoCascade(poId: number): Promise<{ poNumber: string } | undefined> {
+  const po = db.select().from(purchaseOrdersV2).where(eq(purchaseOrdersV2.id, poId)).get();
+  if (!po) return undefined;
+  const items = sqlite.prepare(`SELECT id FROM po_items WHERE po_id = ?`).all(poId) as any[];
+  const tx = sqlite.transaction(() => {
+    for (const it of items) {
+      sqlite.prepare(`DELETE FROM po_item_vendor_quotes WHERE po_item_id = ?`).run(it.id);
+    }
+    sqlite.prepare(`DELETE FROM po_items WHERE po_id = ?`).run(poId);
+    sqlite.prepare(`DELETE FROM dispatches WHERE po_id = ?`).run(poId);
+    sqlite.prepare(`DELETE FROM purchase_orders_v2 WHERE id = ?`).run(poId);
+  });
+  tx();
+  return { poNumber: po.poNumber };
+}
+
+// Per-PO dispatch rollup for the data-team PO list. Returns a map poId -> aggregate.
+export async function getDispatchSummaryForPOs(poIds: number[]): Promise<Record<number, {
+  dispatches: Array<{ docket_number: string | null; docket_slip_url: string | null; carrier: string | null; bundles: number | null; dispatched_at: number | null }>;
+  carrier: string | null; bundles: number; docketNumbers: string[];
+}>> {
+  const out: Record<number, any> = {};
+  if (poIds.length === 0) return out;
+  const placeholders = poIds.map(() => "?").join(",");
+  const rows = sqlite.prepare(
+    `SELECT po_id, docket_no, courier_name, bundles, docket_photo_url, dispatch_date
+     FROM dispatches WHERE po_id IN (${placeholders}) ORDER BY po_id, dispatch_date DESC, id DESC`
+  ).all(...poIds) as any[];
+  for (const r of rows) {
+    if (!out[r.po_id]) out[r.po_id] = { dispatches: [], carrier: null, bundles: 0, docketNumbers: [] };
+    const bucket = out[r.po_id];
+    bucket.dispatches.push({
+      docket_number: r.docket_no, docket_slip_url: r.docket_photo_url,
+      carrier: r.courier_name, bundles: r.bundles, dispatched_at: r.dispatch_date,
+    });
+    if (!bucket.carrier && r.courier_name) bucket.carrier = r.courier_name; // most recent
+    bucket.bundles += Number(r.bundles) || 0;
+    if (r.docket_no) bucket.docketNumbers.push(r.docket_no);
+  }
+  return out;
+}
+
+// Vendors with chat activity in the trailing window (the data-team chat hub).
+export async function listActiveVendorChats(sinceMs: number): Promise<Array<{
+  vendor_id: number; vendor_name: string | null; last_message_at: number;
+  last_message_body: string | null; message_count: number;
+}>> {
+  const rows = sqlite.prepare(`
+    SELECT m.vendor_id AS vendor_id,
+           v.name AS vendor_name,
+           MAX(m.created_at) AS last_message_at,
+           COUNT(m.id) AS message_count
+    FROM vendor_rfq_messages m
+    LEFT JOIN vendors v ON v.id = m.vendor_id
+    WHERE m.vendor_id IS NOT NULL AND m.created_at >= ?
+    GROUP BY m.vendor_id
+    ORDER BY last_message_at DESC
+  `).all(sinceMs) as any[];
+  return rows.map((r) => {
+    const last = sqlite.prepare(
+      `SELECT body FROM vendor_rfq_messages WHERE vendor_id = ? ORDER BY created_at DESC, id DESC LIMIT 1`
+    ).get(r.vendor_id) as any;
+    return {
+      vendor_id: r.vendor_id,
+      vendor_name: r.vendor_name,
+      last_message_at: r.last_message_at,
+      last_message_body: last?.body ?? null,
+      message_count: r.message_count,
+    };
+  });
+}
+
 // -------- R8: ASSIGN VENDOR TO PO ITEM (enhanced) --------
 export async function assignVendorToPoItemR8(
   id: number,

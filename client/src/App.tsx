@@ -112,9 +112,13 @@ import TeamRFQs from "@/pages/team/TeamRFQs";
 import TeamRFQDetail from "@/pages/team/TeamRFQDetail";
 // Round 8 — new team pages
 import TeamPOUpload from "@/pages/team/TeamPOUpload";
+// R12 — data-team seller chat hub
+import TeamChats from "@/pages/team/TeamChats";
 // Delhi warehouse portal
 import DelhiLogin from "@/pages/delhi/DelhiLogin";
 import DelhiDashboard from "@/pages/delhi/DelhiDashboard";
+// R12 — Delhi PO-centric detail
+import DelhiPODetail from "@/pages/delhi/DelhiPODetail";
 
 import NotFound from "@/pages/not-found";
 
@@ -208,6 +212,7 @@ function AppRouter() {
         <Route path="/delhi" component={DelhiLogin} />
         <Route path="/delhi/login" component={DelhiLogin} />
         <Route path="/delhi/dashboard" component={DelhiDashboard} />
+        <Route path="/delhi/po/:id" component={DelhiPODetail} />
         <Route component={NotFound} />
       </Switch>
       </ErrorBoundary>
@@ -252,6 +257,8 @@ function AppRouter() {
         <Route path="/team/purchase-orders" component={TeamPOs} />
         <Route path="/team/rfqs/:id" component={TeamRFQDetail} />
         <Route path="/team/rfqs" component={TeamRFQs} />
+        {/* R12 — seller chat hub */}
+        <Route path="/team/chats" component={TeamChats} />
         {/* Round 8 — upload route */}
         <Route path="/team/po/upload" component={TeamPOUpload} />
         <Route component={NotFound} />

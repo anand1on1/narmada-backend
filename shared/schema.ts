@@ -809,6 +809,12 @@ export const poItems = sqliteTable("po_items", {
   // R9 additions — final approved vendor + winning quote for this line
   approvedVendorId: integer("approved_vendor_id"),
   approvedQuoteId: integer("approved_quote_id"),
+  // R12 additions — per-line dispatch snapshot (PO-centric Delhi dispatch)
+  docketNumber: text("docket_number"),
+  docketSlipUrl: text("docket_slip_url"),
+  carrier: text("carrier"),
+  bundles: integer("bundles"),
+  receivedAt: integer("received_at"),
 });
 export const insertPoItemSchema = createInsertSchema(poItems).omit({ id: true });
 export type InsertPoItem = z.infer<typeof insertPoItemSchema>;
@@ -1069,6 +1075,7 @@ export const dispatches = sqliteTable("dispatches", {
   dispatchDate: integer("dispatch_date"),
   docketPhotoUrl: text("docket_photo_url"),
   pdfUrl: text("pdf_url"),
+  bundles: integer("bundles"),
   submittedBy: text("submitted_by"),
   submittedAt: integer("submitted_at"),
   createdAt: integer("created_at").notNull().$defaultFn(() => Date.now()),

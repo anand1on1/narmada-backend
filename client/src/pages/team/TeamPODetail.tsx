@@ -49,6 +49,10 @@ interface PO {
   costTotal: number;
   shipToName: string | null;
   items: PoItem[];
+  dispatches?: Array<{ docket_number: string | null; docket_slip_url: string | null; carrier: string | null; bundles: number | null; dispatched_at: number | null }>;
+  dispatchCarrier?: string | null;
+  dispatchBundles?: number;
+  dispatchDockets?: string[];
 }
 
 interface Vendor { id: number; name: string; phone?: string | null; whatsapp?: string | null; }
@@ -341,6 +345,31 @@ export default function TeamPODetail() {
       {po.shipToName && (
         <div className="mb-4 bg-card border rounded-xl p-3 text-sm">
           <span className="font-semibold">Ship To:</span> {po.shipToName}
+        </div>
+      )}
+
+      {/* R12 — dispatch info filled by Delhi (Status / Carrier / Bundles / Docket#) */}
+      {po.dispatches && po.dispatches.length > 0 && (
+        <div className="mb-4 bg-card border rounded-xl p-3 text-sm flex flex-wrap items-center gap-x-8 gap-y-2">
+          <div>
+            <div className="text-xs text-muted-foreground">Carrier</div>
+            <div className="font-semibold">{po.dispatchCarrier || "—"}</div>
+          </div>
+          <div>
+            <div className="text-xs text-muted-foreground">Bundles</div>
+            <div className="font-semibold">{po.dispatchBundles || 0}</div>
+          </div>
+          <div>
+            <div className="text-xs text-muted-foreground">Docket #</div>
+            <div className="flex flex-wrap gap-2">
+              {po.dispatches.map((d, i) => d.docket_number ? (
+                d.docket_slip_url ? (
+                  <a key={i} href={d.docket_slip_url} target="_blank" rel="noreferrer"
+                    className="text-accent font-semibold hover:underline">{d.docket_number}</a>
+                ) : (<span key={i} className="font-semibold">{d.docket_number}</span>)
+              ) : null)}
+            </div>
+          </div>
         </div>
       )}
 

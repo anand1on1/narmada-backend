@@ -2626,12 +2626,33 @@ function registerR4toR7Routes(
     res.json(await v2.listVendors({ q: req.query.q as string | undefined, activeOnly: req.query.activeOnly === "true" }));
   });
   app.get("/api/team/purchase-orders", requireDataTeam, async (req, res) => {
-    res.json(await v2.listPurchaseOrdersV2WithTotals({ status: req.query.status as string | undefined }));
+    const rows = await v2.listPurchaseOrdersV2WithTotals({ status: req.query.status as string | undefined });
+    // R12: attach per-PO dispatch rollup (Status/Carrier/Bundles/Docket# columns).
+    const summary = await v2.getDispatchSummaryForPOs(rows.map((r: any) => r.id));
+    res.json(rows.map((r: any) => {
+      const s = summary[r.id];
+      return {
+        ...r,
+        dispatches: s?.dispatches || [],
+        dispatchCarrier: s?.carrier || null,
+        dispatchBundles: s?.bundles || 0,
+        dispatchDockets: s?.docketNumbers || [],
+      };
+    }));
   });
   app.get("/api/team/purchase-orders/:id", requireDataTeam, async (req, res) => {
-    const po = await v2.getPurchaseOrderV2(parseInt(req.params.id as string, 10));
+    const id = parseInt(req.params.id as string, 10);
+    const po = await v2.getPurchaseOrderV2(id);
     if (!po) return res.status(404).json({ error: "Not found" });
-    res.json(po);
+    const summary = await v2.getDispatchSummaryForPOs([id]);
+    const s = summary[id];
+    res.json({
+      ...po,
+      dispatches: s?.dispatches || [],
+      dispatchCarrier: s?.carrier || null,
+      dispatchBundles: s?.bundles || 0,
+      dispatchDockets: s?.docketNumbers || [],
+    });
   });
   app.post("/api/team/purchase-orders", requireDataTeam, async (req, res) => {
     try {
@@ -4050,6 +4071,153 @@ function registerR8Routes(
     } catch (e: any) {
       res.status(500).json({ error: e.message });
     }
+  });
+
+  // ============================================================
+  // R12 — PO-CENTRIC DELHI DISPATCH
+  // ============================================================
+
+  // Multer for docket slip uploads (image/PDF, max 10MB) — reuses the R10 consignment pattern.
+  const docketSlipDir = path.join(ctx.uploadsDir || "./uploads", "docket-slips");
+  if (!fs.existsSync(docketSlipDir)) fs.mkdirSync(docketSlipDir, { recursive: true });
+  const multerDocket = multer({
+    storage: multer.diskStorage({
+      destination: (_req: any, _file: any, cb: any) => cb(null, docketSlipDir),
+      filename: (_req: any, file: any, cb: any) => cb(null, `${Date.now()}-${file.originalname.replace(/[^a-zA-Z0-9._-]/g, "_")}`),
+    }),
+    limits: { fileSize: 10 * 1024 * 1024 },
+    fileFilter: (_req: any, file: any, cb: any) => {
+      if (file.mimetype === "application/pdf" || file.mimetype === "image/jpeg" || file.mimetype === "image/png") cb(null, true);
+      else cb(new Error("Only PDF/JPG/PNG allowed"));
+    },
+  });
+
+  // ---- GET /api/delhi/pos/list ----
+  // PO-centric list with rolled-up line state + filters (?from=&to=&customer_id=&status=)
+  app.get("/api/delhi/pos/list", requireDelhi, async (req: any, res: any) => {
+    try {
+      res.set("Cache-Control", "no-cache, no-store, must-revalidate");
+      const from = req.query.from ? parseInt(req.query.from as string, 10) : undefined;
+      const to = req.query.to ? parseInt(req.query.to as string, 10) : undefined;
+      const customerId = req.query.customer_id ? parseInt(req.query.customer_id as string, 10) : undefined;
+      const statusRaw = (req.query.status as string | undefined) || "";
+      const statuses = statusRaw ? statusRaw.split(",").map((s) => s.trim()).filter(Boolean) : undefined;
+      res.json(await v2.listDelhiPosWithRollup({ from, to, customerId, statuses }));
+    } catch (e: any) { res.status(500).json({ error: e.message }); }
+  });
+
+  // ---- GET /api/delhi/customers ---- (filter dropdown)
+  app.get("/api/delhi/customers", requireDelhi, async (_req: any, res: any) => {
+    try { res.json(await v2.listDelhiCustomers()); }
+    catch (e: any) { res.status(500).json({ error: e.message }); }
+  });
+
+  // ---- GET /api/delhi/dispatch/carriers ---- (autocomplete)
+  app.get("/api/delhi/dispatch/carriers", requireDelhi, async (_req: any, res: any) => {
+    try { res.json(await v2.listDispatchCarriers()); }
+    catch (e: any) { res.status(500).json({ error: e.message }); }
+  });
+
+  // ---- GET /api/delhi/po/:id ---- (PO detail for Delhi)
+  app.get("/api/delhi/po/:id", requireDelhi, async (req: any, res: any) => {
+    try {
+      res.set("Cache-Control", "no-cache, no-store, must-revalidate");
+      const po = await v2.getPurchaseOrderV2(parseInt(req.params.id as string, 10));
+      if (!po) return res.status(404).json({ error: "PO not found" });
+      const roll = v2.rollupPoLineStages(po.items as any);
+      res.json({ ...po, bucket: roll.bucket, counts: roll.counts, packed_count: roll.packedCount });
+    } catch (e: any) { res.status(500).json({ error: e.message }); }
+  });
+
+  // ---- PUT /api/delhi/po-items/:id/mark-packed ---- (single, auto-receives)
+  app.put("/api/delhi/po-items/:id/mark-packed", requireDelhi, async (req: any, res: any) => {
+    try {
+      const item = await v2.markPoItemPacked(parseInt(req.params.id as string, 10));
+      if (!item) return res.status(404).json({ error: "Item not found" });
+      res.json(item);
+    } catch (e: any) { res.status(500).json({ error: e.message }); }
+  });
+
+  // ---- POST /api/delhi/po-items/bulk-mark-packed ---- ({ids:[]})
+  app.post("/api/delhi/po-items/bulk-mark-packed", requireDelhi, async (req: any, res: any) => {
+    try {
+      const ids = Array.isArray(req.body?.ids) ? req.body.ids.map((n: any) => parseInt(String(n), 10)).filter((n: number) => Number.isInteger(n)) : [];
+      if (ids.length === 0) return res.status(400).json({ error: "ids required" });
+      const packed = await v2.bulkMarkPoItemsPacked(ids);
+      res.json({ packed });
+    } catch (e: any) { res.status(500).json({ error: e.message }); }
+  });
+
+  // ---- POST /api/delhi/po/:id/dispatch ---- (multipart: courier, docketNumber, bundles, docketSlip file)
+  app.post("/api/delhi/po/:id/dispatch", requireDelhi, multerDocket.single("docketSlip"), async (req: any, res: any) => {
+    try {
+      const poId = parseInt(req.params.id as string, 10);
+      const u = (req as any).teamUser;
+      const carrier = String(req.body?.courier || req.body?.carrier || "").trim();
+      const docketNumber = String(req.body?.docketNumber || req.body?.docketNo || "").trim();
+      const bundles = parseInt(String(req.body?.bundles || ""), 10);
+      const file = req.file;
+      if (!carrier) return res.status(400).json({ error: "Courier is required" });
+      if (!docketNumber) return res.status(400).json({ error: "Docket number is required" });
+      if (!Number.isInteger(bundles) || bundles < 1) return res.status(400).json({ error: "Bundles count (min 1) is required" });
+      if (!file) return res.status(400).json({ error: "Docket slip upload is required" });
+
+      const proto = "https";
+      const host = req.get("host") || "narmada-backend.onrender.com";
+      const docketSlipUrl = `${proto}://${host}/uploads/docket-slips/${file.filename}`;
+
+      const result = await v2.dispatchPackedLines(poId, {
+        carrier, docketNumber, bundles, docketSlipUrl, submittedBy: u?.username,
+      });
+
+      await v2.writeAuditLog({
+        actorType: "delhi", actorId: u?.username, action: "po.dispatch",
+        entityType: "purchase_order", entityId: String(poId),
+        afterJson: JSON.stringify({ carrier, docketNumber, bundles, ...result }),
+      });
+
+      res.json(result);
+    } catch (e: any) { res.status(400).json({ error: e.message }); }
+  });
+
+  // ---- DELETE /api/team/po/:id ---- (data team hard-delete, cascades)
+  app.delete("/api/team/po/:id", requireDataTeam, async (req: any, res: any) => {
+    try {
+      const poId = parseInt(req.params.id as string, 10);
+      const u = (req as any).teamUser;
+      const deleted = await v2.deletePoCascade(poId);
+      if (!deleted) return res.status(404).json({ error: "PO not found" });
+      await v2.writeAuditLog({
+        actorType: "data_team", actorId: u?.username, action: "po.delete",
+        entityType: "purchase_order", entityId: String(poId),
+        beforeJson: JSON.stringify({ poNumber: deleted.poNumber }),
+      });
+      res.json({ ok: true, poNumber: deleted.poNumber });
+    } catch (e: any) { res.status(500).json({ error: e.message }); }
+  });
+
+  // ---- DELETE /api/admin/po/:id ---- (admin hard-delete, cascades)
+  app.delete("/api/admin/po/:id", requireAdminRole, async (req: any, res: any) => {
+    try {
+      const poId = parseInt(req.params.id as string, 10);
+      const u = (req as any).user as TokenInfo;
+      const deleted = await v2.deletePoCascade(poId);
+      if (!deleted) return res.status(404).json({ error: "PO not found" });
+      await v2.writeAuditLog({
+        actorType: "admin", actorId: u?.username, action: "po.delete",
+        entityType: "purchase_order", entityId: String(poId),
+        beforeJson: JSON.stringify({ poNumber: deleted.poNumber }),
+      });
+      res.json({ ok: true, poNumber: deleted.poNumber });
+    } catch (e: any) { res.status(500).json({ error: e.message }); }
+  });
+
+  // ---- GET /api/team/rfq/active-chats?since= ---- (data-team chat hub)
+  app.get("/api/team/rfq/active-chats", requireDataTeam, async (req: any, res: any) => {
+    try {
+      const since = req.query.since ? parseInt(req.query.since as string, 10) : (Date.now() - 30 * 24 * 60 * 60 * 1000);
+      res.json(await v2.listActiveVendorChats(since));
+    } catch (e: any) { res.status(500).json({ error: e.message }); }
   });
 
   // ---- GET /api/admin/purchase-history ----

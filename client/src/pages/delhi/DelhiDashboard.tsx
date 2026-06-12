@@ -1,97 +1,91 @@
-import { useState, useEffect } from "react";
+/**
+ * R12 — DelhiDashboard.tsx (PO-centric rebuild)
+ * The old per-line pickup/pack/dispatch queue did not fit the PO-centric workflow. This
+ * dashboard lists POs with a rolled-up line state and three interchangeable views:
+ * Table / Kanban / Tabs (segmented switcher, persisted in localStorage). Filters: date range,
+ * customer (multi-select), and status chips. All views share GET /api/delhi/pos/list.
+ * Opening a PO routes to /delhi/po/:id (DelhiPODetail) for marking lines packed + dispatch.
+ */
+import { useState, useEffect, useMemo } from "react";
 import { useLocation } from "wouter";
 import { useTeamAuth, teamFetch } from "@/lib/team-auth";
-import { useToast } from "@/hooks/use-toast";
-import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
+import { useQuery } from "@tanstack/react-query";
 import { Logo } from "@/components/Logo";
 import {
-  LogOut, Package, Truck, PackageCheck, Megaphone, X,
-  ClipboardList, Loader2, Check,
+  LogOut, Megaphone, X, Table as TableIcon, Columns, LayoutList,
+  Package, Search, ChevronDown,
 } from "lucide-react";
 
-// ────────────────────────────────────────────────
-// Types — existing queue
-// ────────────────────────────────────────────────
-interface QItem {
-  id: number; partNumber: string | null; brand: string | null; qty: number;
-  vendorName: string; vendorPhone: string; vendorAddress: string;
-  clientName: string; clientCity: string; poNumber: string;
-}
-interface Queue { pickup: QItem[]; pack: QItem[]; dispatch: QItem[]; }
+type ViewMode = "table" | "kanban" | "tabs";
+const VIEW_KEY = "delhi_view_mode";
 
-// ────────────────────────────────────────────────
-// Types — R8 POs tab
-// ────────────────────────────────────────────────
-interface PoListItem {
+// Buckets map to po_item fulfil_status stages rolled up per-PO.
+const BUCKETS = [
+  { key: "pending", label: "To Pick Up", color: "bg-slate-500/15 text-slate-700" },
+  { key: "collected", label: "Received", color: "bg-blue-500/15 text-blue-700" },
+  { key: "packed", label: "Packed", color: "bg-amber-500/15 text-amber-700" },
+  { key: "dispatched", label: "Dispatched", color: "bg-emerald-500/15 text-emerald-700" },
+] as const;
+const TO_DISPATCH = { key: "to_dispatch", label: "To Dispatch", color: "bg-orange-500/15 text-orange-700" };
+
+interface PoRow {
   id: number;
   po_number: string;
-  status: string;
+  customer_id: number | null;
   customer_name: string | null;
-  ship_to_name: string | null;
-  ship_to_address: string | null;
-  item_count: number;
-  shipped_count: number;
-  dispatch_round: number | null;
-  is_fully_dispatched: number;
+  customer_po_number: string | null;
   created_at: number;
-}
-
-interface PoItemDetail {
-  id: number;
-  part_number: string | null;
-  brand: string | null;
-  description: string | null;
-  qty: number;
-  unit_price: number | null;
-  vendor_name: string | null;
-  awaiting_lock: boolean;
-  shipped_status: string | null;
-  dispatch_round_shipped: number | null;
-}
-
-interface PoDetail {
-  id: number;
-  poNumber: string;
-  customerPoNumber: string | null;
+  po_date: number | null;
   status: string;
-  shipToName: string | null;
-  shipToAddress: string | null;
-  shipToPhone: string | null;
-  items: PoItemDetail[];
+  bucket: string;
+  counts: { pending: number; collected: number; packed: number; dispatched: number };
+  packed_count: number;
+  line_count: number;
+  total_qty: number;
+  is_fully_dispatched: number;
 }
+interface CustomerOpt { id: number; name: string; }
 
-type DashTab = "pickup" | "pack" | "dispatch" | "pos";
+function fmt(d: number | null) {
+  if (!d) return "—";
+  return new Date(d).toLocaleDateString("en-IN", { day: "2-digit", month: "short", year: "numeric" });
+}
+function bucketMeta(key: string) {
+  return BUCKETS.find((b) => b.key === key) || { key, label: key, color: "bg-muted" };
+}
+function linesSummary(p: PoRow) {
+  return `${p.packed_count}/${p.line_count} packed`;
+}
+function isoDay(ms: number) { return new Date(ms).toISOString().slice(0, 10); }
 
 export default function DelhiDashboard() {
   const { token, user, clear, ready } = useTeamAuth();
   const [, navigate] = useLocation();
-  const { toast } = useToast();
-  const qc = useQueryClient();
 
-  // ── Legacy dispatch modal state ──
-  const [dispatchItem, setDispatchItem] = useState<QItem | null>(null);
-  const [docket, setDocket] = useState("");
-  const [courier, setCourier] = useState("");
+  const [view, setView] = useState<ViewMode>(() => {
+    try { return (localStorage.getItem(VIEW_KEY) as ViewMode) || "tabs"; } catch { return "tabs"; }
+  });
+  useEffect(() => { try { localStorage.setItem(VIEW_KEY, view); } catch {} }, [view]);
 
-  // ── Announcement banner ──
+  // ── Filters ──
+  const now = Date.now();
+  const [fromDate, setFromDate] = useState(() => isoDay(now - 30 * 24 * 60 * 60 * 1000));
+  const [toDate, setToDate] = useState(() => isoDay(now));
+  const [customerIds, setCustomerIds] = useState<number[]>([]);
+  const [custOpen, setCustOpen] = useState(false);
+  const [custSearch, setCustSearch] = useState("");
+  // Status chips — default first 4 ON (incl. To Dispatch), Dispatched OFF.
+  const [statusOn, setStatusOn] = useState<Record<string, boolean>>({
+    pending: true, collected: true, packed: true, to_dispatch: true, dispatched: false,
+  });
+
   const [bannerDismissed, setBannerDismissed] = useState(() => {
     try { return sessionStorage.getItem("delhi_announcement_dismissed") === "1"; } catch { return false; }
   });
+  const [activeTab, setActiveTab] = useState<string>("pending");
 
-  // ── Tab state ──
-  const [activeTab, setActiveTab] = useState<DashTab>("pickup");
-  const [includePending, setIncludePending] = useState(false);
+  useEffect(() => { if (ready && !token) navigate("/delhi"); }, [ready, token, navigate]);
 
-  // ── POs tab state ──
-  const [selectedPo, setSelectedPo] = useState<PoDetail | null>(null);
-  const [poLoading, setPoLoading] = useState(false);
-  const [submitDocket, setSubmitDocket] = useState("");
-  const [submitCourier, setSubmitCourier] = useState("");
-  const [submitting, setSubmitting] = useState(false);
-
-  // ────────────────────────────────────────────────
-  // Data queries
-  // ────────────────────────────────────────────────
   const { data: announcement } = useQuery<{ id: number; title: string; body: string | null } | null>({
     queryKey: ["delhi-announcement"],
     queryFn: async () => {
@@ -101,234 +95,80 @@ export default function DelhiDashboard() {
       const arr = await r.json();
       return Array.isArray(arr) && arr.length > 0 ? arr[0] : null;
     },
-    enabled: !!token,
-    staleTime: 60_000,
+    enabled: !!token, staleTime: 60_000,
   });
 
-  // Legacy queue
-  const { data: q } = useQuery<Queue>({
-    queryKey: ["delhi-queue"],
-    queryFn: async () => {
-      const r = await teamFetch(token, `/api/delhi/queue`);
-      return r.ok ? r.json() : { pickup: [], pack: [], dispatch: [] };
-    },
+  const { data: customers = [] } = useQuery<CustomerOpt[]>({
+    queryKey: ["delhi-customers"],
+    queryFn: async () => { const r = await teamFetch(token, `/api/delhi/customers`); return r.ok ? r.json() : []; },
     enabled: !!token,
-    refetchInterval: 30_000,
   });
 
-  // R8 POs list (polls every 15s)
-  const { data: activePOs = [] } = useQuery<PoListItem[]>({
-    queryKey: ["delhi-active-pos", includePending],
+  const fromMs = useMemo(() => new Date(fromDate + "T00:00:00").getTime(), [fromDate]);
+  const toMs = useMemo(() => new Date(toDate + "T23:59:59").getTime(), [toDate]);
+
+  const { data: pos = [], isLoading } = useQuery<PoRow[]>({
+    queryKey: ["delhi-pos-list", fromMs, toMs, customerIds.join(",")],
     queryFn: async () => {
-      const r = await teamFetch(token, `/api/delhi/pos${includePending ? "?include_pending=1" : ""}`);
+      const params = new URLSearchParams();
+      params.set("from", String(fromMs));
+      params.set("to", String(toMs));
+      if (customerIds.length === 1) params.set("customer_id", String(customerIds[0]));
+      const r = await teamFetch(token, `/api/delhi/pos/list?${params.toString()}`);
       return r.ok ? r.json() : [];
     },
-    enabled: !!token,
-    refetchInterval: 15_000,
+    enabled: !!token, refetchInterval: 20_000,
   });
 
-  useEffect(() => {
-    if (ready && !token) navigate("/delhi");
-  }, [ready, token, navigate]);
-
-  // ────────────────────────────────────────────────
-  // Legacy queue mutations
-  // ────────────────────────────────────────────────
-  const setStatus = useMutation({
-    mutationFn: async ({ id, status, docket_no, courier }: { id: number; status: string; docket_no?: string; courier?: string }) => {
-      const r = await teamFetch(token, `/api/delhi/po-items/${id}/status`, {
-        method: "POST",
-        body: JSON.stringify({ status, docket_no, courier }),
-      });
-      if (!r.ok) throw new Error("Update failed");
-    },
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ["delhi-queue"] });
-      setDispatchItem(null);
-      setDocket("");
-      setCourier("");
-      toast({ title: "Updated" });
-    },
-    onError: (e: any) => toast({ title: "Error", description: e.message, variant: "destructive" }),
-  });
-
-  // ────────────────────────────────────────────────
-  // PO detail loader
-  // ────────────────────────────────────────────────
-  async function loadPoDetail(poId: number) {
-    setPoLoading(true);
-    setSelectedPo(null);
-    setSubmitDocket("");
-    setSubmitCourier("");
-    try {
-      const r = await teamFetch(token, `/api/team/purchase-orders/${poId}`);
-      if (!r.ok) throw new Error("Could not load PO");
-      const data = await r.json();
-      // R11: Delhi sees ALL lines (revert R8v2 partial-notify filter). Lines without a
-      // locked vendor show an "awaiting lock" badge but are still visible to the warehouse.
-      const items: PoItemDetail[] = (data.items || []).map((it: any) => ({
-        id: it.id,
-        part_number: it.partNumber ?? it.part_number ?? null,
-        brand: it.brand ?? null,
-        description: it.description ?? null,
-        qty: it.qty ?? 0,
-        unit_price: it.unitPrice ?? it.unit_price ?? null,
-        vendor_name: it.vendorName ?? it.vendor_name ?? null,
-        awaiting_lock: (it.approvedQuoteId ?? it.approved_quote_id) == null,
-        shipped_status: it.shippedStatus ?? it.shipped_status ?? null,
-        dispatch_round_shipped: it.dispatchRoundShipped ?? it.dispatch_round_shipped ?? null,
-      }));
-      setSelectedPo({
-        id: data.id,
-        poNumber: data.poNumber ?? data.po_number,
-        customerPoNumber: data.customerPoNumber ?? data.customer_po_number ?? null,
-        status: data.status,
-        shipToName: data.shipToName ?? data.ship_to_name ?? null,
-        shipToAddress: data.shipToAddress ?? data.ship_to_address ?? null,
-        shipToPhone: data.shipToPhone ?? data.ship_to_phone ?? null,
-        items,
-      });
-    } catch (e: any) {
-      toast({ title: "Error", description: e.message, variant: "destructive" });
-    } finally {
-      setPoLoading(false);
-    }
-  }
-
-  // ────────────────────────────────────────────────
-  // Mark item shipped / unshipped (R8 PUT endpoint)
-  // ────────────────────────────────────────────────
-  async function toggleItemShipped(itemId: number, currentStatus: string | null) {
-    const shipped = currentStatus !== "shipped";
-    try {
-      const r = await teamFetch(token, `/api/delhi/po-items/${itemId}/mark-shipped`, {
-        method: "PUT",
-        body: JSON.stringify({ shipped }),
-      });
-      if (!r.ok) throw new Error("Failed to update item");
-      // Refresh detail
-      if (selectedPo) await loadPoDetail(selectedPo.id);
-      qc.invalidateQueries({ queryKey: ["delhi-active-pos"] });
-    } catch (e: any) {
-      toast({ title: "Error", description: e.message, variant: "destructive" });
-    }
-  }
-
-  // ────────────────────────────────────────────────
-  // Submit day dispatch
-  // ────────────────────────────────────────────────
-  async function submitDay() {
-    if (!selectedPo) return;
-    if (!submitDocket) { toast({ title: "Please enter a docket/AWB number", variant: "destructive" }); return; }
-    const hasShipped = selectedPo.items.some((it) => it.shipped_status === "shipped" && it.dispatch_round_shipped == null);
-    if (!hasShipped) { toast({ title: "No new shipped items to submit", variant: "destructive" }); return; }
-    setSubmitting(true);
-    try {
-      const r = await teamFetch(token, `/api/delhi/po/${selectedPo.id}/submit-day`, {
-        method: "POST",
-        body: JSON.stringify({
-          docketNo: submitDocket,
-          courierName: submitCourier || undefined,
-          dispatchDate: Date.now(),
-        }),
-      });
-      if (!r.ok) {
-        const j = await r.json().catch(() => ({}));
-        throw new Error(j.error || "Submit failed");
+  // Client-side: multi-customer filter (server takes a single customer_id) + status chip filter.
+  const filtered = useMemo(() => {
+    return pos.filter((p) => {
+      if (customerIds.length > 0 && (p.customer_id == null || !customerIds.includes(p.customer_id))) return false;
+      // A PO matches if its bucket chip is ON. "to_dispatch" chip == bucket 'packed' that is ready to dispatch.
+      const chipKey = p.bucket === "packed" ? (statusOn.packed || statusOn.to_dispatch ? p.bucket : null) : p.bucket;
+      if (p.bucket === "packed") {
+        if (!statusOn.packed && !statusOn.to_dispatch) return false;
+        return true;
       }
-      const j = await r.json();
-      toast({
-        title: `Dispatch Round ${j.round} submitted`,
-        description: j.isFullyDispatched ? "All items dispatched! PO marked fulfilled." : `${j.shippedCount} item(s) dispatched.`,
-      });
-      setSubmitDocket("");
-      setSubmitCourier("");
-      await loadPoDetail(selectedPo.id);
-      qc.invalidateQueries({ queryKey: ["delhi-active-pos"] });
-    } catch (e: any) {
-      toast({ title: "Error", description: e.message, variant: "destructive" });
-    } finally {
-      setSubmitting(false);
-    }
-  }
+      return !!statusOn[p.bucket];
+    });
+  }, [pos, customerIds, statusOn]);
 
   async function logout() {
     if (token) { try { await teamFetch(token, "/api/team/logout", { method: "POST" }); } catch {} }
     clear();
     navigate("/delhi");
   }
+  function openPo(id: number) { navigate(`/delhi/po/${id}`); }
+  function toggleCustomer(id: number) {
+    setCustomerIds((prev) => prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]);
+  }
 
   if (!ready) {
-    return (
-      <div className="min-h-screen flex items-center justify-center bg-slate-50">
-        <div className="text-sm text-muted-foreground">Loading…</div>
-      </div>
-    );
+    return <div className="min-h-screen flex items-center justify-center bg-slate-50"><div className="text-sm text-muted-foreground">Loading…</div></div>;
   }
   if (!token) return null;
 
-  // ────────────────────────────────────────────────
-  // Legacy queue card component
-  // ────────────────────────────────────────────────
-  const Card = ({ it, action }: { it: QItem; action: React.ReactNode }) => (
-    <div className="bg-card border rounded-lg p-3 shadow-sm">
-      <div className="font-semibold text-sm">
-        {it.partNumber || "—"}{" "}
-        {it.brand && <span className="text-muted-foreground font-normal">/ {it.brand}</span>}
-      </div>
-      <div className="text-xs text-muted-foreground mt-0.5">Qty {it.qty} · {it.poNumber}</div>
-      <div className="text-xs mt-1"><span className="font-semibold">Vendor:</span> {it.vendorName} · {it.vendorPhone}</div>
-      <div className="text-xs"><span className="font-semibold">Client:</span> {it.clientName} ({it.clientCity})</div>
-      <div className="mt-2">{action}</div>
-    </div>
-  );
-
-  const Col = ({
-    title, icon: Icon, items, action,
-  }: { title: string; icon: React.ElementType; items: QItem[]; action: (it: QItem) => React.ReactNode }) => (
-    <div className="flex-1 min-w-0">
-      <div className="flex items-center gap-2 mb-3 font-bold">
-        <Icon className="w-4 h-4" /> {title}{" "}
-        <span className="text-xs font-normal text-muted-foreground">({items.length})</span>
-      </div>
-      <div className="space-y-2">
-        {items.length === 0
-          ? <div className="text-xs text-muted-foreground border border-dashed rounded-lg p-4 text-center">Empty</div>
-          : items.map((it) => <Card key={it.id} it={it} action={action(it)} />)}
-      </div>
-    </div>
-  );
-
-  // ────────────────────────────────────────────────
-  // Tab pills
-  // ────────────────────────────────────────────────
-  const TAB_LABELS: { key: DashTab; icon: React.ElementType; label: string; count?: number }[] = [
-    { key: "pickup", icon: Package, label: "To Pick Up", count: q?.pickup?.length },
-    { key: "pack", icon: PackageCheck, label: "To Pack", count: q?.pack?.length },
-    { key: "dispatch", icon: Truck, label: "To Dispatch", count: q?.dispatch?.length },
-    { key: "pos", icon: ClipboardList, label: "POs (Active)", count: activePOs.length },
-  ];
+  const filteredCustomers = customers.filter((c) => c.name.toLowerCase().includes(custSearch.toLowerCase()));
 
   return (
     <div className="min-h-screen bg-slate-50 dark:bg-slate-950">
       {/* Header */}
-      <header className="bg-card border-b px-6 py-4 flex items-center justify-between">
-        <div className="flex items-center gap-3">
-          <Logo />
-          <div className="text-[10px] uppercase tracking-widest text-muted-foreground font-bold">Delhi Warehouse</div>
-        </div>
-        <div className="flex items-center gap-3">
-          {user && <span className="text-sm text-muted-foreground">{user.name}</span>}
-          <button
-            onClick={logout}
-            className="text-sm px-3 py-1.5 rounded-lg text-red-600 hover:bg-red-50 inline-flex items-center gap-1"
-          >
-            <LogOut className="w-4 h-4" /> Logout
-          </button>
+      <header className="bg-card border-b sticky top-0 z-30">
+        <div className="px-4 sm:px-6 py-3 flex items-center justify-between gap-4">
+          <div className="flex items-center gap-3">
+            <Logo />
+            <div className="text-[10px] uppercase tracking-widest text-muted-foreground font-bold hidden sm:block">Delhi Warehouse</div>
+          </div>
+          <div className="flex items-center gap-3">
+            {user && <div className="text-xs text-muted-foreground hidden sm:block">{user.name}</div>}
+            <button onClick={logout} className="text-sm px-3 py-1.5 rounded-lg hover:bg-red-50 text-red-600 inline-flex items-center gap-1.5">
+              <LogOut className="w-4 h-4" /> Logout
+            </button>
+          </div>
         </div>
       </header>
 
-      {/* Announcement banner */}
       {announcement && !bannerDismissed && (
         <div className="bg-amber-50 border-b border-amber-200 px-4 py-2.5 flex items-start gap-3">
           <Megaphone className="w-4 h-4 text-amber-600 flex-shrink-0 mt-0.5" />
@@ -336,357 +176,196 @@ export default function DelhiDashboard() {
             <span className="font-semibold">{announcement.title}</span>
             {announcement.body && <span className="ml-2">{announcement.body}</span>}
           </div>
-          <button
-            onClick={() => {
-              setBannerDismissed(true);
-              try { sessionStorage.setItem("delhi_announcement_dismissed", "1"); } catch {}
-            }}
-            className="text-amber-500 hover:text-amber-700"
-          >
-            <X className="w-4 h-4" />
-          </button>
+          <button onClick={() => { setBannerDismissed(true); try { sessionStorage.setItem("delhi_announcement_dismissed", "1"); } catch {} }}
+            className="text-amber-500 hover:text-amber-700 flex-shrink-0"><X className="w-4 h-4" /></button>
         </div>
       )}
 
-      {/* Tab bar */}
-      <div className="bg-card border-b px-6">
-        <div className="flex gap-1">
-          {TAB_LABELS.map(({ key, icon: Icon, label, count }) => (
-            <button
-              key={key}
-              onClick={() => setActiveTab(key)}
-              className={`px-4 py-3 text-sm font-semibold border-b-2 transition-colors inline-flex items-center gap-2 ${
-                activeTab === key
-                  ? "border-accent text-accent-foreground"
-                  : "border-transparent text-muted-foreground hover:text-foreground"
-              }`}
-            >
-              <Icon className="w-4 h-4" />
-              {label}
-              {count != null && count > 0 && (
-                <span className="bg-accent/20 text-accent-foreground text-xs rounded-full px-1.5 py-0.5 font-bold">
-                  {count}
-                </span>
-              )}
+      <div className="p-4 sm:p-6 max-w-[1400px] mx-auto">
+        {/* Top bar: view switcher + filters */}
+        <div className="bg-card border rounded-xl p-3 mb-5 flex flex-wrap items-center gap-3 shadow-sm">
+          {/* View switcher (segmented) */}
+          <div className="inline-flex rounded-lg border overflow-hidden">
+            {([["table", TableIcon, "Table"], ["kanban", Columns, "Kanban"], ["tabs", LayoutList, "Tabs"]] as const).map(([key, Icon, label]) => (
+              <button key={key} onClick={() => setView(key)}
+                className={`px-3 py-1.5 text-xs font-semibold inline-flex items-center gap-1.5 transition ${view === key ? "bg-accent text-accent-foreground" : "hover:bg-muted"}`}>
+                <Icon className="w-3.5 h-3.5" /> {label}
+              </button>
+            ))}
+          </div>
+
+          {/* Date range */}
+          <div className="flex items-center gap-1.5 text-xs">
+            <span className="text-muted-foreground">From</span>
+            <input type="date" value={fromDate} onChange={(e) => setFromDate(e.target.value)}
+              className="border rounded-lg px-2 py-1.5 bg-background" />
+            <span className="text-muted-foreground">To</span>
+            <input type="date" value={toDate} onChange={(e) => setToDate(e.target.value)}
+              className="border rounded-lg px-2 py-1.5 bg-background" />
+          </div>
+
+          {/* Customer multi-select */}
+          <div className="relative">
+            <button onClick={() => setCustOpen((o) => !o)}
+              className="border rounded-lg px-3 py-1.5 text-xs font-semibold inline-flex items-center gap-1.5 hover:bg-muted">
+              {customerIds.length === 0 ? "All Customers" : `${customerIds.length} customer(s)`}
+              <ChevronDown className="w-3.5 h-3.5" />
             </button>
-          ))}
-        </div>
-      </div>
-
-      {/* ── Legacy queue tabs ── */}
-      {activeTab !== "pos" && (
-        <div className="p-6 flex flex-col lg:flex-row gap-6">
-          {activeTab === "pickup" && (
-            <Col
-              title="To Pick Up"
-              icon={Package}
-              items={q?.pickup || []}
-              action={(it) => (
-                <button
-                  onClick={() => setStatus.mutate({ id: it.id, status: "collected" })}
-                  className="w-full text-xs px-2 py-1.5 rounded bg-accent text-accent-foreground font-semibold"
-                >
-                  Mark Collected
-                </button>
-              )}
-            />
-          )}
-          {activeTab === "pack" && (
-            <Col
-              title="To Pack"
-              icon={PackageCheck}
-              items={q?.pack || []}
-              action={(it) => (
-                <button
-                  onClick={() => setStatus.mutate({ id: it.id, status: "packed" })}
-                  className="w-full text-xs px-2 py-1.5 rounded bg-accent text-accent-foreground font-semibold"
-                >
-                  Mark Packed
-                </button>
-              )}
-            />
-          )}
-          {activeTab === "dispatch" && (
-            <Col
-              title="To Dispatch"
-              icon={Truck}
-              items={q?.dispatch || []}
-              action={(it) => (
-                <button
-                  onClick={() => setDispatchItem(it)}
-                  className="w-full text-xs px-2 py-1.5 rounded bg-accent text-accent-foreground font-semibold"
-                >
-                  Dispatch…
-                </button>
-              )}
-            />
-          )}
-        </div>
-      )}
-
-      {/* ── POs (Active) tab ── */}
-      {activeTab === "pos" && (
-        <div className="p-6">
-          {selectedPo ? (
-            /* PO Detail view */
-            <div className="max-w-3xl">
-              <div className="flex items-center gap-3 mb-4">
-                <button
-                  onClick={() => setSelectedPo(null)}
-                  className="text-sm text-muted-foreground hover:text-foreground px-3 py-1.5 border rounded-lg"
-                >
-                  ← Back
-                </button>
-                <div>
-                  <div className="font-bold text-lg">{selectedPo.poNumber}</div>
-                  {selectedPo.customerPoNumber && (
-                    <div className="text-xs text-muted-foreground">Customer PO: {selectedPo.customerPoNumber}</div>
-                  )}
+            {custOpen && (
+              <div className="absolute z-40 mt-1 w-64 bg-card border rounded-lg shadow-lg p-2">
+                <div className="flex items-center gap-1.5 border rounded-lg px-2 py-1 mb-2">
+                  <Search className="w-3.5 h-3.5 text-muted-foreground" />
+                  <input value={custSearch} onChange={(e) => setCustSearch(e.target.value)} placeholder="Search…"
+                    className="text-xs bg-transparent outline-none flex-1" />
                 </div>
-                <span className={`ml-auto text-xs font-semibold px-2 py-0.5 rounded-full ${
-                  selectedPo.status === "fulfilled" ? "bg-emerald-100 text-emerald-700" :
-                  selectedPo.status === "partial" ? "bg-blue-100 text-blue-700" :
-                  "bg-muted text-muted-foreground"
-                }`}>{selectedPo.status}</span>
-              </div>
-
-              {selectedPo.shipToName && (
-                <div className="mb-4 bg-card border rounded-lg p-3 text-xs">
-                  <span className="font-semibold">Ship To:</span> {selectedPo.shipToName}
-                  {selectedPo.shipToAddress && <span className="text-muted-foreground"> — {selectedPo.shipToAddress}</span>}
-                  {selectedPo.shipToPhone && <span className="text-muted-foreground"> · {selectedPo.shipToPhone}</span>}
-                </div>
-              )}
-
-              {/* Items table with shipped checkboxes */}
-              <div className="bg-card border rounded-xl overflow-hidden shadow-sm mb-4">
-                <table className="w-full text-sm">
-                  <thead className="bg-muted/50">
-                    <tr>
-                      <th className="px-3 py-2.5 text-left font-semibold">Part #</th>
-                      <th className="px-3 py-2.5 text-left font-semibold">Brand</th>
-                      <th className="px-3 py-2.5 text-right font-semibold">Qty</th>
-                      <th className="px-3 py-2.5 text-left font-semibold">Seller</th>
-                      <th className="px-3 py-2.5 text-center font-semibold">Shipped?</th>
-                      <th className="px-3 py-2.5 text-center font-semibold">Round</th>
-                    </tr>
-                  </thead>
-                  <tbody className="divide-y">
-                    {selectedPo.items.map((it) => {
-                      const alreadyDispatched = it.dispatch_round_shipped != null;
-                      const isShipped = it.shipped_status === "shipped";
-                      return (
-                        <tr key={it.id} className={`${alreadyDispatched ? "opacity-50" : "hover:bg-muted/30"}`}>
-                          <td className="px-3 py-2.5">
-                            <div className="font-mono font-semibold text-xs">{it.part_number || "—"}</div>
-                            {it.description && <div className="text-xs text-muted-foreground">{it.description}</div>}
-                          </td>
-                          <td className="px-3 py-2.5 text-xs">{it.brand || "—"}</td>
-                          <td className="px-3 py-2.5 text-right text-xs">{it.qty}</td>
-                          <td className="px-3 py-2.5 text-xs">
-                            {it.awaiting_lock ? (
-                              <span className="inline-flex items-center rounded-full bg-amber-100 px-2 py-0.5 text-[10px] font-semibold text-amber-700">
-                                Awaiting vendor lock
-                              </span>
-                            ) : (
-                              it.vendor_name || <span className="text-muted-foreground">—</span>
-                            )}
-                          </td>
-                          <td className="px-3 py-2.5 text-center">
-                            {alreadyDispatched ? (
-                              <Check className="w-4 h-4 text-emerald-500 mx-auto" />
-                            ) : (
-                              <input
-                                type="checkbox"
-                                checked={isShipped}
-                                onChange={() => toggleItemShipped(it.id, it.shipped_status)}
-                                className="w-4 h-4 rounded accent-accent cursor-pointer"
-                              />
-                            )}
-                          </td>
-                          <td className="px-3 py-2.5 text-center text-xs text-muted-foreground">
-                            {it.dispatch_round_shipped ?? "—"}
-                          </td>
-                        </tr>
-                      );
-                    })}
-                    {selectedPo.items.length === 0 && (
-                      <tr><td colSpan={6} className="px-3 py-8 text-center text-muted-foreground text-xs">No items</td></tr>
-                    )}
-                  </tbody>
-                </table>
-              </div>
-
-              {/* Submit Day form */}
-              <div className="bg-card border rounded-xl p-4 shadow-sm">
-                <div className="font-semibold text-sm mb-3">Submit Day Dispatch</div>
-                <div className="grid grid-cols-2 gap-3 mb-3">
-                  <label className="text-xs font-semibold block">
-                    Docket / AWB Number <span className="text-red-500">*</span>
-                    <input
-                      value={submitDocket}
-                      onChange={(e) => setSubmitDocket(e.target.value)}
-                      placeholder="e.g. 123456789"
-                      className="mt-1 w-full border rounded-lg px-3 py-2 bg-background text-sm font-normal"
-                    />
-                  </label>
-                  <label className="text-xs font-semibold block">
-                    Courier
-                    <input
-                      value={submitCourier}
-                      onChange={(e) => setSubmitCourier(e.target.value)}
-                      placeholder="e.g. Delhivery, DTDC"
-                      className="mt-1 w-full border rounded-lg px-3 py-2 bg-background text-sm font-normal"
-                    />
-                  </label>
-                </div>
-                <div className="flex items-center justify-between">
-                  <p className="text-xs text-muted-foreground">
-                    {selectedPo.items.filter((it) => it.shipped_status === "shipped" && it.dispatch_round_shipped == null).length} item(s) marked shipped (new)
-                  </p>
-                  <button
-                    onClick={submitDay}
-                    disabled={submitting || !submitDocket}
-                    className="px-5 py-2 bg-accent text-accent-foreground rounded-lg text-sm font-semibold inline-flex items-center gap-2 disabled:opacity-50"
-                  >
-                    {submitting ? (
-                      <><Loader2 className="w-4 h-4 animate-spin" /> Submitting…</>
-                    ) : (
-                      <><Truck className="w-4 h-4" /> Submit Day</>
-                    )}
-                  </button>
+                {customerIds.length > 0 && (
+                  <button onClick={() => setCustomerIds([])} className="text-[11px] text-accent hover:underline mb-1">Clear all</button>
+                )}
+                <div className="max-h-56 overflow-y-auto space-y-0.5">
+                  {filteredCustomers.length === 0 ? <div className="text-xs text-muted-foreground px-2 py-1">No customers</div> :
+                    filteredCustomers.map((c) => (
+                      <label key={c.id} className="flex items-center gap-2 px-2 py-1 rounded hover:bg-muted cursor-pointer text-xs">
+                        <input type="checkbox" checked={customerIds.includes(c.id)} onChange={() => toggleCustomer(c.id)} />
+                        <span className="truncate">{c.name}</span>
+                      </label>
+                    ))}
                 </div>
               </div>
-            </div>
-          ) : (
-            /* PO List view */
-            <div>
-              <div className="mb-4 flex items-center justify-between">
-                <h2 className="font-bold text-lg">Active Purchase Orders</h2>
-                <div className="flex items-center gap-3">
-                  <label className="text-xs text-muted-foreground inline-flex items-center gap-1.5 cursor-pointer">
-                    <input
-                      type="checkbox"
-                      checked={includePending}
-                      onChange={(e) => setIncludePending(e.target.checked)}
-                      className="w-3.5 h-3.5 rounded accent-accent cursor-pointer"
-                    />
-                    Show pending (split) POs
-                  </label>
-                  <span className="text-xs text-muted-foreground">Auto-refreshes every 15s</span>
-                </div>
-              </div>
+            )}
+          </div>
 
-              {poLoading && (
-                <div className="py-8 text-center text-muted-foreground">
-                  <Loader2 className="w-5 h-5 animate-spin inline" />
-                </div>
-              )}
-
-              {!poLoading && activePOs.length === 0 && (
-                <div className="py-12 text-center text-muted-foreground border border-dashed rounded-xl text-sm">
-                  No active POs in queue.
-                </div>
-              )}
-
-              <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
-                {activePOs.map((po) => {
-                  const progress = po.item_count > 0 ? Math.round((po.shipped_count / po.item_count) * 100) : 0;
-                  return (
-                    <div
-                      key={po.id}
-                      onClick={() => loadPoDetail(po.id)}
-                      className="bg-card border rounded-xl p-4 shadow-sm cursor-pointer hover:border-accent transition-colors"
-                    >
-                      <div className="flex items-start justify-between gap-2 mb-2">
-                        <div>
-                          <div className="font-bold text-sm">{po.po_number}</div>
-                          {po.customer_name && (
-                            <div className="text-xs text-muted-foreground mt-0.5">{po.customer_name}</div>
-                          )}
-                        </div>
-                        <span className={`text-xs font-semibold px-2 py-0.5 rounded-full flex-shrink-0 ${
-                          po.status === "fulfilled" ? "bg-emerald-100 text-emerald-700" :
-                          po.status === "partial" ? "bg-blue-100 text-blue-700" :
-                          "bg-amber-100 text-amber-700"
-                        }`}>{po.status}</span>
-                      </div>
-                      {po.ship_to_name && (
-                        <div className="text-xs text-muted-foreground mb-2">Ship to: {po.ship_to_name}</div>
-                      )}
-                      <div className="flex items-center gap-2">
-                        <div className="flex-1 h-1.5 bg-muted rounded-full overflow-hidden">
-                          <div
-                            className="h-full bg-emerald-500 rounded-full transition-all"
-                            style={{ width: `${progress}%` }}
-                          />
-                        </div>
-                        <span className="text-xs text-muted-foreground flex-shrink-0">
-                          {po.shipped_count}/{po.item_count} shipped
-                        </span>
-                      </div>
-                      {po.dispatch_round && po.dispatch_round > 1 && (
-                        <div className="text-xs text-muted-foreground mt-1">
-                          Round {po.dispatch_round - 1} dispatched
-                        </div>
-                      )}
-                    </div>
-                  );
-                })}
-              </div>
-            </div>
-          )}
-        </div>
-      )}
-
-      {/* Legacy dispatch modal */}
-      {dispatchItem && (
-        <div
-          className="fixed inset-0 bg-black/40 flex items-center justify-center z-50 p-4"
-          onClick={() => setDispatchItem(null)}
-        >
-          <div
-            className="bg-card rounded-xl p-6 w-full max-w-sm shadow-xl"
-            onClick={(e) => e.stopPropagation()}
-          >
-            <h2 className="font-bold text-lg mb-1">Dispatch {dispatchItem.partNumber}</h2>
-            <p className="text-xs text-muted-foreground mb-4">
-              To {dispatchItem.clientName} ({dispatchItem.clientCity})
-            </p>
-            <div className="space-y-3">
-              <label className="text-xs font-semibold block">
-                Docket / AWB Number
-                <input
-                  value={docket}
-                  onChange={(e) => setDocket(e.target.value)}
-                  className="mt-1 w-full border rounded-lg px-3 py-2 bg-background text-sm font-normal"
-                />
-              </label>
-              <label className="text-xs font-semibold block">
-                Courier
-                <input
-                  value={courier}
-                  onChange={(e) => setCourier(e.target.value)}
-                  placeholder="e.g. Delhivery, DTDC"
-                  className="mt-1 w-full border rounded-lg px-3 py-2 bg-background text-sm font-normal"
-                />
-              </label>
-            </div>
-            <div className="flex justify-end gap-2 mt-5">
-              <button onClick={() => setDispatchItem(null)} className="px-4 py-2 border rounded-lg text-sm">
-                Cancel
+          {/* Status chips */}
+          <div className="flex flex-wrap items-center gap-1.5">
+            {[...BUCKETS.slice(0, 3), TO_DISPATCH, BUCKETS[3]].map((b) => (
+              <button key={b.key} onClick={() => setStatusOn((s) => ({ ...s, [b.key]: !s[b.key] }))}
+                className={`text-[11px] font-semibold rounded-full px-2.5 py-1 border transition ${statusOn[b.key] ? `${b.color} border-transparent` : "bg-background text-muted-foreground border-border"}`}>
+                {b.label}
               </button>
-              <button
-                onClick={() => setStatus.mutate({ id: dispatchItem.id, status: "dispatched", docket_no: docket, courier })}
-                disabled={setStatus.isPending}
-                className="px-4 py-2 bg-accent text-accent-foreground rounded-lg text-sm font-semibold disabled:opacity-50"
-              >
-                Confirm Dispatch
-              </button>
-            </div>
+            ))}
           </div>
         </div>
-      )}
+
+        {isLoading ? (
+          <div className="text-center text-muted-foreground py-16">Loading POs…</div>
+        ) : view === "table" ? (
+          <TableView pos={filtered} onOpen={openPo} />
+        ) : view === "kanban" ? (
+          <KanbanView pos={filtered} onOpen={openPo} />
+        ) : (
+          <TabsView pos={filtered} onOpen={openPo} activeTab={activeTab} setActiveTab={setActiveTab} />
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ─── Shared row layout for Table + Tabs ───
+function PoTable({ pos, onOpen }: { pos: PoRow[]; onOpen: (id: number) => void }) {
+  if (pos.length === 0) return <div className="p-12 text-center text-muted-foreground">No POs match these filters.</div>;
+  return (
+    <table className="w-full text-sm">
+      <thead><tr className="bg-muted/50 text-left">
+        <th className="px-3 py-3 font-semibold">PO #</th>
+        <th className="px-3 py-3 font-semibold">Customer</th>
+        <th className="px-3 py-3 font-semibold">Date</th>
+        <th className="px-3 py-3 font-semibold">Status</th>
+        <th className="px-3 py-3 font-semibold">Lines</th>
+        <th className="px-3 py-3 font-semibold text-right">Total Qty</th>
+        <th className="px-3 py-3 font-semibold text-right">Open</th>
+      </tr></thead>
+      <tbody className="divide-y">{pos.map((p) => {
+        const m = bucketMeta(p.bucket);
+        return (
+          <tr key={p.id} className="hover:bg-muted/30 cursor-pointer" onClick={() => onOpen(p.id)}>
+            <td className="px-3 py-3 font-semibold">{p.po_number}</td>
+            <td className="px-3 py-3">{p.customer_name || "—"}</td>
+            <td className="px-3 py-3 text-xs text-muted-foreground">{fmt(p.po_date || p.created_at)}</td>
+            <td className="px-3 py-3"><span className={`text-xs font-bold rounded px-2 py-1 ${m.color}`}>{m.label}</span></td>
+            <td className="px-3 py-3 text-xs">{linesSummary(p)}</td>
+            <td className="px-3 py-3 text-right">{p.total_qty}</td>
+            <td className="px-3 py-3 text-right">
+              <button onClick={(e) => { e.stopPropagation(); onOpen(p.id); }}
+                className="text-accent font-semibold hover:underline text-xs inline-flex items-center gap-1">
+                <Package className="w-3.5 h-3.5" /> Open
+              </button>
+            </td>
+          </tr>
+        );
+      })}</tbody>
+    </table>
+  );
+}
+
+function TableView({ pos, onOpen }: { pos: PoRow[]; onOpen: (id: number) => void }) {
+  return <div className="bg-card border rounded-xl overflow-x-auto shadow-sm"><PoTable pos={pos} onOpen={onOpen} /></div>;
+}
+
+function TabsView({ pos, onOpen, activeTab, setActiveTab }: { pos: PoRow[]; onOpen: (id: number) => void; activeTab: string; setActiveTab: (s: string) => void; }) {
+  const tabs = BUCKETS;
+  const byBucket = (key: string) => pos.filter((p) => p.bucket === key);
+  return (
+    <div>
+      <div className="flex flex-wrap gap-2 mb-4">
+        {tabs.map((t) => {
+          const count = byBucket(t.key).length;
+          return (
+            <button key={t.key} onClick={() => setActiveTab(t.key)}
+              className={`px-4 py-2 rounded-lg text-sm font-semibold transition ${activeTab === t.key ? "bg-accent text-accent-foreground shadow-sm" : "bg-card border hover:bg-muted"}`}>
+              {t.label} <span className="opacity-70">({count})</span>
+            </button>
+          );
+        })}
+      </div>
+      <div className="bg-card border rounded-xl overflow-x-auto shadow-sm">
+        <PoTable pos={byBucket(activeTab)} onOpen={onOpen} />
+      </div>
+    </div>
+  );
+}
+
+function KanbanView({ pos, onOpen }: { pos: PoRow[]; onOpen: (id: number) => void }) {
+  const cols = [
+    { key: "pending", label: "To Pick Up" },
+    { key: "collected", label: "Received" },
+    { key: "packed", label: "Packed" },
+    { key: "packed_dispatch", label: "To Dispatch" },
+  ];
+  // "Packed" and "To Dispatch" both surface packed POs; To Dispatch highlights those with packed lines ready.
+  function inCol(p: PoRow, key: string) {
+    if (key === "packed") return p.bucket === "packed";
+    if (key === "packed_dispatch") return p.packed_count > 0 && p.bucket !== "dispatched";
+    return p.bucket === key;
+  }
+  return (
+    <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+      {cols.map((c) => {
+        const items = pos.filter((p) => inCol(p, c.key));
+        return (
+          <div key={c.key} className="bg-muted/30 rounded-xl p-3">
+            <div className="font-bold text-sm mb-3 flex items-center justify-between">
+              <span>{c.label}</span>
+              <span className="text-xs font-normal text-muted-foreground">{items.length}</span>
+            </div>
+            <div className="space-y-2">
+              {items.length === 0 ? <div className="text-xs text-muted-foreground border border-dashed rounded-lg p-4 text-center">Empty</div> :
+                items.map((p) => {
+                  const stateCount = c.key === "packed_dispatch" ? p.packed_count : (p.counts as any)[c.key === "packed" ? "packed" : c.key];
+                  return (
+                    <button key={p.id} onClick={() => onOpen(p.id)}
+                      className="w-full text-left bg-card border rounded-lg p-3 shadow-sm hover:shadow transition">
+                      <div className="font-semibold text-sm">{p.po_number}</div>
+                      <div className="text-xs text-muted-foreground mt-0.5 truncate">{p.customer_name || "—"}</div>
+                      <div className="text-xs mt-1.5 flex items-center justify-between">
+                        <span>{linesSummary(p)}</span>
+                        <span className="font-semibold text-accent">{stateCount} line(s)</span>
+                      </div>
+                    </button>
+                  );
+                })}
+            </div>
+          </div>
+        );
+      })}
     </div>
   );
 }
