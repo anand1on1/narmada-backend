@@ -1556,6 +1556,39 @@ function seqNumber(table: any, col: any, prefix: string): string {
   return `${pfx}${String(next).padStart(4, "0")}`;
 }
 
+// R13.6: robust PO-number generator. The legacy COUNT(*)+1 approach (seqNumber) collides
+// whenever the row count differs from the highest sequence — e.g. one active PO numbered
+// NM/PO/26/0002 makes COUNT=1 → next=0002, a duplicate. Instead we take MAX(sequence)+1
+// over BOTH active AND soft-deleted rows (so a historically-used number is never reused),
+// then defensively confirm the candidate is free, looping past any gaps/collisions.
+// FY derivation is intentionally unchanged from seqNumber (calendar year, last 2 digits).
+function nextPoNumber(prefix = "NM/PO"): string {
+  const yy = String(new Date().getFullYear()).slice(-2);
+  const pfx = `${prefix}/${yy}/`;
+  // Highest existing sequence for this FY, considering active + soft-deleted rows.
+  const maxRow = sqlite
+    .prepare(
+      `SELECT po_number FROM purchase_orders_v2
+         WHERE po_number LIKE ?
+         ORDER BY CAST(SUBSTR(po_number, -4) AS INTEGER) DESC
+         LIMIT 1`,
+    )
+    .get(`${pfx}%`) as { po_number?: string } | undefined;
+  const parseSeq = (n?: string): number => {
+    if (!n) return 0;
+    const seq = parseInt(n.slice(-4), 10);
+    return Number.isFinite(seq) ? seq : 0;
+  };
+  let nextSeq = parseSeq(maxRow?.po_number) + 1;
+  const existsStmt = sqlite.prepare(`SELECT 1 FROM purchase_orders_v2 WHERE po_number = ? LIMIT 1`);
+  for (let attempt = 0; attempt < 100; attempt++) {
+    const candidate = `${pfx}${String(nextSeq).padStart(4, "0")}`;
+    if (!existsStmt.get(candidate)) return candidate;
+    nextSeq++;
+  }
+  throw new Error(`nextPoNumber: could not allocate a free PO number for ${pfx} after 100 attempts`);
+}
+
 // -------- VENDORS --------
 export async function listVendors(opts: { q?: string; brand?: string; category?: string; activeOnly?: boolean } = {}): Promise<Vendor[]> {
   const conds: any[] = [];
@@ -1697,32 +1730,39 @@ export function computePoTotals(items: PoItem[]): { custTotal: number; costTotal
   return { custTotal, costTotal };
 }
 export async function createPurchaseOrderV2(data: Partial<InsertPurchaseOrderV2>, items: Partial<InsertPoItem>[] = []): Promise<PurchaseOrderV2> {
-  const poNumber = data.poNumber || seqNumber(purchaseOrdersV2, purchaseOrdersV2.poNumber, "NM/PO");
   const now = Date.now();
+  // R13.6: allocate the internal PO number with the robust MAX-based generator (handles
+  // gaps + historically-used soft-deleted numbers) unless the caller supplied one. The
+  // allocation + insert run inside one transaction below so the SELECT-then-INSERT is atomic.
   // R13.4: a soft-deleted PO still occupies po_number under the legacy UNIQUE constraint,
-  // which blocks reuse. Purge any soft-deleted row carrying this po_number (with its child
-  // rows) inside a transaction before inserting. Active (deleted_at IS NULL) duplicates are
+  // which blocks reuse. Purge any soft-deleted row carrying a caller-supplied po_number
+  // (with its child rows) before inserting. Active (deleted_at IS NULL) duplicates are
   // intentionally left alone so the insert still fails for genuine active-duplicate attempts.
-  const stale = sqlite
-    .prepare(`SELECT id FROM purchase_orders_v2 WHERE po_number = ? AND deleted_at IS NOT NULL`)
-    .all(poNumber) as Array<{ id: number }>;
-  for (const row of stale) {
-    const itemIds = sqlite.prepare(`SELECT id FROM po_items WHERE po_id = ?`).all(row.id) as Array<{ id: number }>;
-    const purge = sqlite.transaction(() => {
+  const purgeSoftDeleted = (poNumber: string) => {
+    const stale = sqlite
+      .prepare(`SELECT id FROM purchase_orders_v2 WHERE po_number = ? AND deleted_at IS NOT NULL`)
+      .all(poNumber) as Array<{ id: number }>;
+    for (const row of stale) {
+      const itemIds = sqlite.prepare(`SELECT id FROM po_items WHERE po_id = ?`).all(row.id) as Array<{ id: number }>;
       for (const it of itemIds) {
         sqlite.prepare(`DELETE FROM po_item_vendor_quotes WHERE po_item_id = ?`).run(it.id);
       }
       sqlite.prepare(`DELETE FROM po_items WHERE po_id = ?`).run(row.id);
       sqlite.prepare(`DELETE FROM dispatches WHERE po_id = ?`).run(row.id);
       sqlite.prepare(`DELETE FROM purchase_orders_v2 WHERE id = ?`).run(row.id);
-    });
-    purge();
-    console.log(`[R13.4] Purged soft-deleted PO ${row.id} with po_number=${poNumber} before reuse`);
-  }
-  const po = db.insert(purchaseOrdersV2).values({ ...data, poNumber, createdAt: now, updatedAt: now } as any).returning().get();
-  for (const it of items) {
-    db.insert(poItems).values({ ...it, poId: po.id } as any).run();
-  }
+      console.log(`[R13.4] Purged soft-deleted PO ${row.id} with po_number=${poNumber} before reuse`);
+    }
+  };
+  const allocateAndInsert = sqlite.transaction(() => {
+    const poNumber = data.poNumber || nextPoNumber("NM/PO");
+    purgeSoftDeleted(poNumber);
+    const created = db.insert(purchaseOrdersV2).values({ ...data, poNumber, createdAt: now, updatedAt: now } as any).returning().get();
+    for (const it of items) {
+      db.insert(poItems).values({ ...it, poId: created.id } as any).run();
+    }
+    return created;
+  });
+  const po = allocateAndInsert();
   return po;
 }
 export async function updatePurchaseOrderV2(id: number, data: Partial<InsertPurchaseOrderV2>): Promise<PurchaseOrderV2 | undefined> {
