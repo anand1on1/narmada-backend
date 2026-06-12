@@ -30,6 +30,15 @@ interface Consignment {
 
 const STATUSES: Consignment["status"][] = ["pending", "in_transit", "out_for_delivery", "delivered", "cancelled"];
 
+// Open an uploaded file (invoice/docket) in a new tab. Stored URLs may be absolute
+// (Render host) or relative; apiUrl() passes absolute through and prepends the API base
+// to relative paths so the link never resolves against the frontend SPA origin (which
+// would hit the hash-router fallback and bounce to "/").
+function openFile(url: string | null | undefined) {
+  if (!url) return;
+  window.open(apiUrl(url), "_blank", "noopener,noreferrer");
+}
+
 const emptyConsignment: Partial<Consignment> = {
   docketNumber: "", carrier: "", origin: "Patna", destination: "",
   customerName: "", customerPhone: "", customerEmail: "", bundlesCount: 1,
@@ -224,10 +233,10 @@ export default function AdminConsignments() {
                   <td className="px-4 py-3 text-muted-foreground text-xs">{c.invoiceNumber || "—"}</td>
                   <td className="px-4 py-3 text-xs whitespace-nowrap">
                     {c.invoiceUrl ? (
-                      <a href={c.invoiceUrl} target="_blank" rel="noreferrer" className="text-accent hover:underline mr-2" data-testid={`link-invoice-${c.id}`}>Invoice</a>
+                      <button type="button" onClick={() => openFile(c.invoiceUrl)} className="text-accent hover:underline mr-2" data-testid={`link-invoice-${c.id}`}>Invoice</button>
                     ) : <span className="text-muted-foreground mr-2">—</span>}
                     {c.docketUrl ? (
-                      <a href={c.docketUrl} target="_blank" rel="noreferrer" className="text-accent hover:underline" data-testid={`link-docket-${c.id}`}>Docket</a>
+                      <button type="button" onClick={() => openFile(c.docketUrl)} className="text-accent hover:underline" data-testid={`link-docket-${c.id}`}>Docket</button>
                     ) : <span className="text-muted-foreground">—</span>}
                   </td>
                   <td className="px-4 py-3 text-muted-foreground">{c.etaDate || "—"}</td>
@@ -381,7 +390,7 @@ export default function AdminConsignments() {
                   <div className="grid sm:grid-cols-2 gap-4">
                     <Field label="Invoice (PDF/JPG/PNG)">
                       {open.invoiceUrl && (
-                        <a href={open.invoiceUrl} target="_blank" rel="noreferrer" className="block text-xs text-accent hover:underline mb-1 truncate">View current invoice</a>
+                        <button type="button" onClick={() => openFile(open.invoiceUrl)} className="block text-xs text-accent hover:underline mb-1 truncate">View current invoice</button>
                       )}
                       <input type="file" accept=".pdf,image/jpeg,image/png" disabled={uploadingDocs}
                         onChange={(e) => { const f = e.target.files?.[0]; if (f) uploadDocs("invoice", f); }}
@@ -389,7 +398,7 @@ export default function AdminConsignments() {
                     </Field>
                     <Field label="Docket (PDF/JPG/PNG)">
                       {open.docketUrl && (
-                        <a href={open.docketUrl} target="_blank" rel="noreferrer" className="block text-xs text-accent hover:underline mb-1 truncate">View current docket</a>
+                        <button type="button" onClick={() => openFile(open.docketUrl)} className="block text-xs text-accent hover:underline mb-1 truncate">View current docket</button>
                       )}
                       <input type="file" accept=".pdf,image/jpeg,image/png" disabled={uploadingDocs}
                         onChange={(e) => { const f = e.target.files?.[0]; if (f) uploadDocs("docket", f); }}
