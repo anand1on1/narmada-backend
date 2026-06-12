@@ -2099,7 +2099,14 @@ export function listPurchaseHistory(opts: {
 }
 
 // -------- R8: DELHI PO LIST --------
-export async function listDelhiActivePOs(): Promise<any[]> {
+export async function listDelhiActivePOs(opts: { includePending?: boolean } = {}): Promise<any[]> {
+  // R11: Delhi sees ALL lines (the R8v2 vendor_id filter is reverted). Each PO carries an
+  // awaiting_count so the UI can badge lines still awaiting a vendor lock. Status filter:
+  // default excludes draft/cancelled and the split-off 'pending' POs unless includePending.
+  const statusExclude = opts.includePending
+    ? ['draft', 'cancelled']
+    : ['draft', 'cancelled', 'pending'];
+  const placeholders = statusExclude.map(() => "?").join(",");
   const rows = sqlite.prepare(`
     SELECT
       po.id, po.po_number, po.status, po.created_at,
@@ -2107,16 +2114,16 @@ export async function listDelhiActivePOs(): Promise<any[]> {
       po.ship_to_name, po.ship_to_address, po.ship_to_phone,
       c.name AS customer_name,
       COUNT(pi.id) AS item_count,
-      SUM(CASE WHEN pi.shipped_status = 'shipped' THEN 1 ELSE 0 END) AS shipped_count
+      SUM(CASE WHEN pi.shipped_status = 'shipped' THEN 1 ELSE 0 END) AS shipped_count,
+      SUM(CASE WHEN pi.approved_quote_id IS NULL THEN 1 ELSE 0 END) AS awaiting_count
     FROM purchase_orders_v2 po
     LEFT JOIN customers c ON c.id = po.customer_id
-    -- Delhi only sees line items that have a seller assigned (Bug 3 — partial notify).
-    LEFT JOIN po_items pi ON pi.po_id = po.id AND pi.vendor_id IS NOT NULL
-    WHERE po.is_fully_dispatched = 0 AND po.status NOT IN ('draft', 'cancelled')
+    LEFT JOIN po_items pi ON pi.po_id = po.id
+    WHERE po.is_fully_dispatched = 0 AND po.status NOT IN (${placeholders})
     GROUP BY po.id
     HAVING item_count > 0
     ORDER BY po.created_at DESC
-  `).all() as any[];
+  `).all(...statusExclude) as any[];
   return rows;
 }
 
@@ -2139,7 +2146,7 @@ export function getVendorQuote(id: number): any {
 
 export function addQuoteToPoItem(
   poItemId: number,
-  data: { vendorId?: number | null; vendorName?: string | null; vendorPhone?: string | null }
+  data: { vendorId?: number | null; vendorName?: string | null; vendorPhone?: string | null; source?: string | null }
 ): any {
   const now = Date.now();
   // Enforce one quote row per (line, vendor) — for free-text vendors vendor_id is null and
@@ -2151,9 +2158,9 @@ export function addQuoteToPoItem(
     if (existing) return existing;
   }
   const info = sqlite.prepare(
-    `INSERT INTO po_item_vendor_quotes (po_item_id, vendor_id, vendor_name, vendor_phone, status, requested_at)
-     VALUES (?, ?, ?, ?, 'requested', ?)`
-  ).run(poItemId, data.vendorId ?? null, data.vendorName ?? null, data.vendorPhone ?? null, now);
+    `INSERT INTO po_item_vendor_quotes (po_item_id, vendor_id, vendor_name, vendor_phone, status, requested_at, source)
+     VALUES (?, ?, ?, ?, 'requested', ?, ?)`
+  ).run(poItemId, data.vendorId ?? null, data.vendorName ?? null, data.vendorPhone ?? null, now, data.source ?? null);
   return getVendorQuote(Number(info.lastInsertRowid));
 }
 
@@ -2180,13 +2187,25 @@ export function setQuoteManualRate(
 
 // Approve a quote as the winner for its PO line. Atomic: marks the quote approved,
 // stamps po_items.approved_vendor_id / approved_quote_id / vendor_rate / vendor_name / vendor_id.
-export function approveQuote(poItemId: number, quoteId: number): { item: any; quote: any } | null {
+export function approveQuote(poItemId: number, quoteId: number): { item: any; quote: any; previousQuoteId: number | null } | null {
   const tx = sqlite.transaction(() => {
     const quote = sqlite.prepare(
       `SELECT * FROM po_item_vendor_quotes WHERE id = ? AND po_item_id = ?`
     ).get(quoteId, poItemId) as any;
     if (!quote) return null;
     const now = Date.now();
+    // Tolerate an existing approval on this line: unlock the previous winner (back to a
+    // received/manual-style state) so the new pick becomes the single locked vendor. Swap.
+    const item0 = sqlite.prepare(`SELECT * FROM po_items WHERE id = ?`).get(poItemId) as any;
+    let previousQuoteId: number | null = null;
+    if (item0?.approved_quote_id && item0.approved_quote_id !== quoteId) {
+      previousQuoteId = item0.approved_quote_id;
+      const prev = sqlite.prepare(`SELECT * FROM po_item_vendor_quotes WHERE id = ?`).get(previousQuoteId) as any;
+      const revertTo = prev && prev.rate != null ? "received" : "requested";
+      sqlite.prepare(
+        `UPDATE po_item_vendor_quotes SET status = ?, approved_at = NULL WHERE id = ?`
+      ).run(revertTo, previousQuoteId);
+    }
     sqlite.prepare(
       `UPDATE po_item_vendor_quotes SET status = 'approved', approved_at = ? WHERE id = ?`
     ).run(now, quoteId);
@@ -2200,7 +2219,7 @@ export function approveQuote(poItemId: number, quoteId: number): { item: any; qu
       quote.rate ?? null, quote.vendor_name ?? null, quote.rate ?? null, now, poItemId
     );
     const item = sqlite.prepare(`SELECT * FROM po_items WHERE id = ?`).get(poItemId) as any;
-    return { item, quote: getVendorQuote(quoteId) };
+    return { item, quote: getVendorQuote(quoteId), previousQuoteId };
   });
   return tx();
 }
@@ -2246,6 +2265,47 @@ export function collectPendingQuotesForFire(vendorIds: number[], poIds: number[]
     byVendor.get(r.vendor_id)!.push(r);
   }
   return byVendor;
+}
+
+// R11: collect quotes for an explicit set of (seller_id, po_item_id) rows, grouped by vendor.
+// Powers the flat-table Fire Rate Request modal's new request shape. Only DB sellers
+// (vendor_id) can be addressed here; rows whose quote is already received/approved/manual are
+// skipped so we never re-fire on an answered line.
+export function collectPendingQuotesForFireRows(rows: Array<{ seller_id: number; po_item_id: number }>): Map<number, any[]> {
+  const byVendor = new Map<number, any[]>();
+  for (const { seller_id, po_item_id } of rows) {
+    if (!seller_id || !po_item_id) continue;
+    const q = sqlite.prepare(
+      `SELECT q.*, pi.po_id, pi.part_number, pi.brand, pi.description, pi.qty, po.po_number
+       FROM po_item_vendor_quotes q
+       JOIN po_items pi ON pi.id = q.po_item_id
+       JOIN purchase_orders_v2 po ON po.id = pi.po_id
+       WHERE q.po_item_id = ? AND q.vendor_id = ?`
+    ).get(po_item_id, seller_id) as any;
+    if (!q) continue;
+    if (["received", "approved", "manual"].includes(q.status)) continue;
+    if (!byVendor.has(seller_id)) byVendor.set(seller_id, []);
+    byVendor.get(seller_id)!.push(q);
+  }
+  return byVendor;
+}
+
+// R11: every (seller, item) pair across non-cancelled POs (optionally one PO), with quote
+// status, for the flat Fire Rate Request table.
+export function listSellerItemPairs(poId?: number): any[] {
+  const conds = ["q.vendor_id IS NOT NULL", "po.status NOT IN ('cancelled')"];
+  const params: any[] = [];
+  if (poId != null) { conds.push("pi.po_id = ?"); params.push(poId); }
+  return sqlite.prepare(
+    `SELECT q.id AS quote_id, q.vendor_id AS seller_id, q.vendor_name AS seller_name,
+            q.status, q.rate, pi.id AS po_item_id, pi.part_number, pi.brand, pi.qty,
+            po.id AS po_id, po.po_number, po.customer_po_number
+     FROM po_item_vendor_quotes q
+     JOIN po_items pi ON pi.id = q.po_item_id
+     JOIN purchase_orders_v2 po ON po.id = pi.po_id
+     WHERE ${conds.join(" AND ")}
+     ORDER BY q.vendor_name, po.created_at DESC, pi.id`
+  ).all(...params) as any[];
 }
 
 // List vendors that currently have at least one pending (requested, no-rate) quote, with the
@@ -2437,4 +2497,105 @@ export function searchPurchaseOrders(q: string): any[] {
      ORDER BY po.created_at DESC
      LIMIT 20`
   ).all(like, like) as any[];
+}
+
+// ============================================================
+// R11: WORKFLOW SPLIT (Notify Delhi vs Process PO) + locked-vendor summary
+// ============================================================
+
+// Build a one-PO summary of confirmed (approved) lines for the rate-confirmed WhatsApp
+// to a single seller: their locked items only, with our PO number and total.
+export function getConfirmedItemsForVendorOnPo(poId: number, vendorId: number): {
+  poNumber: string; itemsText: string; totalAmount: number; count: number;
+} {
+  const po = sqlite.prepare(`SELECT po_number FROM purchase_orders_v2 WHERE id = ?`).get(poId) as any;
+  const rows = sqlite.prepare(
+    `SELECT pi.part_number, pi.brand, pi.qty, pi.vendor_rate
+     FROM po_items pi
+     WHERE pi.po_id = ? AND pi.approved_vendor_id = ? AND pi.approved_quote_id IS NOT NULL
+     ORDER BY pi.id`
+  ).all(poId, vendorId) as any[];
+  let total = 0;
+  const itemsText = rows
+    .map((r, i) => {
+      const qty = Number(r.qty ?? 1) || 1;
+      const rate = r.vendor_rate != null ? Number(r.vendor_rate) : 0;
+      total += rate * qty;
+      const label = [r.part_number, r.brand].filter(Boolean).join(" ");
+      return `${i + 1}. ${label} x${qty}${rate ? ` @ ₹${rate}` : ""}`;
+    })
+    .join("\n");
+  return { poNumber: po?.po_number || `PO#${poId}`, itemsText, totalAmount: total, count: rows.length };
+}
+
+// Find the PO id that owns a given po_item (used to scope the confirmed-rate WA).
+export function getPoIdForItem(poItemId: number): number | null {
+  const r = sqlite.prepare(`SELECT po_id FROM po_items WHERE id = ?`).get(poItemId) as any;
+  return r?.po_id ?? null;
+}
+
+// Process a PO: split confirmed (approved) lines from the rest. Confirmed lines stay on the
+// original PO (status -> 'processed'); unconfirmed lines move to a NEW pending PO that points
+// back at the original via parent_po_id. Returns both PO summaries. Transactional.
+export function processPurchaseOrder(poId: number): {
+  original_po: { id: number; po_number: string; status: string; confirmed_count: number };
+  pending_po: { id: number; po_number: string; status: string; moved_count: number } | null;
+} {
+  const tx = sqlite.transaction(() => {
+    const orig = sqlite.prepare(`SELECT * FROM purchase_orders_v2 WHERE id = ?`).get(poId) as any;
+    if (!orig) throw new Error("PO not found");
+
+    const confirmed = sqlite.prepare(
+      `SELECT * FROM po_items WHERE po_id = ? AND approved_quote_id IS NOT NULL`
+    ).all(poId) as any[];
+    const unconfirmed = sqlite.prepare(
+      `SELECT * FROM po_items WHERE po_id = ? AND approved_quote_id IS NULL`
+    ).all(poId) as any[];
+
+    if (confirmed.length === 0) throw new Error("No confirmed lines to process");
+
+    let pendingPo: any = null;
+    if (unconfirmed.length > 0) {
+      // New internal NM/PO number; keep the same customer PO number.
+      const yy = String(new Date().getFullYear()).slice(-2);
+      const pfx = `NM/PO/${yy}/`;
+      const cntRow = sqlite.prepare(
+        `SELECT COUNT(*) AS c FROM purchase_orders_v2 WHERE po_number LIKE ?`
+      ).get(`${pfx}%`) as any;
+      const newPoNumber = `${pfx}${String(((cntRow?.c as number) || 0) + 1).padStart(4, "0")}`;
+      const now = Date.now();
+      const dateStr = new Date().toISOString().slice(0, 10);
+      const notes = `Split from ${orig.po_number} on ${dateStr}`;
+      const info = sqlite.prepare(
+        `INSERT INTO purchase_orders_v2
+           (po_number, quotation_id, customer_id, company_id, status, subtotal, discount, tax, total,
+            notes, created_by, created_at, updated_at, customer_po_number, customer_po_url,
+            ship_to_name, ship_to_address, ship_to_phone, po_date, parent_po_id)
+         VALUES (?, ?, ?, ?, 'pending', 0, 0, 0, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      ).run(
+        newPoNumber, orig.quotation_id ?? null, orig.customer_id ?? null, orig.company_id ?? null,
+        notes, orig.created_by ?? null, now, now,
+        orig.customer_po_number ?? null, orig.customer_po_url ?? null,
+        orig.ship_to_name ?? null, orig.ship_to_address ?? null, orig.ship_to_phone ?? null,
+        orig.po_date ?? null, poId,
+      );
+      const newPoId = Number(info.lastInsertRowid);
+      // Move unconfirmed lines (and their quote rows) to the new PO.
+      for (const it of unconfirmed) {
+        sqlite.prepare(`UPDATE po_items SET po_id = ? WHERE id = ?`).run(newPoId, it.id);
+      }
+      pendingPo = {
+        id: newPoId, po_number: newPoNumber, status: "pending", moved_count: unconfirmed.length,
+      };
+    }
+
+    sqlite.prepare(`UPDATE purchase_orders_v2 SET status = 'processed', updated_at = ? WHERE id = ?`)
+      .run(Date.now(), poId);
+
+    return {
+      original_po: { id: poId, po_number: orig.po_number, status: "processed", confirmed_count: confirmed.length },
+      pending_po: pendingPo,
+    };
+  });
+  return tx();
 }

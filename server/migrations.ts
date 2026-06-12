@@ -384,3 +384,24 @@ export function runR10Migrations() {
 
   console.log("[migrations] R10 tables/columns ensured");
 }
+
+// -------- R11 additive migrations --------
+// Workflow split (Notify vs Process), global Sonar search source tagging, pending-split linkage.
+export function runR11Migrations() {
+  const stmts: Array<{ desc: string; sql: string }> = [
+    // quote source: null/db (DB seller), 'global' (Perplexity), 'manual' (free-text)
+    { desc: "po_item_vendor_quotes.source", sql: `ALTER TABLE po_item_vendor_quotes ADD COLUMN source TEXT` },
+    // pending-split linkage: a split-off pending PO points back at its origin
+    { desc: "purchase_orders_v2.parent_po_id", sql: `ALTER TABLE purchase_orders_v2 ADD COLUMN parent_po_id INTEGER` },
+  ];
+  for (const { desc, sql } of stmts) {
+    console.log(`[migrations] R11: ${desc}`);
+    try {
+      sqlite.exec(sql);
+    } catch (err: any) {
+      console.log(`[migrations] R11: skipped ${desc} —`, err?.message || err);
+    }
+  }
+
+  console.log("[migrations] R11 tables/columns ensured");
+}

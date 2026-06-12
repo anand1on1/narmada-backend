@@ -109,8 +109,9 @@ export default function TeamPOUpload() {
       });
       const j = await r.json();
       if (!r.ok) { toast({ title: "Failed to create PO", description: j.error, variant: "destructive" }); return; }
-      toast({ title: `PO ${j.poNumber} created!` });
-      navigate(`/team/purchase-orders/${j.id}`);
+      toast({ title: `PO ${j.poNumber} created!`, description: "Assign sellers from the PO list." });
+      // R11: vendor assignment happens later on the merged PO page — return to the list.
+      navigate(`/team/purchase-orders`);
     } catch (e: any) {
       toast({ title: "Error", description: e.message, variant: "destructive" });
     } finally {

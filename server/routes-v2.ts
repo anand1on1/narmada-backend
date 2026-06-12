@@ -3137,8 +3137,34 @@ function registerR9Routes(
       Promise.resolve(v2.writeAuditLog({
         actorType: "data_team", actorId: String(u?.id || ""), action: "approve_quote",
         entityType: "po_item", entityId: String(id),
-        afterJson: JSON.stringify({ quoteId, rate: result.quote?.rate, vendorId: result.quote?.vendor_id }),
+        afterJson: JSON.stringify({ quoteId, rate: result.quote?.rate, vendorId: result.quote?.vendor_id, previousQuoteId: result.previousQuoteId }),
       })).catch(() => {});
+      // R11: fire-and-forget rate-confirmed WhatsApp to the locked seller for this PO's confirmed lines.
+      const q = result.quote;
+      const confirmPhone = q?.vendor_phone || null;
+      const poId = v2.getPoIdForItem(id);
+      if ((confirmPhone || q?.vendor_id) && poId) {
+        setImmediate(() => {
+          (async () => {
+            const wa = require("./whatsapp") as typeof import("./whatsapp");
+            let phone = confirmPhone;
+            if (!phone && q?.vendor_id) {
+              const vendor = await v2.getVendor(q.vendor_id);
+              phone = vendor?.whatsapp || vendor?.phone || null;
+            }
+            if (!phone) return;
+            const summary = q?.vendor_id
+              ? v2.getConfirmedItemsForVendorOnPo(poId, q.vendor_id)
+              : { poNumber: "-", itemsText: "", totalAmount: 0, count: 0 };
+            await wa.sendVendorRateConfirmed(phone, {
+              vendorName: q?.vendor_name || "Seller",
+              ourPoNumber: summary.poNumber,
+              itemsText: summary.itemsText || `${q?.vendor_name || "item"}`,
+              totalAmount: String(summary.totalAmount || q?.rate || 0),
+            });
+          })().catch((err) => console.error("[approve] rate-confirmed WA failed:", err));
+        });
+      }
       res.json(result);
     } catch (e: any) { res.status(500).json({ error: e.message }); }
   });
@@ -3155,13 +3181,24 @@ function registerR9Routes(
   // ---- Fire Rate Request (batched, one consolidated WA per vendor) ----
   app.post("/api/team/rfq/fire", requireDataTeam, async (req: any, res: any) => {
     try {
-      const { vendor_ids, po_ids } = req.body || {};
-      const vendorIds: number[] = Array.isArray(vendor_ids) ? vendor_ids.map((n: any) => parseInt(n, 10)).filter(Boolean) : [];
-      const poIds: number[] = Array.isArray(po_ids) ? po_ids.map((n: any) => parseInt(n, 10)).filter(Boolean) : [];
-      if (vendorIds.length === 0 || poIds.length === 0) {
-        return res.status(400).json({ error: "vendor_ids and po_ids required" });
+      const { vendor_ids, po_ids, rows } = req.body || {};
+      let byVendor: Map<number, any[]>;
+      if (Array.isArray(rows) && rows.length > 0) {
+        // R11 new shape: explicit (seller_id, po_item_id) rows.
+        const cleaned = rows
+          .map((r: any) => ({ seller_id: parseInt(r.seller_id, 10), po_item_id: parseInt(r.po_item_id, 10) }))
+          .filter((r: any) => r.seller_id && r.po_item_id);
+        if (cleaned.length === 0) return res.status(400).json({ error: "rows must contain seller_id + po_item_id" });
+        byVendor = v2.collectPendingQuotesForFireRows(cleaned);
+      } else {
+        // Legacy shape: vendor_ids + po_ids.
+        const vendorIds: number[] = Array.isArray(vendor_ids) ? vendor_ids.map((n: any) => parseInt(n, 10)).filter(Boolean) : [];
+        const poIds: number[] = Array.isArray(po_ids) ? po_ids.map((n: any) => parseInt(n, 10)).filter(Boolean) : [];
+        if (vendorIds.length === 0 || poIds.length === 0) {
+          return res.status(400).json({ error: "vendor_ids and po_ids (or rows) required" });
+        }
+        byVendor = v2.collectPendingQuotesForFire(vendorIds, poIds);
       }
-      const byVendor = v2.collectPendingQuotesForFire(vendorIds, poIds);
       let firedVendors = 0; let firedItems = 0;
       for (const [vendorId, items] of Array.from(byVendor.entries())) {
         if (!items.length) continue;
@@ -3194,6 +3231,14 @@ function registerR9Routes(
   app.get("/api/team/rfq/pending-vendors", requireDataTeam, async (_req: any, res: any) => {
     try { res.json(v2.listVendorsWithPendingQuotes()); }
     catch (e: any) { res.status(500).json({ error: e.message }); }
+  });
+
+  // ---- R11: flat (seller, item) pairs for the redesigned Fire Rate Request table ----
+  app.get("/api/team/rfq/pairs", requireDataTeam, async (req: any, res: any) => {
+    try {
+      const poId = req.query.po_id ? parseInt(req.query.po_id as string, 10) : undefined;
+      res.json(v2.listSellerItemPairs(poId));
+    } catch (e: any) { res.status(500).json({ error: e.message }); }
   });
 
   // ---- Embedded chat ----
@@ -3263,6 +3308,158 @@ function registerR9Routes(
       if (!q) return res.json([]);
       res.json(v2.searchPurchaseOrders(q));
     } catch (e: any) { res.status(500).json({ error: e.message }); }
+  });
+
+  // ============================================================
+  // R11: global Sonar search, chat AI assist + send, process PO
+  // ============================================================
+
+  // Normalize an Indian phone to E.164 (+91XXXXXXXXXX). Accepts with/without country code.
+  function toE164India(raw: any): string | null {
+    const digits = String(raw || "").replace(/[^0-9]/g, "");
+    if (!digits) return null;
+    if (digits.length === 10) return `+91${digits}`;
+    if (digits.length === 12 && digits.startsWith("91")) return `+${digits}`;
+    if (digits.length === 11 && digits.startsWith("0")) return `+91${digits.slice(1)}`;
+    if (digits.startsWith("91") && digits.length > 12) return `+${digits.slice(0, 12)}`;
+    return `+${digits}`;
+  }
+
+  // ---- Per-line global seller search (Perplexity Sonar) ----
+  app.post("/api/team/po-items/:id/global-search", requireDataTeam, async (req: any, res: any) => {
+    try {
+      const id = parseInt(req.params.id as string, 10);
+      const key = process.env.PPLX_API_KEY || "";
+      if (!key) return res.status(503).json({ error: "PPLX_API_KEY not configured" });
+      let query = String(req.body?.query || "").trim();
+      if (!query) {
+        const item = await v2.getPoItem(id);
+        query = [item?.brand, item?.partNumber, item?.description, "wholesale supplier India"].filter(Boolean).join(" ");
+      }
+      const prompt = `Find wholesale sellers/distributors in India for this automotive spare part:\n${query}\n\nReturn a JSON array of suppliers with: name, phone (with country code), location (city, state), website (if any), gst_number (if found), source_url. Aim for 5-10 results. Only return JSON, no preamble.`;
+      const r = await fetch("https://api.perplexity.ai/chat/completions", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "Authorization": `Bearer ${key}` },
+        body: JSON.stringify({
+          model: "sonar",
+          messages: [{ role: "user", content: prompt }],
+          return_citations: true,
+        }),
+      });
+      const j: any = await r.json().catch(() => ({}));
+      if (!r.ok) return res.status(502).json({ error: j?.error?.message || "Perplexity error" });
+      const content = j?.choices?.[0]?.message?.content || "[]";
+      let results: any[] = [];
+      try {
+        const cleaned = String(content).replace(/```(?:json)?/gi, "").trim();
+        const start = cleaned.indexOf("[");
+        const end = cleaned.lastIndexOf("]");
+        const slice = start >= 0 && end > start ? cleaned.slice(start, end + 1) : cleaned;
+        results = JSON.parse(slice);
+      } catch (parseErr) {
+        console.error("[global-search] JSON parse failed. Raw response:", content);
+        results = [];
+      }
+      res.json({ query, results: Array.isArray(results) ? results : [], citations: j?.citations || [] });
+    } catch (e: any) { res.status(500).json({ error: e.message }); }
+  });
+
+  // ---- Add a global-search result as a quote AND immediately fire a single-item rate request ----
+  app.post("/api/team/po-items/:id/quotes/global-send", requireDataTeam, async (req: any, res: any) => {
+    try {
+      const id = parseInt(req.params.id as string, 10);
+      const { vendor_name, vendor_phone } = req.body || {};
+      if (!vendor_name && !vendor_phone) return res.status(400).json({ error: "vendor_name or vendor_phone required" });
+      const phone = toE164India(vendor_phone);
+      const row = v2.addQuoteToPoItem(id, {
+        vendorId: null, vendorName: vendor_name ? String(vendor_name) : null, vendorPhone: phone, source: "global",
+      });
+      const item = await v2.getPoItem(id);
+      const poId = v2.getPoIdForItem(id);
+      const po = poId ? await v2.getPurchaseOrderV2(poId) : null;
+      const vendorName = vendor_name ? String(vendor_name) : "Seller";
+      // Persist outbound copy so chat reflects it even before AiSensy responds.
+      v2.addRfqMessage({ vendorId: null, vendorPhone: phone, direction: "out",
+        body: `Rate request to ${vendorName} for ${[item?.partNumber, item?.brand].filter(Boolean).join(" ")} x${item?.qty ?? 1}` });
+      if (phone) {
+        setImmediate(() => {
+          (async () => {
+            const wa = require("./whatsapp") as typeof import("./whatsapp");
+            await wa.sendVendorRateRequest(phone, {
+              vendorName,
+              partNumber: item?.partNumber || "-",
+              brand: item?.brand || "",
+              qty: String(item?.qty ?? 1),
+              ourPoNumber: po?.poNumber || "-",
+            });
+          })().catch((err) => console.error("[global-send] rate request failed:", err));
+        });
+      }
+      res.json({ ok: true, quote: row, sent: !!phone });
+    } catch (e: any) { res.status(500).json({ error: e.message }); }
+  });
+
+  // ---- Chat: AI assist (draft a reply via Perplexity Sonar) ----
+  app.post("/api/team/rfq/chat/:vendorId/ai-assist", requireDataTeam, async (req: any, res: any) => {
+    try {
+      const key = process.env.PPLX_API_KEY || "";
+      if (!key) return res.status(503).json({ error: "PPLX_API_KEY not configured" });
+      const question = String(req.body?.question || "").trim();
+      if (!question) return res.status(400).json({ error: "question required" });
+      const ctx = Array.isArray(req.body?.context)
+        ? req.body.context.map((m: any) => `${m.direction === "out" ? "Us" : "Seller"}: ${m.body || ""}`).join("\n")
+        : String(req.body?.context || "");
+      const prompt = `You are helping a procurement team respond to a spare parts seller on WhatsApp. The seller asked a technical/specification question. Based on chat context, draft a concise reply (≤80 words, Hinglish OK). Be factual; cite specs if relevant.\n\nRecent chat:\n${ctx}\n\nQuestion to answer: ${question}`;
+      const r = await fetch("https://api.perplexity.ai/chat/completions", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "Authorization": `Bearer ${key}` },
+        body: JSON.stringify({ model: "sonar", messages: [{ role: "user", content: prompt }] }),
+      });
+      const j: any = await r.json().catch(() => ({}));
+      if (!r.ok) return res.status(502).json({ error: j?.error?.message || "Perplexity error" });
+      const suggestion = j?.choices?.[0]?.message?.content || "";
+      res.json({ suggestion: String(suggestion).trim() });
+    } catch (e: any) { res.status(500).json({ error: e.message }); }
+  });
+
+  // ---- Chat: outbound free-text message to a seller ----
+  app.post("/api/team/rfq/chat/:vendorId/send", requireDataTeam, async (req: any, res: any) => {
+    try {
+      const vendorId = parseInt(req.params.vendorId as string, 10);
+      const body = String(req.body?.body || "").trim();
+      if (!body) return res.status(400).json({ error: "body required" });
+      const vendor = await v2.getVendor(vendorId);
+      const phone = vendor?.whatsapp || vendor?.phone || null;
+      const row = v2.addRfqMessage({ vendorId, vendorPhone: phone, direction: "out", body });
+      if (phone) {
+        setImmediate(() => {
+          (async () => {
+            const wa = require("./whatsapp") as typeof import("./whatsapp");
+            await wa.sendTextMessage(phone, body, "rfq_chat_reply");
+          })().catch((err) => console.error("[rfq-chat-send] failed:", err));
+        });
+      }
+      res.json({ ok: true, message: row, sent: !!phone });
+    } catch (e: any) { res.status(500).json({ error: e.message }); }
+  });
+
+  // ---- Process PO: split confirmed lines from unconfirmed (clone to pending PO) ----
+  app.post("/api/team/po/:id/process", requireDataTeam, async (req: any, res: any) => {
+    try {
+      const id = parseInt(req.params.id as string, 10);
+      const result = v2.processPurchaseOrder(id);
+      const u = (req as any).teamUser;
+      Promise.resolve(v2.writeAuditLog({
+        actorType: "data_team", actorId: String(u?.id || ""), action: "process_po",
+        entityType: "purchase_order", entityId: String(id),
+        afterJson: JSON.stringify(result),
+      })).catch(() => {});
+      res.json(result);
+    } catch (e: any) {
+      const msg = e?.message || "Process failed";
+      const code = /No confirmed lines|not found/i.test(msg) ? 400 : 500;
+      res.status(code).json({ error: msg });
+    }
   });
 
   // ---- Outstanding today ----
@@ -3645,23 +3842,27 @@ function registerR8Routes(
       const id = parseInt(req.params.id as string, 10);
       const po = await v2.getPurchaseOrderV2(id);
       if (!po) return res.status(404).json({ error: "PO not found" });
-      const assigned = po.items.filter((it: any) => it.vendorId != null);
-      if (assigned.length === 0) {
-        return res.status(400).json({ error: "Assign at least one seller before notifying Delhi" });
+      // R11: Notify Delhi sends the CURRENT PO state — ALL lines (confirmed + unconfirmed).
+      // Delhi sees everything with a badge for lines still awaiting a vendor lock.
+      if (po.items.length === 0) {
+        return res.status(400).json({ error: "PO has no line items" });
       }
+      const confirmed = po.items.filter((it: any) => it.approvedQuoteId != null || it.vendorId != null);
       await v2.updatePurchaseOrderV2(id, { notifiedDelhiAt: Date.now(), status: po.status === "draft" ? "open" : po.status } as any);
-      res.json({ ok: true, assignedCount: assigned.length });
+      res.json({ ok: true, totalCount: po.items.length, assignedCount: confirmed.length, awaitingCount: po.items.length - confirmed.length });
     } catch (e: any) {
       res.status(500).json({ error: e.message });
     }
   });
 
   // ---- GET /api/delhi/pos ----
-  // List active POs for Delhi warehouse (poll-friendly, no-cache)
-  app.get("/api/delhi/pos", requireDelhi, async (_req: any, res: any) => {
+  // List active POs for Delhi warehouse (poll-friendly, no-cache). R11: ?include_pending=1
+  // to also show split-off pending POs.
+  app.get("/api/delhi/pos", requireDelhi, async (req: any, res: any) => {
     try {
       res.set("Cache-Control", "no-cache, no-store, must-revalidate");
-      res.json(await v2.listDelhiActivePOs());
+      const includePending = String(req.query.include_pending || "") === "1" || req.query.include_pending === "true";
+      res.json(await v2.listDelhiActivePOs({ includePending }));
     } catch (e: any) {
       res.status(500).json({ error: e.message });
     }

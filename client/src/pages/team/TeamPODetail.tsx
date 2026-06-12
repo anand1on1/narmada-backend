@@ -10,9 +10,9 @@ import { TeamLayout } from "./TeamLayout";
 import { teamFetch, useTeamAuth, getTeamToken } from "@/lib/team-auth";
 import { useToast } from "@/hooks/use-toast";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { useParams } from "wouter";
+import { useParams, useLocation } from "wouter";
 import { apiUrl } from "@/lib/queryClient";
-import { Download, Check, Loader2, Package, Pencil, Calendar, Send, Flame } from "lucide-react";
+import { Download, Check, Loader2, Package, Pencil, Calendar, Send, Flame, CheckCircle2, X } from "lucide-react";
 import { LineQuotesPanel, FireRateRequestModal } from "./R9VendorQuotes";
 
 interface PoItem {
@@ -26,6 +26,7 @@ interface PoItem {
   purchaseCost: number | null;
   vendorRate: number | null;
   vendorName: string | null;
+  approvedQuoteId: number | null;
   fulfilStatus: string | null;
   shippedStatus: string | null;
 }
@@ -119,8 +120,11 @@ export default function TeamPODetail() {
   const { token } = useTeamAuth();
   const { toast } = useToast();
   const qc = useQueryClient();
+  const [, navigate] = useLocation();
   const [notifying, setNotifying] = useState(false);
   const [showFireRfq, setShowFireRfq] = useState(false);
+  const [showProcess, setShowProcess] = useState(false);
+  const [processing, setProcessing] = useState(false);
 
   const { data: po, isLoading } = useQuery<PO>({
     queryKey: ["team-po", poId],
@@ -180,11 +184,41 @@ export default function TeamPODetail() {
       const j = await r.json().catch(() => ({}));
       if (!r.ok) throw new Error(j.error || "Notify failed");
       qc.invalidateQueries({ queryKey: ["team-po", poId] });
-      toast({ title: `Delhi notified. They can see ${j.assignedCount} assigned lines.` });
+      const awaiting = j.awaitingCount ?? 0;
+      toast({
+        title: `Delhi notified.`,
+        description: `They can see all ${j.totalCount ?? po?.items.length ?? 0} line(s)${awaiting ? ` (${awaiting} awaiting vendor lock)` : ""}.`,
+      });
     } catch (e: any) {
       toast({ title: "Error", description: e.message, variant: "destructive" });
     } finally {
       setNotifying(false);
+    }
+  }
+
+  async function processPO() {
+    setProcessing(true);
+    try {
+      const r = await teamFetch(token, `/api/team/po/${poId}/process`, { method: "POST" });
+      const j = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(j.error || "Process failed");
+      setShowProcess(false);
+      refresh();
+      const pending = j.pending_po;
+      if (pending) {
+        toast({
+          title: `PO processed.`,
+          description: `${pending.moved_count} unconfirmed item(s) moved to pending PO ${pending.po_number}.`,
+        });
+      } else {
+        toast({ title: `PO processed.`, description: `All lines confirmed — nothing moved.` });
+      }
+      // Stay on the original PO (now in 'processed' state).
+      navigate(`/team/purchase-orders/${j.original_po?.id ?? poId}`);
+    } catch (e: any) {
+      toast({ title: "Error", description: e.message, variant: "destructive" });
+    } finally {
+      setProcessing(false);
     }
   }
 
@@ -214,10 +248,9 @@ export default function TeamPODetail() {
     );
   }
 
-  const assignedCount = po.items.filter(
-    (it) => it.vendorId != null || (it.vendorRate != null) || (it.vendorName && it.vendorName.trim()),
-  ).length;
-  const anyAssigned = assignedCount > 0;
+  const confirmedCount = po.items.filter((it) => it.approvedQuoteId != null).length;
+  const unconfirmedCount = po.items.length - confirmedCount;
+  const canProcess = confirmedCount > 0;
   // Live total: prefer cost total (approved seller rates) else fall back to customer total.
   const liveTotal = po.costTotal > 0 ? po.costTotal : po.custTotal;
   const margin = po.custTotal - po.costTotal;
@@ -247,11 +280,19 @@ export default function TeamPODetail() {
           </button>
           <button
             onClick={notifyDelhi}
-            disabled={notifying || !anyAssigned}
-            title={!anyAssigned ? "Assign at least one seller first" : `Notify Delhi — they will see ${assignedCount} assigned line(s)`}
+            disabled={notifying || po.items.length === 0}
+            title={po.items.length === 0 ? "No line items" : `Notify Delhi — they will see all ${po.items.length} line(s)`}
             className="px-4 py-2 bg-accent text-accent-foreground rounded-lg text-sm font-semibold inline-flex items-center gap-2 disabled:opacity-50"
           >
             {notifying ? <><Loader2 className="w-4 h-4 animate-spin" /> Notifying…</> : <><Send className="w-4 h-4" /> Notify Delhi</>}
+          </button>
+          <button
+            onClick={() => setShowProcess(true)}
+            disabled={!canProcess}
+            title={canProcess ? `Process PO — close ${confirmedCount} confirmed line(s)` : "Lock at least one vendor rate first"}
+            className="px-4 py-2 bg-emerald-600 text-white rounded-lg text-sm font-semibold inline-flex items-center gap-2 disabled:opacity-50"
+          >
+            <CheckCircle2 className="w-4 h-4" /> Process PO
           </button>
           <button
             onClick={() => setShowFireRfq(true)}
@@ -284,14 +325,17 @@ export default function TeamPODetail() {
         </div>
       </div>
 
-      {!anyAssigned ? (
-        <div className="mb-4 px-4 py-2.5 bg-amber-50 border border-amber-200 rounded-lg text-xs text-amber-800">
-          Assign at least one seller before notifying Delhi. You don't need to assign every line — Delhi will only see the lines you've assigned.
-        </div>
-      ) : (
-        <div className="mb-4 px-4 py-2.5 bg-emerald-50 border border-emerald-200 rounded-lg text-xs text-emerald-800">
-          {assignedCount} of {po.items.length} line(s) assigned. Delhi will see only the assigned lines when notified.
-        </div>
+      {po.items.length > 0 && (
+        confirmedCount === 0 ? (
+          <div className="mb-4 px-4 py-2.5 bg-amber-50 border border-amber-200 rounded-lg text-xs text-amber-800">
+            No vendor rates locked yet. Notify Delhi to share all {po.items.length} line(s); lock at least one rate to enable Process PO.
+          </div>
+        ) : (
+          <div className="mb-4 px-4 py-2.5 bg-emerald-50 border border-emerald-200 rounded-lg text-xs text-emerald-800">
+            {confirmedCount} of {po.items.length} line(s) have a locked vendor.
+            {unconfirmedCount > 0 ? ` Processing will move ${unconfirmedCount} unconfirmed line(s) to a new pending PO.` : " All lines confirmed."}
+          </div>
+        )
       )}
 
       {po.shipToName && (
@@ -360,6 +404,39 @@ export default function TeamPODetail() {
 
       {showFireRfq && (
         <FireRateRequestModal token={token} defaultPoId={poId} onClose={() => { setShowFireRfq(false); refresh(); }} />
+      )}
+
+      {showProcess && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4" onClick={() => !processing && setShowProcess(false)}>
+          <div className="bg-card border rounded-xl shadow-xl w-full max-w-md p-6" onClick={(e) => e.stopPropagation()}>
+            <div className="flex items-center justify-between mb-3">
+              <h3 className="font-bold text-lg inline-flex items-center gap-2">
+                <CheckCircle2 className="w-5 h-5 text-emerald-600" /> Process PO
+              </h3>
+              <button onClick={() => !processing && setShowProcess(false)} className="text-muted-foreground hover:text-foreground">
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+            <p className="text-sm text-muted-foreground mb-4">
+              Close this PO with <strong className="text-foreground">{confirmedCount}</strong> confirmed line(s).
+              {unconfirmedCount > 0
+                ? <> <strong className="text-foreground">{unconfirmedCount}</strong> unconfirmed line(s) will move to a new pending PO.</>
+                : <> All lines are confirmed.</>}
+            </p>
+            <div className="flex justify-end gap-2">
+              <button onClick={() => setShowProcess(false)} disabled={processing} className="px-4 py-2 border rounded-lg text-sm disabled:opacity-50">
+                Cancel
+              </button>
+              <button
+                onClick={processPO}
+                disabled={processing}
+                className="px-5 py-2 bg-emerald-600 text-white rounded-lg text-sm font-semibold inline-flex items-center gap-2 disabled:opacity-50"
+              >
+                {processing ? <><Loader2 className="w-4 h-4 animate-spin" /> Processing…</> : <><Check className="w-4 h-4" /> Confirm</>}
+              </button>
+            </div>
+          </div>
+        </div>
       )}
     </TeamLayout>
   );

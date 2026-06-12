@@ -44,6 +44,7 @@ interface PoItemDetail {
   qty: number;
   unit_price: number | null;
   vendor_name: string | null;
+  awaiting_lock: boolean;
   shipped_status: string | null;
   dispatch_round_shipped: number | null;
 }
@@ -79,6 +80,7 @@ export default function DelhiDashboard() {
 
   // ── Tab state ──
   const [activeTab, setActiveTab] = useState<DashTab>("pickup");
+  const [includePending, setIncludePending] = useState(false);
 
   // ── POs tab state ──
   const [selectedPo, setSelectedPo] = useState<PoDetail | null>(null);
@@ -116,9 +118,9 @@ export default function DelhiDashboard() {
 
   // R8 POs list (polls every 15s)
   const { data: activePOs = [] } = useQuery<PoListItem[]>({
-    queryKey: ["delhi-active-pos"],
+    queryKey: ["delhi-active-pos", includePending],
     queryFn: async () => {
-      const r = await teamFetch(token, `/api/delhi/pos`);
+      const r = await teamFetch(token, `/api/delhi/pos${includePending ? "?include_pending=1" : ""}`);
       return r.ok ? r.json() : [];
     },
     enabled: !!token,
@@ -162,11 +164,9 @@ export default function DelhiDashboard() {
       const r = await teamFetch(token, `/api/team/purchase-orders/${poId}`);
       if (!r.ok) throw new Error("Could not load PO");
       const data = await r.json();
-      // Delhi only sees line items that have a seller assigned (Bug 3 — partial notify).
-      // Unassigned lines (e.g. 96 of 100 not yet sourced) stay hidden from the warehouse.
-      const items: PoItemDetail[] = (data.items || [])
-        .filter((it: any) => (it.vendorId ?? it.vendor_id) != null)
-        .map((it: any) => ({
+      // R11: Delhi sees ALL lines (revert R8v2 partial-notify filter). Lines without a
+      // locked vendor show an "awaiting lock" badge but are still visible to the warehouse.
+      const items: PoItemDetail[] = (data.items || []).map((it: any) => ({
         id: it.id,
         part_number: it.partNumber ?? it.part_number ?? null,
         brand: it.brand ?? null,
@@ -174,6 +174,7 @@ export default function DelhiDashboard() {
         qty: it.qty ?? 0,
         unit_price: it.unitPrice ?? it.unit_price ?? null,
         vendor_name: it.vendorName ?? it.vendor_name ?? null,
+        awaiting_lock: (it.approvedQuoteId ?? it.approved_quote_id) == null,
         shipped_status: it.shippedStatus ?? it.shipped_status ?? null,
         dispatch_round_shipped: it.dispatchRoundShipped ?? it.dispatch_round_shipped ?? null,
       }));
@@ -482,7 +483,15 @@ export default function DelhiDashboard() {
                           </td>
                           <td className="px-3 py-2.5 text-xs">{it.brand || "—"}</td>
                           <td className="px-3 py-2.5 text-right text-xs">{it.qty}</td>
-                          <td className="px-3 py-2.5 text-xs">{it.vendor_name || <span className="text-muted-foreground">—</span>}</td>
+                          <td className="px-3 py-2.5 text-xs">
+                            {it.awaiting_lock ? (
+                              <span className="inline-flex items-center rounded-full bg-amber-100 px-2 py-0.5 text-[10px] font-semibold text-amber-700">
+                                Awaiting vendor lock
+                              </span>
+                            ) : (
+                              it.vendor_name || <span className="text-muted-foreground">—</span>
+                            )}
+                          </td>
                           <td className="px-3 py-2.5 text-center">
                             {alreadyDispatched ? (
                               <Check className="w-4 h-4 text-emerald-500 mx-auto" />
@@ -554,7 +563,18 @@ export default function DelhiDashboard() {
             <div>
               <div className="mb-4 flex items-center justify-between">
                 <h2 className="font-bold text-lg">Active Purchase Orders</h2>
-                <span className="text-xs text-muted-foreground">Auto-refreshes every 15s</span>
+                <div className="flex items-center gap-3">
+                  <label className="text-xs text-muted-foreground inline-flex items-center gap-1.5 cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={includePending}
+                      onChange={(e) => setIncludePending(e.target.checked)}
+                      className="w-3.5 h-3.5 rounded accent-accent cursor-pointer"
+                    />
+                    Show pending (split) POs
+                  </label>
+                  <span className="text-xs text-muted-foreground">Auto-refreshes every 15s</span>
+                </div>
               </div>
 
               {poLoading && (

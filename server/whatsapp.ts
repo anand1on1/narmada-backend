@@ -605,6 +605,36 @@ export async function sendVendorRateBatch(
   }
 }
 
+// R11 — rate-confirmed message fired when a seller's quote is locked for a PO line.
+// Template `narmada_vendor_rate_confirmed` (NOT yet Meta-approved) → free-text fallback.
+// params: {{1}}=vendor_name {{2}}=our_po_number {{3}}=items_text {{4}}=total_amount
+export async function sendVendorRateConfirmed(
+  phone: string,
+  p: { vendorName: string; ourPoNumber: string; itemsText: string; totalAmount: string },
+): Promise<{ status: string; body: string }> {
+  const templateName = "narmada_vendor_rate_confirmed";
+  const ourCompany = "Narmada Mobility";
+  const normalized = normalizePhone(phone);
+  const body = `Hello ${p.vendorName},\n${ourCompany} has CONFIRMED your rate for PO ${p.ourPoNumber}:\n${p.itemsText}\n\nTotal: ₹${p.totalAmount}\nWe will share dispatch details shortly. Thank you.`;
+  try {
+    const raw = await postAisensy({
+      campaignName: templateName,
+      destination: normalized,
+      userName: ourCompany,
+      templateParams: [p.vendorName, p.ourPoNumber, p.itemsText, p.totalAmount],
+      source: "narmada-backend",
+      media: {}, buttons: [], carouselCards: [], location: {}, attributes: {},
+      paramsFallbackValue: { FirstName: p.vendorName },
+    });
+    const status = logAisensyResult(normalized, templateName, body, raw);
+    if (status === "failed") return { status: await sendFreeTextWa(phone, body, "vendor_rate_confirmed_fallback"), body };
+    return { status, body };
+  } catch (e: any) {
+    console.error(`[whatsapp] sendVendorRateConfirmed failed for ${normalized}:`, e?.message);
+    return { status: await sendFreeTextWa(phone, body, "vendor_rate_confirmed_fallback"), body };
+  }
+}
+
 // Generic free-text send (used by vendor inbox reply, lead outreach, dispatch reminders).
 export async function sendTextMessage(phone: string, text: string, eventKey = "free_text"): Promise<{ status: string }> {
   const status = await sendFreeTextWa(phone, text, eventKey);
