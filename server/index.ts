@@ -94,7 +94,7 @@ app.use((req, res, next) => {
   // ---- R4.4→R7: ensure additive tables + seed defaults on boot ----
   console.log("[boot] step: pre-migrations");
   try {
-    const { runR4toR7Migrations, runR8Migrations, runR9Migrations, runR10Migrations, runR11Migrations } = await import("./migrations");
+    const { runR4toR7Migrations, runR8Migrations, runR9Migrations, runR10Migrations, runR11Migrations, runR11_1Migrations } = await import("./migrations");
     runR4toR7Migrations();
     console.log("[boot] step: post-R4-R7 migrations");
     runR8Migrations();
@@ -105,6 +105,8 @@ app.use((req, res, next) => {
     console.log("[boot] step: post-R10 migrations");
     runR11Migrations();
     console.log("[boot] step: post-R11 migrations");
+    runR11_1Migrations();
+    console.log("[boot] step: post-R11.1 migrations");
     const { seedR5Defaults } = await import("./seed-r5");
     await seedR5Defaults();
     console.log("[boot] step: post-seed");

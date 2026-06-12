@@ -2354,6 +2354,27 @@ export function listRfqMessages(vendorId: number, limit = 50): any[] {
   return rows.reverse(); // newest last
 }
 
+// Dedup guard for backfill: true if a message with this AiSensy id already exists.
+export function rfqMessageExistsByAisensyId(aisensyMsgId: string): boolean {
+  if (!aisensyMsgId) return false;
+  const row = sqlite.prepare(
+    `SELECT 1 FROM vendor_rfq_messages WHERE aisensy_msg_id = ? LIMIT 1`
+  ).get(aisensyMsgId);
+  return !!row;
+}
+
+// Fetch specific messages by id, scoped to a vendor (cross-vendor ids are excluded).
+// Returns rows ordered oldest-first for stable prompt context.
+export function getRfqMessagesByIds(vendorId: number, ids: number[]): any[] {
+  const clean = (ids || []).map((n) => Number(n)).filter((n) => Number.isInteger(n) && n > 0);
+  if (clean.length === 0) return [];
+  const placeholders = clean.map(() => "?").join(",");
+  const rows = sqlite.prepare(
+    `SELECT * FROM vendor_rfq_messages WHERE vendor_id = ? AND id IN (${placeholders}) ORDER BY created_at ASC, id ASC`
+  ).all(vendorId, ...clean) as any[];
+  return rows;
+}
+
 // -------- Vendor payments --------
 export function addVendorPayment(data: {
   vendorId: number; paidOn: number; amount: number; method: string;

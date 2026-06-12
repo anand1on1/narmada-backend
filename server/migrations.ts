@@ -405,3 +405,23 @@ export function runR11Migrations() {
 
   console.log("[migrations] R11 tables/columns ensured");
 }
+
+// -------- R11.1 additive migrations --------
+// Always-ingest chat transcripts + selection-based AI prompts. The vendor_rfq_messages
+// schema (id, vendor_id, direction, body, aisensy_msg_id, created_at) already exists from
+// R9, so no ALTERs are needed. We only ensure the explicit (vendor_id, created_at DESC)
+// index requested by R11.1; an equivalent index from R9 may already cover this.
+export function runR11_1Migrations() {
+  const stmts: Array<{ desc: string; sql: string }> = [
+    { desc: "idx_vrm_vendor_created", sql: `CREATE INDEX IF NOT EXISTS idx_vrm_vendor_created ON vendor_rfq_messages (vendor_id, created_at DESC)` },
+  ];
+  for (const { desc, sql } of stmts) {
+    try {
+      sqlite.exec(sql);
+      console.log(`[migrations] R11.1: ${desc}`);
+    } catch (err: any) {
+      console.log(`[migrations] R11.1: skipped ${desc} —`, err?.message || err);
+    }
+  }
+  console.log("[migrations] R11.1: schema already good (no ALTERs needed)");
+}

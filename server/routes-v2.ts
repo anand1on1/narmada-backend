@@ -3404,12 +3404,36 @@ function registerR9Routes(
     try {
       const key = process.env.PPLX_API_KEY || "";
       if (!key) return res.status(503).json({ error: "PPLX_API_KEY not configured" });
+      const vendorId = parseInt(req.params.vendorId as string, 10);
       const question = String(req.body?.question || "").trim();
       if (!question) return res.status(400).json({ error: "question required" });
-      const ctx = Array.isArray(req.body?.context)
-        ? req.body.context.map((m: any) => `${m.direction === "out" ? "Us" : "Seller"}: ${m.body || ""}`).join("\n")
-        : String(req.body?.context || "");
-      const prompt = `You are helping a procurement team respond to a spare parts seller on WhatsApp. The seller asked a technical/specification question. Based on chat context, draft a concise reply (≤80 words, Hinglish OK). Be factual; cite specs if relevant.\n\nRecent chat:\n${ctx}\n\nQuestion to answer: ${question}`;
+
+      const selectedIds: number[] = Array.isArray(req.body?.selected_message_ids)
+        ? req.body.selected_message_ids.map((n: any) => Number(n)).filter((n: number) => Number.isInteger(n) && n > 0)
+        : [];
+
+      let prompt: string;
+      if (selectedIds.length > 0) {
+        // Selection mode: use ONLY the messages the user picked, scoped to this vendor.
+        // Reject if any requested id does not belong to this vendor (cross-vendor leakage guard).
+        const rows = v2.getRfqMessagesByIds(vendorId, selectedIds);
+        const foundIds = new Set(rows.map((m: any) => Number(m.id)));
+        const missing = selectedIds.filter((id) => !foundIds.has(id));
+        if (missing.length > 0) {
+          return res.status(403).json({ error: "Some selected messages do not belong to this seller" });
+        }
+        const selectedText = rows
+          .map((m: any) => `<${m.direction === "out" ? "us" : "seller"}: ${String(m.body || "").trim()}>`)
+          .join("\n");
+        prompt = `You are helping a procurement team responding to a spare-parts seller. The user has selected specific messages from the chat as context. Use ONLY these messages plus general automotive knowledge to answer the user's question.\n\nSelected messages:\n${selectedText}\n\nUser's question: ${question}\n\nRespond concisely (≤120 words). If the answer requires data not present in selection or general knowledge, say so and ask the team what's missing. Hinglish OK.`;
+      } else {
+        // Freeform mode (R11): last-10-message context passed by the client.
+        const ctx = Array.isArray(req.body?.context)
+          ? req.body.context.map((m: any) => `${m.direction === "out" ? "Us" : "Seller"}: ${m.body || ""}`).join("\n")
+          : String(req.body?.context || "");
+        prompt = `You are helping a procurement team respond to a spare parts seller on WhatsApp. The seller asked a technical/specification question. Based on chat context, draft a concise reply (≤80 words, Hinglish OK). Be factual; cite specs if relevant.\n\nRecent chat:\n${ctx}\n\nQuestion to answer: ${question}`;
+      }
+
       const r = await fetch("https://api.perplexity.ai/chat/completions", {
         method: "POST",
         headers: { "Content-Type": "application/json", "Authorization": `Bearer ${key}` },
@@ -3440,6 +3464,36 @@ function registerR9Routes(
         });
       }
       res.json({ ok: true, message: row, sent: !!phone });
+    } catch (e: any) { res.status(500).json({ error: e.message }); }
+  });
+
+  // ---- R11.1: one-time backfill of chat transcripts from AiSensy (best-effort) ----
+  // Upserts the last 7 days of AiSensy messages into vendor_rfq_messages, deduped by
+  // aisensy_msg_id, so AI can be primed with full history. No-op stub if AiSensy has no
+  // inbound-fetch helper / API access — the webhook remains the source of truth.
+  app.post("/api/admin/rfq/backfill-transcripts", requireAuth, async (_req: any, res: any) => {
+    try {
+      const wa = require("./whatsapp") as any;
+      const fetchRecent = wa?.fetchRecentMessages || wa?.getRecentMessages;
+      if (typeof fetchRecent !== "function") {
+        return res.json({ ok: false, reason: "AiSensy fetch API not configured" });
+      }
+      const since = Date.now() - 7 * 86400000;
+      const msgs: any[] = (await fetchRecent({ since }).catch(() => [])) || [];
+      let upserted = 0;
+      for (const m of msgs) {
+        const aisensyMsgId = m.message_id || m.messageId || m.id || null;
+        if (aisensyMsgId && v2.rfqMessageExistsByAisensyId?.(String(aisensyMsgId))) continue;
+        const from = String(m.from || m.sender || m.phone || "");
+        const vendor = from ? await v2.getVendorByPhone(from) : null;
+        v2.addRfqMessage({
+          vendorId: vendor?.id ?? null, vendorPhone: from || null,
+          direction: m.direction === "out" ? "out" : "in",
+          body: String(m.message || m.text || m.body || ""), aisensyMsgId: aisensyMsgId ? String(aisensyMsgId) : null,
+        });
+        upserted++;
+      }
+      res.json({ ok: true, upserted });
     } catch (e: any) { res.status(500).json({ error: e.message }); }
   });
 
