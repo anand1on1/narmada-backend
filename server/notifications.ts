@@ -140,7 +140,7 @@ export async function sendNotification(eventKey: string, ctx: NotificationContex
   // R10 — append download links for uploaded documents to the rendered body.
   const docLinks: string[] = [];
   if (ctx.invoiceUrl) docLinks.push(`Download Invoice: ${ctx.invoiceUrl}`);
-  if (ctx.docketUrl) docLinks.push(`Download Docket: ${ctx.docketUrl}`);
+  if (ctx.docketUrl) docLinks.push(`Download Docket Slip: ${ctx.docketUrl}`);
   const docLinksBlock = docLinks.length ? `\n\n${docLinks.join("\n")}` : "";
 
   for (const t of templates) {

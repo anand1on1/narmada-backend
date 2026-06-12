@@ -195,12 +195,14 @@ export function LineQuotesPanel({
           );
         })}
         <button
+          data-testid="add-seller-btn"
           onClick={() => { setAdding(!adding); if (adding) resetAdd(); }}
           className="text-xs px-2 py-0.5 border rounded-full hover:bg-muted inline-flex items-center gap-1"
         >
           <Plus className="w-3 h-3" /> Add Seller
         </button>
         <button
+          data-testid="global-search-btn"
           onClick={() => setShowSearch(true)}
           className="text-xs px-2 py-0.5 border rounded-full hover:bg-muted inline-flex items-center gap-1"
           title="Search the web for sellers (Perplexity)"

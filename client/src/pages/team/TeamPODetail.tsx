@@ -10,7 +10,7 @@ import { TeamLayout } from "./TeamLayout";
 import { teamFetch, useTeamAuth, getTeamToken } from "@/lib/team-auth";
 import { useToast } from "@/hooks/use-toast";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { useParams, useLocation } from "wouter";
+import { useParams } from "wouter";
 import { apiUrl } from "@/lib/queryClient";
 import { Download, Check, Loader2, Package, Pencil, Calendar, Send, Flame, CheckCircle2, X } from "lucide-react";
 import { LineQuotesPanel, FireRateRequestModal } from "./R9VendorQuotes";
@@ -124,7 +124,6 @@ export default function TeamPODetail() {
   const { token } = useTeamAuth();
   const { toast } = useToast();
   const qc = useQueryClient();
-  const [, navigate] = useLocation();
   const [notifying, setNotifying] = useState(false);
   const [showFireRfq, setShowFireRfq] = useState(false);
   const [showProcess, setShowProcess] = useState(false);
@@ -211,14 +210,20 @@ export default function TeamPODetail() {
       const pending = j.pending_po;
       if (pending) {
         toast({
-          title: `PO processed.`,
-          description: `${pending.moved_count} unconfirmed item(s) moved to pending PO ${pending.po_number}.`,
+          title: `PO processed. ${pending.moved_count} item(s) moved to pending PO ${pending.po_number}`,
+          description: (
+            <a
+              href={`#/team/purchase-orders/${pending.id}`}
+              className="underline font-semibold"
+            >
+              Open {pending.po_number}
+            </a>
+          ),
         });
       } else {
         toast({ title: `PO processed.`, description: `All lines confirmed — nothing moved.` });
       }
-      // Stay on the original PO (now in 'processed' state).
-      navigate(`/team/purchase-orders/${j.original_po?.id ?? poId}`);
+      // Stay on the original PO (now in 'processed' state) — just refetch, don't redirect away.
     } catch (e: any) {
       toast({ title: "Error", description: e.message, variant: "destructive" });
     } finally {
@@ -254,7 +259,13 @@ export default function TeamPODetail() {
 
   const confirmedCount = po.items.filter((it) => it.approvedQuoteId != null).length;
   const unconfirmedCount = po.items.length - confirmedCount;
-  const canProcess = confirmedCount > 0;
+  const alreadyClosed = po.status === "processed" || po.status === "dispatched";
+  const canProcess = confirmedCount > 0 && !alreadyClosed;
+  const processTooltip = alreadyClosed
+    ? `PO already ${po.status} — cannot process again`
+    : confirmedCount === 0
+      ? "Lock at least one seller rate first"
+      : `Process PO — close ${confirmedCount} confirmed line(s)`;
   // Live total: prefer cost total (approved seller rates) else fall back to customer total.
   const liveTotal = po.costTotal > 0 ? po.costTotal : po.custTotal;
   const margin = po.custTotal - po.costTotal;
@@ -293,7 +304,7 @@ export default function TeamPODetail() {
           <button
             onClick={() => setShowProcess(true)}
             disabled={!canProcess}
-            title={canProcess ? `Process PO — close ${confirmedCount} confirmed line(s)` : "Lock at least one vendor rate first"}
+            title={processTooltip}
             className="px-4 py-2 bg-emerald-600 text-white rounded-lg text-sm font-semibold inline-flex items-center gap-2 disabled:opacity-50"
           >
             <CheckCircle2 className="w-4 h-4" /> Process PO
