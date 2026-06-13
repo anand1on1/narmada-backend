@@ -184,6 +184,8 @@ export const customers = sqliteTable("customers", {
   companyPan: text("company_pan"),
   customerCode: text("customer_code"),  // NM/CUS/0001 style, optional unique
   defaultDiscountPct: real("default_discount_pct"),  // applied as discount% on each new quote line for this customer
+  // R26.5 — sales rep ownership (links to data_team_users.id where role='sales').
+  salesRepId: integer("sales_rep_id"),
 });
 
 export const insertCustomerSchema = createInsertSchema(customers).omit({ id: true, createdAt: true });
@@ -495,6 +497,8 @@ export const dataTeamUsers = sqliteTable("data_team_users", {
   active: integer("active", { mode: "boolean" }).default(true),
   lastLogin: integer("last_login"),
   createdAt: integer("created_at").notNull().$defaultFn(() => Date.now()),
+  // R26.5 — soft-delete for user management.
+  deletedAt: text("deleted_at"),
 });
 export type DataTeamUser = typeof dataTeamUsers.$inferSelect;
 
@@ -1039,6 +1043,10 @@ export const leads = sqliteTable("leads", {
   convertedToCustomerId: integer("converted_to_customer_id"),
   // R25a — link a lead to the vendor record it was converted into (Convert to Vendor action).
   convertedToVendorId: integer("converted_to_vendor_id"),
+  // R26.5 — Leads V2 additive fields.
+  contactPerson: text("contact_person"),
+  address: text("address"),
+  deletedAt: text("deleted_at"),
 });
 export const insertLeadSchema = createInsertSchema(leads).omit({ id: true, createdAt: true, updatedAt: true });
 export type InsertLead = z.infer<typeof insertLeadSchema>;
@@ -1105,10 +1113,14 @@ export const taskItems = sqliteTable("task_items", {
   assignedTo: integer("assigned_to"),
   assignedBy: text("assigned_by"),
   dueDate: integer("due_date"),
-  status: text("status").notNull().default("open"), // open|doing|done
+  status: text("status").notNull().default("open"), // open|doing|done (R26.5 also: pending|processing|standby|complete)
   priority: text("priority").notNull().default("normal"),
   createdAt: integer("created_at").notNull().$defaultFn(() => Date.now()),
   updatedAt: integer("updated_at").notNull().$defaultFn(() => Date.now()),
+  // R26.5 — Tasks V2 additive fields.
+  fileUrl: text("file_url"),
+  deadline: text("deadline"),
+  assignedToUserId: integer("assigned_to_user_id"),
 });
 export const insertTaskItemSchema = createInsertSchema(taskItems).omit({ id: true, createdAt: true, updatedAt: true });
 export type InsertTaskItem = z.infer<typeof insertTaskItemSchema>;
@@ -1134,3 +1146,77 @@ export const dispatches = sqliteTable("dispatches", {
 export const insertDispatchSchema = createInsertSchema(dispatches).omit({ id: true, createdAt: true });
 export type InsertDispatch = z.infer<typeof insertDispatchSchema>;
 export type Dispatch = typeof dispatches.$inferSelect;
+
+// ============================================================================
+// R26.5 — additive tables for Leads V2 stages, sales targets, attendance/visit
+// check-ins, and cross-team notifications. Additive only.
+// ============================================================================
+export const leadStages = sqliteTable("lead_stages", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  name: text("name").notNull().unique(),
+  position: integer("position").notNull().default(0),
+  isDefault: integer("is_default").notNull().default(0),
+  createdAt: integer("created_at"),
+});
+export type LeadStage = typeof leadStages.$inferSelect;
+
+export const salesTargets = sqliteTable("sales_targets", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  salesRepUserId: integer("sales_rep_user_id"),
+  targetType: text("target_type"),       // monthly|weekly|quarterly
+  customerId: integer("customer_id"),
+  periodStart: text("period_start"),
+  periodEnd: text("period_end"),
+  targetAmount: real("target_amount"),
+  achievedAmount: real("achieved_amount").default(0),
+  rolledOverFrom: integer("rolled_over_from"),
+  status: text("status").default("active"), // active|completed|rolled_over
+  createdAt: integer("created_at"),
+});
+export type SalesTarget = typeof salesTargets.$inferSelect;
+
+export const targetAchievements = sqliteTable("target_achievements", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  targetId: integer("target_id"),
+  poId: integer("po_id"),
+  customerId: integer("customer_id"),
+  amount: real("amount"),
+  verifiedBy: text("verified_by"),        // auto|admin
+  adminApproved: integer("admin_approved").default(0),
+  createdAt: integer("created_at"),
+});
+export type TargetAchievement = typeof targetAchievements.$inferSelect;
+
+export const attendanceCheckins = sqliteTable("attendance_checkins", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  salesRepUserId: integer("sales_rep_user_id"),
+  date: text("date"),                     // YYYY-MM-DD
+  checkinAt: text("checkin_at"),
+  checkoutAt: text("checkout_at"),
+  checkinMissed: integer("checkin_missed").default(0),
+  checkoutMissed: integer("checkout_missed").default(0),
+});
+export type AttendanceCheckin = typeof attendanceCheckins.$inferSelect;
+
+export const visitCheckins = sqliteTable("visit_checkins", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  salesRepUserId: integer("sales_rep_user_id"),
+  customerId: integer("customer_id"),
+  gpsLat: real("gps_lat"),
+  gpsLng: real("gps_lng"),
+  photoUrl: text("photo_url"),
+  notes: text("notes"),
+  createdAt: text("created_at"),
+});
+export type VisitCheckin = typeof visitCheckins.$inferSelect;
+
+export const crossTeamEvents = sqliteTable("cross_team_events", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  eventType: text("event_type"),
+  payloadJson: text("payload_json"),
+  targetUserId: integer("target_user_id"),
+  targetRole: text("target_role"),
+  readAt: text("read_at"),
+  createdAt: text("created_at"),
+});
+export type CrossTeamEvent = typeof crossTeamEvents.$inferSelect;

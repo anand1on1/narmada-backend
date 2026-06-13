@@ -2,6 +2,7 @@ import { ReactNode, useEffect, useState } from "react";
 import { Link, useLocation } from "wouter";
 import { useAdminAuth, AdminRole, adminFetch } from "@/lib/admin-auth";
 import { Logo } from "@/components/Logo";
+import AdminNotificationsBell from "@/components/AdminNotificationsBell";
 import {
   LayoutDashboard, Package, MessageSquare, Map, Settings, LogOut, ExternalLink,
   FileText, Tag, Truck, Users,
@@ -25,9 +26,10 @@ const ROLE_PAGES: Record<AdminRole, Set<string>> = {
     "/admin/rfqs", "/admin/quotes", "/admin/parts", "/admin/purchase-orders", "/admin/purchase-history", "/admin/bank",
     "/admin/quoting-companies", "/admin/data-team", "/admin/audit-logs", "/admin/notification-log", "/admin/account-requests",
     "/admin/vendors", "/admin/vendor-ledger", "/admin/vendor-inbox", "/admin/market-radar", "/admin/companies",
-    "/admin/ai-ledger", "/admin/leads", "/admin/targets", "/admin/announcements", "/admin/tasks",
+    "/admin/ai-ledger", "/admin/leads", "/admin/leads-legacy", "/admin/targets", "/admin/announcements", "/admin/tasks", "/admin/tasks-legacy",
+    "/admin/users", "/admin/sales-targets", "/admin/attendance",
     "/admin/ads-meta", "/admin/ads-google", "/admin/integrations",
-    "/admin/marketing/campaigns", "/admin/marketing/audiences", "/admin/marketing/templates",
+    "/admin/marketing/campaigns", "/admin/marketing/audiences", "/admin/marketing/templates", "/admin/marketing/custom-templates",
   ]),
   logistics: new Set(["/admin/consignments"]),
   accounts: new Set([
@@ -104,10 +106,13 @@ export function AdminLayout({ children, title }: { children: ReactNode; title: s
     { href: "/admin/vendor-inbox", label: "Vendor Inbox", icon: Inbox },
     { href: "/admin/market-radar", label: "Market Radar", icon: Radar },
     { href: "/admin/leads", label: "Leads", icon: Target },
+    { href: "/admin/leads-legacy", label: "Leads (Legacy)", icon: Target },
     { href: "/admin/ai-ledger", label: "AI Ledger", icon: Sparkles },
     { href: "/admin/targets", label: "Targets", icon: Target },
     { href: "/admin/announcements", label: "Announcements", icon: Megaphone },
     { href: "/admin/tasks", label: "Tasks", icon: CheckSquare },
+    { href: "/admin/tasks-legacy", label: "Tasks (Legacy)", icon: CheckSquare },
+    { href: "/admin/users", label: "Create Users", icon: UserCog },
     { href: "/admin/ads-meta", label: "Meta Ads", icon: Facebook },
     { href: "/admin/ads-google", label: "Google Ads", icon: Search },
     { href: "/admin/marketing/campaigns", label: "Marketing", icon: Megaphone },
@@ -215,8 +220,9 @@ export function AdminLayout({ children, title }: { children: ReactNode; title: s
 
       {/* Main */}
       <main className="flex-1 overflow-auto">
-        <header className="bg-white border-b border-slate-200 px-8 py-5 sticky top-0 z-20">
+        <header className="bg-white border-b border-slate-200 px-8 py-5 sticky top-0 z-20 flex items-center justify-between">
           <h1 className="font-display text-2xl font-bold text-slate-900">{title}</h1>
+          <AdminNotificationsBell adminToken={token} />
         </header>
         <div className="p-8">{children}</div>
       </main>

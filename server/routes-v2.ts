@@ -8,7 +8,9 @@ import Papa from "papaparse";
 import multer from "multer";
 import { storage, db } from "./storage";
 import * as v2 from "./storage-v2";
-import { sendNotification, buildTrackingLink, sendGenericEmail } from "./notifications";
+import { sendNotification, buildTrackingLink, sendGenericEmail, emitCrossTeamEvent } from "./notifications";
+import { rawSqlite } from "./storage";
+import * as XLSX from "xlsx";
 import { recordMarketingWhatsAppReceipt } from "./marketing/webhook-hook";
 import {
   insertPostSchema, insertConsignmentSchema, insertPriceListSchema,
@@ -1130,11 +1132,28 @@ export function registerV2Routes(app: Express, ctx: V2Context) {
   app.get("/api/admin/customers/:id/ledger", requireAuth, async (req, res) => {
     try {
       const cid = parseInt(req.params.id as string, 10);
-      const from = req.query.from ? parseInt(req.query.from as string, 10) : undefined;
-      const to = req.query.to ? parseInt(req.query.to as string, 10) : undefined;
+      // R26.5 (A2) — accept ?from=YYYY-MM-DD&to=YYYY-MM-DD (or epoch ms). Default to last 90 days.
+      const parseDate = (v: any): number | undefined => {
+        if (v == null || v === "") return undefined;
+        const s = String(v);
+        if (/^\d+$/.test(s)) return parseInt(s, 10); // epoch ms
+        const t = Date.parse(s);
+        return Number.isNaN(t) ? undefined : t;
+      };
+      let from = parseDate(req.query.from);
+      let to = parseDate(req.query.to);
+      if (from == null && to == null) {
+        to = Date.now();
+        from = to - 90 * 24 * 60 * 60 * 1000;
+      }
       const entries = await v2.listLedgerEntries(cid, { from, to });
       const balance = await v2.getLedgerBalance(cid);
-      res.json({ entries, balanceInr: balance });
+      // R26.5 (A2) — surface shipped customers whose goods left via PO/dispatch even when
+      // no ledger_entries row exists. JOIN purchase_orders_v2 → dispatches for this customer.
+      let shippedEntries: any[] = [];
+      try { shippedEntries = v2.listShippedLedgerView(cid, { from, to }); }
+      catch (e: any) { console.error("[R26.5] shipped ledger view failed:", e?.message || e); }
+      res.json({ entries, shippedEntries, balanceInr: balance });
     } catch (e: any) { res.status(500).json({ error: e.message }); }
   });
   app.post("/api/admin/customers/:id/ledger", requireRole("accounts"), async (req, res) => {
@@ -1301,6 +1320,26 @@ export function registerV2Routes(app: Express, ctx: V2Context) {
       const user = (req as any).user as TokenInfo;
       const parsed = insertPaymentRecordSchema.parse({ ...req.body, recordedBy: user.username });
       const row = await v2.recordPayment(parsed);
+
+      // R26.5 H/E4 — payment received: if the customer has a sales rep, notify them (in-app only).
+      try {
+        const custId = (row as any)?.customerId ?? parsed.customerId;
+        if (custId) {
+          const cust = rawSqlite
+            .prepare(`SELECT id, name, sales_rep_id FROM customers WHERE id = ?`)
+            .get(custId) as { id: number; name?: string; sales_rep_id?: number } | undefined;
+          if (cust?.sales_rep_id) {
+            emitCrossTeamEvent(
+              "payment_received",
+              { customer_id: cust.id, customer_name: cust.name || null, amount: (row as any)?.amountInr ?? parsed.amountInr ?? null, payment_id: (row as any)?.id ?? null },
+              { target_user_id: cust.sales_rep_id, target_role: "sales" },
+            );
+          }
+        }
+      } catch (e: any) {
+        console.error("[R26.5 E4] emit failed:", e?.message || e);
+      }
+
       res.json(row);
     } catch (e: any) { res.status(400).json({ error: e.message, details: e.errors }); }
   });
@@ -1770,11 +1809,12 @@ export function registerV2Routes(app: Express, ctx: V2Context) {
 
   app.post("/api/admin/data-team-users", requireAdminRole, async (req, res) => {
     try {
-      const { username, password, name, email, phone } = req.body || {};
+      const { username, password, name, email, phone, role } = req.body || {};
       if (!username || !password) return res.status(400).json({ error: "username and password required" });
       if (String(password).length < 8) return res.status(400).json({ error: "Password must be at least 8 characters" });
       const passwordHash = hashPassword(String(password));
-      const row = await v2.createDataTeamUser({ username: String(username), passwordHash, name, email, phone });
+      // R26.5 (D1) — honor the role field (was previously ignored → everyone became data_team).
+      const row = await v2.createDataTeamUser({ username: String(username), passwordHash, name, email, phone, role: role ? String(role) : undefined });
       const { passwordHash: _ph, ...safe } = row;
       res.json(safe);
     } catch (e: any) { res.status(400).json({ error: e.message }); }
@@ -4647,6 +4687,25 @@ function registerR8Routes(
         poItems2,
       );
 
+      // R26.5 H/E2 — notify the customer's sales rep that a PO was created.
+      try {
+        const custId = customer_id ? parseInt(customer_id, 10) : null;
+        if (custId) {
+          const repRow = rawSqlite
+            .prepare(`SELECT sales_rep_id FROM customers WHERE id = ?`)
+            .get(custId) as { sales_rep_id?: number } | undefined;
+          if (repRow?.sales_rep_id) {
+            emitCrossTeamEvent(
+              "po_created_for_rep_customer",
+              { po_id: po?.id, customer_id: custId, customer_po_number: customer_po_number || null, total: subtotal },
+              { target_user_id: repRow.sales_rep_id, target_role: "sales" },
+            );
+          }
+        }
+      } catch (e: any) {
+        console.error("[R26.5 E2] emit failed:", e?.message || e);
+      }
+
       res.json(po);
     } catch (e: any) {
       res.status(500).json({ error: e.message });
@@ -5094,6 +5153,37 @@ function registerR8Routes(
         afterJson: JSON.stringify({ carrier, docketNumber, bundles, isInternalTransfer, ...result }),
       });
 
+      // R26.5 H/E3 — PO shipped: notify the customer's sales rep, and email the customer if present.
+      try {
+        const poRow = rawSqlite
+          .prepare(`SELECT customer_id, customer_po_number FROM purchase_orders_v2 WHERE id = ?`)
+          .get(poId) as { customer_id?: number; customer_po_number?: string } | undefined;
+        if (poRow?.customer_id) {
+          const cust = rawSqlite
+            .prepare(`SELECT id, name, email, sales_rep_id FROM customers WHERE id = ?`)
+            .get(poRow.customer_id) as { id: number; name?: string; email?: string; sales_rep_id?: number } | undefined;
+          if (cust?.sales_rep_id) {
+            emitCrossTeamEvent(
+              "po_shipped",
+              { po_id: poId, customer_id: cust.id, customer_po_number: poRow.customer_po_number || null, docket_number: docketNumber || null, carrier: carrier || null },
+              { target_user_id: cust.sales_rep_id, target_role: "sales" },
+            );
+          }
+          if (cust?.email) {
+            const { sendGenericEmail } = await import("./notifications");
+            sendGenericEmail({
+              to: cust.email,
+              subject: `Your order has shipped${poRow.customer_po_number ? ` (PO ${poRow.customer_po_number})` : ""}`,
+              html: `<p>Dear ${cust.name || "Customer"},</p><p>Your order${poRow.customer_po_number ? ` for PO <b>${poRow.customer_po_number}</b>` : ""} has been dispatched${carrier ? ` via <b>${carrier}</b>` : ""}${docketNumber ? ` (docket <b>${docketNumber}</b>)` : ""}.</p><p>Thank you,<br/>Narmada Mobility</p>`,
+              text: `Dear ${cust.name || "Customer"}, your order has been dispatched${carrier ? ` via ${carrier}` : ""}${docketNumber ? ` (docket ${docketNumber})` : ""}.`,
+              event: "po_shipped",
+            }).catch((e: any) => console.error("[R26.5 E3] customer email failed:", e?.message || e));
+          }
+        }
+      } catch (e: any) {
+        console.error("[R26.5 E3] emit failed:", e?.message || e);
+      }
+
       res.json(result);
     } catch (e: any) { res.status(400).json({ error: e.message }); }
   });
@@ -5514,7 +5604,10 @@ function registerR8Routes(
     try {
       const fromMs = req.query.from ? Number(req.query.from) : Date.now() - 30 * 24 * 60 * 60 * 1000;
       const toMs = req.query.to ? Number(req.query.to) : Date.now();
-      res.json(v2.marginSummary(fromMs, toMs));
+      const summary = v2.marginSummary(fromMs, toMs);
+      // R26.5 (A1) — ensure periodLabel is present for the Command Center margin card.
+      const fmt = (ms: number) => new Date(ms).toISOString().slice(0, 10);
+      res.json({ ...summary, periodLabel: `${fmt(fromMs)} → ${fmt(toMs)}` });
     } catch (e: any) { res.status(500).json({ error: e.message }); }
   });
   // R23.2 — backfill ledger entries for already-fulfilled POs (idempotent). Safe to re-run.
@@ -5686,6 +5779,554 @@ function registerR8Routes(
       if (phone) wa.sendTextMessage(phone, text, "team_chat").catch(() => {});
       const row = v2.addRfqMessageExternal({ vendorId, vendorPhone: phone || null, direction: "out", body: text, externalMessageId: null });
       res.json({ ok: true, message: row });
+    } catch (e: any) { res.status(500).json({ error: e.message }); }
+  });
+
+  // ==========================================================================
+  // R26.5 — Sales/Finance/HR/Consignment roles, Leads V2, Tasks V2, sales
+  // targets, attendance/visit check-ins, cross-team notifications, user mgmt,
+  // marketing additions, and admin mirrors. All additive.
+  // ==========================================================================
+
+  // ---- E2. role-aware middleware over the data_team store (Delhi pattern) ----
+  function requireDataTeamRole(...allowed: string[]) {
+    return async (req: Request, res: Response, next: NextFunction): Promise<void> => {
+      const token = (req.headers["x-sales-token"] as string | undefined)
+        || (req.headers["x-finance-token"] as string | undefined)
+        || (req.headers["x-hr-token"] as string | undefined)
+        || (req.headers["x-team-token"] as string | undefined)
+        || (req.headers["authorization"] as string | undefined)?.replace("Bearer ", "");
+      if (!token) { res.status(401).json({ error: "Unauthorized" }); return; }
+      const session = await v2.getDataTeamSession(token);
+      if (!session) { res.status(401).json({ error: "Unauthorized" }); return; }
+      const user = await v2.getDataTeamUser(session.userId);
+      if (!user || !user.active) { res.status(401).json({ error: "Unauthorized" }); return; }
+      if (allowed.length && user.role !== "admin" && !allowed.includes(user.role)) {
+        res.status(403).json({ error: `Role ${allowed.join("/")} required` }); return;
+      }
+      (req as any).teamUser = user;
+      next();
+    };
+  }
+  const requireSales = requireDataTeamRole("sales");
+  const requireFinance = requireDataTeamRole("finance");
+  const requireHR = requireDataTeamRole("hr");
+  const requireConsignment = requireDataTeamRole("consignment");
+
+  // ---- E1. role logins (issue a data_team session; client stores as role token) ----
+  function makeRoleLogin(roleName: string) {
+    return async (req: Request, res: Response) => {
+      try {
+        const { username, password } = req.body || {};
+        if (!username || !password) return res.status(400).json({ error: "username and password required" });
+        const user = await v2.getDataTeamUserByUsername(String(username));
+        if (!user || !user.active) return res.status(401).json({ error: "Invalid credentials" });
+        if (user.role !== roleName && user.role !== "admin") return res.status(403).json({ error: `Not a ${roleName} account` });
+        if (!verifyPassword(String(password), user.passwordHash)) return res.status(401).json({ error: "Invalid credentials" });
+        const session = await v2.createDataTeamSession(user.id);
+        await v2.touchDataTeamUserLogin(user.id);
+        const { passwordHash: _ph, ...safeUser } = user;
+        res.json({ token: session.token, expiresAt: session.expiresAt, user: safeUser });
+      } catch (e: any) { res.status(500).json({ error: e.message }); }
+    };
+  }
+  app.post("/api/sales/login", makeRoleLogin("sales"));
+  app.post("/api/finance/login", makeRoleLogin("finance"));
+  app.post("/api/hr/login", makeRoleLogin("hr"));
+  app.post("/api/consignment/login", makeRoleLogin("consignment"));
+  app.get("/api/sales/me", requireSales, (req, res) => { const { passwordHash: _p, ...s } = (req as any).teamUser; res.json(s); });
+  app.get("/api/finance/me", requireFinance, (req, res) => { const { passwordHash: _p, ...s } = (req as any).teamUser; res.json(s); });
+  app.get("/api/hr/me", requireHR, (req, res) => { const { passwordHash: _p, ...s } = (req as any).teamUser; res.json(s); });
+  app.get("/api/consignment/me", requireConsignment, (req, res) => { const { passwordHash: _p, ...s } = (req as any).teamUser; res.json(s); });
+
+  // ---- A4. ADMIN PARTS MASTER (mirror of /api/team/parts) ----
+  app.get("/api/admin/parts", requireAuth, async (req, res) => {
+    try {
+      const q = (req.query.q as string) || "";
+      if (q.length < 3) return res.json([]);
+      res.json(v2.adminListParts(q, 50));
+    } catch (e: any) { res.status(500).json({ error: e.message }); }
+  });
+  app.post("/api/admin/parts", requireAdminRole, async (req, res) => {
+    try {
+      const { partNumber, part_number, name, hsn, gstRate, gst_rate, brand, lastMrp, last_mrp } = req.body || {};
+      const pn = partNumber || part_number;
+      if (!pn || !name) return res.status(400).json({ error: "partNumber and name required" });
+      res.json(v2.adminUpsertPart({ partNumber: String(pn), name: String(name), hsn, gstRate: gstRate ?? gst_rate, brand, lastMrp: lastMrp ?? last_mrp }));
+    } catch (e: any) { res.status(400).json({ error: e.message }); }
+  });
+  app.patch("/api/admin/parts/:partNumber", requireAdminRole, async (req, res) => {
+    try {
+      const pn = String(req.params.partNumber);
+      const existing = v2.adminListParts(pn, 1).find((p: any) => p.partNumber === pn || p.part_number === pn);
+      const name = req.body.name ?? (existing as any)?.name;
+      if (!name) return res.status(400).json({ error: "name required" });
+      res.json(v2.adminUpsertPart({ partNumber: pn, name: String(name), hsn: req.body.hsn, gstRate: req.body.gstRate ?? req.body.gst_rate, brand: req.body.brand, lastMrp: req.body.lastMrp ?? req.body.last_mrp }));
+    } catch (e: any) { res.status(400).json({ error: e.message }); }
+  });
+  app.delete("/api/admin/parts/:partNumber", requireAdminRole, async (req, res) => {
+    try { v2.adminDeletePart(String(req.params.partNumber)); res.json({ ok: true }); }
+    catch (e: any) { res.status(500).json({ error: e.message }); }
+  });
+
+  // ---- A3. ADMIN QUOTATIONS CRUD (mirror Data Team v2 logic; DT is source of truth) ----
+  app.post("/api/admin/quotations", requireAuth, async (req, res) => {
+    try {
+      const { items: rawItems, company_id, ...quotationData } = req.body || {};
+      if (!quotationData.customerId) return res.status(400).json({ error: "customerId required" });
+      if (quotationData.companyId == null && company_id != null) quotationData.companyId = parseInt(String(company_id), 10);
+      const items = Array.isArray(rawItems) ? rawItems : [];
+      let companyPrefix = "NM";
+      if (quotationData.quotingCompanyId) {
+        const co = await v2.getQuotingCompany(Number(quotationData.quotingCompanyId));
+        if (co?.quotePrefix) companyPrefix = co.quotePrefix;
+      }
+      const { quotation, items: savedItems } = await v2.createQuotation(
+        { ...quotationData } as any,
+        items.map((item: any, idx: number) => ({ ...item, lineNo: item.lineNo || idx + 1 })),
+        companyPrefix,
+      );
+      res.json({ quotation, items: savedItems });
+    } catch (e: any) { res.status(400).json({ error: e.message }); }
+  });
+  app.patch("/api/admin/quotations/:id", requireAuth, async (req, res) => {
+    try {
+      const id = parseInt(req.params.id as string, 10);
+      const { items: rawItems, company_id, ...patchData } = req.body || {};
+      if (patchData.companyId == null && company_id != null) patchData.companyId = parseInt(String(company_id), 10);
+      const updated = await v2.updateQuotation(id, patchData);
+      if (!updated) return res.status(404).json({ error: "Quotation not found" });
+      let savedItems = undefined;
+      if (Array.isArray(rawItems)) savedItems = await v2.updateQuotationItems(id, rawItems);
+      res.json({ quotation: updated, items: savedItems });
+    } catch (e: any) { res.status(400).json({ error: e.message }); }
+  });
+  app.delete("/api/admin/quotations/:id", requireAdminRole, async (req, res) => {
+    try {
+      const id = parseInt(req.params.id as string, 10);
+      const existing = await v2.getQuotation(id);
+      if (!existing) return res.status(404).json({ error: "Quotation not found" });
+      await v2.softDeleteQuotation(id);
+      res.json({ ok: true });
+    } catch (e: any) { res.status(400).json({ error: e.message }); }
+  });
+
+  // ---- A5. ADMIN POs v2 (mirror Data Team; DT is source of truth) ----
+  app.get("/api/admin/purchase-orders-v2", requireAuth, async (req, res) => {
+    try {
+      const rows = await v2.listPurchaseOrdersV2WithTotals({
+        status: req.query.status as string | undefined,
+        customerId: req.query.customer_id ? parseInt(req.query.customer_id as string, 10) : undefined,
+      });
+      const summary = await v2.getDispatchSummaryForPOs(rows.map((r: any) => r.id));
+      res.json(rows.map((r: any) => {
+        const s = summary[r.id];
+        return { ...r, dispatches: s?.dispatches || [], dispatchCarrier: s?.carrier || null, dispatchBundles: s?.bundles || 0, dispatchDockets: s?.docketNumbers || [] };
+      }));
+    } catch (e: any) { res.status(500).json({ error: e.message }); }
+  });
+  app.post("/api/admin/purchase-orders-v2", requireAdminRole, async (req, res) => {
+    try {
+      const { items, ...data } = req.body || {};
+      const po = await v2.createPurchaseOrderV2(data, Array.isArray(items) ? items : []);
+      res.json(po);
+    } catch (e: any) { res.status(400).json({ error: e.message }); }
+  });
+  app.patch("/api/admin/purchase-orders-v2/:id", requireAdminRole, async (req, res) => {
+    try {
+      const updated = await v2.updatePurchaseOrderV2(parseInt(req.params.id as string, 10), req.body || {});
+      if (!updated) return res.status(404).json({ error: "Not found" });
+      res.json(updated);
+    } catch (e: any) { res.status(400).json({ error: e.message }); }
+  });
+  app.delete("/api/admin/purchase-orders-v2/:id", requireAdminRole, async (req, res) => {
+    try {
+      rawSqlite.prepare(`UPDATE purchase_orders_v2 SET deleted_at = ?, updated_at = ? WHERE id = ?`).run(Date.now(), Date.now(), parseInt(req.params.id as string, 10));
+      res.json({ ok: true });
+    } catch (e: any) { res.status(500).json({ error: e.message }); }
+  });
+
+  // ==================== B. LEADS V2 ====================
+  app.get("/api/admin/leads-v2", requireAuth, async (req, res) => {
+    try {
+      res.json(v2.listLeadsV2({
+        stage: req.query.stage as string | undefined,
+        assignedTo: req.query.assigned_to ? parseInt(req.query.assigned_to as string, 10) : undefined,
+        search: req.query.search as string | undefined,
+      }));
+    } catch (e: any) { res.status(500).json({ error: e.message }); }
+  });
+  app.post("/api/admin/leads-v2", requireAuth, async (req, res) => {
+    try { res.json(v2.createLeadV2(req.body || {})); }
+    catch (e: any) { res.status(400).json({ error: e.message }); }
+  });
+  app.patch("/api/admin/leads-v2/:id", requireAuth, async (req, res) => {
+    try {
+      const id = parseInt(req.params.id as string, 10);
+      const before = v2.getLeadRow(id);
+      if (!before) return res.status(404).json({ error: "Not found" });
+      const updated = v2.updateLeadV2(id, req.body || {});
+      // H E1 — notify the rep when assignment changes.
+      const newAssignee = req.body?.assigned_to_user_id ?? req.body?.assignedToUserId;
+      if (newAssignee != null && Number(newAssignee) !== Number(before.assigned_to_user_id)) {
+        const rep = await v2.getDataTeamUser(Number(newAssignee));
+        emitCrossTeamEvent("lead_assigned", { lead_id: id, lead_name: updated.name, assigned_to: Number(newAssignee) }, {
+          target_user_id: Number(newAssignee), target_role: "sales",
+          whatsapp_phone: rep?.phone || null, whatsapp_template: rep?.phone ? "narmada_marketing_v1" : null,
+          whatsapp_vars: [rep?.name || "Sales Rep", "Lead", `New lead assigned: ${updated.name}`],
+        });
+      }
+      res.json(updated);
+    } catch (e: any) { res.status(400).json({ error: e.message }); }
+  });
+  app.delete("/api/admin/leads-v2/:id", requireAuth, async (req, res) => {
+    try { v2.softDeleteLeadV2(parseInt(req.params.id as string, 10)); res.json({ ok: true }); }
+    catch (e: any) { res.status(500).json({ error: e.message }); }
+  });
+  // Lead stages
+  app.get("/api/admin/lead-stages", requireAuth, async (_req, res) => { res.json(v2.listLeadStages()); });
+  app.post("/api/admin/lead-stages", requireAdminRole, async (req, res) => {
+    try {
+      if (!req.body?.name) return res.status(400).json({ error: "name required" });
+      res.json(v2.createLeadStage({ name: String(req.body.name), position: req.body.position }));
+    } catch (e: any) { res.status(400).json({ error: e.message }); }
+  });
+  app.patch("/api/admin/lead-stages/:id", requireAdminRole, async (req, res) => {
+    try { res.json(v2.updateLeadStage(parseInt(req.params.id as string, 10), req.body || {})); }
+    catch (e: any) { res.status(400).json({ error: e.message }); }
+  });
+  app.delete("/api/admin/lead-stages/:id", requireAdminRole, async (req, res) => {
+    try { v2.deleteLeadStage(parseInt(req.params.id as string, 10)); res.json({ ok: true }); }
+    catch (e: any) { res.status(500).json({ error: e.message }); }
+  });
+  // Leads XLSX export — one sheet per stage.
+  app.get("/api/admin/leads/export.xlsx", requireAuth, async (_req, res) => {
+    try {
+      const stages = v2.listLeadStages();
+      const wb = XLSX.utils.book_new();
+      const cols = ["id", "name", "contact_person", "phone", "email", "address", "city", "state", "stage", "source", "requirement", "assigned_to_user_id", "created_at"];
+      for (const st of stages) {
+        const rows = v2.listLeadsV2({ stage: st.name });
+        const data = rows.map((r: any) => { const o: any = {}; for (const c of cols) o[c] = r[c] ?? ""; return o; });
+        const ws = XLSX.utils.json_to_sheet(data.length ? data : [Object.fromEntries(cols.map((c) => [c, ""]))]);
+        XLSX.utils.book_append_sheet(wb, ws, st.name.slice(0, 31));
+      }
+      const buf = XLSX.write(wb, { type: "buffer", bookType: "xlsx" });
+      const fname = `leads-export-${new Date().toISOString().slice(0, 10)}.xlsx`;
+      res.setHeader("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
+      res.setHeader("Content-Disposition", `attachment; filename="${fname}"`);
+      res.send(buf);
+    } catch (e: any) { res.status(500).json({ error: e.message }); }
+  });
+  // Sales mirror: only leads assigned to the logged-in rep.
+  app.get("/api/sales/leads", requireSales, async (req, res) => {
+    const u = (req as any).teamUser;
+    res.json(v2.listLeadsV2({ assignedTo: u.id, stage: req.query.stage as string | undefined, search: req.query.search as string | undefined }));
+  });
+  app.patch("/api/sales/leads/:id/stage", requireSales, async (req, res) => {
+    try {
+      const id = parseInt(req.params.id as string, 10);
+      const u = (req as any).teamUser;
+      const lead = v2.getLeadRow(id);
+      if (!lead || lead.assigned_to_user_id !== u.id) return res.status(404).json({ error: "Not found" });
+      if (!req.body?.stage) return res.status(400).json({ error: "stage required" });
+      res.json(v2.updateLeadV2(id, { stage: String(req.body.stage) }));
+    } catch (e: any) { res.status(400).json({ error: e.message }); }
+  });
+  // G2. Sales leads kanban
+  app.get("/api/sales/leads/kanban", requireSales, async (req, res) => {
+    const u = (req as any).teamUser;
+    res.json(v2.leadsKanbanForRep(u.id));
+  });
+
+  // ==================== C. TASKS V2 (over task_items) ====================
+  const taskUploadsDir = path.join(ctx.uploadsDir || "./uploads", "tasks");
+  if (!fs.existsSync(taskUploadsDir)) fs.mkdirSync(taskUploadsDir, { recursive: true });
+  const multerTask = multer({
+    storage: multer.diskStorage({
+      destination: (_req: any, _file: any, cb: any) => cb(null, taskUploadsDir),
+      filename: (_req: any, file: any, cb: any) => cb(null, `${Date.now()}-${file.originalname.replace(/[^a-zA-Z0-9._-]/g, "_")}`),
+    }),
+    limits: { fileSize: 20 * 1024 * 1024 },
+  });
+  const TASK_STATUSES = ["pending", "processing", "standby", "complete", "open", "doing", "done"];
+  app.post("/api/admin/tasks/:id/file", requireAuth, multerTask.single("file"), async (req: any, res: any) => {
+    try {
+      if (!req.file) return res.status(400).json({ error: "No file uploaded" });
+      const id = parseInt(req.params.id as string, 10);
+      const proto = req.protocol || "https";
+      const host = req.get("host") || "narmada-backend.onrender.com";
+      const fileUrl = `${proto}://${host}/uploads/tasks/${req.file.filename}`;
+      const t = await v2.updateTaskItem(id, { fileUrl } as any);
+      if (!t) return res.status(404).json({ error: "Not found" });
+      res.json(t);
+    } catch (e: any) { res.status(400).json({ error: e.message }); }
+  });
+  app.patch("/api/admin/tasks/:id/status", requireAuth, async (req, res) => {
+    try {
+      const status = String(req.body?.status || "");
+      if (!TASK_STATUSES.includes(status)) return res.status(400).json({ error: `Invalid status. Allowed: ${TASK_STATUSES.join(", ")}` });
+      const t = await v2.updateTaskItem(parseInt(req.params.id as string, 10), { status } as any);
+      if (!t) return res.status(404).json({ error: "Not found" });
+      res.json(t);
+    } catch (e: any) { res.status(400).json({ error: e.message }); }
+  });
+  // Sales mirror: own tasks + status change
+  app.get("/api/sales/tasks", requireSales, async (req, res) => {
+    const u = (req as any).teamUser;
+    res.json(await v2.listTaskItems({ assignedTo: u.id, status: req.query.status as string | undefined }));
+  });
+  app.patch("/api/sales/tasks/:id/status", requireSales, async (req, res) => {
+    try {
+      const id = parseInt(req.params.id as string, 10);
+      const u = (req as any).teamUser;
+      const all = await v2.listTaskItems({ assignedTo: u.id });
+      if (!all.find((t: any) => t.id === id)) return res.status(404).json({ error: "Not found" });
+      const status = String(req.body?.status || "");
+      if (!TASK_STATUSES.includes(status)) return res.status(400).json({ error: "Invalid status" });
+      res.json(await v2.updateTaskItem(id, { status } as any));
+    } catch (e: any) { res.status(400).json({ error: e.message }); }
+  });
+
+  // ==================== D. USER MANAGEMENT ====================
+  const VALID_USER_ROLES = ["admin", "data_team", "team", "dispatch", "delhi", "delhi_warehouse", "consignment", "sales", "finance", "hr", "customer"];
+  app.get("/api/admin/users", requireAdminRole, async (req, res) => {
+    try { res.json(v2.listUsersByRole(req.query.role as string | undefined)); }
+    catch (e: any) { res.status(500).json({ error: e.message }); }
+  });
+  app.post("/api/admin/users", requireAdminRole, async (req, res) => {
+    try {
+      const { username, password, role, name, phone, email } = req.body || {};
+      if (!username || !password) return res.status(400).json({ error: "username and password required" });
+      if (String(password).length < 6) return res.status(400).json({ error: "Password too short" });
+      if (role && !VALID_USER_ROLES.includes(String(role))) return res.status(400).json({ error: "Invalid role" });
+      const row = await v2.createDataTeamUser({ username: String(username), passwordHash: hashPassword(String(password)), name, email, phone, role: role ? String(role) : undefined });
+      const { passwordHash: _ph, ...safe } = row;
+      res.json(safe);
+    } catch (e: any) { res.status(400).json({ error: e.message }); }
+  });
+  app.patch("/api/admin/users/:id", requireAdminRole, async (req, res) => {
+    try {
+      const id = parseInt(req.params.id as string, 10);
+      const updates: any = {};
+      if (req.body.name !== undefined) updates.name = req.body.name;
+      if (req.body.email !== undefined) updates.email = req.body.email;
+      if (req.body.phone !== undefined) updates.phone = req.body.phone;
+      if (req.body.username !== undefined) updates.username = req.body.username;
+      if (req.body.active !== undefined) updates.active = req.body.active;
+      if (req.body.role !== undefined) {
+        if (!VALID_USER_ROLES.includes(String(req.body.role))) return res.status(400).json({ error: "Invalid role" });
+        updates.role = String(req.body.role);
+      }
+      if (req.body.password) updates.passwordHash = hashPassword(String(req.body.password));
+      const row = await v2.updateDataTeamUser(id, updates);
+      if (!row) return res.status(404).json({ error: "Not found" });
+      const { passwordHash: _ph, ...safe } = row;
+      res.json(safe);
+    } catch (e: any) { res.status(400).json({ error: e.message }); }
+  });
+  app.delete("/api/admin/users/:id", requireAdminRole, async (req, res) => {
+    try { v2.softDeleteUser(parseInt(req.params.id as string, 10)); res.json({ ok: true }); }
+    catch (e: any) { res.status(500).json({ error: e.message }); }
+  });
+
+  // ==================== F. CONSIGNMENT DASHBOARD ====================
+  app.get("/api/consignment/orders", requireConsignment, async (req, res) => {
+    try {
+      const list = await v2.listConsignments({ status: req.query.status as string | undefined, q: req.query.q as string | undefined });
+      res.json(list);
+    } catch (e: any) { res.status(500).json({ error: e.message }); }
+  });
+
+  // ==================== G1. SALES TARGETS ====================
+  app.get("/api/admin/sales-targets", requireAuth, async (req, res) => {
+    res.json(v2.listSalesTargets({ repId: req.query.rep_id ? parseInt(req.query.rep_id as string, 10) : undefined, status: req.query.status as string | undefined }));
+  });
+  app.post("/api/admin/sales-targets", requireAdminRole, async (req, res) => {
+    try { res.json(v2.createSalesTarget(req.body || {})); }
+    catch (e: any) { res.status(400).json({ error: e.message }); }
+  });
+  app.patch("/api/admin/sales-targets/:id", requireAdminRole, async (req, res) => {
+    try {
+      const t = v2.updateSalesTarget(parseInt(req.params.id as string, 10), req.body || {});
+      if (!t) return res.status(404).json({ error: "Not found" });
+      res.json(t);
+    } catch (e: any) { res.status(400).json({ error: e.message }); }
+  });
+  app.delete("/api/admin/sales-targets/:id", requireAdminRole, async (req, res) => {
+    try { v2.deleteSalesTarget(parseInt(req.params.id as string, 10)); res.json({ ok: true }); }
+    catch (e: any) { res.status(500).json({ error: e.message }); }
+  });
+  app.post("/api/admin/sales-targets/:id/approve-achievement/:achievement_id", requireAdminRole, async (req, res) => {
+    try { res.json(v2.approveTargetAchievement(parseInt(req.params.achievement_id as string, 10))); }
+    catch (e: any) { res.status(400).json({ error: e.message }); }
+  });
+  // Sales: own targets with progress (also runs rollover + deadline events idempotently).
+  app.get("/api/sales/targets", requireSales, async (req, res) => {
+    try {
+      const u = (req as any).teamUser;
+      v2.autoRolloverTargets(u.id);
+      const targetsList = v2.listSalesTargets({ repId: u.id, status: "active" });
+      // H E5 — target deadline approaching (<=3 days), deduped per target per day.
+      const todayMs = Date.now();
+      for (const t of targetsList) {
+        if (!t.period_end) continue;
+        const endMs = Date.parse(t.period_end);
+        if (Number.isNaN(endMs)) continue;
+        const daysLeft = Math.ceil((endMs - todayMs) / (24 * 60 * 60 * 1000));
+        if (daysLeft <= 3 && daysLeft >= 0 && !v2.deadlineEventExistsToday(t.id)) {
+          emitCrossTeamEvent("target_deadline_approaching", { target_id: t.id, days_left: daysLeft, rep_id: u.id }, { target_user_id: u.id, target_role: "admin" });
+        }
+      }
+      const withProgress = targetsList.map((t: any) => ({ ...t, achievements: v2.listTargetAchievements(t.id) }));
+      res.json(withProgress);
+    } catch (e: any) { res.status(500).json({ error: e.message }); }
+  });
+  app.post("/api/sales/targets/:id/claim-po", requireSales, async (req, res) => {
+    try {
+      const u = (req as any).teamUser;
+      const poId = parseInt(req.body?.po_id as string, 10);
+      if (!poId) return res.status(400).json({ error: "po_id required" });
+      const result = v2.claimPoForTarget(parseInt(req.params.id as string, 10), poId, u.id);
+      if (!result.ok) return res.status(400).json({ error: result.error });
+      res.json({ ok: true, achievement: result.achievement });
+    } catch (e: any) { res.status(400).json({ error: e.message }); }
+  });
+
+  // ==================== G3. ATTENDANCE + VISITS ====================
+  // IST helpers: convert "now" into IST date + hour.
+  const istNow = () => {
+    const now = new Date();
+    const ist = new Date(now.getTime() + (5.5 * 60 - now.getTimezoneOffset()) * 60 * 1000);
+    return { iso: now.toISOString(), date: ist.toISOString().slice(0, 10), hour: ist.getUTCHours(), minute: ist.getUTCMinutes() };
+  };
+  app.post("/api/sales/attendance/checkin", requireSales, async (req, res) => {
+    try {
+      const u = (req as any).teamUser;
+      const t = istNow();
+      const missed = t.hour > 10 || (t.hour === 10 && t.minute > 0);
+      res.json(v2.attendanceCheckin(u.id, t.date, t.iso, missed));
+    } catch (e: any) { res.status(400).json({ error: e.message }); }
+  });
+  app.post("/api/sales/attendance/checkout", requireSales, async (req, res) => {
+    try {
+      const u = (req as any).teamUser;
+      const t = istNow();
+      const missed = t.hour < 18;
+      res.json(v2.attendanceCheckout(u.id, t.date, t.iso, missed));
+    } catch (e: any) { res.status(400).json({ error: e.message }); }
+  });
+  app.get("/api/sales/attendance/today", requireSales, async (req, res) => {
+    const u = (req as any).teamUser;
+    res.json(v2.getAttendanceToday(u.id, istNow().date) || null);
+  });
+  app.get("/api/admin/attendance", requireAuth, async (req, res) => {
+    res.json(v2.listAttendance({ date: req.query.date as string | undefined, repId: req.query.rep_id ? parseInt(req.query.rep_id as string, 10) : undefined }));
+  });
+  // Visits (multipart photo)
+  const visitsDir = path.join(ctx.uploadsDir || "./uploads", "visits");
+  if (!fs.existsSync(visitsDir)) fs.mkdirSync(visitsDir, { recursive: true });
+  const multerVisit = multer({
+    storage: multer.diskStorage({
+      destination: (_req: any, _file: any, cb: any) => cb(null, visitsDir),
+      filename: (_req: any, file: any, cb: any) => cb(null, `${Date.now()}-${file.originalname.replace(/[^a-zA-Z0-9._-]/g, "_")}`),
+    }),
+    limits: { fileSize: 20 * 1024 * 1024 },
+  });
+  app.post("/api/sales/visits", requireSales, multerVisit.single("photo"), async (req: any, res: any) => {
+    try {
+      const u = (req as any).teamUser;
+      let photoUrl: string | undefined;
+      if (req.file) {
+        const proto = req.protocol || "https";
+        const host = req.get("host") || "narmada-backend.onrender.com";
+        photoUrl = `${proto}://${host}/uploads/visits/${req.file.filename}`;
+      }
+      res.json(v2.createVisit({
+        repUserId: u.id,
+        customerId: req.body?.customer_id ? parseInt(req.body.customer_id, 10) : undefined,
+        gpsLat: req.body?.gps_lat ? Number(req.body.gps_lat) : undefined,
+        gpsLng: req.body?.gps_lng ? Number(req.body.gps_lng) : undefined,
+        photoUrl, notes: req.body?.notes,
+      }));
+    } catch (e: any) { res.status(400).json({ error: e.message }); }
+  });
+  app.get("/api/sales/visits/today", requireSales, async (req, res) => {
+    const u = (req as any).teamUser;
+    res.json(v2.listVisits({ repId: u.id, date: istNow().date }));
+  });
+  app.get("/api/admin/visits", requireAuth, async (req, res) => {
+    res.json(v2.listVisits({ repId: req.query.rep_id ? parseInt(req.query.rep_id as string, 10) : undefined, date: req.query.date as string | undefined }));
+  });
+
+  // ==================== H. CROSS-TEAM NOTIFICATIONS FEED ====================
+  app.get("/api/notifications", requireDataTeamRole(), async (req, res) => {
+    const u = (req as any).teamUser;
+    // Admins (via SSO team session) may pass role/user_id; reps are auto-scoped to self.
+    if (u.role === "admin") {
+      res.json(v2.listCrossTeamEvents({ userId: req.query.user_id ? parseInt(req.query.user_id as string, 10) : undefined, role: req.query.role as string | undefined }));
+    } else {
+      res.json(v2.listCrossTeamEvents({ userId: u.id, role: u.role }));
+    }
+  });
+  app.post("/api/notifications/:id/read", requireDataTeamRole(), async (req, res) => {
+    try { v2.markCrossTeamEventRead(parseInt(req.params.id as string, 10)); res.json({ ok: true }); }
+    catch (e: any) { res.status(500).json({ error: e.message }); }
+  });
+  app.get("/api/notifications/unread-count", requireDataTeamRole(), async (req, res) => {
+    const u = (req as any).teamUser;
+    if (u.role === "admin") {
+      res.json({ count: v2.crossTeamUnreadCount({ userId: req.query.user_id ? parseInt(req.query.user_id as string, 10) : undefined, role: req.query.role as string | undefined }) });
+    } else {
+      res.json({ count: v2.crossTeamUnreadCount({ userId: u.id, role: u.role }) });
+    }
+  });
+
+  // ==================== I. MARKETING ADDITIONS ====================
+  app.get("/api/admin/marketing/whatsapp-templates", requireAuth, async (_req, res) => {
+    res.json(v2.listMarketingWhatsappTemplates());
+  });
+  app.post("/api/admin/marketing/whatsapp-templates", requireAdminRole, async (req, res) => {
+    try {
+      if (!req.body?.name && !req.body?.template_name) return res.status(400).json({ error: "name required" });
+      res.json(v2.createMarketingWhatsappTemplate(req.body || {}));
+    } catch (e: any) { res.status(400).json({ error: e.message }); }
+  });
+  app.patch("/api/admin/marketing/whatsapp-templates/:id", requireAdminRole, async (req, res) => {
+    try { res.json(v2.updateMarketingWhatsappTemplate(parseInt(req.params.id as string, 10), req.body || {})); }
+    catch (e: any) { res.status(400).json({ error: e.message }); }
+  });
+  app.delete("/api/admin/marketing/whatsapp-templates/:id", requireAdminRole, async (req, res) => {
+    try { v2.deleteMarketingWhatsappTemplate(parseInt(req.params.id as string, 10)); res.json({ ok: true }); }
+    catch (e: any) { res.status(500).json({ error: e.message }); }
+  });
+  // I2. Audience include/exclude preview + patch
+  app.patch("/api/admin/audiences/:id", requireAdminRole, async (req, res) => {
+    try {
+      const id = parseInt(req.params.id as string, 10);
+      const includeIds = Array.isArray(req.body?.include_user_ids) ? req.body.include_user_ids.map((n: any) => Number(n)) : undefined;
+      const excludeIds = Array.isArray(req.body?.exclude_user_ids) ? req.body.exclude_user_ids.map((n: any) => Number(n)) : undefined;
+      res.json(v2.updateAudienceIncludeExclude(id, includeIds, excludeIds));
+    } catch (e: any) { res.status(400).json({ error: e.message }); }
+  });
+  app.get("/api/admin/audiences/:id/preview", requireAuth, async (req, res) => {
+    try {
+      const id = parseInt(req.params.id as string, 10);
+      const aud = v2.getAudienceRow(id);
+      if (!aud) return res.status(404).json({ error: "Not found" });
+      // Base filter-matched customers (best-effort: all customers; resolver applies finer filters at send time).
+      const filterMatched = rawSqlite.prepare(`SELECT id, name, phone, email, state FROM customers`).all() as any[];
+      const includeIds: number[] = aud.include_user_ids_json ? JSON.parse(aud.include_user_ids_json) : [];
+      const excludeIds: number[] = aud.exclude_user_ids_json ? JSON.parse(aud.exclude_user_ids_json) : [];
+      const matchedIds = new Set(filterMatched.map((c) => c.id));
+      const includedExtra = includeIds.filter((cid) => !matchedIds.has(cid));
+      for (const cid of includeIds) matchedIds.add(cid);
+      for (const cid of excludeIds) matchedIds.delete(cid);
+      const finalList = Array.from(matchedIds).slice(0, 50).map((cid) => rawSqlite.prepare(`SELECT id, name, phone, email, state FROM customers WHERE id = ?`).get(cid)).filter(Boolean);
+      res.json({
+        customers: finalList,
+        summary: { matched: filterMatched.length, included_extra: includedExtra.length, excluded: excludeIds.length, final_count: finalList.length },
+      });
     } catch (e: any) { res.status(500).json({ error: e.message }); }
   });
 }

@@ -847,6 +847,7 @@ export async function createDataTeamUser(data: {
   name?: string;
   email?: string;
   phone?: string;
+  role?: string;
 }): Promise<DataTeamUser> {
   return db.insert(dataTeamUsers).values({
     username: data.username,
@@ -854,7 +855,8 @@ export async function createDataTeamUser(data: {
     name: data.name || null,
     email: data.email || null,
     phone: data.phone || null,
-    role: "data_team",
+    // R26.5 (D1) — honor an explicit role; defaults to data_team for back-compat.
+    role: data.role || "data_team",
     active: true,
     createdAt: Date.now(),
   } as any).returning().get();
@@ -4042,4 +4044,398 @@ export function syncDelhiLineRates(poId: number): { lines: number; zeroRateLines
     return { lines: items.length, zeroRateLines, total };
   });
   return tx();
+}
+
+// ============================================================================
+// R26.5 — additive storage helpers. Raw-sqlite backed (mirrors marginSummary
+// style) for the new tables + admin mirrors. Additive only — never touches
+// existing helpers.
+// ============================================================================
+
+// ---- A2. shipped-customer ledger view (PO/dispatch derived, read-only) ----
+export function listShippedLedgerView(customerId: number, opts: { from?: number; to?: number } = {}): any[] {
+  const conds: string[] = ["po.customer_id = ?", "po.deleted_at IS NULL", "po.delhi_submitted_at IS NOT NULL"];
+  const args: any[] = [customerId];
+  if (opts.from != null) { conds.push("po.delhi_submitted_at >= ?"); args.push(opts.from); }
+  if (opts.to != null) { conds.push("po.delhi_submitted_at <= ?"); args.push(opts.to); }
+  const rows = sqlite.prepare(
+    `SELECT po.id AS po_id, po.customer_po_number, po.total, po.delhi_submitted_at,
+            po.consignment_status, po.is_fully_dispatched,
+            d.docket_no, d.courier_name, d.dispatch_date
+       FROM purchase_orders_v2 po
+       LEFT JOIN dispatches d ON d.po_id = po.id
+      WHERE ${conds.join(" AND ")}
+      ORDER BY po.delhi_submitted_at DESC`,
+  ).all(...args) as any[];
+  return rows.map((r) => ({
+    poId: r.po_id,
+    customerPoNumber: r.customer_po_number,
+    amount: r.total ?? 0,
+    shippedAt: r.delhi_submitted_at,
+    consignmentStatus: r.consignment_status,
+    isFullyDispatched: r.is_fully_dispatched,
+    docketNo: r.docket_no,
+    courier: r.courier_name,
+    dispatchDate: r.dispatch_date,
+  }));
+}
+
+// ---- A4. admin parts list (mirrors searchPartsEnriched) ----
+export function adminListParts(q: string, limit = 50): EnrichedPartsMasterRow[] {
+  return searchPartsEnriched(q, limit);
+}
+export function adminUpsertPart(data: { partNumber: string; name: string; hsn?: string; gstRate?: number; brand?: string; lastMrp?: number }): any {
+  const now = Date.now();
+  const searchText = `${data.partNumber} ${data.name} ${data.brand ?? ""}`.toLowerCase();
+  sqlite.prepare(
+    `INSERT INTO parts_master (part_number, name, hsn, gst_rate, brand, last_mrp, last_source, last_updated, search_text, use_count, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, 'manual', ?, ?, 0, ?)
+     ON CONFLICT(part_number) DO UPDATE SET
+       name=excluded.name, hsn=excluded.hsn, gst_rate=excluded.gst_rate, brand=excluded.brand,
+       last_mrp=excluded.last_mrp, last_source='manual', last_updated=excluded.last_updated, search_text=excluded.search_text`,
+  ).run(data.partNumber, data.name, data.hsn ?? null, data.gstRate ?? null, data.brand ?? null, data.lastMrp ?? null, now, searchText, now);
+  return sqlite.prepare(`SELECT * FROM parts_master WHERE part_number = ?`).get(data.partNumber);
+}
+export function adminDeletePart(partNumber: string): void {
+  sqlite.prepare(`DELETE FROM parts_master WHERE part_number = ?`).run(partNumber);
+}
+
+// ---- B. Leads V2 ----
+export function listLeadsV2(opts: { stage?: string; assignedTo?: number; search?: string } = {}): any[] {
+  const conds: string[] = ["(deleted_at IS NULL)"];
+  const args: any[] = [];
+  if (opts.stage) { conds.push("stage = ?"); args.push(opts.stage); }
+  if (opts.assignedTo != null) { conds.push("assigned_to_user_id = ?"); args.push(opts.assignedTo); }
+  if (opts.search) {
+    conds.push("(LOWER(name) LIKE ? OR LOWER(COALESCE(phone,'')) LIKE ? OR LOWER(COALESCE(email,'')) LIKE ? OR LOWER(COALESCE(contact_person,'')) LIKE ?)");
+    const s = `%${opts.search.toLowerCase()}%`;
+    args.push(s, s, s, s);
+  }
+  return sqlite.prepare(`SELECT * FROM leads WHERE ${conds.join(" AND ")} ORDER BY created_at DESC`).all(...args) as any[];
+}
+export function createLeadV2(data: any): any {
+  const now = Date.now();
+  const info = sqlite.prepare(
+    `INSERT INTO leads (source, name, phone, email, city, state, requirement, stage, contact_person, address, assigned_to_user_id, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+  ).run(
+    data.source || "manual", data.name || "Lead", data.phone ?? null, data.email ?? null,
+    data.city ?? null, data.state ?? null, data.requirement ?? null, data.stage || "New",
+    data.contact_person ?? data.contactPerson ?? null, data.address ?? null,
+    data.assigned_to_user_id ?? data.assignedToUserId ?? null, now, now,
+  );
+  return sqlite.prepare(`SELECT * FROM leads WHERE id = ?`).get(info.lastInsertRowid);
+}
+export function updateLeadV2(id: number, data: any): any {
+  const cols: string[] = [];
+  const args: any[] = [];
+  const map: Record<string, any> = {
+    name: data.name, phone: data.phone, email: data.email, city: data.city, state: data.state,
+    requirement: data.requirement, stage: data.stage, source: data.source,
+    contact_person: data.contact_person ?? data.contactPerson,
+    address: data.address,
+    assigned_to_user_id: data.assigned_to_user_id ?? data.assignedToUserId,
+  };
+  for (const [k, v] of Object.entries(map)) {
+    if (v !== undefined) { cols.push(`${k} = ?`); args.push(v); }
+  }
+  if (!cols.length) return sqlite.prepare(`SELECT * FROM leads WHERE id = ?`).get(id);
+  cols.push("updated_at = ?"); args.push(Date.now());
+  args.push(id);
+  sqlite.prepare(`UPDATE leads SET ${cols.join(", ")} WHERE id = ?`).run(...args);
+  return sqlite.prepare(`SELECT * FROM leads WHERE id = ?`).get(id);
+}
+export function softDeleteLeadV2(id: number): void {
+  sqlite.prepare(`UPDATE leads SET deleted_at = ?, updated_at = ? WHERE id = ?`).run(new Date().toISOString(), Date.now(), id);
+}
+export function getLeadRow(id: number): any {
+  return sqlite.prepare(`SELECT * FROM leads WHERE id = ?`).get(id);
+}
+
+// ---- B2. lead stages ----
+export function listLeadStages(): any[] {
+  return sqlite.prepare(`SELECT * FROM lead_stages ORDER BY position, id`).all() as any[];
+}
+export function createLeadStage(data: { name: string; position?: number }): any {
+  const info = sqlite.prepare(
+    `INSERT INTO lead_stages (name, position, is_default, created_at) VALUES (?, ?, 0, ?)`,
+  ).run(data.name, data.position ?? 0, Date.now());
+  return sqlite.prepare(`SELECT * FROM lead_stages WHERE id = ?`).get(info.lastInsertRowid);
+}
+export function updateLeadStage(id: number, data: { name?: string; position?: number }): any {
+  const cols: string[] = []; const args: any[] = [];
+  if (data.name !== undefined) { cols.push("name = ?"); args.push(data.name); }
+  if (data.position !== undefined) { cols.push("position = ?"); args.push(data.position); }
+  if (cols.length) { args.push(id); sqlite.prepare(`UPDATE lead_stages SET ${cols.join(", ")} WHERE id = ?`).run(...args); }
+  return sqlite.prepare(`SELECT * FROM lead_stages WHERE id = ?`).get(id);
+}
+export function deleteLeadStage(id: number): void {
+  // Never delete default stages — only custom ones.
+  sqlite.prepare(`DELETE FROM lead_stages WHERE id = ? AND is_default = 0`).run(id);
+}
+
+// ---- G1. sales targets ----
+export function listSalesTargets(opts: { repId?: number; status?: string } = {}): any[] {
+  const conds: string[] = []; const args: any[] = [];
+  if (opts.repId != null) { conds.push("sales_rep_user_id = ?"); args.push(opts.repId); }
+  if (opts.status) { conds.push("status = ?"); args.push(opts.status); }
+  const where = conds.length ? `WHERE ${conds.join(" AND ")}` : "";
+  return sqlite.prepare(`SELECT * FROM sales_targets ${where} ORDER BY created_at DESC`).all(...args) as any[];
+}
+export function getSalesTarget(id: number): any {
+  return sqlite.prepare(`SELECT * FROM sales_targets WHERE id = ?`).get(id);
+}
+export function createSalesTarget(data: any): any {
+  const info = sqlite.prepare(
+    `INSERT INTO sales_targets (sales_rep_user_id, target_type, customer_id, period_start, period_end, target_amount, achieved_amount, rolled_over_from, status, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+  ).run(
+    data.sales_rep_user_id ?? data.salesRepUserId ?? null, data.target_type ?? data.targetType ?? "monthly",
+    data.customer_id ?? data.customerId ?? null, data.period_start ?? data.periodStart ?? null,
+    data.period_end ?? data.periodEnd ?? null, Number(data.target_amount ?? data.targetAmount ?? 0),
+    Number(data.achieved_amount ?? 0), data.rolled_over_from ?? null, data.status ?? "active", Date.now(),
+  );
+  return getSalesTarget(Number(info.lastInsertRowid));
+}
+export function updateSalesTarget(id: number, data: any): any {
+  const map: Record<string, any> = {
+    sales_rep_user_id: data.sales_rep_user_id ?? data.salesRepUserId,
+    target_type: data.target_type ?? data.targetType,
+    customer_id: data.customer_id ?? data.customerId,
+    period_start: data.period_start ?? data.periodStart,
+    period_end: data.period_end ?? data.periodEnd,
+    target_amount: data.target_amount ?? data.targetAmount,
+    achieved_amount: data.achieved_amount ?? data.achievedAmount,
+    status: data.status,
+  };
+  const cols: string[] = []; const args: any[] = [];
+  for (const [k, v] of Object.entries(map)) { if (v !== undefined) { cols.push(`${k} = ?`); args.push(v); } }
+  if (cols.length) { args.push(id); sqlite.prepare(`UPDATE sales_targets SET ${cols.join(", ")} WHERE id = ?`).run(...args); }
+  return getSalesTarget(id);
+}
+export function deleteSalesTarget(id: number): void {
+  sqlite.prepare(`DELETE FROM sales_targets WHERE id = ?`).run(id);
+}
+export function listTargetAchievements(targetId: number): any[] {
+  return sqlite.prepare(`SELECT * FROM target_achievements WHERE target_id = ? ORDER BY created_at DESC`).all(targetId) as any[];
+}
+export function getTargetAchievement(id: number): any {
+  return sqlite.prepare(`SELECT * FROM target_achievements WHERE id = ?`).get(id);
+}
+
+// Claim a PO against a target. Returns { ok, error?, achievement? }. Verification:
+// (1) PO customer.sales_rep_id == rep, (2) PO status shipped or later, (3) not already claimed.
+export function claimPoForTarget(targetId: number, poId: number, repUserId: number): { ok: boolean; error?: string; achievement?: any } {
+  const target = getSalesTarget(targetId);
+  if (!target) return { ok: false, error: "Target not found" };
+  if (target.sales_rep_user_id !== repUserId) return { ok: false, error: "Target does not belong to this rep" };
+  const po = sqlite.prepare(`SELECT * FROM purchase_orders_v2 WHERE id = ? AND deleted_at IS NULL`).get(poId) as any;
+  if (!po) return { ok: false, error: "PO not found" };
+  const cust = po.customer_id ? sqlite.prepare(`SELECT * FROM customers WHERE id = ?`).get(po.customer_id) as any : null;
+  if (!cust || cust.sales_rep_id !== repUserId) return { ok: false, error: "PO customer is not assigned to this rep" };
+  const shippedStatuses = new Set(["shipped", "dispatched", "fulfilled", "completed", "delivered"]);
+  const isShipped = shippedStatuses.has(String(po.status || "").toLowerCase()) || po.is_fully_dispatched || po.delhi_submitted_at;
+  if (!isShipped) return { ok: false, error: "PO is not shipped yet" };
+  const existing = sqlite.prepare(`SELECT id FROM target_achievements WHERE po_id = ?`).get(poId) as any;
+  if (existing) return { ok: false, error: "PO already claimed against a target" };
+  const amount = Number(po.total ?? 0);
+  const info = sqlite.prepare(
+    `INSERT INTO target_achievements (target_id, po_id, customer_id, amount, verified_by, admin_approved, created_at)
+     VALUES (?, ?, ?, ?, 'auto', 0, ?)`,
+  ).run(targetId, poId, po.customer_id ?? null, amount, Date.now());
+  // Tentatively increment achieved_amount (fail-safe: still awaiting admin approval).
+  sqlite.prepare(`UPDATE sales_targets SET achieved_amount = COALESCE(achieved_amount,0) + ? WHERE id = ?`).run(amount, targetId);
+  return { ok: true, achievement: getTargetAchievement(Number(info.lastInsertRowid)) };
+}
+export function approveTargetAchievement(achievementId: number): any {
+  sqlite.prepare(`UPDATE target_achievements SET admin_approved = 1, verified_by = 'admin' WHERE id = ?`).run(achievementId);
+  return getTargetAchievement(achievementId);
+}
+
+// Idempotent auto-rollover: expired active targets that fell short get marked rolled_over
+// and a fresh target for the next equal-length period is created with the remaining amount.
+export function autoRolloverTargets(repUserId: number): void {
+  const today = new Date().toISOString().slice(0, 10);
+  const expired = sqlite.prepare(
+    `SELECT * FROM sales_targets WHERE sales_rep_user_id = ? AND status = 'active' AND period_end IS NOT NULL AND period_end < ? AND COALESCE(achieved_amount,0) < COALESCE(target_amount,0)`,
+  ).all(repUserId, today) as any[];
+  for (const t of expired) {
+    // Guard: skip if a rollover child already exists (idempotent).
+    const child = sqlite.prepare(`SELECT id FROM sales_targets WHERE rolled_over_from = ?`).get(t.id) as any;
+    sqlite.prepare(`UPDATE sales_targets SET status = 'rolled_over' WHERE id = ?`).run(t.id);
+    if (child) continue;
+    const remaining = Number(t.target_amount ?? 0) - Number(t.achieved_amount ?? 0);
+    // Next period: same length, starting day after old period_end.
+    let nextStart = t.period_end, nextEnd: string | null = null;
+    try {
+      const startMs = Date.parse(t.period_start);
+      const endMs = Date.parse(t.period_end);
+      const len = endMs - startMs;
+      const ns = endMs + 24 * 60 * 60 * 1000;
+      nextStart = new Date(ns).toISOString().slice(0, 10);
+      nextEnd = new Date(ns + len).toISOString().slice(0, 10);
+    } catch { /* keep best-effort */ }
+    sqlite.prepare(
+      `INSERT INTO sales_targets (sales_rep_user_id, target_type, customer_id, period_start, period_end, target_amount, achieved_amount, rolled_over_from, status, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, 0, ?, 'active', ?)`,
+    ).run(t.sales_rep_user_id, t.target_type, t.customer_id, nextStart, nextEnd, remaining, t.id, Date.now());
+  }
+}
+
+// ---- G2. leads kanban ----
+export function leadsKanbanForRep(repUserId: number): any {
+  const stages = listLeadStages();
+  const out: any[] = [];
+  for (const st of stages) {
+    const leadsForStage = sqlite.prepare(
+      `SELECT * FROM leads WHERE deleted_at IS NULL AND assigned_to_user_id = ? AND stage = ? ORDER BY created_at DESC`,
+    ).all(repUserId, st.name) as any[];
+    if (leadsForStage.length) out.push({ stage_name: st.name, count: leadsForStage.length, leads: leadsForStage });
+  }
+  return { stages: out };
+}
+
+// ---- G3. attendance ----
+export function getAttendanceToday(repUserId: number, date: string): any {
+  return sqlite.prepare(`SELECT * FROM attendance_checkins WHERE sales_rep_user_id = ? AND date = ?`).get(repUserId, date);
+}
+export function attendanceCheckin(repUserId: number, date: string, nowIso: string, missed: boolean): any {
+  const existing = getAttendanceToday(repUserId, date);
+  if (existing) {
+    sqlite.prepare(`UPDATE attendance_checkins SET checkin_at = ?, checkin_missed = ? WHERE id = ?`).run(nowIso, missed ? 1 : 0, existing.id);
+    return getAttendanceToday(repUserId, date);
+  }
+  sqlite.prepare(
+    `INSERT INTO attendance_checkins (sales_rep_user_id, date, checkin_at, checkin_missed) VALUES (?, ?, ?, ?)`,
+  ).run(repUserId, date, nowIso, missed ? 1 : 0);
+  return getAttendanceToday(repUserId, date);
+}
+export function attendanceCheckout(repUserId: number, date: string, nowIso: string, missed: boolean): any {
+  const existing = getAttendanceToday(repUserId, date);
+  if (existing) {
+    sqlite.prepare(`UPDATE attendance_checkins SET checkout_at = ?, checkout_missed = ? WHERE id = ?`).run(nowIso, missed ? 1 : 0, existing.id);
+    return getAttendanceToday(repUserId, date);
+  }
+  sqlite.prepare(
+    `INSERT INTO attendance_checkins (sales_rep_user_id, date, checkout_at, checkout_missed) VALUES (?, ?, ?, ?)`,
+  ).run(repUserId, date, nowIso, missed ? 1 : 0);
+  return getAttendanceToday(repUserId, date);
+}
+export function listAttendance(opts: { date?: string; repId?: number } = {}): any[] {
+  const conds: string[] = []; const args: any[] = [];
+  if (opts.date) { conds.push("date = ?"); args.push(opts.date); }
+  if (opts.repId != null) { conds.push("sales_rep_user_id = ?"); args.push(opts.repId); }
+  const where = conds.length ? `WHERE ${conds.join(" AND ")}` : "";
+  return sqlite.prepare(`SELECT * FROM attendance_checkins ${where} ORDER BY date DESC, id DESC`).all(...args) as any[];
+}
+
+// ---- G3. visits ----
+export function createVisit(data: { repUserId: number; customerId?: number; gpsLat?: number; gpsLng?: number; photoUrl?: string; notes?: string }): any {
+  const info = sqlite.prepare(
+    `INSERT INTO visit_checkins (sales_rep_user_id, customer_id, gps_lat, gps_lng, photo_url, notes, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?)`,
+  ).run(data.repUserId, data.customerId ?? null, data.gpsLat ?? null, data.gpsLng ?? null, data.photoUrl ?? null, data.notes ?? null, new Date().toISOString());
+  return sqlite.prepare(`SELECT * FROM visit_checkins WHERE id = ?`).get(info.lastInsertRowid);
+}
+export function listVisits(opts: { repId?: number; date?: string } = {}): any[] {
+  const conds: string[] = []; const args: any[] = [];
+  if (opts.repId != null) { conds.push("sales_rep_user_id = ?"); args.push(opts.repId); }
+  if (opts.date) { conds.push("substr(created_at,1,10) = ?"); args.push(opts.date); }
+  const where = conds.length ? `WHERE ${conds.join(" AND ")}` : "";
+  return sqlite.prepare(`SELECT * FROM visit_checkins ${where} ORDER BY created_at DESC`).all(...args) as any[];
+}
+
+// ---- H. cross-team notifications feed ----
+export function listCrossTeamEvents(opts: { userId?: number; role?: string } = {}): any[] {
+  const conds: string[] = []; const args: any[] = [];
+  if (opts.userId != null && opts.role) { conds.push("(target_user_id = ? OR target_role = ?)"); args.push(opts.userId, opts.role); }
+  else if (opts.userId != null) { conds.push("target_user_id = ?"); args.push(opts.userId); }
+  else if (opts.role) { conds.push("target_role = ?"); args.push(opts.role); }
+  const where = conds.length ? `WHERE ${conds.join(" AND ")}` : "";
+  return sqlite.prepare(`SELECT * FROM cross_team_events ${where} ORDER BY created_at DESC LIMIT 200`).all(...args) as any[];
+}
+export function markCrossTeamEventRead(id: number): void {
+  sqlite.prepare(`UPDATE cross_team_events SET read_at = ? WHERE id = ?`).run(new Date().toISOString(), id);
+}
+export function crossTeamUnreadCount(opts: { userId?: number; role?: string } = {}): number {
+  const conds: string[] = ["read_at IS NULL"]; const args: any[] = [];
+  if (opts.userId != null && opts.role) { conds.push("(target_user_id = ? OR target_role = ?)"); args.push(opts.userId, opts.role); }
+  else if (opts.userId != null) { conds.push("target_user_id = ?"); args.push(opts.userId); }
+  else if (opts.role) { conds.push("target_role = ?"); args.push(opts.role); }
+  const row = sqlite.prepare(`SELECT COUNT(*) AS c FROM cross_team_events WHERE ${conds.join(" AND ")}`).get(...args) as any;
+  return Number(row?.c ?? 0);
+}
+// H E5 dedupe — has a deadline event already been emitted today for this target?
+export function deadlineEventExistsToday(targetId: number): boolean {
+  const today = new Date().toISOString().slice(0, 10);
+  const row = sqlite.prepare(
+    `SELECT id FROM cross_team_events WHERE event_type = 'target_deadline_approaching' AND substr(created_at,1,10) = ? AND payload_json LIKE ?`,
+  ).get(today, `%"target_id":${targetId}%`) as any;
+  return !!row;
+}
+
+// ---- D. user management (mirrors over data_team_users with role + soft delete) ----
+export function listUsersByRole(role?: string): any[] {
+  const conds: string[] = ["deleted_at IS NULL"]; const args: any[] = [];
+  if (role) { conds.push("role = ?"); args.push(role); }
+  const rows = sqlite.prepare(`SELECT id, username, name, email, phone, role, active, last_login, created_at FROM data_team_users WHERE ${conds.join(" AND ")} ORDER BY id`).all(...args) as any[];
+  return rows;
+}
+export function softDeleteUser(id: number): void {
+  sqlite.prepare(`UPDATE data_team_users SET deleted_at = ?, active = 0 WHERE id = ?`).run(new Date().toISOString(), id);
+}
+
+// ---- I. marketing whatsapp templates CRUD ----
+export function listMarketingWhatsappTemplates(): any[] {
+  return sqlite.prepare(`SELECT * FROM marketing_whatsapp_templates ORDER BY id DESC`).all() as any[];
+}
+export function createMarketingWhatsappTemplate(data: any): any {
+  const now = Date.now();
+  const info = sqlite.prepare(
+    `INSERT INTO marketing_whatsapp_templates
+       (template_name, display_name, category, language, header_type, header_required, variable_count, variable_labels, buttons, status, is_default, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)`,
+  ).run(
+    data.name ?? data.template_name, data.display_name ?? data.name ?? data.template_name,
+    data.category ?? "marketing", data.language ?? "en", data.header_type ?? "none", data.header_required ?? 0,
+    data.variable_count ?? (data.variables_json ? (JSON.parse(data.variables_json) || []).length : 0),
+    data.variable_labels ?? data.variables_json ?? "[]", data.buttons ?? data.buttons_json ?? "[]",
+    data.status ?? "active", now, now,
+  );
+  return sqlite.prepare(`SELECT * FROM marketing_whatsapp_templates WHERE id = ?`).get(info.lastInsertRowid);
+}
+export function updateMarketingWhatsappTemplate(id: number, data: any): any {
+  const map: Record<string, any> = {
+    template_name: data.name ?? data.template_name,
+    display_name: data.display_name,
+    category: data.category,
+    language: data.language,
+    header_type: data.header_type,
+    header_required: data.header_required,
+    variable_count: data.variable_count,
+    variable_labels: data.variable_labels ?? data.variables_json,
+    buttons: data.buttons ?? data.buttons_json,
+    status: data.status,
+  };
+  const cols: string[] = []; const args: any[] = [];
+  for (const [k, v] of Object.entries(map)) { if (v !== undefined) { cols.push(`${k} = ?`); args.push(v); } }
+  cols.push("updated_at = ?"); args.push(Date.now());
+  args.push(id);
+  sqlite.prepare(`UPDATE marketing_whatsapp_templates SET ${cols.join(", ")} WHERE id = ?`).run(...args);
+  return sqlite.prepare(`SELECT * FROM marketing_whatsapp_templates WHERE id = ?`).get(id);
+}
+export function deleteMarketingWhatsappTemplate(id: number): void {
+  sqlite.prepare(`DELETE FROM marketing_whatsapp_templates WHERE id = ?`).run(id);
+}
+
+// ---- I2. audience include/exclude preview ----
+export function getAudienceRow(id: number): any {
+  return sqlite.prepare(`SELECT * FROM marketing_audiences WHERE id = ?`).get(id);
+}
+export function updateAudienceIncludeExclude(id: number, includeIds?: number[], excludeIds?: number[]): any {
+  const cols: string[] = []; const args: any[] = [];
+  if (includeIds !== undefined) { cols.push("include_user_ids_json = ?"); args.push(JSON.stringify(includeIds)); }
+  if (excludeIds !== undefined) { cols.push("exclude_user_ids_json = ?"); args.push(JSON.stringify(excludeIds)); }
+  if (cols.length) { args.push(id); sqlite.prepare(`UPDATE marketing_audiences SET ${cols.join(", ")} WHERE id = ?`).run(...args); }
+  return getAudienceRow(id);
 }

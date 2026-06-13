@@ -1201,3 +1201,234 @@ export function runR26_4bMigrations() {
 
   console.log("[migrations] R26.4b tables/columns ensured");
 }
+
+// ============================================================================
+// R26.5 — Sales/Finance/HR roles, Leads V2, Tasks V2, sales targets,
+// attendance/visit check-ins, cross-team notifications, user management,
+// marketing audience include/exclude, parts seed. Additive only.
+// Per-statement try/catch with [migrations] R26.5: markers so a re-run
+// (table/column exists) is logged and skipped, never aborting boot.
+// ============================================================================
+export function runR26_5Migrations() {
+  const stmts: Array<{ desc: string; sql: string }> = [
+    // ---- B. Leads V2 additive columns ----
+    { desc: "leads.contact_person", sql: `ALTER TABLE leads ADD COLUMN contact_person TEXT` },
+    { desc: "leads.address", sql: `ALTER TABLE leads ADD COLUMN address TEXT` },
+    { desc: "leads.deleted_at", sql: `ALTER TABLE leads ADD COLUMN deleted_at TEXT` },
+    // (phone, email, stage, assigned_to_user_id already exist from earlier rounds)
+
+    // ---- B2. lead_stages ----
+    {
+      desc: "lead_stages table",
+      sql: `CREATE TABLE IF NOT EXISTS lead_stages (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        name TEXT NOT NULL UNIQUE,
+        position INTEGER NOT NULL DEFAULT 0,
+        is_default INTEGER NOT NULL DEFAULT 0,
+        created_at INTEGER DEFAULT (strftime('%s','now')*1000)
+      )`,
+    },
+
+    // ---- C. Tasks V2 additive columns on task_items ----
+    { desc: "task_items.file_url", sql: `ALTER TABLE task_items ADD COLUMN file_url TEXT` },
+    { desc: "task_items.deadline", sql: `ALTER TABLE task_items ADD COLUMN deadline TEXT` },
+    { desc: "task_items.assigned_to_user_id", sql: `ALTER TABLE task_items ADD COLUMN assigned_to_user_id INTEGER` },
+    // (status already exists on task_items)
+
+    // ---- D. User management ----
+    { desc: "data_team_users.deleted_at", sql: `ALTER TABLE data_team_users ADD COLUMN deleted_at TEXT` },
+
+    // ---- G4. customers.sales_rep_id ----
+    { desc: "customers.sales_rep_id", sql: `ALTER TABLE customers ADD COLUMN sales_rep_id INTEGER` },
+
+    // ---- G1. sales_targets ----
+    {
+      desc: "sales_targets table",
+      sql: `CREATE TABLE IF NOT EXISTS sales_targets (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        sales_rep_user_id INTEGER,
+        target_type TEXT,
+        customer_id INTEGER,
+        period_start TEXT,
+        period_end TEXT,
+        target_amount NUMERIC,
+        achieved_amount NUMERIC DEFAULT 0,
+        rolled_over_from INTEGER,
+        status TEXT DEFAULT 'active',
+        created_at INTEGER DEFAULT (strftime('%s','now')*1000)
+      )`,
+    },
+    {
+      desc: "target_achievements table",
+      sql: `CREATE TABLE IF NOT EXISTS target_achievements (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        target_id INTEGER,
+        po_id INTEGER,
+        customer_id INTEGER,
+        amount NUMERIC,
+        verified_by TEXT,
+        admin_approved INTEGER DEFAULT 0,
+        created_at INTEGER DEFAULT (strftime('%s','now')*1000)
+      )`,
+    },
+    { desc: "idx_sales_targets_rep", sql: `CREATE INDEX IF NOT EXISTS idx_sales_targets_rep ON sales_targets(sales_rep_user_id)` },
+    { desc: "idx_target_achievements_target", sql: `CREATE INDEX IF NOT EXISTS idx_target_achievements_target ON target_achievements(target_id)` },
+
+    // ---- G3. attendance + visit check-ins ----
+    {
+      desc: "attendance_checkins table",
+      sql: `CREATE TABLE IF NOT EXISTS attendance_checkins (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        sales_rep_user_id INTEGER,
+        date TEXT,
+        checkin_at TEXT,
+        checkout_at TEXT,
+        checkin_missed INTEGER DEFAULT 0,
+        checkout_missed INTEGER DEFAULT 0
+      )`,
+    },
+    { desc: "idx_attendance_rep_date", sql: `CREATE INDEX IF NOT EXISTS idx_attendance_rep_date ON attendance_checkins(sales_rep_user_id, date)` },
+    {
+      desc: "visit_checkins table",
+      sql: `CREATE TABLE IF NOT EXISTS visit_checkins (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        sales_rep_user_id INTEGER,
+        customer_id INTEGER,
+        gps_lat NUMERIC,
+        gps_lng NUMERIC,
+        photo_url TEXT,
+        notes TEXT,
+        created_at TEXT
+      )`,
+    },
+    { desc: "idx_visit_rep", sql: `CREATE INDEX IF NOT EXISTS idx_visit_rep ON visit_checkins(sales_rep_user_id)` },
+
+    // ---- H. cross_team_events ----
+    {
+      desc: "cross_team_events table",
+      sql: `CREATE TABLE IF NOT EXISTS cross_team_events (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        event_type TEXT,
+        payload_json TEXT,
+        target_user_id INTEGER,
+        target_role TEXT,
+        read_at TEXT,
+        created_at TEXT
+      )`,
+    },
+    { desc: "idx_cross_team_target_user", sql: `CREATE INDEX IF NOT EXISTS idx_cross_team_target_user ON cross_team_events(target_user_id)` },
+    { desc: "idx_cross_team_target_role", sql: `CREATE INDEX IF NOT EXISTS idx_cross_team_target_role ON cross_team_events(target_role)` },
+
+    // ---- I2. audiences include/exclude (marketing_audiences) ----
+    { desc: "marketing_audiences.include_user_ids_json", sql: `ALTER TABLE marketing_audiences ADD COLUMN include_user_ids_json TEXT` },
+    { desc: "marketing_audiences.exclude_user_ids_json", sql: `ALTER TABLE marketing_audiences ADD COLUMN exclude_user_ids_json TEXT` },
+  ];
+  for (const { desc, sql } of stmts) {
+    console.log(`[migrations] R26.5: ${desc}`);
+    try {
+      sqlite.exec(sql);
+    } catch (err: any) {
+      // Duplicate-column on ALTER re-run is expected and benign; CREATE IF NOT EXISTS is idempotent.
+      console.log(`[migrations] R26.5: skipped ${desc} —`, err?.message || err);
+    }
+  }
+
+  // ---- B2. seed default lead stages (idempotent) ----
+  try {
+    const stages: Array<[string, number]> = [
+      ["New", 1], ["Contacted", 2], ["Qualified", 3], ["Quoted", 4], ["Won", 5], ["Lost", 6],
+    ];
+    const ins = sqlite.prepare(
+      `INSERT OR IGNORE INTO lead_stages (name, position, is_default, created_at) VALUES (?, ?, 1, ?)`,
+    );
+    const now = Date.now();
+    let seeded = 0;
+    for (const [name, pos] of stages) { if (ins.run(name, pos, now).changes > 0) seeded++; }
+    console.log(`[migrations] R26.5: seeded ${seeded} lead stage(s)`);
+  } catch (err: any) {
+    console.log(`[migrations] R26.5: lead stage seed failed —`, err?.message || err);
+  }
+
+  // ---- E3. seed demo Sales/Finance/HR users (idempotent) ----
+  // These live in data_team_users (same store Delhi uses) with role text column.
+  // Password hashing mirrors server/routes-v2.ts hashPassword (scrypt salt:hash).
+  try {
+    const { scryptSync, randomBytes } = require("node:crypto");
+    const hash = (plain: string) => {
+      const salt = randomBytes(16).toString("hex");
+      return `${salt}:${scryptSync(plain, salt, 64).toString("hex")}`;
+    };
+    const demoUsers: Array<{ username: string; password: string; role: string; name: string }> = [
+      { username: "sales", password: "Sales@123", role: "sales", name: "Demo Sales Rep" },
+      { username: "finance", password: "Finance@123", role: "finance", name: "Demo Finance" },
+      { username: "hr", password: "HR@123", role: "hr", name: "Demo HR" },
+    ];
+    const ins = sqlite.prepare(
+      `INSERT OR IGNORE INTO data_team_users (username, password_hash, name, role, active, created_at)
+       VALUES (?, ?, ?, ?, 1, ?)`,
+    );
+    const now = Date.now();
+    let seeded = 0;
+    for (const u of demoUsers) { if (ins.run(u.username, hash(u.password), u.name, u.role, now).changes > 0) seeded++; }
+    console.log(`[migrations] R26.5: seeded ${seeded} role demo user(s)`);
+  } catch (err: any) {
+    console.log(`[migrations] R26.5: role user seed failed —`, err?.message || err);
+  }
+
+  // ---- A4. seed parts_master with ~30 Tata / Ashok Leyland parts (idempotent) ----
+  try {
+    const parts: Array<{ pn: string; name: string; brand: string; hsn: string; gst: number }> = [
+      // Clutch
+      { pn: "TML-CLT-3107", name: "Clutch Plate Assembly 310mm", brand: "Tata", hsn: "87089300", gst: 28 },
+      { pn: "TML-CLT-3108", name: "Clutch Cover Pressure Plate", brand: "Tata", hsn: "87089300", gst: 28 },
+      { pn: "AL-CLT-3520", name: "Clutch Release Bearing", brand: "Ashok Leyland", hsn: "87089300", gst: 28 },
+      { pn: "AL-CLT-3521", name: "Clutch Master Cylinder", brand: "Ashok Leyland", hsn: "87089300", gst: 28 },
+      { pn: "TML-CLT-3109", name: "Clutch Servo Booster", brand: "Tata", hsn: "87089300", gst: 28 },
+      // Brake
+      { pn: "TML-BRK-4201", name: "Brake Lining Set Front", brand: "Tata", hsn: "87083000", gst: 28 },
+      { pn: "TML-BRK-4202", name: "Brake Drum Rear", brand: "Tata", hsn: "87083000", gst: 28 },
+      { pn: "AL-BRK-4410", name: "Brake Chamber Type-24", brand: "Ashok Leyland", hsn: "87083000", gst: 28 },
+      { pn: "AL-BRK-4411", name: "Brake Shoe Assembly", brand: "Ashok Leyland", hsn: "87083000", gst: 28 },
+      { pn: "TML-BRK-4203", name: "Brake Valve Dual", brand: "Tata", hsn: "87083000", gst: 28 },
+      { pn: "TML-BRK-4204", name: "Slack Adjuster Automatic", brand: "Tata", hsn: "87083000", gst: 28 },
+      // Engine
+      { pn: "TML-ENG-5101", name: "Piston Set 497 TCIC", brand: "Tata", hsn: "84099190", gst: 28 },
+      { pn: "TML-ENG-5102", name: "Cylinder Head Gasket", brand: "Tata", hsn: "84099190", gst: 28 },
+      { pn: "AL-ENG-5310", name: "Crankshaft H-Series", brand: "Ashok Leyland", hsn: "84099190", gst: 28 },
+      { pn: "AL-ENG-5311", name: "Oil Pump Assembly", brand: "Ashok Leyland", hsn: "84099190", gst: 28 },
+      { pn: "TML-ENG-5103", name: "Connecting Rod Set", brand: "Tata", hsn: "84099190", gst: 28 },
+      { pn: "TML-ENG-5104", name: "Engine Valve Set Inlet/Exhaust", brand: "Tata", hsn: "84099190", gst: 28 },
+      { pn: "AL-ENG-5312", name: "Water Pump Assembly", brand: "Ashok Leyland", hsn: "84099190", gst: 28 },
+      // Suspension
+      { pn: "TML-SUS-6201", name: "Leaf Spring Front 10-Leaf", brand: "Tata", hsn: "87088000", gst: 28 },
+      { pn: "TML-SUS-6202", name: "Shock Absorber Front", brand: "Tata", hsn: "87088000", gst: 28 },
+      { pn: "AL-SUS-6410", name: "Bogie Spring Rear", brand: "Ashok Leyland", hsn: "87088000", gst: 28 },
+      { pn: "AL-SUS-6411", name: "Spring Pin & Bush Kit", brand: "Ashok Leyland", hsn: "87088000", gst: 28 },
+      { pn: "TML-SUS-6203", name: "U-Bolt Set Rear", brand: "Tata", hsn: "87088000", gst: 28 },
+      // Electrical
+      { pn: "TML-ELE-7101", name: "Starter Motor 24V", brand: "Tata", hsn: "85114000", gst: 28 },
+      { pn: "TML-ELE-7102", name: "Alternator 24V 55A", brand: "Tata", hsn: "85114000", gst: 28 },
+      { pn: "AL-ELE-7310", name: "Headlamp Assembly RH", brand: "Ashok Leyland", hsn: "85122010", gst: 28 },
+      { pn: "AL-ELE-7311", name: "Wiper Motor Assembly", brand: "Ashok Leyland", hsn: "85129000", gst: 28 },
+      { pn: "TML-ELE-7103", name: "Combination Switch", brand: "Tata", hsn: "85365090", gst: 18 },
+      { pn: "TML-ELE-7104", name: "Battery Relay 24V", brand: "Tata", hsn: "85364900", gst: 18 },
+      { pn: "AL-ELE-7312", name: "Glow Plug Set", brand: "Ashok Leyland", hsn: "85119000", gst: 28 },
+    ];
+    const now = Date.now();
+    const ins = sqlite.prepare(
+      `INSERT OR IGNORE INTO parts_master
+         (part_number, name, hsn, gst_rate, brand, last_source, last_updated, search_text, use_count, created_at)
+       VALUES (?, ?, ?, ?, ?, 'seed', ?, ?, 0, ?)`,
+    );
+    let seeded = 0;
+    for (const p of parts) {
+      const searchText = `${p.pn} ${p.name} ${p.brand}`.toLowerCase();
+      if (ins.run(p.pn, p.name, p.hsn, p.gst, p.brand, now, searchText, now).changes > 0) seeded++;
+    }
+    console.log(`[migrations] R26.5: seeded ${seeded} parts_master row(s)`);
+  } catch (err: any) {
+    console.log(`[migrations] R26.5: parts seed failed —`, err?.message || err);
+  }
+
+  console.log("[migrations] R26.5: complete");
+}

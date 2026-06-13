@@ -106,6 +106,23 @@ import AdminMarketingCampaignComposer from "@/pages/admin/AdminMarketingCampaign
 import AdminMarketingCampaignDetail from "@/pages/admin/AdminMarketingCampaignDetail";
 import AdminMarketingAudiences from "@/pages/admin/AdminMarketingAudiences";
 import AdminMarketingTemplates from "@/pages/admin/AdminMarketingTemplates";
+// R26.5 — Marketing custom WhatsApp templates
+import AdminMarketingCustomTemplates from "@/pages/admin/AdminMarketingCustomTemplates";
+// R26.5 — V2 admin pages (canonical Leads/Tasks, Create Users)
+import AdminLeadsV2 from "@/pages/admin/AdminLeadsV2";
+import AdminTasksV2 from "@/pages/admin/AdminTasksV2";
+import AdminUsers from "@/pages/admin/AdminUsers";
+
+// R26.5 — Sales/Finance/HR/Consignment role portals
+import { SalesAuth, FinanceAuth, HRAuth, ConsignmentAuth } from "@/lib/role-auth";
+import SalesLogin from "@/pages/roles/SalesLogin";
+import SalesDashboard from "@/pages/roles/SalesDashboard";
+import FinanceLogin from "@/pages/roles/FinanceLogin";
+import FinanceDashboard from "@/pages/roles/FinanceDashboard";
+import HRLogin from "@/pages/roles/HRLogin";
+import HRDashboard from "@/pages/roles/HRDashboard";
+import ConsignmentLogin from "@/pages/roles/ConsignmentLogin";
+import ConsignmentDashboard from "@/pages/roles/ConsignmentDashboard";
 
 import { CustomerAuthProvider } from "@/lib/customer-auth";
 import CustomerLogin from "@/pages/portal/CustomerLogin";
@@ -214,12 +231,18 @@ function AppRouter() {
         <Route path="/admin/vendor-ledger" component={AdminVendorLedger} />
         <Route path="/admin/companies" component={AdminCompanies} />
         <Route path="/admin/ai-ledger" component={AdminAILedger} />
-        <Route path="/admin/leads" component={AdminLeads} />
+        {/* R26.5 — Leads V2 is now canonical at /admin/leads; old page kept at -legacy */}
+        <Route path="/admin/leads-legacy" component={AdminLeads} />
+        <Route path="/admin/leads" component={AdminLeadsV2} />
         <Route path="/admin/vendor-inbox" component={AdminVendorInbox} />
         <Route path="/admin/vendor-discovery" component={AdminVendorDiscovery} />
         <Route path="/admin/targets" component={AdminTargets} />
         <Route path="/admin/announcements" component={AdminAnnouncements} />
-        <Route path="/admin/tasks" component={AdminTasks} />
+        {/* R26.5 — Tasks V2 is now canonical at /admin/tasks; old page kept at -legacy */}
+        <Route path="/admin/tasks-legacy" component={AdminTasks} />
+        <Route path="/admin/tasks" component={AdminTasksV2} />
+        {/* R26.5 — Create Users + Sales Targets + Attendance */}
+        <Route path="/admin/users" component={AdminUsers} />
         <Route path="/admin/ads-meta" component={AdminAdsMeta} />
         <Route path="/admin/ads-google" component={AdminAdsGoogle} />
         {/* R26.3b — OAuth Integrations panel */}
@@ -237,6 +260,7 @@ function AppRouter() {
         <Route path="/admin/marketing/campaigns/:id" component={AdminMarketingCampaignDetail} />
         <Route path="/admin/marketing/campaigns" component={AdminMarketingCampaigns} />
         <Route path="/admin/marketing/audiences" component={AdminMarketingAudiences} />
+        <Route path="/admin/marketing/custom-templates" component={AdminMarketingCustomTemplates} />
         <Route path="/admin/marketing/templates" component={AdminMarketingTemplates} />
         {/* R24.1 — Market Radar rebrand (vendor-discovery → market-radar, keep old URL working) */}
         <Route path="/admin/market-radar" component={AdminVendorDiscovery} />
@@ -305,6 +329,66 @@ function AppRouter() {
         <Route path="/team/po/upload" component={TeamPOUpload} />
         <Route component={NotFound} />
       </Switch>
+      </ErrorBoundary>
+    );
+  }
+  // R26.5 — Sales rep portal
+  if (location.startsWith("/sales")) {
+    return (
+      <ErrorBoundary key={location} label="sales">
+        <SalesAuth.Provider>
+          <Switch>
+            <Route path="/sales" component={SalesLogin} />
+            <Route path="/sales/login" component={SalesLogin} />
+            <Route path="/sales/dashboard" component={SalesDashboard} />
+            <Route component={NotFound} />
+          </Switch>
+        </SalesAuth.Provider>
+      </ErrorBoundary>
+    );
+  }
+  // R26.5 — Finance portal (stub dashboard)
+  if (location.startsWith("/finance")) {
+    return (
+      <ErrorBoundary key={location} label="finance">
+        <FinanceAuth.Provider>
+          <Switch>
+            <Route path="/finance" component={FinanceLogin} />
+            <Route path="/finance/login" component={FinanceLogin} />
+            <Route path="/finance/dashboard" component={FinanceDashboard} />
+            <Route component={NotFound} />
+          </Switch>
+        </FinanceAuth.Provider>
+      </ErrorBoundary>
+    );
+  }
+  // R26.5 — HR portal (stub dashboard)
+  if (location.startsWith("/hr")) {
+    return (
+      <ErrorBoundary key={location} label="hr">
+        <HRAuth.Provider>
+          <Switch>
+            <Route path="/hr" component={HRLogin} />
+            <Route path="/hr/login" component={HRLogin} />
+            <Route path="/hr/dashboard" component={HRDashboard} />
+            <Route component={NotFound} />
+          </Switch>
+        </HRAuth.Provider>
+      </ErrorBoundary>
+    );
+  }
+  // R26.5 — Consignment portal
+  if (location.startsWith("/consignment")) {
+    return (
+      <ErrorBoundary key={location} label="consignment">
+        <ConsignmentAuth.Provider>
+          <Switch>
+            <Route path="/consignment" component={ConsignmentLogin} />
+            <Route path="/consignment/login" component={ConsignmentLogin} />
+            <Route path="/consignment/dashboard" component={ConsignmentDashboard} />
+            <Route component={NotFound} />
+          </Switch>
+        </ConsignmentAuth.Provider>
       </ErrorBoundary>
     );
   }

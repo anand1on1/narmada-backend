@@ -8,6 +8,12 @@ interface Ledger {
   id: number; customerId: number; entryDate: number; voucherType: string; voucherNo: string | null;
   description: string | null; debitInr: number; creditInr: number; runningBalanceInr: number;
 }
+// R26.5 (A2) — PO/dispatch-derived shipped rows surfaced below the ledger.
+interface ShippedEntry {
+  poId: number; customerPoNumber: string | null; amount: number; shippedAt: number | null;
+  consignmentStatus: string | null; isFullyDispatched: number | null;
+  docketNo: string | null; courier: string | null; dispatchDate: string | null;
+}
 
 const VOUCHER_TYPES = ["opening", "invoice", "payment", "credit_note", "debit_note", "manual"];
 
@@ -16,6 +22,9 @@ export default function AdminLedger() {
   const [customers, setCustomers] = useState<Customer[]>([]);
   const [customerId, setCustomerId] = useState<number | null>(null);
   const [entries, setEntries] = useState<Ledger[]>([]);
+  const [shipped, setShipped] = useState<ShippedEntry[]>([]);
+  const [from, setFrom] = useState<string>("");
+  const [to, setTo] = useState<string>("");
   const [open, setOpen] = useState<any | null>(null);
   const [csvOpen, setCsvOpen] = useState(false);
 
@@ -42,14 +51,20 @@ export default function AdminLedger() {
   async function loadEntries() {
     if (!token || !customerId) return;
     try {
-      const r = await adminFetch(token, `/api/admin/customers/${customerId}/ledger`);
+      // R26.5 (A2) — pass ?from=&to= (YYYY-MM-DD). Backend defaults to last 90 days when omitted.
+      const params = new URLSearchParams();
+      if (from) params.set("from", from);
+      if (to) params.set("to", to);
+      const qs = params.toString();
+      const r = await adminFetch(token, `/api/admin/customers/${customerId}/ledger${qs ? `?${qs}` : ""}`);
       const data = await r.json();
-      // Endpoint returns { entries, balanceInr }; older shapes may return a bare array.
+      // Endpoint returns { entries, shippedEntries, balanceInr }; older shapes may return a bare array.
       const list = Array.isArray(data) ? data : (data?.entries ?? []);
       setEntries(Array.isArray(list) ? list : []);
+      setShipped(Array.isArray(data?.shippedEntries) ? data.shippedEntries : []);
     } catch (e) {
       console.error("[ledger] failed to load entries", e);
-      setEntries([]);
+      setEntries([]); setShipped([]);
     }
   }
   useEffect(() => { loadEntries(); }, [customerId, token]); // eslint-disable-line
@@ -119,7 +134,18 @@ export default function AdminLedger() {
           className="border rounded-lg px-3 py-2 bg-background text-sm min-w-72" data-testid="select-customer">
           {customers.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
         </select>
-        <button onClick={loadEntries} className="px-3 py-2 border rounded-lg text-sm">Refresh</button>
+        {/* R26.5 (A2) — date range filter */}
+        <div>
+          <label className="text-[11px] block mb-0.5 text-muted-foreground">From</label>
+          <input type="date" value={from} onChange={(e) => setFrom(e.target.value)}
+            className="border rounded-lg px-3 py-2 bg-background text-sm" data-testid="ledger-from" />
+        </div>
+        <div>
+          <label className="text-[11px] block mb-0.5 text-muted-foreground">To</label>
+          <input type="date" value={to} onChange={(e) => setTo(e.target.value)}
+            className="border rounded-lg px-3 py-2 bg-background text-sm" data-testid="ledger-to" />
+        </div>
+        <button onClick={loadEntries} className="px-3 py-2 border rounded-lg text-sm">Apply</button>
         <div className="flex-1" />
         <button onClick={exportCsv} className="px-3 py-2 border rounded-lg text-sm inline-flex items-center gap-1.5"><Download className="w-4 h-4" />Export CSV</button>
         <button onClick={() => setCsvOpen(true)} className="px-3 py-2 border rounded-lg text-sm inline-flex items-center gap-1.5"><Upload className="w-4 h-4" />Import CSV</button>
@@ -175,6 +201,39 @@ export default function AdminLedger() {
           </table>
         )}
       </div>
+
+      {/* R26.5 (A2) — shipped customers derived from PO/dispatch (no ledger row needed) */}
+      {customerId && shipped.length > 0 && (
+        <div className="mt-6">
+          <h3 className="text-sm font-bold uppercase tracking-wider text-muted-foreground mb-2">Shipped (from PO / dispatch)</h3>
+          <div className="bg-card border rounded-xl overflow-x-auto" data-testid="shipped-entries">
+            <table className="w-full text-sm">
+              <thead>
+                <tr className="bg-muted/50 text-left">
+                  <th className="px-4 py-3 font-semibold">PO #</th>
+                  <th className="px-4 py-3 font-semibold">Shipped</th>
+                  <th className="px-4 py-3 font-semibold">Docket</th>
+                  <th className="px-4 py-3 font-semibold">Courier</th>
+                  <th className="px-4 py-3 font-semibold">Status</th>
+                  <th className="px-4 py-3 font-semibold text-right">Amount</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y">
+                {shipped.map((s) => (
+                  <tr key={s.poId} data-testid={`row-shipped-${s.poId}`}>
+                    <td className="px-4 py-3 font-mono text-xs font-semibold">{s.customerPoNumber || `PO-${s.poId}`}</td>
+                    <td className="px-4 py-3 text-xs">{s.shippedAt ? new Date(s.shippedAt).toLocaleDateString("en-IN") : "—"}</td>
+                    <td className="px-4 py-3 text-xs font-mono">{s.docketNo || "—"}</td>
+                    <td className="px-4 py-3 text-xs">{s.courier || "—"}</td>
+                    <td className="px-4 py-3"><span className="text-[10px] uppercase font-bold px-2 py-0.5 rounded bg-muted">{s.consignmentStatus || (s.isFullyDispatched ? "dispatched" : "shipped")}</span></td>
+                    <td className="px-4 py-3 text-right font-semibold">₹{(Number(s.amount) || 0).toLocaleString("en-IN")}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
 
       {open && (
         <div className="fixed inset-0 bg-black/60 z-50 flex items-center justify-center p-4">

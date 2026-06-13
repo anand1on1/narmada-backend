@@ -1,68 +1,78 @@
 import { useEffect, useState } from "react";
 import { AdminLayout } from "./AdminLayout";
 import { adminFetch, useAdminAuth } from "@/lib/admin-auth";
-import { Trash2, Eye, Check, X, Bell } from "lucide-react";
+import { Trash2, Eye, ExternalLink, Truck } from "lucide-react";
 
-interface Customer { id: number; name: string; }
+// R26.5 (A5) — repointed to the v2 purchase_orders_v2 table (Data Team source of truth).
+// GET /api/admin/purchase-orders-v2 returns camelCase Drizzle rows with live totals
+// + dispatch rollup. PATCH/:id updates fields; DELETE soft-deletes.
 interface PO {
-  id: number; customerId: number; customerPoNumber: string; rfqId: number | null; quoteId: number | null;
-  items: string; subtotalInr: number | null; gstInr: number | null; totalInr: number; status: string;
-  reminderCount: number; lastRemindedAt: number | null; approvedAt: number | null; approvedBy: string | null;
-  notes: string | null; createdAt: number;
+  id: number;
+  customerId: number | null;
+  customerName?: string | null;
+  companyName?: string | null;
+  customerPoNumber?: string | null;
+  internalPoNumber?: string | null;
+  status: string;
+  custTotal?: number;
+  costTotal?: number;
+  consignmentStatus?: string | null;
+  isFullyDispatched?: number | null;
+  notes?: string | null;
+  createdAt: number;
+  dispatchCarrier?: string | null;
+  dispatchDockets?: string[];
 }
 
-const STATUSES = ["pending", "approved", "rejected"];
+const STATUSES = ["draft", "submitted", "confirmed", "dispatched", "completed", "cancelled"];
 
 export default function AdminPOs() {
   const { token } = useAdminAuth();
   const [items, setItems] = useState<PO[]>([]);
-  const [customers, setCustomers] = useState<Customer[]>([]);
   const [filter, setFilter] = useState<"all" | string>("all");
   const [view, setView] = useState<PO | null>(null);
-  const [rejectFor, setRejectFor] = useState<PO | null>(null);
-  const [rejectNotes, setRejectNotes] = useState("");
+  const [busy, setBusy] = useState(false);
 
   async function load() {
     if (!token) return;
     const params = new URLSearchParams();
     if (filter !== "all") params.set("status", filter);
-    const r = await adminFetch(token, `/api/admin/purchase-orders?${params}`);
-    { const _d = await r.json(); setItems(Array.isArray(_d) ? _d : []); }
+    const r = await adminFetch(token, `/api/admin/purchase-orders-v2?${params}`);
+    if (!r.ok) { setItems([]); return; }
+    const d = await r.json();
+    setItems(Array.isArray(d) ? d : (Array.isArray(d?.purchaseOrders) ? d.purchaseOrders : []));
   }
-  useEffect(() => {
-    (async () => {
-      if (!token) return;
-      const r = await adminFetch(token, `/api/admin/customers`);
-      { const _d = await r.json(); setCustomers(Array.isArray(_d) ? _d : []); }
-    })();
-  }, [token]);
   useEffect(() => { load(); }, [token, filter]); // eslint-disable-line
 
-  async function approve(id: number) {
-    if (!token || !confirm("Approve this PO? An invoice ledger entry will be auto-created.")) return;
-    const r = await adminFetch(token, `/api/admin/purchase-orders/${id}/approve`, { method: "POST" });
-    if (!r.ok) { alert((await r.json()).error || "Failed"); return; }
-    load();
-  }
-  async function reject() {
-    if (!token || !rejectFor) return;
-    const r = await adminFetch(token, `/api/admin/purchase-orders/${rejectFor.id}/reject`, { method: "POST", body: JSON.stringify({ notes: rejectNotes }) });
-    if (!r.ok) { alert((await r.json()).error || "Failed"); return; }
-    setRejectFor(null); setRejectNotes(""); load();
+  async function setStatus(id: number, status: string) {
+    if (!token) return;
+    setBusy(true);
+    try {
+      const r = await adminFetch(token, `/api/admin/purchase-orders-v2/${id}`, { method: "PATCH", body: JSON.stringify({ status }) });
+      if (!r.ok) { alert((await r.json()).error || "Failed"); return; }
+      load();
+    } finally { setBusy(false); }
   }
   async function del(id: number) {
-    if (!token || !confirm("Delete this PO?")) return;
-    const r = await adminFetch(token, `/api/admin/purchase-orders/${id}`, { method: "DELETE" });
-    if (!r.ok) { alert((await r.json()).error || "Failed"); return; }
-    load();
+    if (!token || !confirm("Delete this PO? (soft delete)")) return;
+    setBusy(true);
+    try {
+      const r = await adminFetch(token, `/api/admin/purchase-orders-v2/${id}`, { method: "DELETE" });
+      if (!r.ok) { alert((await r.json()).error || "Failed"); return; }
+      load();
+    } finally { setBusy(false); }
   }
 
-  const customerName = (id: number) => customers.find((c) => c.id === id)?.name || `#${id}`;
+  const poNo = (p: PO) => p.customerPoNumber || p.internalPoNumber || `PO-${p.id}`;
+  const total = (p: PO) => Number(p.custTotal ?? 0);
   const badge = (s: string) => {
-    const map: Record<string, string> = { pending: "bg-amber-500/15 text-amber-700", approved: "bg-emerald-500/15 text-emerald-700", rejected: "bg-red-500/15 text-red-700" };
+    const map: Record<string, string> = {
+      draft: "bg-slate-500/15 text-slate-700", submitted: "bg-blue-500/15 text-blue-700",
+      confirmed: "bg-indigo-500/15 text-indigo-700", dispatched: "bg-amber-500/15 text-amber-700",
+      completed: "bg-emerald-500/15 text-emerald-700", cancelled: "bg-red-500/15 text-red-700",
+    };
     return <span className={`text-[10px] uppercase font-bold px-2 py-0.5 rounded ${map[s] || "bg-slate-500/15 text-slate-700"}`}>{s}</span>;
   };
-  const ageDays = (ts: number) => Math.floor((Date.now() - ts) / 86400000);
 
   return (
     <AdminLayout title="Purchase Orders">
@@ -71,6 +81,9 @@ export default function AdminPOs() {
         {STATUSES.map((s) => (
           <button key={s} onClick={() => setFilter(s)} className={`px-3 py-1.5 rounded-lg text-xs font-bold uppercase tracking-wider ${filter === s ? "bg-accent text-accent-foreground" : "bg-card border"}`}>{s}</button>
         ))}
+      </div>
+      <div className="mb-4 text-xs text-muted-foreground">
+        Showing the v2 purchase orders table (same data the Data Team sees). Use Open to edit in the Team portal.
       </div>
 
       <div className="bg-card border rounded-xl overflow-x-auto">
@@ -83,105 +96,70 @@ export default function AdminPOs() {
                 <th className="px-4 py-3 font-semibold">PO #</th>
                 <th className="px-4 py-3 font-semibold">Date</th>
                 <th className="px-4 py-3 font-semibold">Customer</th>
+                <th className="px-4 py-3 font-semibold">Company</th>
                 <th className="px-4 py-3 font-semibold text-right">Total</th>
+                <th className="px-4 py-3 font-semibold">Dispatch</th>
                 <th className="px-4 py-3 font-semibold">Status</th>
-                <th className="px-4 py-3 font-semibold">Age</th>
                 <th className="px-4 py-3"></th>
               </tr>
             </thead>
             <tbody className="divide-y">
-              {items.map((p) => {
-                const age = ageDays(p.createdAt);
-                const isStale = p.status === "pending" && age > 3;
-                return (
-                  <tr key={p.id} className={isStale ? "bg-amber-500/5" : ""} data-testid={`row-po-${p.id}`}>
-                    <td className="px-4 py-3 font-mono font-bold">{p.customerPoNumber}</td>
-                    <td className="px-4 py-3 text-xs">{new Date(p.createdAt).toLocaleDateString("en-IN")}</td>
-                    <td className="px-4 py-3">{customerName(p.customerId)}</td>
-                    <td className="px-4 py-3 text-right font-semibold">₹{p.totalInr.toLocaleString("en-IN")}</td>
-                    <td className="px-4 py-3">{badge(p.status)}</td>
-                    <td className="px-4 py-3 text-xs">
-                      {age}d
-                      {isStale && <span className="ml-1 inline-flex items-center gap-0.5 text-amber-700 font-bold"><Bell className="w-3 h-3" />stale</span>}
-                      {p.reminderCount > 0 && <div className="text-muted-foreground">{p.reminderCount} reminder(s) sent</div>}
-                    </td>
-                    <td className="px-4 py-3 text-right whitespace-nowrap">
-                      <button onClick={() => setView(p)} className="p-2 hover:bg-muted rounded" title="View"><Eye className="w-4 h-4" /></button>
-                      {p.status === "pending" && <>
-                        <button onClick={() => approve(p.id)} className="p-2 hover:bg-emerald-500/10 text-emerald-700 rounded ml-1" title="Approve"><Check className="w-4 h-4" /></button>
-                        <button onClick={() => setRejectFor(p)} className="p-2 hover:bg-red-500/10 text-red-600 rounded ml-1" title="Reject"><X className="w-4 h-4" /></button>
-                      </>}
-                      <button onClick={() => del(p.id)} className="p-2 hover:bg-red-500/10 text-red-600 rounded ml-1"><Trash2 className="w-4 h-4" /></button>
-                    </td>
-                  </tr>
-                );
-              })}
+              {items.map((p) => (
+                <tr key={p.id} data-testid={`row-po-${p.id}`}>
+                  <td className="px-4 py-3 font-mono font-bold">{poNo(p)}</td>
+                  <td className="px-4 py-3 text-xs">{p.createdAt ? new Date(p.createdAt).toLocaleDateString("en-IN") : "—"}</td>
+                  <td className="px-4 py-3">{p.customerName || (p.customerId ? `#${p.customerId}` : "—")}</td>
+                  <td className="px-4 py-3 text-xs">{p.companyName || "—"}</td>
+                  <td className="px-4 py-3 text-right font-semibold">₹{total(p).toLocaleString("en-IN")}</td>
+                  <td className="px-4 py-3 text-xs">
+                    {p.dispatchDockets && p.dispatchDockets.length > 0 ? (
+                      <span className="inline-flex items-center gap-1 text-amber-700"><Truck className="w-3 h-3" />{p.dispatchDockets.join(", ")}</span>
+                    ) : (p.consignmentStatus || (p.isFullyDispatched ? "dispatched" : "—"))}
+                  </td>
+                  <td className="px-4 py-3">{badge(p.status)}</td>
+                  <td className="px-4 py-3 text-right whitespace-nowrap">
+                    <a
+                      href={`/#/team/po/${p.id}`}
+                      className="inline-flex items-center gap-1 px-2 py-1 text-xs font-semibold border rounded mr-1 hover:bg-muted"
+                      title="Open in Team portal to edit"
+                    >
+                      <ExternalLink className="w-3 h-3" /> Open
+                    </a>
+                    <button onClick={() => setView(p)} className="p-2 hover:bg-muted rounded mr-1" title="View"><Eye className="w-4 h-4" /></button>
+                    <select value={p.status} disabled={busy} onChange={(e) => setStatus(p.id, e.target.value)} className="text-xs border rounded px-2 py-1 bg-background mr-1" data-testid={`select-po-status-${p.id}`}>
+                      {STATUSES.map((s) => <option key={s} value={s}>{s}</option>)}
+                    </select>
+                    <button onClick={() => del(p.id)} disabled={busy} className="p-2 hover:bg-red-500/10 text-red-600 rounded" data-testid={`button-delete-po-${p.id}`}><Trash2 className="w-4 h-4" /></button>
+                  </td>
+                </tr>
+              ))}
             </tbody>
           </table>
         )}
       </div>
 
-      {view && <POViewer po={view} customerName={customerName(view.customerId)} onClose={() => setView(null)} />}
-      {rejectFor && (
+      {view && (
         <div className="fixed inset-0 bg-black/60 z-50 flex items-center justify-center p-4">
-          <div className="bg-card border rounded-2xl shadow-2xl w-full max-w-md">
-            <div className="border-b px-6 py-4 font-display text-lg font-bold">Reject PO {rejectFor.customerPoNumber}</div>
-            <div className="p-6 space-y-3">
-              <label className="block text-sm"><div className="text-xs font-bold uppercase tracking-wider mb-1 text-muted-foreground">Reason for rejection</div>
-                <textarea value={rejectNotes} onChange={(e) => setRejectNotes(e.target.value)} rows={4} className="w-full border rounded-lg px-3 py-2 bg-background" />
-              </label>
+          <div className="bg-card border rounded-2xl shadow-2xl w-full max-w-2xl max-h-[92vh] overflow-y-auto">
+            <div className="sticky top-0 bg-card border-b px-6 py-4 flex items-center justify-between">
+              <div>
+                <div className="font-display text-xl font-bold">PO {poNo(view)}</div>
+                <div className="text-xs text-muted-foreground">{view.customerName || "—"} · {view.createdAt ? new Date(view.createdAt).toLocaleDateString("en-IN") : "—"}</div>
+              </div>
+              <button onClick={() => setView(null)} className="px-3 py-1.5 hover:bg-muted rounded text-sm">Close</button>
             </div>
-            <div className="border-t px-6 py-4 flex justify-end gap-2">
-              <button onClick={() => setRejectFor(null)} className="px-4 py-2 border rounded-lg text-sm">Cancel</button>
-              <button onClick={reject} className="px-4 py-2 bg-red-600 text-white rounded-lg text-sm font-semibold">Reject PO</button>
+            <div className="p-6 space-y-4 text-sm">
+              <div className="grid grid-cols-3 gap-3">
+                <div><div className="text-xs uppercase font-bold text-muted-foreground">Customer Total</div><div className="text-lg font-bold">₹{Number(view.custTotal || 0).toLocaleString("en-IN")}</div></div>
+                <div><div className="text-xs uppercase font-bold text-muted-foreground">Cost Total</div><div>₹{Number(view.costTotal || 0).toLocaleString("en-IN")}</div></div>
+                <div><div className="text-xs uppercase font-bold text-muted-foreground">Status</div><div>{badge(view.status)}</div></div>
+              </div>
+              {view.notes && <div><div className="text-xs uppercase font-bold text-muted-foreground">Notes</div><div className="whitespace-pre-wrap">{view.notes}</div></div>}
+              <a href={`/#/team/po/${view.id}`} className="inline-flex items-center gap-1 px-3 py-2 text-xs font-semibold border rounded hover:bg-muted"><ExternalLink className="w-3 h-3" /> Open full PO in Team portal</a>
             </div>
           </div>
         </div>
       )}
     </AdminLayout>
-  );
-}
-
-function POViewer({ po, customerName, onClose }: { po: PO; customerName: string; onClose: () => void }) {
-  let items: any[] = [];
-  try { items = JSON.parse(po.items); } catch {}
-  return (
-    <div className="fixed inset-0 bg-black/60 z-50 flex items-center justify-center p-4">
-      <div className="bg-card border rounded-2xl shadow-2xl w-full max-w-3xl max-h-[92vh] overflow-y-auto">
-        <div className="sticky top-0 bg-card border-b px-6 py-4 flex items-center justify-between">
-          <div>
-            <div className="font-display text-xl font-bold">PO {po.customerPoNumber}</div>
-            <div className="text-xs text-muted-foreground">{customerName} · {new Date(po.createdAt).toLocaleDateString("en-IN")}</div>
-          </div>
-          <button onClick={onClose} className="px-3 py-1.5 hover:bg-muted rounded text-sm">Close</button>
-        </div>
-        <div className="p-6 space-y-4">
-          <table className="w-full text-sm border rounded-lg overflow-hidden">
-            <thead className="bg-muted/50"><tr>
-              <th className="px-3 py-2 text-left">Part #</th><th className="px-3 py-2 text-left">Description</th>
-              <th className="px-3 py-2 text-right">Qty</th><th className="px-3 py-2 text-right">Unit ₹</th><th className="px-3 py-2 text-right">Line ₹</th>
-            </tr></thead>
-            <tbody className="divide-y">
-              {items.map((it, i) => (
-                <tr key={i}>
-                  <td className="px-3 py-2 font-mono text-xs">{it.partNumber}</td>
-                  <td className="px-3 py-2 text-xs">{it.description}</td>
-                  <td className="px-3 py-2 text-right">{it.quantity}</td>
-                  <td className="px-3 py-2 text-right">₹{Number(it.unitPriceInr).toLocaleString("en-IN")}</td>
-                  <td className="px-3 py-2 text-right font-semibold">₹{(Number(it.quantity) * Number(it.unitPriceInr)).toLocaleString("en-IN")}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-          <div className="grid grid-cols-3 gap-3 text-sm">
-            <div><div className="text-xs uppercase font-bold text-muted-foreground">Subtotal</div><div>₹{(po.subtotalInr || 0).toLocaleString("en-IN")}</div></div>
-            <div><div className="text-xs uppercase font-bold text-muted-foreground">GST</div><div>₹{(po.gstInr || 0).toLocaleString("en-IN")}</div></div>
-            <div><div className="text-xs uppercase font-bold text-muted-foreground">Total</div><div className="text-lg font-bold">₹{po.totalInr.toLocaleString("en-IN")}</div></div>
-          </div>
-          {po.notes && <div><div className="text-xs uppercase font-bold text-muted-foreground">Notes</div><div className="text-sm whitespace-pre-wrap">{po.notes}</div></div>}
-          {po.approvedAt && <div className="text-xs text-muted-foreground">{po.status === "approved" ? "Approved" : "Reviewed"} by {po.approvedBy || "—"} on {new Date(po.approvedAt).toLocaleDateString("en-IN")}</div>}
-        </div>
-      </div>
-    </div>
   );
 }

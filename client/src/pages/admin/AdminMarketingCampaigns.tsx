@@ -3,7 +3,7 @@ import { adminFetch, useAdminAuth } from "@/lib/admin-auth";
 import { useToast } from "@/hooks/use-toast";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { Link, useLocation } from "wouter";
-import { Plus, Eye, Copy, Trash2, Mail, MessageCircle, Layers, Users, Send } from "lucide-react";
+import { Plus, Eye, Copy, Trash2, Mail, MessageCircle, Layers, Users, Send, MessageSquareText } from "lucide-react";
 
 interface Campaign {
   id: number;
@@ -141,11 +141,12 @@ export default function AdminMarketingCampaigns() {
 }
 
 // Shared sub-nav used across all marketing pages.
-export function MarketingTabs({ active }: { active: "campaigns" | "audiences" | "templates" }) {
+export function MarketingTabs({ active }: { active: "campaigns" | "audiences" | "templates" | "custom-templates" }) {
   const tabs = [
     { key: "campaigns", label: "Campaigns", href: "/admin/marketing/campaigns", icon: Send },
     { key: "audiences", label: "Audiences", href: "/admin/marketing/audiences", icon: Users },
     { key: "templates", label: "Templates", href: "/admin/marketing/templates", icon: Layers },
+    { key: "custom-templates", label: "Custom Templates", href: "/admin/marketing/custom-templates", icon: MessageSquareText },
   ];
   return (
     <div className="flex gap-1 mb-6 border-b">

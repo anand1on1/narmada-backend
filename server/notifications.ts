@@ -2,6 +2,7 @@
 // If BREVO_SMTP_KEY is not set, all sends are silently skipped (logged as 'skipped').
 import nodemailer from "nodemailer";
 import * as v2 from "./storage-v2";
+import { rawSqlite as sqlite } from "./storage";
 
 const SMTP_HOST = process.env.BREVO_SMTP_HOST || "smtp-relay.brevo.com";
 const SMTP_PORT = parseInt(process.env.BREVO_SMTP_PORT || "587", 10);
@@ -80,6 +81,57 @@ export async function sendGenericEmail(opts: {
     console.error("[email] send failed:", e?.message);
     await logSafe("failed", e?.message || "send failed");
     return { ok: false, via: "smtp", error: e?.message };
+  }
+}
+
+// ============================================================================
+// R26.5 — Cross-team event notifications (in-app feed + optional WhatsApp).
+// Writes a row to cross_team_events and, if a WhatsApp template+phone is given,
+// fires the marketing AiSensy sender fire-and-forget. Never throws.
+// ============================================================================
+export interface CrossTeamEventOpts {
+  target_user_id?: number | null;
+  target_role?: string | null;
+  whatsapp_phone?: string | null;
+  whatsapp_template?: string | null;
+  whatsapp_vars?: string[];
+}
+
+export function emitCrossTeamEvent(
+  eventType: string,
+  payload: Record<string, unknown>,
+  opts: CrossTeamEventOpts = {},
+): void {
+  try {
+    sqlite
+      .prepare(
+        `INSERT INTO cross_team_events (event_type, payload_json, target_user_id, target_role, read_at, created_at)
+         VALUES (?, ?, ?, ?, NULL, ?)`,
+      )
+      .run(
+        eventType,
+        JSON.stringify(payload ?? {}),
+        opts.target_user_id ?? null,
+        opts.target_role ?? null,
+        new Date().toISOString(),
+      );
+  } catch (e: any) {
+    console.error("[cross-team] event insert failed:", e?.message || e);
+  }
+  // Fire-and-forget WhatsApp via the existing marketing AiSensy sender.
+  if (opts.whatsapp_phone && opts.whatsapp_template) {
+    (async () => {
+      try {
+        const { sendAisensyMarketing } = await import("./marketing/aisensy-sender");
+        await sendAisensyMarketing({
+          templateName: opts.whatsapp_template as string,
+          phone: opts.whatsapp_phone as string,
+          templateParams: opts.whatsapp_vars ?? [],
+        });
+      } catch (e: any) {
+        console.error("[cross-team] whatsapp emit failed:", e?.message || e);
+      }
+    })();
   }
 }
 

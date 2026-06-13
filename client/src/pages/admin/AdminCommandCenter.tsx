@@ -3,7 +3,7 @@ import { AdminLayout } from "./AdminLayout";
 import { useAdminAuth, adminFetch } from "@/lib/admin-auth";
 import {
   DollarSign, FileText, Truck, AlertTriangle, MessageSquare, BarChart3,
-  Send, Users, Building2, ChevronDown,
+  Send, Users, Building2, ChevronDown, TrendingUp, ExternalLink,
 } from "lucide-react";
 
 // R23.1 — owner Command Center. 9 read-only widgets, polled every 30s. No page reload.
@@ -86,9 +86,13 @@ function startOfMonthIso(): string { const d = new Date(); return new Date(d.get
 
 type QuickChip = "today" | "7d" | "30d" | "month" | "custom";
 
+// R26.5 (A1) — gross-margin summary for the date range.
+type Margin = { totalRevenue: number; totalCost: number; grossMarginPct: number; periodLabel?: string };
+
 export default function AdminCommandCenter() {
   const { token } = useAdminAuth();
   const [data, setData] = useState<CC | null>(null);
+  const [margin, setMargin] = useState<Margin | null>(null);
   const [err, setErr] = useState<string | null>(null);
   // R26 — date range. Defaults to today; chips set both ends.
   const [from, setFrom] = useState<string>(isoToday());
@@ -106,6 +110,11 @@ export default function AdminCommandCenter() {
       if (!res.ok) throw new Error(`${res.status}`);
       setData(await res.json());
       setErr(null);
+      // R26.5 (A1) — margin card uses the same date window.
+      try {
+        const mr = await adminFetch(token, `/api/admin/margin-summary?${params.toString()}`);
+        if (mr.ok) setMargin(await mr.json());
+      } catch { /* leave previous margin in place */ }
     } catch (e: any) {
       setErr(e?.message || "failed to load");
     }
@@ -157,7 +166,15 @@ export default function AdminCommandCenter() {
               className="border rounded-lg px-3 py-2 bg-background text-sm" data-testid="cc-to" />
           </div>
         </div>
-        <RoleSwitcher />
+        <div className="flex items-center gap-2">
+          {/* R26.5 (F) — open the consignment portal in a new tab */}
+          <a href="#/consignment" target="_blank" rel="noreferrer"
+            className="px-3 py-2 border rounded-lg text-sm font-semibold inline-flex items-center gap-2 bg-card hover:bg-muted"
+            data-testid="link-consignment-portal">
+            <ExternalLink className="w-4 h-4" /> Consignment Portal
+          </a>
+          <RoleSwitcher />
+        </div>
       </div>
       {err && <div className="mb-4 text-sm text-red-600">Error: {err}</div>}
       {!data && !err && <div className="text-sm text-muted-foreground">Loading widgets…</div>}
@@ -165,6 +182,25 @@ export default function AdminCommandCenter() {
         <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
           <Card title={isSingleToday ? "Today's Revenue" : "Revenue (range)"} gradient="from-emerald-50 to-emerald-100" text="text-emerald-800" icon={DollarSign}>
             <div className="text-3xl font-bold">{inr(data.todayRevenue)}</div>
+          </Card>
+
+          {/* R26.5 (A1) — gross margin card */}
+          <Card title="Margin (range)" gradient="from-teal-50 to-teal-100" text="text-teal-800" icon={TrendingUp}>
+            <div className="grid grid-cols-1 gap-1.5">
+              <div className="flex justify-between gap-2 text-sm">
+                <span className="opacity-70">Revenue</span>
+                <span className="font-semibold" data-testid="margin-revenue">{inr(margin?.totalRevenue || 0)}</span>
+              </div>
+              <div className="flex justify-between gap-2 text-sm">
+                <span className="opacity-70">Cost</span>
+                <span className="font-semibold" data-testid="margin-cost">{inr(margin?.totalCost || 0)}</span>
+              </div>
+              <div className="flex justify-between gap-2 text-base border-t border-teal-200/60 pt-1.5 mt-0.5">
+                <span className="font-semibold">Gross Margin</span>
+                <span className="font-bold text-xl" data-testid="margin-pct">{margin ? `${margin.grossMarginPct}%` : "—"}</span>
+              </div>
+              {margin?.periodLabel && <div className="text-[11px] opacity-60 mt-0.5">{margin.periodLabel}</div>}
+            </div>
           </Card>
           <Card title="Open POs" gradient="from-blue-50 to-blue-100" text="text-blue-800" icon={FileText}>
             <div className="text-3xl font-bold">{data.openPos.count}</div>
