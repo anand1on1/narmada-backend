@@ -3782,18 +3782,32 @@ function registerR9Routes(
     let processed = 0;
     try {
       const b = req.body || {};
-      // AiSensy may wrap events in an array or send a single object.
-      const events: any[] = Array.isArray(b)
+
+      // R26.2e — AiSensy v0.0.1 wraps each event in a {id, topic, project_id, data}
+      // envelope (header x-aisensy-api-version: 0.0.1). The real message fields live
+      // inside `data`, and the event name is in `topic`. Detect that envelope and
+      // unwrap it BEFORE building the events list, so legacy {events:[...]} / bare-object
+      // shapes still work unchanged.
+      const isV1Root = !!b?.topic && !!b?.data && !!b?.project_id;
+
+      // Build the list of raw event objects.
+      const rawEvents: any[] = Array.isArray(b)
         ? b
         : Array.isArray(b.events)
           ? b.events
-          : Array.isArray(b.data)
-            ? b.data
-            : [b];
+          : isV1Root
+            ? [b] // single v0.0.1 envelope — keep wrapped so we read topic + data below
+            : Array.isArray(b.data)
+              ? b.data
+              : [b];
 
-      for (const ev of events) {
+      for (const ev of rawEvents) {
         try {
-          const e = ev || {};
+          const envelope = ev || {};
+          // R26.2e — per-event v0.0.1 envelope detection (also covers arrays of envelopes).
+          const isV1Envelope =
+            !!envelope?.topic && !!envelope?.data && !!envelope?.project_id;
+          const e = isV1Envelope ? envelope.data || {} : envelope;
           // R22.x — AiSensy nests the real payload under data.messageData / messageData /
           // message. Merge those nested objects so field lookups work regardless of shape.
           const md = e.messageData || e.data?.messageData || e.message || {};
@@ -3804,22 +3818,85 @@ function registerR9Routes(
             }
             return undefined;
           };
+
+          // Event name: v0.0.1 → envelope.topic; legacy → event/type/eventType.
           const type = String(
-            e.event || e.type || e.eventType || e.event_type || "",
+            isV1Envelope
+              ? envelope.topic
+              : e.event || e.type || e.eventType || e.event_type || "",
           ).trim();
+
+          // Phone — extended fallback chain (R26.2e).
           const from = String(
             pick("from", "sender", "phone", "mobile", "waId", "wa_id") ||
-            e.contact?.phone || e.contact?.mobile || "",
+            e.contact?.wa_id || e.contact?.phone || e.contact?.mobile ||
+            e.user?.phone || e.payload?.from || e.message?.from || "",
           );
+
+          // External message id: envelope.id first (v0.0.1), then inner ids.
           const externalId =
-            pick("external_message_id", "message_id", "messageId", "id", "msgId") || null;
+            envelope.id ||
+            pick("external_message_id", "message_id", "messageId", "id", "msgId") ||
+            null;
+
+          // Text — extended fallback chain (R26.2e). `message` can be a string directly.
           const text = String(
-            pick("message", "text", "body", "content") ||
-            md.text?.body || e.message?.text || "",
+            (typeof e.message === "string" ? e.message : "") ||
+            pick("text", "body", "content", "message_text") ||
+            e.message?.body || e.message?.text ||
+            e.payload?.text?.body || e.payload?.body ||
+            (typeof e.text === "object" ? e.text?.body : "") ||
+            md.text?.body || "",
+          );
+
+          // R26.2e — recognized inbound message topics (case-insensitive substring match).
+          const INBOUND_TOPICS = [
+            "message", "incoming_message", "whatsapp:message", "whatsapp_inbound",
+            "inbound", "text_message", "reply", "user_message",
+          ];
+          // R26.2e — delivery/read receipts & status updates → ignore (don't insert a row).
+          const STATUS_HINTS = ["delivered", "read", "sent", "status", "update"];
+          const typeLc = type.toLowerCase();
+          const isStatusEvent = STATUS_HINTS.some((h) => typeLc.includes(h));
+          const isInboundTopic = INBOUND_TOPICS.some((t) => typeLc.includes(t));
+
+          // R26.2e — INFO-level parsed-envelope debug line.
+          console.log(
+            `[R22.x aisensy] parsed v1=${isV1Envelope} topic=${type || "?"} from=${from || "?"} textPreview=${JSON.stringify((text || "").slice(0, 80))}`,
           );
           console.log(
-            `[R22.x aisensy] event=${type || "?"} from=${from || "?"} msgId=${externalId || "?"} textLen=${text.length}`,
+            `[R22.x aisensy] topic=${type || "?"} from=${from || "?"} msgId=${externalId || "?"} textLen=${text.length}`,
           );
+
+          // R26.2e — if we have a topic but it is a status/delivery receipt (and not a
+          // recognized inbound message topic), ignore early without creating a chat row.
+          if (type && isStatusEvent && !isInboundTopic) {
+            console.log(`[R22.x aisensy] ignoring topic=${type}`);
+            return res.json({ ok: true, ignored: true, topic: type });
+          }
+
+          // R26.2e — if extraction found neither a sender nor text, dump the inner object
+          // so we can patch the missing field path for future AiSensy variants.
+          if (!from && !text) {
+            console.warn(
+              "[R22.x aisensy] UNKNOWN_SHAPE",
+              JSON.stringify(e).slice(0, 2000),
+            );
+            return res.json({ ok: true, parsed: false });
+          }
+
+          // R26.2e — v0.0.1 topics route through the inbound handler when recognized.
+          if (isV1Envelope) {
+            if (isInboundTopic || (from && !isStatusEvent)) {
+              processed += await processInboundReply(
+                from, text, externalId ? String(externalId) : null,
+              );
+            } else {
+              console.log(`[R22.x aisensy] ignoring topic=${type}`);
+              return res.json({ ok: true, ignored: true, topic: type });
+            }
+            continue;
+          }
 
           switch (type) {
             case "message.sender.user":
