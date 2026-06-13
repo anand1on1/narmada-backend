@@ -235,8 +235,19 @@ export async function createCustomer(data: InsertCustomer): Promise<Customer> {
   const row: any = { ...data, createdAt: Date.now() };
   return db.insert(customers).values(row).returning().get();
 }
+const CUSTOMER_EDITABLE_FIELDS = [
+  "name", "phone", "email", "address", "city", "state", "pincode",
+  "gstNumber", "notes", "contactPerson", "companyPan", "customerCode",
+  "creditLimitInr", "openingBalanceInr", "paymentTermsDays", "defaultDiscountPct",
+] as const;
+
 export async function updateCustomer(id: number, data: Partial<InsertCustomer>): Promise<Customer | undefined> {
-  return db.update(customers).set(data).where(eq(customers.id, id)).returning().get();
+  const patch: Record<string, unknown> = {};
+  for (const key of CUSTOMER_EDITABLE_FIELDS) {
+    if (key in data && (data as any)[key] !== undefined) patch[key] = (data as any)[key];
+  }
+  if (Object.keys(patch).length === 0) return getCustomer(id);
+  return db.update(customers).set(patch).where(eq(customers.id, id)).returning().get();
 }
 export async function deleteCustomer(id: number): Promise<void> {
   db.delete(customers).where(eq(customers.id, id)).run();

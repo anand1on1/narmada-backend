@@ -1,8 +1,9 @@
 import { useState } from "react";
 import { TeamLayout } from "./TeamLayout";
 import { useTeamAuth, teamFetch } from "@/lib/team-auth";
-import { Search, Plus, X } from "lucide-react";
+import { Search, Plus, X, Pencil } from "lucide-react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
+import EditCustomerModal from "@/components/EditCustomerModal";
 
 interface Customer {
   id: number;
@@ -39,6 +40,7 @@ export default function TeamCustomers() {
   const [form, setForm] = useState<NewCustomerForm>(EMPTY_FORM);
   const [saving, setSaving] = useState(false);
   const [err, setErr] = useState<string | null>(null);
+  const [editing, setEditing] = useState<Customer | null>(null);
 
   const { data: customers = [], isLoading } = useQuery<Customer[]>({
     queryKey: ["team-customers", searchQ],
@@ -120,6 +122,7 @@ export default function TeamCustomers() {
                 <th className="px-4 py-3 font-semibold">Location</th>
                 <th className="px-4 py-3 font-semibold">GST</th>
                 <th className="px-4 py-3 font-semibold">Default Discount</th>
+                <th className="px-4 py-3"></th>
               </tr>
             </thead>
             <tbody className="divide-y">
@@ -133,6 +136,12 @@ export default function TeamCustomers() {
                   <td className="px-4 py-3 text-xs">{[c.city, c.state].filter(Boolean).join(", ") || "—"}</td>
                   <td className="px-4 py-3 text-xs font-mono">{c.gstNumber || "—"}</td>
                   <td className="px-4 py-3 text-xs">{c.defaultDiscountPct != null ? `${c.defaultDiscountPct}%` : "—"}</td>
+                  <td className="px-4 py-3 text-right">
+                    <button onClick={() => setEditing(c)} title="Edit customer"
+                      className="p-2 rounded-lg hover:bg-muted text-muted-foreground hover:text-foreground">
+                      <Pencil className="w-4 h-4" />
+                    </button>
+                  </td>
                 </tr>
               ))}
             </tbody>
@@ -171,6 +180,16 @@ export default function TeamCustomers() {
             </div>
           </div>
         </div>
+      )}
+
+      {editing && (
+        <EditCustomerModal
+          customer={editing as any}
+          open={!!editing}
+          apiBase="/api/team"
+          onClose={() => setEditing(null)}
+          onSaved={() => qc.invalidateQueries({ queryKey: ["team-customers"] })}
+        />
       )}
     </TeamLayout>
   );

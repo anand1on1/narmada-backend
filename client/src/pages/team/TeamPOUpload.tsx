@@ -5,13 +5,18 @@
 import { useState, useRef } from "react";
 import { TeamLayout } from "./TeamLayout";
 import { teamFetch, useTeamAuth } from "@/lib/team-auth";
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useLocation } from "wouter";
 import { useToast } from "@/hooks/use-toast";
-import { Upload, ChevronRight, ChevronLeft, Check, Loader2, X, Plus } from "lucide-react";
+import { Upload, ChevronRight, ChevronLeft, Check, Loader2, X, Plus, Pencil } from "lucide-react";
 import { CompanyPicker } from "@/components/common/CompanyPicker";
+import EditCustomerModal from "@/components/EditCustomerModal";
 
-interface Customer { id: number; name: string; }
+interface Customer {
+  id: number; name: string;
+  phone?: string | null; email?: string | null; gstNumber?: string | null;
+  address?: string | null; contactPerson?: string | null; notes?: string | null;
+}
 interface ParsedItem {
   partNumber: string | null;
   brand: string | null;
@@ -36,6 +41,8 @@ export default function TeamPOUpload() {
   const { token } = useTeamAuth();
   const { toast } = useToast();
   const [location, navigate] = useLocation();
+  const qc = useQueryClient();
+  const [editingCustomer, setEditingCustomer] = useState<Customer | null>(null);
 
   // R20.4: manual entry skips the Upload PDF step entirely.
   const manualMode = location.includes("mode=manual") || (typeof window !== "undefined" && window.location.hash.includes("mode=manual"));
@@ -217,14 +224,22 @@ export default function TeamPOUpload() {
               </div>
             </label>
             <label className="text-xs font-semibold block">Customer *
-              <select
-                value={customerId}
-                onChange={(e) => setCustomerId(e.target.value)}
-                className="mt-1 w-full border rounded-lg px-3 py-2.5 bg-background text-sm font-normal"
-              >
-                <option value="">— Select customer —</option>
-                {customers.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
-              </select>
+              <div className="mt-1 flex items-center gap-2">
+                <select
+                  value={customerId}
+                  onChange={(e) => setCustomerId(e.target.value)}
+                  className="flex-1 border rounded-lg px-3 py-2.5 bg-background text-sm font-normal"
+                >
+                  <option value="">— Select customer —</option>
+                  {customers.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
+                </select>
+                {selectedCustomer && (
+                  <button type="button" onClick={() => setEditingCustomer(selectedCustomer)} title="Edit customer"
+                    className="p-2.5 border rounded-lg hover:bg-muted text-muted-foreground hover:text-foreground shrink-0">
+                    <Pencil className="w-4 h-4" />
+                  </button>
+                )}
+              </div>
             </label>
             <div className="flex justify-between items-center gap-2">
               <button
@@ -481,6 +496,17 @@ export default function TeamPOUpload() {
           </div>
         )}
       </div>
+
+      {/* R26.1: edit existing customer */}
+      {editingCustomer && (
+        <EditCustomerModal
+          customer={editingCustomer as any}
+          open={!!editingCustomer}
+          apiBase="/api/team"
+          onClose={() => setEditingCustomer(null)}
+          onSaved={() => qc.invalidateQueries({ queryKey: ["team-customers"] })}
+        />
+      )}
     </TeamLayout>
   );
 }

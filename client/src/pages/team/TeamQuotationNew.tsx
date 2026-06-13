@@ -6,8 +6,9 @@ import { useToast } from "@/hooks/use-toast";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   ChevronRight, ChevronLeft, Plus, Trash2, Upload, Search, Check,
-  FileText, RefreshCw, Sparkles, Truck, X, Loader2,
+  FileText, RefreshCw, Sparkles, Truck, X, Loader2, Pencil,
 } from "lucide-react";
+import EditCustomerModal from "@/components/EditCustomerModal";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -83,6 +84,8 @@ export default function TeamQuotationNew() {
   const [selectedCompany, setSelectedCompany] = useState<QuotingCompany | null>(null);
   const [selectedCustomer, setSelectedCustomer] = useState<Customer | null>(null);
   const [customerSearch, setCustomerSearch] = useState("");
+  // R26.1: edit selected customer modal
+  const [editingCustomer, setEditingCustomer] = useState<Customer | null>(null);
   // R20.3: quick-add customer modal
   const [showNewCustomer, setShowNewCustomer] = useState(false);
   const [ncName, setNcName] = useState("");
@@ -548,19 +551,25 @@ export default function TeamQuotationNew() {
               {customers.length === 0 ? (
                 <div className="p-6 text-center text-muted-foreground text-sm">No customers found.</div>
               ) : customers.slice(0, 20).map((c) => (
-                <button key={c.id} onClick={() => setSelectedCustomer(c)}
-                  className={`w-full text-left p-3 flex items-center gap-3 hover:bg-muted/50 transition ${selectedCustomer?.id === c.id ? "bg-accent/10" : ""}`}>
-                  <div className={`w-5 h-5 rounded-full border-2 ${selectedCustomer?.id === c.id ? "border-accent bg-accent" : "border-muted-foreground"} flex items-center justify-center shrink-0`}>
-                    {selectedCustomer?.id === c.id && <Check className="w-3 h-3 text-white" />}
-                  </div>
-                  <div className="flex-1 min-w-0">
-                    <div className="text-sm font-semibold">{c.name}</div>
-                    <div className="text-xs text-muted-foreground truncate">
-                      {[c.phone, c.gstNumber && `GST: ${c.gstNumber}`, c.defaultDiscountPct != null && `Default Disc: ${c.defaultDiscountPct}%`]
-                        .filter(Boolean).join(" · ")}
+                <div key={c.id}
+                  className={`w-full p-3 flex items-center gap-3 hover:bg-muted/50 transition ${selectedCustomer?.id === c.id ? "bg-accent/10" : ""}`}>
+                  <button type="button" onClick={() => setSelectedCustomer(c)} className="flex-1 min-w-0 flex items-center gap-3 text-left">
+                    <div className={`w-5 h-5 rounded-full border-2 ${selectedCustomer?.id === c.id ? "border-accent bg-accent" : "border-muted-foreground"} flex items-center justify-center shrink-0`}>
+                      {selectedCustomer?.id === c.id && <Check className="w-3 h-3 text-white" />}
                     </div>
-                  </div>
-                </button>
+                    <div className="flex-1 min-w-0">
+                      <div className="text-sm font-semibold">{c.name}</div>
+                      <div className="text-xs text-muted-foreground truncate">
+                        {[c.phone, c.gstNumber && `GST: ${c.gstNumber}`, c.defaultDiscountPct != null && `Default Disc: ${c.defaultDiscountPct}%`]
+                          .filter(Boolean).join(" · ")}
+                      </div>
+                    </div>
+                  </button>
+                  <button type="button" onClick={() => setEditingCustomer(c)} title="Edit customer"
+                    className="p-1.5 rounded-lg hover:bg-muted text-muted-foreground hover:text-foreground shrink-0">
+                    <Pencil className="w-4 h-4" />
+                  </button>
+                </div>
               ))}
             </div>
             <div className="mt-6 flex justify-between">
@@ -923,6 +932,20 @@ export default function TeamQuotationNew() {
             </div>
           </div>
         </div>
+      )}
+
+      {/* R26.1: edit existing customer */}
+      {editingCustomer && (
+        <EditCustomerModal
+          customer={editingCustomer as any}
+          open={!!editingCustomer}
+          apiBase="/api/team"
+          onClose={() => setEditingCustomer(null)}
+          onSaved={(updated) => {
+            qc.invalidateQueries({ queryKey: ["customers-team"] });
+            if (selectedCustomer?.id === updated.id) setSelectedCustomer({ ...selectedCustomer, ...updated } as any);
+          }}
+        />
       )}
     </TeamLayout>
   );

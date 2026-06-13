@@ -883,14 +883,23 @@ export function registerV2Routes(app: Express, ctx: V2Context) {
     } catch (e: any) { res.status(400).json({ error: e.message, details: e.errors }); }
   });
 
-  app.patch("/api/admin/customers/:id", requireAuth, async (req, res) => {
+  const adminUpdateCustomer = async (req: any, res: any) => {
     try {
       const id = parseInt(req.params.id as string, 10);
+      if (!Number.isInteger(id) || id <= 0) return res.status(400).json({ error: "Invalid customer id" });
+      const existing = await v2.getCustomer(id);
+      if (!existing) return res.status(404).json({ error: "Customer not found" });
       const customer = await v2.updateCustomer(id, req.body || {});
       if (!customer) return res.status(404).json({ error: "Customer not found" });
+      Promise.resolve(v2.writeAuditLog({
+        actorType: "admin", actorId: (req as any).user?.username, action: "update_customer",
+        entityType: "customer", entityId: String(id),
+      })).catch((e: any) => console.error("[audit] customer update write failed:", e?.message));
       res.json(customer);
     } catch (e: any) { res.status(400).json({ error: e.message }); }
-  });
+  };
+  app.patch("/api/admin/customers/:id", requireAuth, adminUpdateCustomer);
+  app.put("/api/admin/customers/:id", requireAuth, adminUpdateCustomer);
 
   app.delete("/api/admin/customers/:id", requireAdminRole, async (req, res) => {
     try {
@@ -1586,9 +1595,12 @@ export function registerV2Routes(app: Express, ctx: V2Context) {
     } catch (e: any) { res.status(400).json({ error: e.message, details: e.errors }); }
   });
 
-  app.patch("/api/team/customers/:id", requireDataTeam, async (req, res) => {
+  const teamUpdateCustomer = async (req: any, res: any) => {
     try {
       const id = parseInt(req.params.id as string, 10);
+      if (!Number.isInteger(id) || id <= 0) return res.status(400).json({ error: "Invalid customer id" });
+      const existing = await v2.getCustomer(id);
+      if (!existing) return res.status(404).json({ error: "Customer not found" });
       const customer = await v2.updateCustomer(id, req.body || {});
       if (!customer) return res.status(404).json({ error: "Customer not found" });
       const teamUser = (req as any).teamUser;
@@ -1598,7 +1610,9 @@ export function registerV2Routes(app: Express, ctx: V2Context) {
       })).catch((e: any) => console.error("[audit] team customer update failed:", e?.message));
       res.json(customer);
     } catch (e: any) { res.status(400).json({ error: e.message }); }
-  });
+  };
+  app.patch("/api/team/customers/:id", requireDataTeam, teamUpdateCustomer);
+  app.put("/api/team/customers/:id", requireDataTeam, teamUpdateCustomer);
 
   // ---------------- R13.1 TEAM SELLERS ----------------
   // Team-scoped mirror of the admin vendor (seller) CRUD. Shares the same v2 storage
