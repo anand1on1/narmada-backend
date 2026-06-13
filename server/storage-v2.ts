@@ -2532,19 +2532,25 @@ export function getDelhiPoForDocket(poId: number): { notFound: true } | { notDel
 }
 
 export function setDelhiPoDocket(poId: number, data: {
-  docketTransport: string | null; docketNumber: string | null; docketDate: number | null; docketSlipPath: string | null;
+  docketTransport: string | null; docketNumber: string | null; docketDate: number | null;
+  docketSlipPath?: string | null; docketBundles?: number | null;
 }): PurchaseOrderV2 {
-  return db.update(purchaseOrdersV2).set({
+  const patch: any = {
     docketTransport: data.docketTransport,
     docketNumber: data.docketNumber,
     docketDate: data.docketDate,
-    docketSlipPath: data.docketSlipPath,
     updatedAt: Date.now(),
-  } as any).where(eq(purchaseOrdersV2.id, poId)).returning().get();
+  };
+  // R26.2b — slip path / bundles are only overwritten when supplied, so a re-upload that omits
+  // a new file (or bundles) keeps the previously stored value instead of nulling it.
+  if (data.docketSlipPath !== undefined) patch.docketSlipPath = data.docketSlipPath;
+  if (data.docketBundles !== undefined) patch.docketBundles = data.docketBundles;
+  return db.update(purchaseOrdersV2).set(patch).where(eq(purchaseOrdersV2.id, poId)).returning().get();
 }
 
 export function getDelhiPoDocket(poId: number): {
-  docketTransport: string | null; docketNumber: string | null; docketDate: number | null; docketSlipPath: string | null;
+  docketTransport: string | null; docketNumber: string | null; docketDate: number | null;
+  docketSlipPath: string | null; docketBundles: number | null;
 } | undefined {
   const po = db.select().from(purchaseOrdersV2).where(eq(purchaseOrdersV2.id, poId)).get();
   if (!po) return undefined;
@@ -2553,6 +2559,7 @@ export function getDelhiPoDocket(poId: number): {
     docketNumber: (po as any).docketNumber ?? null,
     docketDate: (po as any).docketDate ?? null,
     docketSlipPath: (po as any).docketSlipPath ?? null,
+    docketBundles: (po as any).docketBundles ?? null,
   };
 }
 

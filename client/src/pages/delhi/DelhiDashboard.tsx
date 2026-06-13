@@ -13,7 +13,7 @@ import { useQuery } from "@tanstack/react-query";
 import { Logo } from "@/components/Logo";
 import {
   LogOut, Megaphone, X, Table as TableIcon, Columns, LayoutList,
-  Package, Search, ChevronDown,
+  Package, Search, ChevronDown, Pencil,
 } from "lucide-react";
 
 type ViewMode = "table" | "kanban" | "tabs";
@@ -21,6 +21,8 @@ const VIEW_KEY = "delhi_view_mode";
 
 // R14.6 — lazy-loaded pending widgets (heavy module loaded only when dashboard mounts).
 const DelhiPendingWidgets = lazy(() => import("./DelhiPendingWidgets"));
+// R26.2b — lazy-loaded Edit Docket dialog (post-dispatch transport re-entry).
+const EditDocketModal = lazy(() => import("./EditDocketModal"));
 
 // Buckets map to po_item fulfil_status stages rolled up per-PO.
 const BUCKETS = [
@@ -120,6 +122,8 @@ export default function DelhiDashboard() {
     try { return sessionStorage.getItem("delhi_announcement_dismissed") === "1"; } catch { return false; }
   });
   const [activeTab, setActiveTab] = useState<string>("pending");
+  // R26.2b — PO whose docket is being edited (post-dispatch re-upload dialog).
+  const [editDocketPo, setEditDocketPo] = useState<{ id: number; po_number: string } | null>(null);
 
   useEffect(() => { if (ready && !token) navigate("/delhi"); }, [ready, token, navigate]);
 
@@ -296,19 +300,30 @@ export default function DelhiDashboard() {
         {isLoading ? (
           <div className="text-center text-muted-foreground py-16">Loading POs…</div>
         ) : view === "table" ? (
-          <TableView pos={filtered} onOpen={openPo} />
+          <TableView pos={filtered} onOpen={openPo} onEditDocket={setEditDocketPo} />
         ) : view === "kanban" ? (
           <KanbanView pos={filtered} onOpen={openPo} />
         ) : (
-          <TabsView pos={filtered} onOpen={openPo} activeTab={activeTab} setActiveTab={setActiveTab} />
+          <TabsView pos={filtered} onOpen={openPo} activeTab={activeTab} setActiveTab={setActiveTab} onEditDocket={setEditDocketPo} />
         )}
       </div>
+
+      {editDocketPo && (
+        <Suspense fallback={null}>
+          <EditDocketModal
+            poId={editDocketPo.id}
+            poNumber={editDocketPo.po_number}
+            onClose={() => setEditDocketPo(null)}
+            onDone={() => setEditDocketPo(null)}
+          />
+        </Suspense>
+      )}
     </div>
   );
 }
 
 // ─── Shared row layout for Table + Tabs ───
-function PoTable({ pos, onOpen }: { pos: PoRow[]; onOpen: (id: number) => void }) {
+function PoTable({ pos, onOpen, onEditDocket }: { pos: PoRow[]; onOpen: (id: number) => void; onEditDocket?: (po: { id: number; po_number: string }) => void }) {
   if (pos.length === 0) return <div className="p-12 text-center text-muted-foreground">No POs match these filters.</div>;
   return (
     <table className="w-full text-sm">
@@ -353,10 +368,19 @@ function PoTable({ pos, onOpen }: { pos: PoRow[]; onOpen: (id: number) => void }
             <td className="px-3 py-3 text-right">{p.total_qty}</td>
             <td className="px-3 py-3 text-right text-xs font-semibold">{fmtINR(p.cust_total)}</td>
             <td className="px-3 py-3 text-right">
-              <button onClick={(e) => { e.stopPropagation(); onOpen(p.id); }}
-                className="text-accent font-semibold hover:underline text-xs inline-flex items-center gap-1">
-                <Package className="w-3.5 h-3.5" /> Open
-              </button>
+              <div className="inline-flex items-center gap-3 justify-end">
+                {onEditDocket && p.bucket === "dispatched" && (
+                  <button onClick={(e) => { e.stopPropagation(); onEditDocket({ id: p.id, po_number: p.po_number }); }}
+                    title="Edit / re-upload docket"
+                    className="text-accent font-semibold hover:underline text-xs inline-flex items-center gap-1">
+                    <Pencil className="w-3.5 h-3.5" /> Edit Docket
+                  </button>
+                )}
+                <button onClick={(e) => { e.stopPropagation(); onOpen(p.id); }}
+                  className="text-accent font-semibold hover:underline text-xs inline-flex items-center gap-1">
+                  <Package className="w-3.5 h-3.5" /> Open
+                </button>
+              </div>
             </td>
           </tr>
         );
@@ -365,11 +389,11 @@ function PoTable({ pos, onOpen }: { pos: PoRow[]; onOpen: (id: number) => void }
   );
 }
 
-function TableView({ pos, onOpen }: { pos: PoRow[]; onOpen: (id: number) => void }) {
-  return <div className="bg-card border rounded-xl overflow-x-auto shadow-sm"><PoTable pos={pos} onOpen={onOpen} /></div>;
+function TableView({ pos, onOpen, onEditDocket }: { pos: PoRow[]; onOpen: (id: number) => void; onEditDocket?: (po: { id: number; po_number: string }) => void }) {
+  return <div className="bg-card border rounded-xl overflow-x-auto shadow-sm"><PoTable pos={pos} onOpen={onOpen} onEditDocket={onEditDocket} /></div>;
 }
 
-function TabsView({ pos, onOpen, activeTab, setActiveTab }: { pos: PoRow[]; onOpen: (id: number) => void; activeTab: string; setActiveTab: (s: string) => void; }) {
+function TabsView({ pos, onOpen, activeTab, setActiveTab, onEditDocket }: { pos: PoRow[]; onOpen: (id: number) => void; activeTab: string; setActiveTab: (s: string) => void; onEditDocket?: (po: { id: number; po_number: string }) => void }) {
   const tabs = BUCKETS;
   const byBucket = (key: string) => pos.filter((p) => p.bucket === key);
   return (
@@ -386,7 +410,7 @@ function TabsView({ pos, onOpen, activeTab, setActiveTab }: { pos: PoRow[]; onOp
         })}
       </div>
       <div className="bg-card border rounded-xl overflow-x-auto shadow-sm">
-        <PoTable pos={byBucket(activeTab)} onOpen={onOpen} />
+        <PoTable pos={byBucket(activeTab)} onOpen={onOpen} onEditDocket={onEditDocket} />
       </div>
     </div>
   );

@@ -787,6 +787,8 @@ export const purchaseOrdersV2 = sqliteTable("purchase_orders_v2", {
   docketNumber: text("docket_number"),
   docketDate: integer("docket_date"),
   docketSlipPath: text("docket_slip_path"),
+  // R26.2b — bundles count captured in the Delhi Edit Docket dialog (mirrors the dispatch modal).
+  docketBundles: integer("docket_bundles"),
 });
 export const insertPurchaseOrderV2Schema = createInsertSchema(purchaseOrdersV2).omit({ id: true, createdAt: true, updatedAt: true });
 export type InsertPurchaseOrderV2 = z.infer<typeof insertPurchaseOrderV2Schema>;

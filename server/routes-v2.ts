@@ -4983,15 +4983,36 @@ function registerR8Routes(
         if (Number.isNaN(parsed)) return res.status(400).json({ error: "Invalid docketDate (expected ISO date string)" });
         docketDate = parsed;
       }
-      const file = req.file;
-      const docketSlipPath = file ? `/uploads/docket-slips/${file.filename}` : null;
+      // R26.2b — optional bundles count (mirrors the dispatch modal). Omit -> preserve prior value.
+      const docketBundlesRaw = String(req.body?.docketBundles ?? req.body?.bundles ?? "").trim();
+      let docketBundles: number | null | undefined = undefined;
+      if (docketBundlesRaw) {
+        const b = parseInt(docketBundlesRaw, 10);
+        if (!Number.isInteger(b) || b < 0) return res.status(400).json({ error: "Invalid docketBundles (expected a non-negative integer)" });
+        docketBundles = b;
+      }
 
-      const updated = v2.setDelhiPoDocket(poId, { docketTransport, docketNumber, docketDate, docketSlipPath });
+      const file = req.file;
+      // R26.2b — only touch the slip path when a new file is uploaded. On replacement, unlink the
+      // old slip (best-effort: a failed unlink must not fail the request).
+      const prior = v2.getDelhiPoDocket(poId);
+      const docketSlipPath: string | undefined = file ? `/uploads/docket-slips/${file.filename}` : undefined;
+      if (file && prior?.docketSlipPath) {
+        try {
+          const rel = prior.docketSlipPath.replace(/^\/uploads\//, "");
+          const oldAbs = path.join(ctx.uploadsDir || "./uploads", rel);
+          if (fs.existsSync(oldAbs)) fs.unlinkSync(oldAbs);
+        } catch (unlinkErr: any) {
+          console.log(`[R26.2b] failed to unlink old docket slip for PO ${poId} —`, unlinkErr?.message || unlinkErr);
+        }
+      }
+
+      const updated = v2.setDelhiPoDocket(poId, { docketTransport, docketNumber, docketDate, docketSlipPath, docketBundles });
 
       await v2.writeAuditLog({
         actorType: "delhi", actorId: (req as any).teamUser?.username, action: "po.docket_upload",
         entityType: "purchase_order", entityId: String(poId),
-        afterJson: JSON.stringify({ docketTransport, docketNumber, docketDate, docketSlipPath }),
+        afterJson: JSON.stringify({ docketTransport, docketNumber, docketDate, docketBundles, docketSlipPath: docketSlipPath ?? prior?.docketSlipPath ?? null }),
       });
 
       res.json(updated);

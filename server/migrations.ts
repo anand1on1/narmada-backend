@@ -722,3 +722,18 @@ export function runR26_2Migrations() {
   }
   console.log("[migrations] R26.2 tables/columns ensured");
 }
+
+// -------- R26.2b additive migrations --------
+// R26.2b: Delhi "Edit Docket" dialog — the post-dispatch docket re-entry form mirrors the
+// dispatch modal, which captures a bundles count. R26.2 only stored transport/number/date/slip
+// on purchase_orders_v2, so add docket_bundles here. Idempotent — duplicate-column failure swallowed.
+export function runR26_2bMigrations() {
+  const stmts: Array<{ desc: string; sql: string }> = [
+    { desc: "purchase_orders_v2.docket_bundles", sql: `ALTER TABLE purchase_orders_v2 ADD COLUMN docket_bundles INTEGER` },
+  ];
+  for (const { desc, sql } of stmts) {
+    console.log(`[migrations] R26.2b: ${desc}`);
+    try { sqlite.exec(sql); } catch (err: any) { console.log(`[migrations] R26.2b: skipped ${desc} —`, err?.message || err); }
+  }
+  console.log("[migrations] R26.2b tables/columns ensured");
+}
