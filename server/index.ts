@@ -96,7 +96,7 @@ app.use((req, res, next) => {
   // ---- R4.4→R7: ensure additive tables + seed defaults on boot ----
   console.log("[boot] step: pre-migrations");
   try {
-    const { runR4toR7Migrations, runR8Migrations, runR9Migrations, runR10Migrations, runR11Migrations, runR11_1Migrations, runR12Migrations, runR13Migrations, runR13_4Migrations, runR18Migrations, runR20Migrations, runR21Migrations, runR22Migrations, runR23Migrations, runR24Migrations, runR25Migrations, runR26Migrations, runR26_2Migrations, runR26_2bMigrations, runR26_2fCleanup } = await import("./migrations");
+    const { runR4toR7Migrations, runR8Migrations, runR9Migrations, runR10Migrations, runR11Migrations, runR11_1Migrations, runR12Migrations, runR13Migrations, runR13_4Migrations, runR18Migrations, runR20Migrations, runR21Migrations, runR22Migrations, runR23Migrations, runR24Migrations, runR25Migrations, runR26Migrations, runR26_2Migrations, runR26_2bMigrations, runR26_2fCleanup, runR26_2gBackfill } = await import("./migrations");
     runR4toR7Migrations();
     console.log("[boot] step: post-R4-R7 migrations");
     runR8Migrations();
@@ -137,6 +137,8 @@ app.use((req, res, next) => {
     console.log("[boot] step: post-R26.2b migrations");
     runR26_2fCleanup();
     console.log("[boot] step: post-R26.2f cleanup");
+    runR26_2gBackfill();
+    console.log("[boot] step: post-R26.2g backfill");
     const { seedR5Defaults } = await import("./seed-r5");
     await seedR5Defaults();
     console.log("[boot] step: post-seed");

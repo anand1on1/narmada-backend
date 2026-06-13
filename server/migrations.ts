@@ -761,3 +761,43 @@ export function runR26_2fCleanup() {
     console.error("[migrations] R26.2f cleanup failed:", e?.message || e);
   }
 }
+
+// -------- R26.2g one-time backfill --------
+// R26.2g: POs already notified to Delhi can show Rate/Line Total/Order Value = 0 even though
+// the master line carries a customer rate, because line_total was never recomputed from
+// unit_price*qty (and the header total stayed stale). In this schema procurement + Delhi share
+// the SAME `po_items` table and the customer rate IS `po_items.unit_price` (the migration-added
+// `customer_rate` column is unused/never populated), so the backfill = recompute each notified
+// PO's line_total from unit_price*qty, then refresh the header total/subtotal from the new line
+// totals. IDEMPOTENT — only touches lines where line_total disagrees with unit_price*qty, and
+// only POs that have been notified to Delhi. Lines with unit_price = 0 correctly stay at 0.
+export function runR26_2gBackfill() {
+  try {
+    // 1) Recompute stale line_totals on notified POs (unit_price = customer rate).
+    const lineInfo = sqlite
+      .prepare(
+        `UPDATE po_items
+         SET line_total = COALESCE(unit_price, 0) * COALESCE(qty, 0)
+         WHERE po_id IN (SELECT id FROM purchase_orders_v2 WHERE notified_delhi_at IS NOT NULL)
+           AND COALESCE(line_total, 0) <> COALESCE(unit_price, 0) * COALESCE(qty, 0)`,
+      )
+      .run();
+
+    // 2) Refresh the Delhi PO header order value (total/subtotal) from the line totals.
+    const headerInfo = sqlite
+      .prepare(
+        `UPDATE purchase_orders_v2
+         SET subtotal = COALESCE((SELECT SUM(COALESCE(line_total, 0)) FROM po_items WHERE po_items.po_id = purchase_orders_v2.id), 0),
+             total    = COALESCE((SELECT SUM(COALESCE(line_total, 0)) FROM po_items WHERE po_items.po_id = purchase_orders_v2.id), 0)
+         WHERE notified_delhi_at IS NOT NULL
+           AND COALESCE(total, 0) <> COALESCE((SELECT SUM(COALESCE(line_total, 0)) FROM po_items WHERE po_items.po_id = purchase_orders_v2.id), 0)`,
+      )
+      .run();
+
+    console.log(
+      `[migrations] R26.2g: backfilled ${lineInfo.changes} Delhi line total(s), refreshed ${headerInfo.changes} PO header total(s)`,
+    );
+  } catch (e: any) {
+    console.error("[migrations] R26.2g backfill failed:", e?.message || e);
+  }
+}

@@ -3931,3 +3931,36 @@ export function listChatThread(vendorId: number): any[] {
      FROM vendor_rfq_messages WHERE vendor_id = ? ORDER BY created_at ASC, id ASC`
   ).all(vendorId) as any[];
 }
+
+// R26.2g — On "Notify Delhi", sync the customer (selling) rate into the line snapshot the
+// Delhi UI reads. In this schema procurement + Delhi share the SAME `po_items` table, and the
+// customer rate lives in `po_items.unit_price` (computePoTotals + getDelhiPoDetail both read
+// unit_price as the customer rate). So syncing = recomputing each line's `line_total` from the
+// current `unit_price * qty` (the Delhi "Rate"/"Line Total" columns), then refreshing the PO
+// header `total`/`subtotal` (Delhi "Order Value"). Idempotent — safe on repeated notify clicks.
+// Lines with unit_price = 0 stay at 0 (correct: a draft PO without rates set yet); the notify
+// flow is NOT blocked. Returns counts for logging.
+export function syncDelhiLineRates(poId: number): { lines: number; zeroRateLines: number; total: number } {
+  const tx = sqlite.transaction(() => {
+    const items = sqlite
+      .prepare(`SELECT id, qty, unit_price FROM po_items WHERE po_id = ?`)
+      .all(poId) as Array<{ id: number; qty: number | null; unit_price: number | null }>;
+    let total = 0;
+    let zeroRateLines = 0;
+    const upd = sqlite.prepare(`UPDATE po_items SET line_total = ? WHERE id = ?`);
+    for (const it of items) {
+      const qty = Number(it.qty ?? 0) || 0;
+      const rate = Number(it.unit_price ?? 0) || 0;
+      const lineTotal = rate * qty;
+      if (rate <= 0) zeroRateLines++;
+      total += lineTotal;
+      upd.run(lineTotal, it.id);
+    }
+    // Refresh the PO header order value from the freshly-recomputed line totals.
+    sqlite
+      .prepare(`UPDATE purchase_orders_v2 SET subtotal = ?, total = ?, updated_at = ? WHERE id = ?`)
+      .run(total, total, Date.now(), poId);
+    return { lines: items.length, zeroRateLines, total };
+  });
+  return tx();
+}

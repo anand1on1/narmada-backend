@@ -4752,6 +4752,17 @@ function registerR8Routes(
         return res.status(400).json({ error: "PO has no line items" });
       }
       const confirmed = po.items.filter((it: any) => it.approvedQuoteId != null || it.vendorId != null);
+      // R26.2g — sync the customer (selling) rate into the Delhi-visible line snapshot at
+      // click time: recompute each line_total from unit_price*qty and refresh the PO header
+      // order value. On-click only (no master-edit triggers); idempotent across repeat clicks.
+      try {
+        const sync = v2.syncDelhiLineRates(id);
+        if (sync.zeroRateLines > 0) {
+          console.warn(`[R26.2g] notify-delhi: PO ${id} has ${sync.zeroRateLines} line(s) with customer_rate=0`);
+        }
+      } catch (e: any) {
+        console.error(`[R26.2g] notify-delhi rate sync failed for PO ${id}:`, e?.message || e);
+      }
       await v2.updatePurchaseOrderV2(id, { notifiedDelhiAt: Date.now(), status: po.status === "draft" ? "open" : po.status } as any);
       res.json({ ok: true, totalCount: po.items.length, assignedCount: confirmed.length, awaitingCount: po.items.length - confirmed.length });
     } catch (e: any) {
