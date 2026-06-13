@@ -3004,15 +3004,38 @@ export function approveQuote(poItemId: number, quoteId: number): { item: any; qu
     sqlite.prepare(
       `UPDATE po_item_vendor_quotes SET status = 'approved', approved_at = ? WHERE id = ?`
     ).run(now, quoteId);
+    // R26.2i — when a vendor quote is approved and the line has no customer rate yet
+    // (unit_price 0/NULL), seed unit_price + line_total from the approved vendor_rate as a
+    // safe baseline (Margin = 0). The CASE WHEN reads the PRE-update unit_price (SQLite SET
+    // references resolve to old column values), so a deliberately-priced line is never
+    // clobbered. unitPriceWasZero is captured before the UPDATE for logging.
+    const vendorRate = quote.rate ?? null;
+    const unitPriceWasZero = item0 == null || item0.unit_price == null || item0.unit_price === 0;
     sqlite.prepare(
       `UPDATE po_items
        SET approved_vendor_id = ?, approved_quote_id = ?, vendor_id = COALESCE(?, vendor_id),
-           vendor_rate = ?, vendor_name = ?, purchase_cost = ?, assigned_at = ?
+           vendor_rate = ?, vendor_name = ?, purchase_cost = ?, assigned_at = ?,
+           unit_price = CASE WHEN (unit_price IS NULL OR unit_price = 0) AND ? IS NOT NULL THEN ? ELSE unit_price END,
+           line_total = CASE WHEN (unit_price IS NULL OR unit_price = 0) AND ? IS NOT NULL THEN ? * COALESCE(qty, 0) ELSE line_total END
        WHERE id = ?`
     ).run(
       quote.vendor_id ?? null, quoteId, quote.vendor_id ?? null,
-      quote.rate ?? null, quote.vendor_name ?? null, quote.rate ?? null, now, poItemId
+      vendorRate, quote.vendor_name ?? null, vendorRate, now,
+      vendorRate, vendorRate,
+      vendorRate, vendorRate,
+      poItemId
     );
+    console.log(`[R26.2i approveQuote] po_id=${item0?.po_id} item_id=${poItemId} vendor_rate=${vendorRate} unit_price_set=${unitPriceWasZero && vendorRate != null}`);
+    // R26.2i — refresh the PO header subtotal/total from the line totals (same shape as
+    // R26.2h's propagate path) so customer-facing PO totals reflect the seeded unit_price.
+    if (item0?.po_id != null) {
+      sqlite.prepare(
+        `UPDATE purchase_orders_v2
+         SET subtotal = COALESCE((SELECT SUM(COALESCE(line_total, 0)) FROM po_items WHERE po_items.po_id = purchase_orders_v2.id), 0),
+             total    = COALESCE((SELECT SUM(COALESCE(line_total, 0)) FROM po_items WHERE po_items.po_id = purchase_orders_v2.id), 0)
+         WHERE id = ?`
+      ).run(item0.po_id);
+    }
     const item = sqlite.prepare(`SELECT * FROM po_items WHERE id = ?`).get(poItemId) as any;
     return { item, quote: getVendorQuote(quoteId), previousQuoteId };
   });
