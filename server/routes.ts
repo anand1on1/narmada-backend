@@ -123,14 +123,14 @@ function requireAdmin(req: Request, res: Response, next: NextFunction) {
 }
 
 // --- Uploads dir ---
-const UPLOADS_DIR = path.resolve(process.cwd(), "uploads");
-if (!fs.existsSync(UPLOADS_DIR)) fs.mkdirSync(UPLOADS_DIR, { recursive: true });
+const UPLOADS_DIR = path.resolve(process.env.DATA_DIR || ".", "uploads");
+fs.mkdirSync(UPLOADS_DIR, { recursive: true });
 const PUBLIC_DIR = path.resolve(process.cwd(), "public-runtime");
 if (!fs.existsSync(PUBLIC_DIR)) fs.mkdirSync(PUBLIC_DIR, { recursive: true });
 
 export async function registerRoutes(httpServer: Server, app: Express): Promise<Server> {
   // Serve uploaded images
-  app.use("/uploads", express.static(UPLOADS_DIR));
+  app.use("/uploads", express.static(UPLOADS_DIR, { fallthrough: false }));
 
   // -------- AUTH --------
   app.post("/api/admin/login", async (req, res) => {

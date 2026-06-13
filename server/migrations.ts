@@ -703,3 +703,22 @@ export function runR26Migrations() {
   }
   console.log("[migrations] R26 tables/columns ensured");
 }
+
+// -------- R26.2 additive migrations --------
+// R26.2: Delhi docket upload — adds transport name, docket number, docket date, and the
+// public-relative slip path to purchase_orders_v2 (the table the Delhi PO endpoints read).
+// docket_date is INTEGER (unix-ms) to match this table's existing date convention (po_date,
+// delivery_deadline, etc.). All ALTERs are idempotent — a duplicate-column failure is swallowed.
+export function runR26_2Migrations() {
+  const stmts: Array<{ desc: string; sql: string }> = [
+    { desc: "purchase_orders_v2.docket_transport", sql: `ALTER TABLE purchase_orders_v2 ADD COLUMN docket_transport TEXT` },
+    { desc: "purchase_orders_v2.docket_number", sql: `ALTER TABLE purchase_orders_v2 ADD COLUMN docket_number TEXT` },
+    { desc: "purchase_orders_v2.docket_date", sql: `ALTER TABLE purchase_orders_v2 ADD COLUMN docket_date INTEGER` },
+    { desc: "purchase_orders_v2.docket_slip_path", sql: `ALTER TABLE purchase_orders_v2 ADD COLUMN docket_slip_path TEXT` },
+  ];
+  for (const { desc, sql } of stmts) {
+    console.log(`[migrations] R26.2: ${desc}`);
+    try { sqlite.exec(sql); } catch (err: any) { console.log(`[migrations] R26.2: skipped ${desc} —`, err?.message || err); }
+  }
+  console.log("[migrations] R26.2 tables/columns ensured");
+}

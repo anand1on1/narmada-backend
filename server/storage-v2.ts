@@ -2286,6 +2286,11 @@ export async function getDelhiPoDetail(id: number): Promise<any | undefined> {
     delivery_deadline: (po as any).deliveryDeadline ?? null,
     pickup_pending_days: pickupPending && createdAt != null ? Math.floor((Date.now() - Number(createdAt)) / (24 * 60 * 60 * 1000)) : null,
     has_deviation: safeItems.some((it) => it.is_deviated === 1),
+    // R26.2 — Delhi docket fields (so the PO detail can show what was uploaded).
+    docket_transport: (po as any).docketTransport ?? null,
+    docket_number: (po as any).docketNumber ?? null,
+    docket_date: (po as any).docketDate ?? null,
+    docket_slip_path: (po as any).docketSlipPath ?? null,
     items: safeItems,
   };
 }
@@ -2514,6 +2519,41 @@ export async function dispatchPackedLines(poId: number, data: {
   } as any).where(eq(purchaseOrdersV2.id, poId)).run();
 
   return { dispatched_count: packed.length, remaining_count: remaining, dispatchId: dispatch.id };
+}
+
+// R26.2 — Delhi docket upload. A PO counts as "assigned to Delhi" once Patna has notified
+// Delhi (notified_delhi_at IS NOT NULL); the same predicate gates every other Delhi endpoint.
+// Returns { notFound } / { notDelhi } discriminators so the route can map to 404 / 403.
+export function getDelhiPoForDocket(poId: number): { notFound: true } | { notDelhi: true } | { po: PurchaseOrderV2 } {
+  const po = db.select().from(purchaseOrdersV2).where(eq(purchaseOrdersV2.id, poId)).get();
+  if (!po || (po as any).deletedAt != null) return { notFound: true };
+  if ((po as any).notifiedDelhiAt == null) return { notDelhi: true };
+  return { po };
+}
+
+export function setDelhiPoDocket(poId: number, data: {
+  docketTransport: string | null; docketNumber: string | null; docketDate: number | null; docketSlipPath: string | null;
+}): PurchaseOrderV2 {
+  return db.update(purchaseOrdersV2).set({
+    docketTransport: data.docketTransport,
+    docketNumber: data.docketNumber,
+    docketDate: data.docketDate,
+    docketSlipPath: data.docketSlipPath,
+    updatedAt: Date.now(),
+  } as any).where(eq(purchaseOrdersV2.id, poId)).returning().get();
+}
+
+export function getDelhiPoDocket(poId: number): {
+  docketTransport: string | null; docketNumber: string | null; docketDate: number | null; docketSlipPath: string | null;
+} | undefined {
+  const po = db.select().from(purchaseOrdersV2).where(eq(purchaseOrdersV2.id, poId)).get();
+  if (!po) return undefined;
+  return {
+    docketTransport: (po as any).docketTransport ?? null,
+    docketNumber: (po as any).docketNumber ?? null,
+    docketDate: (po as any).docketDate ?? null,
+    docketSlipPath: (po as any).docketSlipPath ?? null,
+  };
 }
 
 // Hard-delete a PO and cascade po_items + po_item_vendor_quotes. Returns the po_number for
@@ -3491,6 +3531,11 @@ export function getConsignmentDetail(poId: number): any | null {
     totalBundles,
     carrier: carriers.join(", ") || null,
     dockets,
+    // R26.2 — Delhi docket fields stored on the PO (transport name + docket no/date + slip).
+    docketTransport: po.docket_transport ?? null,
+    docketNumber: po.docket_number ?? null,
+    docketDate: po.docket_date ?? null,
+    docketSlipPath: po.docket_slip_path ?? null,
   };
 }
 

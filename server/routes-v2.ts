@@ -4963,6 +4963,53 @@ function registerR8Routes(
     } catch (e: any) { res.status(400).json({ error: e.message }); }
   });
 
+  // ---- POST /api/delhi/po/:id/docket ---- (R26.2 multipart docket upload)
+  // Stores transport name, docket number, docket date + slip on the PO. Auth: Delhi team.
+  // Slip saved under uploads/docket-slips/ (reuses multerDocket: image/PDF, max 10MB).
+  app.post("/api/delhi/po/:id/docket", requireDelhi, multerDocket.single("docketSlip"), async (req: any, res: any) => {
+    try {
+      const poId = parseInt(req.params.id as string, 10);
+      if (!Number.isInteger(poId)) return res.status(400).json({ error: "Invalid PO id" });
+      const gate = v2.getDelhiPoForDocket(poId);
+      if ("notFound" in gate) return res.status(404).json({ error: "PO not found" });
+      if ("notDelhi" in gate) return res.status(403).json({ error: "Only Delhi POs can be updated" });
+
+      const docketTransport = String(req.body?.docketTransport || "").trim() || null;
+      const docketNumber = String(req.body?.docketNumber || "").trim() || null;
+      const docketDateRaw = String(req.body?.docketDate || "").trim();
+      let docketDate: number | null = null;
+      if (docketDateRaw) {
+        const parsed = Date.parse(docketDateRaw);
+        if (Number.isNaN(parsed)) return res.status(400).json({ error: "Invalid docketDate (expected ISO date string)" });
+        docketDate = parsed;
+      }
+      const file = req.file;
+      const docketSlipPath = file ? `/uploads/docket-slips/${file.filename}` : null;
+
+      const updated = v2.setDelhiPoDocket(poId, { docketTransport, docketNumber, docketDate, docketSlipPath });
+
+      await v2.writeAuditLog({
+        actorType: "delhi", actorId: (req as any).teamUser?.username, action: "po.docket_upload",
+        entityType: "purchase_order", entityId: String(poId),
+        afterJson: JSON.stringify({ docketTransport, docketNumber, docketDate, docketSlipPath }),
+      });
+
+      res.json(updated);
+    } catch (e: any) { res.status(400).json({ error: e.message }); }
+  });
+
+  // ---- GET /api/delhi/po/:id/docket ---- (R26.2 read back docket fields)
+  app.get("/api/delhi/po/:id/docket", requireDelhi, async (req: any, res: any) => {
+    try {
+      res.set("Cache-Control", "no-cache, no-store, must-revalidate");
+      const poId = parseInt(req.params.id as string, 10);
+      if (!Number.isInteger(poId)) return res.status(400).json({ error: "Invalid PO id" });
+      const docket = v2.getDelhiPoDocket(poId);
+      if (!docket) return res.status(404).json({ error: "PO not found" });
+      res.json(docket);
+    } catch (e: any) { res.status(500).json({ error: e.message }); }
+  });
+
   // ---- DELETE /api/team/po/:id ---- (data team hard-delete, cascades)
   app.delete("/api/team/po/:id", requireDataTeam, async (req: any, res: any) => {
     try {

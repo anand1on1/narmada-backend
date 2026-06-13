@@ -781,6 +781,12 @@ export const purchaseOrdersV2 = sqliteTable("purchase_orders_v2", {
   // R22 additions — consignment view marker (independent of the PO lifecycle status).
   consignmentStatus: text("consignment_status"), // null|received|processing|completed
   consignmentReceivedAt: integer("consignment_received_at"),
+  // R26.2 additions — Delhi docket upload (transport name, docket no, docket date, slip path).
+  // docketDate stored as integer unix-ms to match this table's date convention (po_date etc.).
+  docketTransport: text("docket_transport"),
+  docketNumber: text("docket_number"),
+  docketDate: integer("docket_date"),
+  docketSlipPath: text("docket_slip_path"),
 });
 export const insertPurchaseOrderV2Schema = createInsertSchema(purchaseOrdersV2).omit({ id: true, createdAt: true, updatedAt: true });
 export type InsertPurchaseOrderV2 = z.infer<typeof insertPurchaseOrderV2Schema>;
