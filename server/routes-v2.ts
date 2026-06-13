@@ -1704,11 +1704,16 @@ export function registerV2Routes(app: Express, ctx: V2Context) {
       const { items, context } = body;
       if (!instruction || typeof instruction !== "string") return res.status(400).json({ error: "instruction is required" });
       if (!Array.isArray(items)) return res.status(400).json({ error: "items must be an array" });
+      console.log(`[R26.2d ai-quote] request instruction="${instruction}" itemCount=${items.length}`);
       const { editQuotationItems } = await import("./claude-service");
       const result = await editQuotationItems(instruction, items, context || {});
+      console.log(`[R26.2d ai-quote] response ok=${(result as any).ok} error=${(result as any).error || "-"} items=${(result.items || []).length}`);
       // Pass through `summary` alias for the explanation field for nicer client toasts.
       res.json({ ...result, summary: (result as any).explanation });
-    } catch (e: any) { res.status(500).json({ error: e.message }); }
+    } catch (e: any) {
+      console.error(`[R26.2d ai-quote] route error:`, e?.message);
+      res.status(500).json({ error: e.message });
+    }
   });
 
   // -------- ADMIN: V2 QUOTATIONS (read-only mirror) --------

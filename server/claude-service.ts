@@ -449,6 +449,8 @@ Schema for each item: {"lineNo": number, "partNumber": string|null, "productName
 
 Rules:
 - Preserve any field the user did not change.
+- The "rate"/"price"/"unit rate"/"selling rate" of a line IS the "mrp" field. When the user asks to "fill the rates", "fill missing rates", "add rates", "quote rates", or "price the items", you MUST write the numeric price into the "mrp" field of EACH line. Never invent a separate "rate"/"price" key — always use "mrp".
+- For "fill the/missing rates": estimate a reasonable Indian-market rate (INR) for each line from the productName/brand/partNumber and put it in "mrp". Only fill lines whose mrp is missing/0 unless told to overwrite all. Never leave a line at mrp=0 when the user asked to fill rates.
 - Discount and gstPct are PERCENTAGES (0-100), not multipliers.
 - For "decrease/increase rates by X%": adjust mrp (not discount).
 - For "fill missing HSN codes": apply common Indian automotive HSN codes (87089900 = motor-vehicle parts general, 40169990 = rubber, 84212300 = filters, 73181500 = bolts, 85114000 = starters/alternators, 84099991 = engine parts, 87083000 = brakes).
@@ -460,7 +462,7 @@ Rules:
 export async function editQuotationItems(
   instruction: string,
   items: AiQuoteItem[],
-  context?: { customerName?: string; currency?: string },
+  context?: { customerName?: string; companyName?: string; currency?: string },
 ): Promise<{ items: AiQuoteItem[]; explanation: string; ok: boolean; error?: string }> {
   if (!CLAUDE_API_KEY || CLAUDE_API_KEY === "skip") {
     return { items, explanation: "", ok: false, error: "Claude API key not configured (set CLAUDE_API_KEY)" };
@@ -484,12 +486,26 @@ ${JSON.stringify(items, null, 2)}`;
       messages: [{ role: "user", content: userMsg }],
     });
     const text = response.content[0]?.type === "text" ? response.content[0].text : "";
+    console.log(`[R26.2d ai-quote] raw AI text (first 600 chars):`, text.slice(0, 600));
     const cleaned = text.replace(/```(?:json)?\n?/gi, "").trim();
     const parsed = JSON.parse(cleaned);
     if (!parsed || !Array.isArray(parsed.items)) {
+      console.warn(`[R26.2d ai-quote] AI did not return an items array. parsed=`, JSON.stringify(parsed).slice(0, 300));
       return { items, explanation: "", ok: false, error: "Claude did not return a valid items array" };
     }
-    // Coerce/validate numeric fields and trim strings
+    // Coerce/validate numeric fields and trim strings.
+    // R26.2d: the AI sometimes emits the price under a synonym key ("rate", "price",
+    // "unitRate", "unitPrice", "sellingRate") instead of "mrp" — especially for
+    // "fill the rates" prompts. Accept any of those as the mrp value so the rate
+    // actually lands in the field the frontend reads, instead of silently becoming 0.
+    const pickRate = (it: any): number => {
+      const candidates = [it.mrp, it.rate, it.price, it.unitRate, it.unit_rate, it.unitPrice, it.unit_price, it.sellingRate, it.selling_rate];
+      for (const c of candidates) {
+        const n = Number(c);
+        if (Number.isFinite(n) && n > 0) return n;
+      }
+      return Number(it.mrp ?? 0) || 0;
+    };
     const cleanItems: AiQuoteItem[] = parsed.items.map((it: any, idx: number) => ({
       lineNo: Number(it.lineNo ?? idx + 1),
       partNumber: it.partNumber == null ? null : String(it.partNumber),
@@ -497,19 +513,22 @@ ${JSON.stringify(items, null, 2)}`;
       hsn: it.hsn == null ? null : String(it.hsn),
       brand: it.brand == null ? null : String(it.brand),
       qty: Number(it.qty ?? 1),
-      mrp: Number(it.mrp ?? 0),
+      mrp: pickRate(it),
       discount: Number(it.discount ?? 0),
       gstPct: Number(it.gstPct ?? 18),
     }));
     // Renumber to be safe
     cleanItems.forEach((it, i) => { it.lineNo = i + 1; });
+    const filledCount = cleanItems.filter((it) => (it.mrp ?? 0) > 0).length;
+    console.log(`[R26.2d ai-quote] parsed ${cleanItems.length} items, ${filledCount} with mrp>0. rates=`,
+      JSON.stringify(cleanItems.map((it) => ({ lineNo: it.lineNo, mrp: it.mrp }))));
     return {
       items: cleanItems,
       explanation: String(parsed.explanation || ""),
       ok: true,
     };
   } catch (e: any) {
-    console.error("[claude] editQuotationItems error:", e?.message, e?.stack?.split("\n").slice(0, 3).join(" | "));
+    console.error("[R26.2d ai-quote] editQuotationItems error:", e?.message, e?.stack?.split("\n").slice(0, 3).join(" | "));
     return { items, explanation: "", ok: false, error: e?.message || "Claude call failed" };
   }
 }
