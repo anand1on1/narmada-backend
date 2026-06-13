@@ -257,6 +257,12 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
   // -------- BULK PRODUCT UPLOAD (admin) --------
   registerBulkRoutes(app, requireAdmin);
 
+  // -------- R26.4 MARKETING HUB (admin + public track/unsubscribe) --------
+  {
+    const { registerMarketingRoutes } = await import("./marketing/routes");
+    registerMarketingRoutes(app, requireAdmin);
+  }
+
   // -------- IMAGE UPLOAD (admin) --------
   // Accepts base64 data URL or raw base64 string and writes to /uploads/<id>.<ext>
   app.post("/api/admin/upload-image", requireAdmin, async (req, res) => {

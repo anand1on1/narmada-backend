@@ -96,7 +96,7 @@ app.use((req, res, next) => {
   // ---- R4.4→R7: ensure additive tables + seed defaults on boot ----
   console.log("[boot] step: pre-migrations");
   try {
-    const { runR4toR7Migrations, runR8Migrations, runR9Migrations, runR10Migrations, runR11Migrations, runR11_1Migrations, runR12Migrations, runR13Migrations, runR13_4Migrations, runR18Migrations, runR20Migrations, runR21Migrations, runR22Migrations, runR23Migrations, runR24Migrations, runR25Migrations, runR26Migrations, runR26_2Migrations, runR26_2bMigrations, runR26_2fCleanup, runR26_2gBackfill, runR26_2hBackfill, runR26_3Migrations } = await import("./migrations");
+    const { runR4toR7Migrations, runR8Migrations, runR9Migrations, runR10Migrations, runR11Migrations, runR11_1Migrations, runR12Migrations, runR13Migrations, runR13_4Migrations, runR18Migrations, runR20Migrations, runR21Migrations, runR22Migrations, runR23Migrations, runR24Migrations, runR25Migrations, runR26Migrations, runR26_2Migrations, runR26_2bMigrations, runR26_2fCleanup, runR26_2gBackfill, runR26_2hBackfill, runR26_3Migrations, runR26_4Migrations } = await import("./migrations");
     runR4toR7Migrations();
     console.log("[boot] step: post-R4-R7 migrations");
     runR8Migrations();
@@ -143,6 +143,8 @@ app.use((req, res, next) => {
     console.log("[boot] step: post-R26.2g backfill");
     runR26_3Migrations();
     console.log("[boot] step: post-R26.3 migrations");
+    runR26_4Migrations();
+    console.log("[boot] step: post-R26.4 migrations");
     const { seedR5Defaults } = await import("./seed-r5");
     await seedR5Defaults();
     console.log("[boot] step: post-seed");
@@ -243,6 +245,14 @@ app.use((req, res, next) => {
     startImapPolling();
   } catch (e: any) {
     log(`[imap] Failed to start polling: ${e?.message}`);
+  }
+
+  // ---- R26.4: Start marketing scheduler (picks up scheduled campaigns every 60s) ----
+  try {
+    const { startMarketingScheduler } = await import("./marketing/scheduler");
+    startMarketingScheduler();
+  } catch (e: any) {
+    log(`[marketing] Failed to start scheduler: ${e?.message}`);
   }
 
   // ---- Session C: Nightly parts_master TATA sync placeholder ----

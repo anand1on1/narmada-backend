@@ -1,0 +1,98 @@
+// R26.4 Marketing Hub — audience resolver.
+// Given a marketing_audiences.filter_json shape, resolve to a concrete recipient list.
+// "seller" in the UI maps to this codebase's `vendors` table. Leads are not yet a real
+// table here, so 'leads' resolves to an empty set (and 'all' = customers + sellers).
+// Hard cap of 50 recipients per the R26.4 audience-size constraint (keeps the simple
+// sequential send loop manageable — no queue infrastructure needed).
+import { rawSqlite as sqlite } from "../storage";
+
+export const MAX_AUDIENCE = 50;
+
+export type RecipientType = "customer" | "seller" | "lead";
+
+export interface Recipient {
+  id: string;
+  name: string;
+  email: string | null;
+  phone: string | null;
+  type: RecipientType;
+}
+
+export interface AudienceFilter {
+  audience_type?: "customers" | "sellers" | "leads" | "all";
+  filters?: {
+    state?: string;
+    last_order_after?: number; // epoch ms — customers only
+    min_spend?: number; // INR — customers only
+  };
+}
+
+export function parseFilter(filterJson: string | null | undefined): AudienceFilter {
+  if (!filterJson) return { audience_type: "all" };
+  try {
+    const parsed = JSON.parse(filterJson) as AudienceFilter;
+    return parsed && typeof parsed === "object" ? parsed : { audience_type: "all" };
+  } catch {
+    return { audience_type: "all" };
+  }
+}
+
+function resolveCustomers(f: AudienceFilter["filters"]): Recipient[] {
+  // Spend + last-order derive from ledger_entries (debit = invoiced value, entry_date = order time).
+  const rows = sqlite
+    .prepare(
+      `SELECT c.id AS id, c.name AS name, c.email AS email, c.phone AS phone, c.state AS state,
+              COALESCE((SELECT SUM(le.debit_inr) FROM ledger_entries le WHERE le.customer_id = c.id), 0) AS spend,
+              (SELECT MAX(le2.entry_date) FROM ledger_entries le2 WHERE le2.customer_id = c.id) AS last_order
+       FROM customers c`,
+    )
+    .all() as Array<{ id: number; name: string; email: string | null; phone: string | null; state: string | null; spend: number; last_order: number | null }>;
+
+  return rows
+    .filter((r) => {
+      if (f?.state && (r.state || "").toLowerCase() !== f.state.toLowerCase()) return false;
+      if (f?.last_order_after != null && !(r.last_order != null && r.last_order >= f.last_order_after)) return false;
+      if (f?.min_spend != null && !(r.spend >= f.min_spend)) return false;
+      return true;
+    })
+    .map((r) => ({ id: String(r.id), name: r.name, email: r.email, phone: r.phone, type: "customer" as const }));
+}
+
+function resolveSellers(f: AudienceFilter["filters"]): Recipient[] {
+  // "sellers" = vendors table. Only active vendors. State filter applies; spend/last_order do not.
+  const rows = sqlite
+    .prepare(`SELECT id, name, email, phone, whatsapp, state FROM vendors WHERE is_active = 1`)
+    .all() as Array<{ id: number; name: string; email: string | null; phone: string | null; whatsapp: string | null; state: string | null }>;
+
+  return rows
+    .filter((r) => {
+      if (f?.state && (r.state || "").toLowerCase() !== f.state.toLowerCase()) return false;
+      return true;
+    })
+    .map((r) => ({ id: String(r.id), name: r.name, email: r.email, phone: r.phone || r.whatsapp, type: "seller" as const }));
+}
+
+// Resolve a filter to recipients, capped at MAX_AUDIENCE. Returns the (uncapped) total too.
+export function resolveAudience(filter: AudienceFilter): { recipients: Recipient[]; total: number } {
+  const type = filter.audience_type || "all";
+  const f = filter.filters;
+  let recipients: Recipient[] = [];
+
+  if (type === "customers") {
+    recipients = resolveCustomers(f);
+  } else if (type === "sellers") {
+    recipients = resolveSellers(f);
+  } else if (type === "leads") {
+    recipients = []; // leads table not present in this codebase yet
+  } else {
+    // 'all' — customers + sellers
+    recipients = [...resolveCustomers(f), ...resolveSellers(f)];
+  }
+
+  const total = recipients.length;
+  return { recipients: recipients.slice(0, MAX_AUDIENCE), total };
+}
+
+export function resolveAudienceByJson(filterJson: string | null | undefined): { recipients: Recipient[]; total: number } {
+  return resolveAudience(parseFilter(filterJson));
+}

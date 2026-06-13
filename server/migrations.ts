@@ -915,3 +915,140 @@ export function runR26_3Migrations() {
   }
   console.log("[migrations] R26.3 tables/indexes ensured");
 }
+
+// -------- R26.4 additive migrations (Marketing Hub V1) --------
+// Additive only — six new marketing_* tables. SQLite via better-sqlite3:
+//   epoch ms for all timestamps (matching the project's INTEGER date convention),
+//   JSON-as-TEXT for arrays/objects, BOOLEAN-as-INTEGER (0/1). Per-statement try/catch
+//   with [migrations] R26.4: markers so a re-run (table exists) is logged and skipped,
+//   never aborting boot. NEVER drops/renames existing tables. After the tables are ensured,
+//   seed 4 default audiences ONLY if marketing_audiences is empty (idempotent first-boot seed).
+export function runR26_4Migrations() {
+  const stmts: Array<{ desc: string; sql: string }> = [
+    {
+      desc: "marketing_campaigns table",
+      sql: `CREATE TABLE IF NOT EXISTS marketing_campaigns (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        name TEXT NOT NULL,
+        channel TEXT NOT NULL,
+        audience_id INTEGER,
+        audience_snapshot TEXT,
+        email_subject TEXT,
+        email_from_name TEXT,
+        email_reply_to TEXT,
+        email_body_html TEXT,
+        email_attachments TEXT,
+        whatsapp_template_name TEXT,
+        whatsapp_variables TEXT,
+        status TEXT NOT NULL DEFAULT 'draft',
+        scheduled_at INTEGER,
+        sent_at INTEGER,
+        created_by TEXT,
+        created_at INTEGER DEFAULT (strftime('%s','now')*1000),
+        updated_at INTEGER
+      )`,
+    },
+    { desc: "idx_marketing_campaigns_status", sql: `CREATE INDEX IF NOT EXISTS idx_marketing_campaigns_status ON marketing_campaigns(status)` },
+    { desc: "idx_marketing_campaigns_scheduled", sql: `CREATE INDEX IF NOT EXISTS idx_marketing_campaigns_scheduled ON marketing_campaigns(scheduled_at)` },
+    {
+      desc: "marketing_audiences table",
+      sql: `CREATE TABLE IF NOT EXISTS marketing_audiences (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        name TEXT NOT NULL,
+        description TEXT,
+        filter_json TEXT NOT NULL,
+        created_at INTEGER,
+        updated_at INTEGER
+      )`,
+    },
+    {
+      desc: "marketing_templates table",
+      sql: `CREATE TABLE IF NOT EXISTS marketing_templates (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        name TEXT NOT NULL,
+        channel TEXT NOT NULL,
+        email_subject TEXT,
+        email_body_html TEXT,
+        whatsapp_template_name TEXT,
+        whatsapp_variables TEXT,
+        created_at INTEGER,
+        updated_at INTEGER
+      )`,
+    },
+    {
+      desc: "marketing_send_jobs table",
+      sql: `CREATE TABLE IF NOT EXISTS marketing_send_jobs (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        campaign_id INTEGER NOT NULL,
+        recipient_type TEXT,
+        recipient_id TEXT,
+        recipient_email TEXT,
+        recipient_phone TEXT,
+        recipient_name TEXT,
+        channel TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'pending',
+        attempted_at INTEGER,
+        sent_at INTEGER,
+        error_message TEXT,
+        gmail_message_id TEXT,
+        created_at INTEGER
+      )`,
+    },
+    { desc: "idx_marketing_send_jobs_campaign", sql: `CREATE INDEX IF NOT EXISTS idx_marketing_send_jobs_campaign ON marketing_send_jobs(campaign_id)` },
+    {
+      desc: "marketing_send_log table",
+      sql: `CREATE TABLE IF NOT EXISTS marketing_send_log (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        send_job_id INTEGER NOT NULL,
+        event TEXT,
+        event_data TEXT,
+        created_at INTEGER
+      )`,
+    },
+    { desc: "idx_marketing_send_log_job", sql: `CREATE INDEX IF NOT EXISTS idx_marketing_send_log_job ON marketing_send_log(send_job_id)` },
+    {
+      desc: "marketing_unsubscribes table",
+      sql: `CREATE TABLE IF NOT EXISTS marketing_unsubscribes (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        email TEXT,
+        phone TEXT,
+        source_job_id INTEGER,
+        unsubscribed_at INTEGER
+      )`,
+    },
+    { desc: "idx_marketing_unsubscribes_email", sql: `CREATE INDEX IF NOT EXISTS idx_marketing_unsubscribes_email ON marketing_unsubscribes(email)` },
+  ];
+  for (const { desc, sql } of stmts) {
+    console.log(`[migrations] R26.4: ${desc}`);
+    try { sqlite.exec(sql); } catch (err: any) { console.log(`[migrations] R26.4: skipped ${desc} —`, err?.message || err); }
+  }
+
+  // Seed 4 default audiences ONLY on first boot (table empty). Idempotent.
+  try {
+    const row = sqlite.prepare(`SELECT COUNT(*) AS n FROM marketing_audiences`).get() as { n: number };
+    if (!row || row.n === 0) {
+      const now = Date.now();
+      const ninetyDaysAgo = now - 90 * 24 * 60 * 60 * 1000;
+      const seed = sqlite.prepare(
+        `INSERT INTO marketing_audiences (name, description, filter_json, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?)`,
+      );
+      const defaults: Array<{ name: string; description: string; filter: unknown }> = [
+        { name: "All Customers", description: "Every customer on record", filter: { audience_type: "customers" } },
+        { name: "Active Customers (90d)", description: "Customers with an order in the last 90 days", filter: { audience_type: "customers", filters: { last_order_after: ninetyDaysAgo } } },
+        { name: "All Sellers", description: "Every seller on record", filter: { audience_type: "sellers" } },
+        { name: "All Contacts (Customers + Sellers)", description: "Customers and sellers combined", filter: { audience_type: "all" } },
+      ];
+      for (const d of defaults) {
+        seed.run(d.name, d.description, JSON.stringify(d.filter), now, now);
+      }
+      console.log(`[migrations] R26.4: seeded ${defaults.length} default audiences`);
+    } else {
+      console.log(`[migrations] R26.4: audiences already present (${row.n}) — seed skipped`);
+    }
+  } catch (err: any) {
+    console.log(`[migrations] R26.4: audience seed failed —`, err?.message || err);
+  }
+
+  console.log("[migrations] R26.4 tables/indexes ensured");
+}

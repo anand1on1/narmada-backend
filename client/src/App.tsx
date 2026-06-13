@@ -41,6 +41,13 @@ function MarketRadarRedirect() {
   return null;
 }
 
+// R26.4 — Marketing hub root redirects to the campaigns list.
+function MarketingRedirect() {
+  const [, navigate] = useLocation();
+  navigate("/admin/marketing/campaigns", { replace: true });
+  return null;
+}
+
 function SeoLandingResolver() {
   const { slug } = useParams<{ slug: string }>();
   const m = /^([a-z0-9-]+?)-spare-parts-(.+)$/i.exec(slug);
@@ -93,6 +100,12 @@ import AdminPurchaseHistory from "@/pages/admin/AdminPurchaseHistory";
 // R23/R24 — Command Center + WhatsApp-web Chats
 import AdminCommandCenter from "@/pages/admin/AdminCommandCenter";
 import AdminChats from "@/pages/admin/AdminChats";
+// R26.4 — Marketing Hub
+import AdminMarketingCampaigns from "@/pages/admin/AdminMarketingCampaigns";
+import AdminMarketingCampaignComposer from "@/pages/admin/AdminMarketingCampaignComposer";
+import AdminMarketingCampaignDetail from "@/pages/admin/AdminMarketingCampaignDetail";
+import AdminMarketingAudiences from "@/pages/admin/AdminMarketingAudiences";
+import AdminMarketingTemplates from "@/pages/admin/AdminMarketingTemplates";
 
 import { CustomerAuthProvider } from "@/lib/customer-auth";
 import CustomerLogin from "@/pages/portal/CustomerLogin";
@@ -218,6 +231,13 @@ function AppRouter() {
         <Route path="/admin/command-center" component={AdminCommandCenter} />
         {/* R24.4 — WhatsApp-web style Chats */}
         <Route path="/admin/chats" component={AdminChats} />
+        {/* R26.4 — Marketing Hub (new BEFORE :id to avoid shadowing) */}
+        <Route path="/admin/marketing" component={MarketingRedirect} />
+        <Route path="/admin/marketing/campaigns/new" component={AdminMarketingCampaignComposer} />
+        <Route path="/admin/marketing/campaigns/:id" component={AdminMarketingCampaignDetail} />
+        <Route path="/admin/marketing/campaigns" component={AdminMarketingCampaigns} />
+        <Route path="/admin/marketing/audiences" component={AdminMarketingAudiences} />
+        <Route path="/admin/marketing/templates" component={AdminMarketingTemplates} />
         {/* R24.1 — Market Radar rebrand (vendor-discovery → market-radar, keep old URL working) */}
         <Route path="/admin/market-radar" component={AdminVendorDiscovery} />
         <Route path="/admin/discovery" component={MarketRadarRedirect} />
