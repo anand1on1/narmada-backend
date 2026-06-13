@@ -105,6 +105,28 @@
   --elevate-2: rgba(255, 255, 255, 0.08);
 }
 
+/* R25b — Per-panel accent theming.
+   Each role panel scopes its own --accent (+ ring) so every nested page that
+   already uses bg-accent / text-accent-foreground / ring-accent recolors
+   automatically. No per-page edits required. Background is also lifted to a
+   cleaner slate-50 and cards to pure white for the modern SaaS look. */
+.panel-admin       { --accent: 239 84% 60%;  --accent-foreground: 0 0% 100%; --ring: 239 84% 60%; }   /* indigo-600  */
+.panel-team        { --accent: 262 83% 58%;  --accent-foreground: 0 0% 100%; --ring: 262 83% 58%; }   /* violet-600  */
+.panel-delhi       { --accent: 25 95% 53%;   --accent-foreground: 0 0% 100%; --ring: 25 95% 53%; }    /* orange-500  */
+.panel-consignment { --accent: 160 84% 39%;  --accent-foreground: 0 0% 100%; --ring: 160 84% 39%; }   /* emerald-600 */
+.panel-customer    { --accent: 173 80% 40%;  --accent-foreground: 0 0% 100%; --ring: 173 80% 40%; }   /* teal-600    */
+
+.panel-admin, .panel-team, .panel-delhi, .panel-consignment, .panel-customer {
+  --background: 210 40% 98%;   /* slate-50  */
+  --card: 0 0% 100%;           /* white     */
+  --card-border: 214 32% 91%;  /* slate-200 */
+  --border: 214 32% 91%;       /* slate-200 */
+  --muted: 210 40% 96%;        /* slate-100 */
+  --muted-foreground: 215 16% 47%; /* slate-500 */
+  --foreground: 222 47% 11%;   /* slate-900 */
+  --card-foreground: 222 47% 11%;
+}
+
 @layer base {
   * { @apply border-border; }
   html { -webkit-font-smoothing: antialiased; }

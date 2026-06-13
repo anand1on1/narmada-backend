@@ -72,22 +72,22 @@ export default function TeamLogin() {
 
   if (ssoBusy) {
     return (
-      <div className="min-h-screen flex items-center justify-center bg-slate-50 dark:bg-slate-950 p-4">
-        <div className="bg-card border rounded-2xl shadow-xl w-full max-w-md p-8 text-center">
+      <div className="panel-team min-h-screen flex items-center justify-center bg-slate-50 dark:bg-slate-950 p-4">
+        <div className="bg-white border border-slate-200 rounded-2xl shadow-xl w-full max-w-md p-8 text-center">
           <div className="inline-block mb-4"><Logo /></div>
-          <div className="text-sm font-semibold">Signing you in…</div>
-          <div className="text-xs text-muted-foreground mt-1">Using your admin session.</div>
+          <div className="text-sm font-semibold text-slate-900">Signing you in…</div>
+          <div className="text-xs text-slate-500 mt-1">Using your admin session.</div>
         </div>
       </div>
     );
   }
 
   return (
-    <div className="min-h-screen flex items-center justify-center bg-slate-50 dark:bg-slate-950 p-4">
-      <div className="bg-card border rounded-2xl shadow-xl w-full max-w-md p-8">
+    <div className="panel-team min-h-screen flex items-center justify-center bg-slate-50 dark:bg-slate-950 p-4">
+      <div className="bg-white border border-slate-200 rounded-2xl shadow-xl w-full max-w-md p-8">
         <div className="text-center mb-6">
           <div className="inline-block"><Logo /></div>
-          <div className="mt-2 text-xs uppercase tracking-widest font-bold text-muted-foreground">Data Team Portal</div>
+          <div className="mt-2 text-xs uppercase tracking-widest font-bold text-violet-600">Data Team Portal</div>
         </div>
         <div className="space-y-4">
           <div>

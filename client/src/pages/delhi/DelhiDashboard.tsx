@@ -186,17 +186,17 @@ export default function DelhiDashboard() {
   const filteredCustomers = customers.filter((c) => c.name.toLowerCase().includes(custSearch.toLowerCase()));
 
   return (
-    <div className="min-h-screen bg-slate-50 dark:bg-slate-950">
+    <div className="panel-delhi min-h-screen bg-slate-50 dark:bg-slate-950">
       {/* Header */}
-      <header className="bg-card border-b sticky top-0 z-30">
+      <header className="bg-white border-b border-slate-200 sticky top-0 z-30">
         <div className="px-4 sm:px-6 py-3 flex items-center justify-between gap-4">
           <div className="flex items-center gap-3">
             <Logo />
-            <div className="text-[10px] uppercase tracking-widest text-muted-foreground font-bold hidden sm:block">Delhi Warehouse</div>
+            <div className="text-[10px] uppercase tracking-widest text-orange-600 font-bold hidden sm:block">Delhi Warehouse</div>
           </div>
           <div className="flex items-center gap-3">
-            {user && <div className="text-xs text-muted-foreground hidden sm:block">{user.name}</div>}
-            <button onClick={logout} className="text-sm px-3 py-1.5 rounded-lg hover:bg-red-50 text-red-600 inline-flex items-center gap-1.5">
+            {user && <div className="text-xs text-slate-500 hidden sm:block">{user.name}</div>}
+            <button onClick={logout} className="text-sm px-3 py-1.5 rounded-xl hover:bg-rose-50 text-rose-600 font-medium inline-flex items-center gap-1.5 transition">
               <LogOut className="w-4 h-4" /> Logout
             </button>
           </div>

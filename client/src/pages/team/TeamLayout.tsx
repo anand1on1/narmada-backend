@@ -65,24 +65,24 @@ export function TeamLayout({ children, title }: { children: ReactNode; title: st
   }
 
   return (
-    <div className="min-h-screen flex bg-slate-50 dark:bg-slate-950">
-      <aside className="w-64 bg-card border-r flex flex-col flex-shrink-0">
-        <div className="p-5 border-b">
+    <div className="panel-team min-h-screen flex bg-slate-50 dark:bg-slate-950">
+      <aside className="w-64 bg-white border-r border-slate-200 flex flex-col flex-shrink-0">
+        <div className="p-6 border-b border-slate-200">
           <Logo />
-          <div className="mt-2 text-[10px] uppercase tracking-widest text-muted-foreground font-bold">Data Team</div>
+          <div className="mt-2 text-[10px] uppercase tracking-widest text-violet-600 font-bold">Data Team</div>
         </div>
-        <nav className="flex-1 p-3 space-y-1">
+        <nav className="flex-1 p-3 space-y-1 overflow-y-auto">
           {navItems.map((n) => <NavItem key={n.href} {...n} />)}
         </nav>
-        <div className="p-4 border-t">
+        <div className="p-4 border-t border-slate-200">
           {user && (
             <>
-              <div className="text-sm font-semibold truncate">{user.name}</div>
-              <div className="text-xs text-muted-foreground truncate">{user.username}</div>
+              <div className="text-sm font-semibold text-slate-900 truncate">{user.name}</div>
+              <div className="text-xs text-slate-500 truncate">{user.username}</div>
             </>
           )}
           <button onClick={logout}
-            className="mt-3 w-full text-left text-sm px-3 py-2 rounded-lg hover:bg-muted inline-flex items-center gap-2 text-red-600 hover:bg-red-50">
+            className="mt-3 w-full text-left text-sm px-4 py-2 rounded-xl inline-flex items-center gap-2 font-medium text-rose-600 hover:bg-rose-50 transition">
             <LogOut className="w-4 h-4" /> Logout
           </button>
         </div>
@@ -100,8 +100,8 @@ export function TeamLayout({ children, title }: { children: ReactNode; title: st
             </button>
           </div>
         )}
-        <header className="bg-card border-b px-6 py-4">
-          <h1 className="font-display text-2xl font-bold">{title}</h1>
+        <header className="bg-white border-b border-slate-200 px-6 py-4 sticky top-0 z-20">
+          <h1 className="font-display text-2xl font-bold text-slate-900">{title}</h1>
         </header>
         <div className="p-6 flex-1">{children}</div>
       </main>
@@ -117,8 +117,11 @@ function NavItem({ href, label, icon: Icon }: { href: string; label: string; ico
     : location === href || (location.startsWith(href + "/") && href !== "/team/quotations");
   return (
     <Link href={href}>
-      <a className={`flex items-center gap-3 px-3 py-2 rounded-lg text-sm font-semibold transition ${active ? "bg-accent text-accent-foreground" : "hover:bg-muted text-foreground/80 hover:text-foreground"}`}>
-        <Icon className="w-4 h-4" /> {label}
+      <a className={`group flex items-center gap-3 px-4 py-2.5 rounded-xl text-sm transition ${active ? "bg-violet-50 text-violet-700 font-semibold" : "text-slate-600 font-medium hover:bg-slate-100 hover:text-slate-900"}`}>
+        <span className={`w-8 h-8 rounded-lg flex items-center justify-center flex-shrink-0 transition ${active ? "bg-violet-100 text-violet-700" : "bg-slate-100 text-slate-500 group-hover:bg-violet-100 group-hover:text-violet-600"}`}>
+          <Icon className="w-4 h-4" />
+        </span>
+        {label}
       </a>
     </Link>
   );

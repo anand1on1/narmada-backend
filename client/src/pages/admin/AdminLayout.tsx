@@ -129,15 +129,15 @@ export function AdminLayout({ children, title }: { children: ReactNode; title: s
   const navItems = allItems.filter((i) => allowed.has(i.href));
 
   return (
-    <div className="min-h-screen flex bg-slate-50 dark:bg-slate-950">
+    <div className="panel-admin min-h-screen flex bg-slate-50 dark:bg-slate-950">
       {/* Sidebar */}
-      <aside className="w-64 bg-card border-r flex flex-col flex-shrink-0">
-        <div className="p-5 border-b">
+      <aside className="w-64 bg-white border-r border-slate-200 flex flex-col flex-shrink-0">
+        <div className="p-6 border-b border-slate-200">
           <Logo />
-          <div className="mt-2 text-[10px] uppercase tracking-widest text-muted-foreground font-bold">Admin Panel</div>
+          <div className="mt-2 text-[10px] uppercase tracking-widest text-indigo-600 font-bold">Admin Panel</div>
         </div>
 
-        <nav className="flex-1 p-3 space-y-1">
+        <nav className="flex-1 p-3 space-y-1 overflow-y-auto">
           {navItems.map((n) => {
             const active = location.startsWith(n.href);
             return (
@@ -145,17 +145,22 @@ export function AdminLayout({ children, title }: { children: ReactNode; title: s
                 key={n.href}
                 href={n.href}
                 className={
-                  "flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm font-semibold transition " +
+                  "group flex items-center gap-3 px-4 py-2.5 rounded-xl text-sm transition " +
                   (active
-                    ? "bg-accent text-accent-foreground"
-                    : "hover:bg-slate-100 dark:hover:bg-slate-900 text-foreground/80 hover:text-foreground")
+                    ? "bg-indigo-50 text-indigo-700 font-semibold"
+                    : "text-slate-600 font-medium hover:bg-slate-100 hover:text-slate-900")
                 }
                 data-testid={`link-admin-${n.label.toLowerCase()}`}
               >
-                <n.icon className="w-4 h-4" />
+                <span className={
+                  "w-8 h-8 rounded-lg flex items-center justify-center flex-shrink-0 transition " +
+                  (active ? "bg-indigo-100 text-indigo-700" : "bg-slate-100 text-slate-500 group-hover:bg-indigo-100 group-hover:text-indigo-600")
+                }>
+                  <n.icon className="w-4 h-4" />
+                </span>
                 <span className="flex-1">{n.label}</span>
                 {"badge" in n && (n as any).badge > 0 && (
-                  <span className="bg-emerald-600 text-white text-[10px] font-bold px-1.5 py-0.5 rounded-full" data-testid="badge-unread-chats">
+                  <span className="bg-rose-500 text-white text-[10px] font-bold px-1.5 py-0.5 rounded-full" data-testid="badge-unread-chats">
                     {(n as any).badge}
                   </span>
                 )}
@@ -164,11 +169,11 @@ export function AdminLayout({ children, title }: { children: ReactNode; title: s
           })}
         </nav>
 
-        <div className="p-3 border-t space-y-1">
+        <div className="p-3 border-t border-slate-200 space-y-1">
           {effectiveRole === "admin" && (
             <Link
               href="/team/quotations/new"
-              className="flex items-center gap-3 px-3 py-2 text-sm text-muted-foreground hover:text-foreground"
+              className="flex items-center gap-3 px-4 py-2 rounded-xl text-sm font-medium text-slate-600 hover:bg-slate-100 hover:text-slate-900 transition"
               data-testid="link-team-portal"
               title="Opens the Quotation builder in the Team portal (requires a separate Data Team login)"
             >
@@ -177,21 +182,21 @@ export function AdminLayout({ children, title }: { children: ReactNode; title: s
           )}
           <Link
             href="/"
-            className="flex items-center gap-3 px-3 py-2 text-sm text-muted-foreground hover:text-foreground"
+            className="flex items-center gap-3 px-4 py-2 rounded-xl text-sm font-medium text-slate-600 hover:bg-slate-100 hover:text-slate-900 transition"
             data-testid="link-view-site"
           >
             <ExternalLink className="w-4 h-4" /> View Site
           </Link>
           <button
             onClick={() => { clear(); navigate("/admin"); }}
-            className="w-full flex items-center gap-3 px-3 py-2 text-sm text-red-600 hover:bg-red-500/10 rounded-lg"
+            className="w-full flex items-center gap-3 px-4 py-2 text-sm font-medium text-rose-600 hover:bg-rose-50 rounded-xl transition"
             data-testid="button-logout"
           >
             <LogOut className="w-4 h-4" /> Sign Out
           </button>
           {username && (
-            <div className="px-3 pt-2 text-xs text-[hsl(220_60%_12%)]/75 font-medium">
-              Signed in as <span className="font-semibold text-foreground">{displayName || username}</span>
+            <div className="px-4 pt-2 text-xs text-slate-500 font-medium">
+              Signed in as <span className="font-semibold text-slate-900">{displayName || username}</span>
               {role && (
                 <span
                   className={`ml-1.5 inline-block text-[9px] px-1.5 py-0.5 rounded uppercase font-bold tracking-wider ${ROLE_BADGE[role] || ROLE_BADGE.admin}`}
@@ -207,8 +212,8 @@ export function AdminLayout({ children, title }: { children: ReactNode; title: s
 
       {/* Main */}
       <main className="flex-1 overflow-auto">
-        <header className="bg-card border-b px-8 py-5">
-          <h1 className="font-display text-2xl font-bold">{title}</h1>
+        <header className="bg-white border-b border-slate-200 px-8 py-5 sticky top-0 z-20">
+          <h1 className="font-display text-2xl font-bold text-slate-900">{title}</h1>
         </header>
         <div className="p-8">{children}</div>
       </main>

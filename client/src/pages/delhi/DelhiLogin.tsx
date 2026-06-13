@@ -38,11 +38,11 @@ export default function DelhiLogin() {
   }
 
   return (
-    <div className="min-h-screen flex items-center justify-center bg-slate-50 dark:bg-slate-950 p-4">
-      <div className="bg-card border rounded-2xl shadow-xl w-full max-w-md p-8">
+    <div className="panel-delhi min-h-screen flex items-center justify-center bg-slate-50 dark:bg-slate-950 p-4">
+      <div className="bg-white border border-slate-200 rounded-2xl shadow-xl w-full max-w-md p-8">
         <div className="text-center mb-6">
           <div className="inline-block"><Logo /></div>
-          <div className="mt-2 text-xs uppercase tracking-widest font-bold text-muted-foreground inline-flex items-center gap-1 justify-center"><Warehouse className="w-3.5 h-3.5" /> Delhi Warehouse</div>
+          <div className="mt-2 text-xs uppercase tracking-widest font-bold text-orange-600 inline-flex items-center gap-1 justify-center"><Warehouse className="w-3.5 h-3.5" /> Delhi Warehouse</div>
         </div>
         <div className="space-y-4">
           <div>

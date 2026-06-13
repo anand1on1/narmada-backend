@@ -64,7 +64,7 @@ export default function AdminDashboard() {
           <Link
             key={c.label}
             href={c.href}
-            className="block p-5 bg-card border rounded-xl hover:shadow-md hover:border-accent/40 transition"
+            className="block p-5 bg-white border border-slate-200 rounded-2xl shadow-sm hover:shadow-md hover:border-slate-300 transition-all duration-200"
             data-testid={`card-${c.label.toLowerCase().replace(/\s+/g, "-")}`}
           >
             <div className={`w-10 h-10 ${c.color} border rounded-lg flex items-center justify-center mb-4`}>
@@ -78,7 +78,7 @@ export default function AdminDashboard() {
       </div>
 
       <div className="grid lg:grid-cols-2 gap-6 mt-8">
-        <div className="p-6 bg-card border rounded-xl">
+        <div className="p-6 bg-white border border-slate-200 rounded-2xl shadow-sm">
           <h2 className="font-display text-lg font-bold mb-4">Quick Actions</h2>
           <div className="space-y-2">
             <Link href="/admin/products" className="block px-4 py-3 bg-slate-100 dark:bg-slate-900 rounded-lg hover:bg-accent hover:text-accent-foreground transition font-semibold" data-testid="link-add-product">
@@ -93,7 +93,7 @@ export default function AdminDashboard() {
           </div>
         </div>
 
-        <div className="p-6 bg-card border rounded-xl">
+        <div className="p-6 bg-white border border-slate-200 rounded-2xl shadow-sm">
           <h2 className="font-display text-lg font-bold mb-4">Notes for the Admin</h2>
           <ul className="space-y-3 text-sm text-[hsl(220_60%_12%)]/75 font-medium">
             <li>• Products added here appear instantly on the public website.</li>

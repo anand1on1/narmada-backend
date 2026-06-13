@@ -57,11 +57,11 @@ export default function CustomerLogin() {
   }
 
   return (
-    <div className="min-h-screen flex items-center justify-center bg-slate-50 dark:bg-slate-950 p-4">
-      <div className="bg-card border rounded-2xl shadow-xl w-full max-w-md p-8">
+    <div className="panel-customer min-h-screen flex items-center justify-center bg-slate-50 dark:bg-slate-950 p-4">
+      <div className="bg-white border border-slate-200 rounded-2xl shadow-xl w-full max-w-md p-8">
         <div className="text-center mb-6">
           <div className="inline-block"><Logo /></div>
-          <div className="mt-2 text-xs uppercase tracking-widest font-bold text-muted-foreground">Customer Portal</div>
+          <div className="mt-2 text-xs uppercase tracking-widest font-bold text-teal-600">Customer Portal</div>
         </div>
 
         {step === "email" ? (

@@ -43,12 +43,12 @@ export default function AdminLogin() {
   }
 
   return (
-    <div className="min-h-screen flex items-center justify-center bg-slate-100 dark:bg-slate-950 px-4">
+    <div className="panel-admin min-h-screen flex items-center justify-center bg-slate-100 dark:bg-slate-950 px-4">
       <div className="w-full max-w-md">
         <div className="flex justify-center mb-8">
           <Logo />
         </div>
-        <div className="bg-card border rounded-2xl shadow-xl p-8">
+        <div className="bg-white border border-slate-200 rounded-2xl shadow-xl p-8">
           <div className="flex items-center gap-3 mb-6">
             <div className="w-10 h-10 bg-accent/15 border border-accent/30 rounded-lg flex items-center justify-center">
               <Lock className="w-5 h-5 text-accent" />

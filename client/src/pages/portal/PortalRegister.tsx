@@ -40,7 +40,7 @@ export default function PortalRegister() {
 
   if (success) {
     return (
-      <div className="min-h-screen flex items-center justify-center bg-slate-50 dark:bg-slate-950 p-4">
+      <div className="panel-customer min-h-screen flex items-center justify-center bg-slate-50 dark:bg-slate-950 p-4">
         <div className="bg-card border rounded-2xl shadow-xl w-full max-w-md p-8 text-center">
           <CheckCircle className="w-14 h-14 text-emerald-500 mx-auto mb-4" />
           <h2 className="font-display text-xl font-bold mb-2">Request Submitted!</h2>
@@ -58,7 +58,7 @@ export default function PortalRegister() {
   }
 
   return (
-    <div className="min-h-screen flex items-center justify-center bg-slate-50 dark:bg-slate-950 p-4">
+    <div className="panel-customer min-h-screen flex items-center justify-center bg-slate-50 dark:bg-slate-950 p-4">
       <div className="bg-card border rounded-2xl shadow-xl w-full max-w-md p-8">
         <div className="text-center mb-6">
           <div className="inline-block"><Logo /></div>
