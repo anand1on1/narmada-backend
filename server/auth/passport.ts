@@ -23,7 +23,7 @@ export const META_SCOPES = ["email", "public_profile"];
 
 // Upsert a provider connection. Reconnects (same provider+account_id) refresh tokens/profile
 // without creating duplicate rows. Tokens are stored as-is; meta_pages is JSON-stringified.
-function upsertOAuthToken(row: {
+export function upsertOAuthToken(row: {
   provider: "google" | "meta";
   accountEmail?: string | null;
   accountName?: string | null;
