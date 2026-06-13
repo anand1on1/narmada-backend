@@ -4997,6 +4997,12 @@ function registerR8Routes(
       // old slip (best-effort: a failed unlink must not fail the request).
       const prior = v2.getDelhiPoDocket(poId);
       const docketSlipPath: string | undefined = file ? `/uploads/docket-slips/${file.filename}` : undefined;
+      // R26.2c — legacy dispatch columns (dispatches.docket_photo_url, po_items.docket_slip_url)
+      // store an ABSOLUTE URL; build one from the same host the dispatch endpoint uses so the
+      // existing Consignment / Team PO "View slip" links resolve to the freshly uploaded file.
+      const proto = "https";
+      const host = req.get("host") || "narmada-backend.onrender.com";
+      const docketSlipUrlAbsolute: string | undefined = file ? `${proto}://${host}/uploads/docket-slips/${file.filename}` : undefined;
       if (file && prior?.docketSlipPath) {
         try {
           const rel = prior.docketSlipPath.replace(/^\/uploads\//, "");
@@ -5007,7 +5013,7 @@ function registerR8Routes(
         }
       }
 
-      const updated = v2.setDelhiPoDocket(poId, { docketTransport, docketNumber, docketDate, docketSlipPath, docketBundles });
+      const updated = v2.setDelhiPoDocket(poId, { docketTransport, docketNumber, docketDate, docketSlipPath, docketBundles, docketSlipUrlAbsolute });
 
       await v2.writeAuditLog({
         actorType: "delhi", actorId: (req as any).teamUser?.username, action: "po.docket_upload",

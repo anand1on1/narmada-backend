@@ -2534,6 +2534,10 @@ export function getDelhiPoForDocket(poId: number): { notFound: true } | { notDel
 export function setDelhiPoDocket(poId: number, data: {
   docketTransport: string | null; docketNumber: string | null; docketDate: number | null;
   docketSlipPath?: string | null; docketBundles?: number | null;
+  // R26.2c — absolute slip URL (https://host/uploads/...) for the LEGACY columns, which
+  // historically store a full URL (the new docketSlipPath above stores a relative path).
+  // Only present when a new file was uploaded in this request.
+  docketSlipUrlAbsolute?: string | null;
 }): PurchaseOrderV2 {
   const patch: any = {
     docketTransport: data.docketTransport,
@@ -2545,7 +2549,62 @@ export function setDelhiPoDocket(poId: number, data: {
   // a new file (or bundles) keeps the previously stored value instead of nulling it.
   if (data.docketSlipPath !== undefined) patch.docketSlipPath = data.docketSlipPath;
   if (data.docketBundles !== undefined) patch.docketBundles = data.docketBundles;
-  return db.update(purchaseOrdersV2).set(patch).where(eq(purchaseOrdersV2.id, poId)).returning().get();
+  const updated = db.update(purchaseOrdersV2).set(patch).where(eq(purchaseOrdersV2.id, poId)).returning().get();
+
+  // R26.2c — mirror the docket fields onto the LEGACY dispatch records that the Consignment
+  // "From Delhi" view and the Team PO list/detail actually read (dispatches table + per-line
+  // po_items snapshot). Without this, an Edit-Docket re-upload only refreshes the new R26.2
+  // columns, leaving the legacy slip URL pointing at the old (wiped) file → ENOENT.
+  // Each field is only written when supplied; dispatch_date / dispatched_at are NEVER touched
+  // (they carry the semantic "when was this first dispatched").
+  syncLegacyDispatchFromDocket(poId, {
+    transport: data.docketTransport,
+    docketNumber: data.docketNumber,
+    bundles: data.docketBundles,
+    slipUrlAbsolute: data.docketSlipUrlAbsolute,
+  });
+
+  return updated;
+}
+
+// R26.2c — write the Edit-Docket values back onto the legacy dispatch tables so every reader
+// (Consignment, Team PO) shows the refreshed transport / docket# / bundles / slip image.
+// Updates the LATEST dispatch round row (most recent by dispatch_date/id) and all dispatched
+// po_items lines for the PO. A field whose value is undefined/null is skipped (preserves prior).
+function syncLegacyDispatchFromDocket(poId: number, vals: {
+  transport: string | null; docketNumber: string | null;
+  bundles?: number | null; slipUrlAbsolute?: string | null;
+}): void {
+  // ----- dispatches: most recent round only -----
+  const latest = sqlite.prepare(
+    `SELECT id FROM dispatches WHERE po_id = ? ORDER BY dispatch_date DESC, id DESC LIMIT 1`
+  ).get(poId) as any;
+  if (latest) {
+    const sets: string[] = [];
+    const params: any[] = [];
+    if (vals.transport != null) { sets.push("courier_name = ?"); params.push(vals.transport); }
+    if (vals.docketNumber != null) { sets.push("docket_no = ?"); params.push(vals.docketNumber); }
+    if (vals.bundles != null) { sets.push("bundles = ?"); params.push(vals.bundles); }
+    if (vals.slipUrlAbsolute != null) { sets.push("docket_photo_url = ?"); params.push(vals.slipUrlAbsolute); }
+    if (sets.length) {
+      params.push(latest.id);
+      sqlite.prepare(`UPDATE dispatches SET ${sets.join(", ")} WHERE id = ?`).run(...params);
+    }
+  }
+
+  // ----- po_items: every dispatched line for this PO -----
+  const sets: string[] = [];
+  const params: any[] = [];
+  if (vals.transport != null) { sets.push("carrier = ?", "courier = ?"); params.push(vals.transport, vals.transport); }
+  if (vals.docketNumber != null) { sets.push("docket_number = ?", "docket_no = ?"); params.push(vals.docketNumber, vals.docketNumber); }
+  if (vals.bundles != null) { sets.push("bundles = ?"); params.push(vals.bundles); }
+  if (vals.slipUrlAbsolute != null) { sets.push("docket_slip_url = ?"); params.push(vals.slipUrlAbsolute); }
+  if (sets.length) {
+    params.push(poId);
+    sqlite.prepare(
+      `UPDATE po_items SET ${sets.join(", ")} WHERE po_id = ? AND fulfil_status = 'dispatched'`
+    ).run(...params);
+  }
 }
 
 export function getDelhiPoDocket(poId: number): {
@@ -2554,12 +2613,19 @@ export function getDelhiPoDocket(poId: number): {
 } | undefined {
   const po = db.select().from(purchaseOrdersV2).where(eq(purchaseOrdersV2.id, poId)).get();
   if (!po) return undefined;
+  // R26.2c — when the new R26.2 columns are NULL (PO dispatched before R26.2 and never
+  // re-uploaded), fall back to the legacy dispatch record so the Edit Docket dialog pre-fills.
+  // Legacy slip URL is an absolute URL; the dialog renders it verbatim, so no conversion needed.
+  const legacy = sqlite.prepare(
+    `SELECT docket_no, courier_name, bundles, docket_photo_url, dispatch_date
+     FROM dispatches WHERE po_id = ? ORDER BY dispatch_date DESC, id DESC LIMIT 1`
+  ).get(poId) as any;
   return {
-    docketTransport: (po as any).docketTransport ?? null,
-    docketNumber: (po as any).docketNumber ?? null,
-    docketDate: (po as any).docketDate ?? null,
-    docketSlipPath: (po as any).docketSlipPath ?? null,
-    docketBundles: (po as any).docketBundles ?? null,
+    docketTransport: (po as any).docketTransport ?? legacy?.courier_name ?? null,
+    docketNumber: (po as any).docketNumber ?? legacy?.docket_no ?? null,
+    docketDate: (po as any).docketDate ?? legacy?.dispatch_date ?? null,
+    docketSlipPath: (po as any).docketSlipPath ?? legacy?.docket_photo_url ?? null,
+    docketBundles: (po as any).docketBundles ?? legacy?.bundles ?? null,
   };
 }
 
