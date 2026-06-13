@@ -90,7 +90,13 @@ function extractMessageId(raw: string): string | null {
 export async function sendAisensyMarketing(p: AisensyMarketingSend): Promise<AisensyMarketingResult> {
   const templateName = p.templateName;
   const destination = normalizePhone(p.phone);
-  const params = (p.templateParams || []).map((v) => String(v ?? ""));
+  // Final safety net: Meta rejects template messages with any empty parameter
+  // ("Parameter of type text is missing text value"). Coerce every element to a
+  // non-empty string, substituting an em-dash for anything empty/whitespace.
+  const params = (p.templateParams || []).map((v) => {
+    const s = String(v ?? "").trim();
+    return s ? s : "—";
+  });
 
   if (!AISENSY_API_KEY || AISENSY_API_KEY === "skip") {
     console.error(`[R26.4b aisensy-mkt] FAILED template=${templateName} phone=${destination} reason=AISENSY_API_KEY not configured`);

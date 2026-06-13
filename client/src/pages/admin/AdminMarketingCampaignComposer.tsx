@@ -111,6 +111,32 @@ export default function AdminMarketingCampaignComposer() {
     }
   }
 
+  // Live-substitute {placeholder} tokens using the first sampled recipient, mirroring the
+  // backend's resolution + multi-field fallback chain so the admin sees what each variable will
+  // actually resolve to. Empty results fall back to "—" (same as the backend send path).
+  function resolvePlaceholders(value: string): { text: string; usedFallback: boolean } {
+    if (!value || value.indexOf("{") === -1) return { text: value, usedFallback: false };
+    const r = (preview?.sample?.[0] || {}) as { name?: string | null; email?: string | null; phone?: string | null };
+    const pick = (...vals: Array<string | null | undefined>) => {
+      for (const v of vals) { const s = (v == null ? "" : String(v)).trim(); if (s) return s; }
+      return "";
+    };
+    const firstWord = (r.name || "").trim().split(/\s+/)[0] || "";
+    const map: Record<string, string> = {
+      first_name: pick(firstWord),
+      name: pick(r.name),
+      company: pick(r.name),
+      phone: pick(r.phone),
+      email: pick(r.email),
+    };
+    const text = value.replace(/\{(first_name|name|company|phone|email)\}/gi, (_m, k) => {
+      const key = String(k).toLowerCase();
+      return key in map ? map[key] : `{${k}}`;
+    });
+    const trimmed = text.trim();
+    return trimmed ? { text: trimmed, usedFallback: false } : { text: "—", usedFallback: true };
+  }
+
   // Render a WhatsApp message preview by substituting variable values into a numbered body.
   function previewBubble(): string {
     if (!selectedTemplate) return "";
@@ -279,9 +305,18 @@ export default function AdminMarketingCampaignComposer() {
                     <p className="text-xs text-slate-500">{PLACEHOLDER_HINT}</p>
                     {selectedTemplate.variable_labels.map((label, i) => {
                       const key = String(i + 1);
+                      const val = waValues[key] || "";
+                      const hasPlaceholder = val.indexOf("{") !== -1;
+                      const resolved = hasPlaceholder ? resolvePlaceholders(val) : null;
                       return (
                         <label key={key} className="text-xs font-semibold block">{`{{${i + 1}}} ${label}`}
-                          <input value={waValues[key] || ""} onChange={(e) => setWaValues((v) => ({ ...v, [key]: e.target.value }))} placeholder={label} className="mt-1 w-full border rounded-lg px-3 py-2 text-sm font-normal" />
+                          <input value={val} onChange={(e) => setWaValues((v) => ({ ...v, [key]: e.target.value }))} placeholder={label} className="mt-1 w-full border rounded-lg px-3 py-2 text-sm font-normal" />
+                          {resolved && preview?.sample?.[0] && (
+                            <span className="block mt-1 text-[11px] font-normal text-slate-500">
+                              Preview with first recipient: "<span className="font-semibold text-slate-700">{resolved.text}</span>"
+                              {resolved.usedFallback ? " — if blank, fallback “—” will be used" : ""}
+                            </span>
+                          )}
                         </label>
                       );
                     })}

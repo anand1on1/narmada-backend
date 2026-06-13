@@ -32,29 +32,60 @@ interface WhatsAppTemplateRow {
   header_type: string | null;
   header_required: number;
   variable_count: number;
+  variable_labels: string | null;
   status: string;
 }
 
+const EMPTY_FALLBACK = "—";
+
+function nonEmpty(...vals: Array<string | null | undefined>): string {
+  for (const v of vals) {
+    const s = (v == null ? "" : String(v)).trim();
+    if (s) return s;
+  }
+  return "";
+}
+
 // Substitute per-recipient placeholders inside a campaign variable value. The user writes the
-// campaign once with {first_name} / {name} / {company} and we fill them per recipient at send
-// time. Unknown placeholders are left untouched so literal braces in copy are not destroyed.
+// campaign once with {first_name} / {name} / {company} etc. and we fill them per recipient at
+// send time. Matching is case-insensitive. Each placeholder resolves through a multi-field
+// fallback chain so a missing field on one recipient borrows from a related field rather than
+// producing an empty value. Unknown placeholders are left untouched so literal braces in copy
+// are not destroyed.
 function applyPlaceholders(value: string, recipient: Recipient): string {
   if (!value || value.indexOf("{") === -1) return value;
-  const firstName = (recipient.name || "").trim().split(/\s+/)[0] || "";
-  const map: Record<string, string> = {
-    first_name: firstName,
-    name: recipient.name || "",
-    company: recipient.name || "", // no separate company field on Recipient — fall back to name
+  // Recipient (from audience-resolver) only carries id/name/email/phone/type, but ad-hoc
+  // snapshots may carry richer fields — read them defensively.
+  const r = recipient as Recipient & {
+    first_name?: string | null;
+    company?: string | null;
+    business_name?: string | null;
   };
-  return value.replace(/\{(first_name|name|company)\}/gi, (_m, k) => map[String(k).toLowerCase()] ?? `{${k}}`);
+  const nameFirstWord = (r.name || "").trim().split(/\s+/)[0] || "";
+  const map: Record<string, string> = {
+    first_name: nonEmpty(r.first_name, nameFirstWord),
+    name: nonEmpty(r.name, r.first_name, r.company),
+    company: nonEmpty(r.company, r.business_name, r.name),
+    phone: nonEmpty(r.phone),
+    email: nonEmpty(r.email),
+  };
+  return value.replace(/\{(first_name|name|company|phone|email)\}/gi, (_m, k) => {
+    const key = String(k).toLowerCase();
+    return key in map ? map[key] : `{${k}}`;
+  });
 }
 
 // Resolve a campaign's whatsapp_variables JSON ({"1":"...","2":"...","media_url":"..."}) into the
 // positional templateParams array AiSensy expects, applying per-recipient placeholder substitution.
+// Any positional value that resolves to empty/whitespace is replaced with the template's variable
+// label (when available) or the literal em-dash, because Meta rejects empty template params.
 function resolveTemplateParams(
   varsJson: string | null,
   variableCount: number,
   recipient: Recipient,
+  variableLabelsJson: string | null,
+  campaignId: number,
+  recipientId: string,
 ): { params: string[]; mediaUrl: string | null } {
   let vars: Record<string, any> = {};
   try {
@@ -62,10 +93,26 @@ function resolveTemplateParams(
   } catch {
     vars = {};
   }
+  let labels: string[] = [];
+  try {
+    const parsed = variableLabelsJson ? JSON.parse(variableLabelsJson) : [];
+    if (Array.isArray(parsed)) labels = parsed.map((l) => String(l ?? ""));
+  } catch {
+    labels = [];
+  }
   const params: string[] = [];
   for (let i = 1; i <= variableCount; i++) {
     const raw = vars[String(i)] != null ? String(vars[String(i)]) : "";
-    params.push(applyPlaceholders(raw, recipient));
+    const substituted = applyPlaceholders(raw, recipient).trim();
+    if (substituted) {
+      params.push(substituted);
+    } else {
+      const fallback = nonEmpty(labels[i - 1]) || EMPTY_FALLBACK;
+      console.warn(
+        `[marketing] WARN: variable ${i} for campaign ${campaignId} recipient ${recipientId} resolved empty, using fallback "${fallback}"`,
+      );
+      params.push(fallback);
+    }
   }
   const mediaUrl = vars.media_url ? String(vars.media_url) : null;
   return { params, mediaUrl };
@@ -274,12 +321,18 @@ export async function runCampaign(campaignId: number): Promise<{ ok: boolean; se
             c.whatsapp_variables,
             waTemplate.variable_count,
             recipient,
+            waTemplate.variable_labels,
+            campaignId,
+            recipient.id,
           );
           if (waTemplate.header_required && !mediaUrl) {
             errors.push("whatsapp: media required but missing");
             logEvent(jobId, "failed", { leg: "whatsapp", reason: "media_required" });
             legFailed = true;
           } else {
+            console.log(
+              `[aisensy-send] campaign=${campaignId} recipient=${job.recipient_phone} template=${waTemplate.template_name} params=${JSON.stringify(params)}`,
+            );
             const result = await sendAisensyMarketing({
               templateName: waTemplate.template_name,
               phone: job.recipient_phone,
