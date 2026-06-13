@@ -737,3 +737,27 @@ export function runR26_2bMigrations() {
   }
   console.log("[migrations] R26.2b tables/columns ensured");
 }
+
+// -------- R26.2f one-time cleanup --------
+// R26.2f: prior AiSensy status receipts ("message.status.updated") slipped past the
+// receipt filter and inserted blank inbound chat rows (empty body, vendor_phone of
+// "API"/"USER"/"SYSTEM"/etc), polluting the vendor chat UI with phantom unread messages.
+// Delete those clearly-junk rows. IDEMPOTENT — the WHERE clause only matches blank-body
+// inbound rows with no real phone, so it is safe to run on every boot (deletes ~19 the
+// first time, 0 thereafter). NEVER touches rows that carry a real body or phone number.
+export function runR26_2fCleanup() {
+  try {
+    const info = sqlite
+      .prepare(
+        `DELETE FROM vendor_rfq_messages
+         WHERE direction = 'in'
+           AND (body IS NULL OR body = '')
+           AND (vendor_phone IS NULL OR vendor_phone = ''
+                OR vendor_phone IN ('API','USER','SYSTEM','BOT','TEST'))`,
+      )
+      .run();
+    console.log(`[migrations] R26.2f: cleaned ${info.changes} blank aisensy row(s)`);
+  } catch (e: any) {
+    console.error("[migrations] R26.2f cleanup failed:", e?.message || e);
+  }
+}

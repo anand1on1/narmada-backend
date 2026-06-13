@@ -3868,21 +3868,48 @@ function registerR9Routes(
             `[R22.x aisensy] topic=${type || "?"} from=${from || "?"} msgId=${externalId || "?"} textLen=${text.length}`,
           );
 
-          // R26.2e — if we have a topic but it is a status/delivery receipt (and not a
-          // recognized inbound message topic), ignore early without creating a chat row.
-          if (type && isStatusEvent && !isInboundTopic) {
-            console.log(`[R22.x aisensy] ignoring topic=${type}`);
-            return res.json({ ok: true, ignored: true, topic: type });
+          // R26.2f — receipt/status filter. The R26.2e check was bypassed because
+          // INBOUND_TOPICS contains the substring "message", and topics like
+          // "message.status.updated" contain "message" → isInboundTopic was true →
+          // the receipt slipped through and a blank row got inserted. Fix: run an
+          // unconditional blocklist on the resolved topic (eventType) BEFORE any
+          // vendor lookup or insert. Any topic matching a receipt pattern is ignored.
+          const RECEIPT_PATTERNS = [
+            "status",        // message.status.updated, message_status, etc.
+            "delivered",
+            "read",
+            "sent",
+            "ack",
+            "receipt",
+            "deliver",
+            "update",        // ...status.updated
+            "outbound",      // outbound message events
+            "message_status",
+            "post_message",
+            "campaign",      // campaign analytics events
+            "failed",
+            "rejected",
+          ];
+          const topicLower = (type || "").toLowerCase();
+          const isReceipt = RECEIPT_PATTERNS.some((p) => topicLower.includes(p));
+          if (isReceipt) {
+            console.log(`[R22.x aisensy] ignoring receipt topic=${type} msgId=${externalId || "?"}`);
+            return res.status(200).json({ ok: true, ignored: true, reason: "receipt", topic: type });
           }
 
-          // R26.2e — if extraction found neither a sender nor text, dump the inner object
-          // so we can patch the missing field path for future AiSensy variants.
+          // R26.2f — non-phone placeholder guard. AiSensy sometimes emits literal
+          // role tokens ("API"/"USER"/"SYSTEM"/"BOT"/"TEST") in the from field for
+          // synthetic/system events. These are junk, not real sellers → ignore.
+          if (from && /^(API|USER|SYSTEM|BOT|TEST)$/i.test(from.trim())) {
+            console.log(`[R22.x aisensy] skip non-phone from=${from} topic=${type} msgId=${externalId || "?"}`);
+            return res.status(200).json({ ok: true, ignored: true, reason: "non-phone" });
+          }
+
+          // R26.2f — empty content guard. Even past the receipt filter, never insert a
+          // chat row with neither a sender nor text.
           if (!from && !text) {
-            console.warn(
-              "[R22.x aisensy] UNKNOWN_SHAPE",
-              JSON.stringify(e).slice(0, 2000),
-            );
-            return res.json({ ok: true, parsed: false });
+            console.log(`[R22.x aisensy] skip empty inbound topic=${type} msgId=${externalId || "?"}`);
+            return res.status(200).json({ ok: true, ignored: true, reason: "empty", topic: type });
           }
 
           // R26.2e — v0.0.1 topics route through the inbound handler when recognized.
