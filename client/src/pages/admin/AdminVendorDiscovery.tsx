@@ -79,6 +79,8 @@ export default function AdminVendorDiscovery() {
   const [citations, setCitations] = useState<string[]>([]);
   const [selected, setSelected] = useState<Set<number>>(new Set());
   const [showRFQModal, setShowRFQModal] = useState(false);
+  // R25a Fix 2 — track which result rows were added (as lead or vendor) so we can grey them out.
+  const [added, setAdded] = useState<Record<number, "lead" | "vendor">>({});
 
   const search = useMutation({
     mutationFn: async () => {
@@ -99,7 +101,7 @@ export default function AdminVendorDiscovery() {
   });
 
   const addVendor = useMutation({
-    mutationFn: async (c: Candidate) => {
+    mutationFn: async ({ c }: { c: Candidate; i: number }) => {
       const phone = formatPhone(c) === "—" ? undefined : c.phone;
       const r = await adminFetch(token, `/api/admin/vendors`, {
         method: "POST",
@@ -107,7 +109,27 @@ export default function AdminVendorDiscovery() {
       });
       if (!r.ok) throw new Error("Add failed");
     },
-    onSuccess: () => toast({ title: "Vendor added" }),
+    onSuccess: (_d, { i }) => { setAdded((a) => ({ ...a, [i]: "vendor" })); toast({ title: "Vendor added" }); },
+    onError: (e: any) => toast({ title: "Error", description: e.message, variant: "destructive" }),
+  });
+
+  // R25a Fix 2 — add a discovery result as a CRM lead (source='discovery').
+  const addLead = useMutation({
+    mutationFn: async ({ c }: { c: Candidate; i: number }) => {
+      const phone = formatPhone(c) === "—" ? undefined : c.phone;
+      const snippet = [c.city ? `City: ${c.city}` : null, c.website ? `Website: ${c.website}` : null, c.source_url ? `Source: ${c.source_url}` : null]
+        .filter(Boolean).join(" | ");
+      const r = await adminFetch(token, `/api/admin/leads`, {
+        method: "POST",
+        body: JSON.stringify({
+          name: c.name, phone, city: c.city || undefined,
+          source: "discovery",
+          notes: snippet || `Discovered via Market Radar: ${query}`,
+        }),
+      });
+      if (!r.ok) throw new Error("Add lead failed");
+    },
+    onSuccess: (_d, { i }) => { setAdded((a) => ({ ...a, [i]: "lead" })); toast({ title: "Lead added" }); },
     onError: (e: any) => toast({ title: "Error", description: e.message, variant: "destructive" }),
   });
 
@@ -175,8 +197,9 @@ export default function AdminVendorDiscovery() {
                 {candidates.map((c, i) => {
                   const phone = formatPhone(c);
                   const allPhones = phonesTooltip(c);
+                  const isAdded = added[i];
                   return (
-                    <tr key={i} className={`hover:bg-muted/30 ${selected.has(i) ? "bg-accent/5" : ""}`}>
+                    <tr key={i} className={`hover:bg-muted/30 ${selected.has(i) ? "bg-accent/5" : ""} ${isAdded ? "opacity-50" : ""}`}>
                       <td className="px-3 py-3">
                         <input
                           type="checkbox"
@@ -203,12 +226,30 @@ export default function AdminVendorDiscovery() {
                         {c.confidence != null ? `${Math.round(c.confidence * 100)}%` : "—"}
                       </td>
                       <td className="px-3 py-3 text-right">
-                        <button
-                          onClick={() => addVendor.mutate(c)}
-                          className="px-2.5 py-1 border rounded text-xs font-semibold inline-flex items-center gap-1 hover:bg-muted"
-                        >
-                          <Plus className="w-3 h-3" /> Add
-                        </button>
+                        {isAdded ? (
+                          <span className="text-xs font-semibold text-muted-foreground">
+                            Added as {isAdded === "lead" ? "Lead" : "Vendor"}
+                          </span>
+                        ) : (
+                          <div className="flex gap-1.5 justify-end">
+                            <button
+                              onClick={() => addLead.mutate({ c, i })}
+                              disabled={addLead.isPending || addVendor.isPending}
+                              className="px-2 py-1 border border-indigo-400 text-indigo-600 rounded text-xs font-semibold inline-flex items-center gap-1 hover:bg-indigo-50 disabled:opacity-50"
+                              data-testid={`btn-add-lead-${i}`}
+                            >
+                              <Plus className="w-3 h-3" /> Add as Lead
+                            </button>
+                            <button
+                              onClick={() => addVendor.mutate({ c, i })}
+                              disabled={addLead.isPending || addVendor.isPending}
+                              className="px-2 py-1 border border-green-500 text-green-700 rounded text-xs font-semibold inline-flex items-center gap-1 hover:bg-green-50 disabled:opacity-50"
+                              data-testid={`btn-add-vendor-${i}`}
+                            >
+                              <Plus className="w-3 h-3" /> Add as Vendor
+                            </button>
+                          </div>
+                        )}
                       </td>
                     </tr>
                   );

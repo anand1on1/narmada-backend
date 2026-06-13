@@ -166,3 +166,40 @@ export async function sendQuotationEmail(
     return { ok: false, via: "smtp", error: e.message || String(e) };
   }
 }
+
+// R25a — generic marketing email to a lead via the existing SMTP transport. Body is plain text
+// (newlines preserved as <br>); subject + body come from the caller. Reuses getSmtpTransport().
+export async function sendMarketingEmail(
+  p: { to: string; subject: string; body: string },
+): Promise<{ ok: boolean; via: string; error?: string; messageId?: string }> {
+  const transport = getSmtpTransport();
+  if (!transport) {
+    return { ok: false, via: "smtp_unconfigured", error: "SMTP not configured. Set SMTP_HOST, SMTP_USER, SMTP_PASS." };
+  }
+  if (!p.to) return { ok: false, via: "skipped", error: "recipient email is empty" };
+  const fromName = process.env.SMTP_FROM_NAME || "Narmada Mobility";
+  const fromEmail = process.env.SMTP_FROM_EMAIL || process.env.SMTP_USER!;
+  const html = `
+    <div style="font-family:-apple-system,BlinkMacSystemFont,sans-serif;max-width:640px;margin:0 auto;padding:24px;color:#0f172a;">
+      <div style="background:#0a2540;color:white;padding:18px;border-radius:8px 8px 0 0;">
+        <h2 style="margin:0;font-size:18px;">Narmada Mobility</h2>
+      </div>
+      <div style="background:white;border:1px solid #e5e7eb;border-top:none;padding:24px;border-radius:0 0 8px 8px;line-height:1.6;">
+        ${escape(p.body).replace(/\n/g, "<br>")}
+      </div>
+    </div>`;
+  try {
+    const info = await transport.sendMail({
+      from: `"${fromName}" <${fromEmail}>`,
+      to: p.to,
+      subject: p.subject || "A message from Narmada Mobility",
+      html,
+      text: p.body,
+    });
+    console.log(`[email] Marketing email sent to ${p.to} via SMTP (id=${info.messageId})`);
+    return { ok: true, via: "smtp", messageId: info.messageId };
+  } catch (e: any) {
+    console.error("[email] marketing SMTP send failed:", e);
+    return { ok: false, via: "smtp", error: e.message || String(e) };
+  }
+}

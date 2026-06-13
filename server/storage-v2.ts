@@ -3605,6 +3605,52 @@ export function convertLeadToCustomer(leadId: number): { customerId: number } | 
   return { customerId };
 }
 
+// R25a — convert a lead into a vendor (seller) record, mirroring convertLeadToCustomer.
+export function convertLeadToVendor(leadId: number): { vendorId: number } | null {
+  const lead = sqlite.prepare(`SELECT * FROM leads WHERE id = ?`).get(leadId) as any;
+  if (!lead) return null;
+  if (lead.converted_to_vendor_id) return { vendorId: lead.converted_to_vendor_id };
+  const now = Date.now();
+  // Generate a vendor code in the same NM/V sequence used by createVendor.
+  const last = sqlite.prepare(`SELECT code FROM vendors WHERE code LIKE 'NM/V%' ORDER BY id DESC LIMIT 1`).get() as any;
+  let next = 1;
+  if (last?.code) { const m = String(last.code).match(/(\d+)\s*$/); if (m) next = parseInt(m[1], 10) + 1; }
+  const code = `NM/V${String(next).padStart(4, "0")}`;
+  const info = sqlite.prepare(
+    `INSERT INTO vendors (code, name, phone, whatsapp, city, state, notes, is_active, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?)`
+  ).run(code, lead.name, lead.phone ?? lead.whatsapp ?? null, lead.whatsapp ?? lead.phone ?? null, lead.city ?? null, lead.state ?? null, lead.notes ?? lead.requirement ?? null, now, now);
+  const vendorId = Number(info.lastInsertRowid);
+  sqlite.prepare(
+    `UPDATE leads SET converted_to_vendor_id = ?, status = 'converted', updated_at = ? WHERE id = ?`
+  ).run(vendorId, now, leadId);
+  return { vendorId };
+}
+
+// R25a — Leads CRM analytics row for the page header (counts + conversion + follow-ups).
+export function leadAnalytics(): {
+  total: number;
+  byStage: Record<string, number>;
+  conversionRate: number;
+  thisWeek: number;
+  pendingFollowUps: number;
+} {
+  const total = (sqlite.prepare(`SELECT COUNT(*) AS c FROM leads`).get() as any)?.c || 0;
+  const stageRows = sqlite.prepare(`SELECT stage, COUNT(*) AS c FROM leads GROUP BY stage`).all() as any[];
+  const byStage: Record<string, number> = { new: 0, contacted: 0, qualified: 0, quoted: 0, won: 0, lost: 0 };
+  for (const r of stageRows) { byStage[String(r.stage)] = Number(r.c); }
+  const won = byStage.won || 0;
+  const conversionRate = total > 0 ? Math.round((won / total) * 1000) / 10 : 0;
+  const weekAgo = Date.now() - 7 * 24 * 60 * 60 * 1000;
+  const thisWeek = (sqlite.prepare(`SELECT COUNT(*) AS c FROM leads WHERE created_at >= ?`).get(weekAgo) as any)?.c || 0;
+  // Pending follow-ups: contacted/qualified with no activity in 3+ days (last_contact_at old/null).
+  const threeDaysAgo = Date.now() - 3 * 24 * 60 * 60 * 1000;
+  const pendingFollowUps = (sqlite.prepare(
+    `SELECT COUNT(*) AS c FROM leads WHERE stage IN ('contacted','qualified') AND (last_contact_at IS NULL OR last_contact_at < ?)`
+  ).get(threeDaysAgo) as any)?.c || 0;
+  return { total, byStage, conversionRate, thisWeek, pendingFollowUps };
+}
+
 export function logMarketingSend(data: { leadId?: number | null; phone?: string | null; template?: string | null; vars?: string | null; status: string; error?: string | null; sentBy?: string | null }): any {
   const info = sqlite.prepare(
     `INSERT INTO marketing_sends (lead_id, phone, template, vars, status, error, sent_by, created_at)

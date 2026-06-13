@@ -1029,6 +1029,8 @@ export const leads = sqliteTable("leads", {
   notes: text("notes"),
   assignedToUserId: integer("assigned_to_user_id"),
   convertedToCustomerId: integer("converted_to_customer_id"),
+  // R25a — link a lead to the vendor record it was converted into (Convert to Vendor action).
+  convertedToVendorId: integer("converted_to_vendor_id"),
 });
 export const insertLeadSchema = createInsertSchema(leads).omit({ id: true, createdAt: true, updatedAt: true });
 export type InsertLead = z.infer<typeof insertLeadSchema>;

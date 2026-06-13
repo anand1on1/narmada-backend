@@ -671,3 +671,17 @@ export function runR24Migrations() {
   }
   console.log("[migrations] R24 tables/columns ensured");
 }
+
+// -------- R25 additive migrations --------
+// R25a: link a lead to the vendor it was converted into (Convert to Vendor action in the
+// rebuilt Leads CRM). Additive only — no drops/renames.
+export function runR25Migrations() {
+  const stmts: Array<{ desc: string; sql: string }> = [
+    { desc: "leads.converted_to_vendor_id", sql: `ALTER TABLE leads ADD COLUMN converted_to_vendor_id INTEGER` },
+  ];
+  for (const { desc, sql } of stmts) {
+    console.log(`[migrations] R25: ${desc}`);
+    try { sqlite.exec(sql); } catch (err: any) { console.log(`[migrations] R25: skipped ${desc} —`, err?.message || err); }
+  }
+  console.log("[migrations] R25 tables/columns ensured");
+}

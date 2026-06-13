@@ -3199,6 +3199,14 @@ function registerR4toR7Routes(
       limit: req.query.limit ? parseInt(req.query.limit as string, 10) : undefined,
     }));
   });
+  // R25a Fix 4 — leads analytics header (counts/conversion/follow-ups). MUST be registered
+  // before /api/admin/leads/:id so "analytics" is not parsed as a lead id.
+  app.get("/api/admin/leads/analytics", requireAuth, async (_req: any, res: any) => {
+    try {
+      res.set("Cache-Control", "no-cache, no-store, must-revalidate");
+      res.json(v2.leadAnalytics());
+    } catch (e: any) { res.status(500).json({ error: e.message }); }
+  });
   app.get("/api/admin/leads/:id", requireAuth, async (req, res) => {
     const lead = await v2.getLead(parseInt(req.params.id as string, 10));
     if (!lead) return res.status(404).json({ error: "Not found" });
@@ -5188,6 +5196,54 @@ function registerR8Routes(
       res.json({ ok: true, customerId: result.customerId });
     } catch (e: any) { res.status(500).json({ error: e.message }); }
   });
+  // R25a Fix 4 — convert a lead into a vendor (seller) record.
+  app.post("/api/admin/leads/:id/convert-to-vendor", requireAuth, async (req: any, res: any) => {
+    try {
+      const id = parseInt(req.params.id as string, 10);
+      const result = v2.convertLeadToVendor(id);
+      if (!result) return res.status(404).json({ error: "lead not found" });
+      res.json({ ok: true, vendorId: result.vendorId });
+    } catch (e: any) { res.status(500).json({ error: e.message }); }
+  });
+  // R25a Fix 4 — send a marketing email to a single lead via SMTP; log to marketing_sends.
+  app.post("/api/admin/leads/:id/send-email", requireAuth, async (req: any, res: any) => {
+    try {
+      const id = parseInt(req.params.id as string, 10);
+      const lead = await v2.getLead(id);
+      if (!lead) return res.status(404).json({ error: "lead not found" });
+      if (!lead.email) return res.status(400).json({ error: "lead has no email" });
+      const subject = String(req.body?.subject || "A message from Narmada Mobility");
+      const body = String(req.body?.body || "");
+      if (!body.trim()) return res.status(400).json({ error: "body required" });
+      const sentBy = (req as any).user?.username || "admin";
+      const log = v2.logMarketingSend({ leadId: id, phone: lead.email, template: "email", vars: JSON.stringify({ subject }), status: "queued", sentBy });
+      const { sendMarketingEmail } = await import("./email");
+      const r = await sendMarketingEmail({ to: lead.email, subject, body });
+      v2.updateMarketingSendStatus(log.id, r.ok ? "sent" : "failed", r.ok ? null : r.error || "send failed");
+      await v2.addLeadActivity(id, "email", `${subject}`, sentBy);
+      res.json({ ok: r.ok, via: r.via, error: r.error });
+    } catch (e: any) { res.status(500).json({ error: e.message }); }
+  });
+  // R25a Fix 4 — send WhatsApp brochure to a lead via AiSensy marketing template (fire-and-forget).
+  app.post("/api/admin/leads/:id/send-whatsapp-brochure", requireAuth, async (req: any, res: any) => {
+    try {
+      const id = parseInt(req.params.id as string, 10);
+      const lead = await v2.getLead(id);
+      if (!lead) return res.status(404).json({ error: "lead not found" });
+      const phone = lead.phone || lead.whatsapp;
+      if (!phone) return res.status(400).json({ error: "lead has no phone" });
+      const template = process.env.AISENSY_CAMPAIGN_BROCHURE || "narmada_marketing_brochure";
+      const sentBy = (req as any).user?.username || "admin";
+      const log = v2.logMarketingSend({ leadId: id, phone, template, status: "queued", sentBy });
+      const wa = require("./whatsapp") as typeof import("./whatsapp");
+      // fire-and-forget
+      wa.sendMarketingMessage(phone, { name: lead.name, template })
+        .then((r) => { try { v2.updateMarketingSendStatus(log.id, r.status === "failed" ? "failed" : "sent", r.status === "failed" ? "aisensy failed" : null); } catch {} })
+        .catch((err) => { try { v2.updateMarketingSendStatus(log.id, "failed", String(err?.message || err)); } catch {} });
+      v2.addLeadActivity(id, "whatsapp", `brochure (${template})`, sentBy).catch(() => {});
+      res.json({ ok: true, queued: 1, template });
+    } catch (e: any) { res.status(500).json({ error: e.message }); }
+  });
   // R24.3 — marketing send to selected leads (fire-and-forget; logged in marketing_sends).
   app.post("/api/admin/leads/send-marketing", requireAuth, async (req: any, res: any) => {
     try {
@@ -5233,6 +5289,33 @@ function registerR8Routes(
       const phone = vendor.whatsapp || vendor.phone;
       const wa = require("./whatsapp") as typeof import("./whatsapp");
       if (phone) wa.sendTextMessage(phone, text, "admin_chat").catch(() => {});
+      const row = v2.addRfqMessageExternal({ vendorId, vendorPhone: phone || null, direction: "out", body: text, externalMessageId: null });
+      res.json({ ok: true, message: row });
+    } catch (e: any) { res.status(500).json({ error: e.message }); }
+  });
+  // R25a Fix 3 — team-auth mirrors of the unified chats endpoints so the procurement/data
+  // team can use the same WhatsApp-web-style chat UI at /#/team/chats. Same data as admin
+  // (all vendor conversations); auth is requireDataTeam (x-team-token) instead of admin.
+  app.get("/api/team/chats", requireDataTeam, async (_req: any, res: any) => {
+    try {
+      res.set("Cache-Control", "no-cache, no-store, must-revalidate");
+      res.json(v2.listChatConversations());
+    } catch (e: any) { res.status(500).json({ error: e.message }); }
+  });
+  app.get("/api/team/chats/:vendorId", requireDataTeam, async (req: any, res: any) => {
+    try { res.json(v2.listChatThread(parseInt(req.params.vendorId as string, 10))); }
+    catch (e: any) { res.status(500).json({ error: e.message }); }
+  });
+  app.post("/api/team/chats/:vendorId/send", requireDataTeam, async (req: any, res: any) => {
+    try {
+      const vendorId = parseInt(req.params.vendorId as string, 10);
+      const vendor = await v2.getVendor(vendorId);
+      if (!vendor) return res.status(404).json({ error: "vendor not found" });
+      const text = String(req.body?.message || "").trim();
+      if (!text) return res.status(400).json({ error: "message required" });
+      const phone = vendor.whatsapp || vendor.phone;
+      const wa = require("./whatsapp") as typeof import("./whatsapp");
+      if (phone) wa.sendTextMessage(phone, text, "team_chat").catch(() => {});
       const row = v2.addRfqMessageExternal({ vendorId, vendorPhone: phone || null, direction: "out", body: text, externalMessageId: null });
       res.json({ ok: true, message: row });
     } catch (e: any) { res.status(500).json({ error: e.message }); }

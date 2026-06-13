@@ -3,7 +3,7 @@ import { AdminLayout } from "./AdminLayout";
 import { adminFetch, useAdminAuth } from "@/lib/admin-auth";
 import { useToast } from "@/hooks/use-toast";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { Plus, Upload, MessageSquare, Send, Loader2, LayoutGrid, List, UserPlus, Megaphone } from "lucide-react";
+import { Plus, Upload, MessageSquare, Send, Loader2, LayoutGrid, List, UserPlus, Megaphone, Mail, FileText, Store } from "lucide-react";
 
 interface Lead {
   id: number;
@@ -18,6 +18,14 @@ interface Lead {
   stage: string;
   score: number;
   createdAt: number;
+}
+
+interface LeadAnalytics {
+  total: number;
+  byStage: Record<string, number>;
+  conversionRate: number;
+  thisWeek: number;
+  pendingFollowUps: number;
 }
 
 const STAGES = ["new", "contacted", "qualified", "quoted", "won", "lost"];
@@ -38,6 +46,7 @@ export default function AdminLeads() {
   const [showImport, setShowImport] = useState(false);
   const [csv, setCsv] = useState("");
   const [outreachFor, setOutreachFor] = useState<Lead | null>(null);
+  const [emailFor, setEmailFor] = useState<Lead | null>(null);
 
   const { data, isLoading } = useQuery<{ rows: Lead[]; total: number }>({
     queryKey: ["admin-leads", stageFilter],
@@ -49,6 +58,18 @@ export default function AdminLeads() {
     enabled: !!token,
   });
   const leads = data?.rows || [];
+
+  // R25a Fix 4 — analytics header.
+  const { data: analytics } = useQuery<LeadAnalytics>({
+    queryKey: ["admin-leads-analytics"],
+    queryFn: async () => {
+      const r = await adminFetch(token, `/api/admin/leads/analytics`);
+      if (!r.ok) throw new Error("analytics failed");
+      return r.json();
+    },
+    enabled: !!token,
+    refetchInterval: 30000,
+  });
 
   const save = useMutation({
     mutationFn: async (l: Partial<Lead>) => {
@@ -114,8 +135,59 @@ export default function AdminLeads() {
     onError: (e: any) => toast({ title: "Error", description: e.message, variant: "destructive" }),
   });
 
+  // R25a Fix 4 — convert a lead into a vendor (seller) record.
+  const convertVendor = useMutation({
+    mutationFn: async (id: number) => {
+      const r = await adminFetch(token, `/api/admin/leads/${id}/convert-to-vendor`, { method: "POST" });
+      const d = await r.json();
+      if (!r.ok) throw new Error(d.error || "Convert failed");
+      return d;
+    },
+    onSuccess: (d: any) => { qc.invalidateQueries({ queryKey: ["admin-leads"] }); qc.invalidateQueries({ queryKey: ["admin-leads-analytics"] }); toast({ title: "Converted to vendor", description: d.vendorId ? `Vendor #${d.vendorId}` : undefined }); },
+    onError: (e: any) => toast({ title: "Error", description: e.message, variant: "destructive" }),
+  });
+
+  // R25a Fix 4 — send WhatsApp brochure (AiSensy marketing template) to a lead.
+  const brochure = useMutation({
+    mutationFn: async (id: number) => {
+      const r = await adminFetch(token, `/api/admin/leads/${id}/send-whatsapp-brochure`, { method: "POST" });
+      const d = await r.json();
+      if (!r.ok) throw new Error(d.error || "Send failed");
+      return d;
+    },
+    onSuccess: (d: any) => toast({ title: "Brochure queued", description: `${d.queued ?? 1} message(s) · ${d.template ?? ""}` }),
+    onError: (e: any) => toast({ title: "Error", description: e.message, variant: "destructive" }),
+  });
+
+  // R25a Fix 4 — send a marketing email to a lead via SMTP.
+  const sendEmail = useMutation({
+    mutationFn: async ({ id, subject, body }: { id: number; subject: string; body: string }) => {
+      const r = await adminFetch(token, `/api/admin/leads/${id}/send-email`, { method: "POST", body: JSON.stringify({ subject, body }) });
+      const d = await r.json();
+      if (!r.ok || !d.ok) throw new Error(d.error || "Email failed");
+      return d;
+    },
+    onSuccess: () => { setEmailFor(null); toast({ title: "Email sent" }); },
+    onError: (e: any) => toast({ title: "Error", description: e.message, variant: "destructive" }),
+  });
+
   return (
     <AdminLayout title="Leads CRM">
+      {/* R25a Fix 4 — analytics header */}
+      {analytics && (
+        <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-8 gap-2 mb-4">
+          <AnalyticsStat label="Total" value={analytics.total} color="bg-slate-100 text-slate-700" />
+          <AnalyticsStat label="New" value={analytics.byStage.new || 0} color="bg-blue-100 text-blue-700" />
+          <AnalyticsStat label="Contacted" value={analytics.byStage.contacted || 0} color="bg-amber-100 text-amber-700" />
+          <AnalyticsStat label="Qualified" value={analytics.byStage.qualified || 0} color="bg-violet-100 text-violet-700" />
+          <AnalyticsStat label="Quoted" value={analytics.byStage.quoted || 0} color="bg-cyan-100 text-cyan-700" />
+          <AnalyticsStat label="Won" value={analytics.byStage.won || 0} color="bg-emerald-100 text-emerald-700" />
+          <AnalyticsStat label="Lost" value={analytics.byStage.lost || 0} color="bg-red-100 text-red-700" />
+          <AnalyticsStat label="Conv. rate" value={`${analytics.conversionRate}%`} color="bg-fuchsia-100 text-fuchsia-700" />
+          <AnalyticsStat label="This week" value={analytics.thisWeek} color="bg-indigo-100 text-indigo-700" />
+          <AnalyticsStat label="Pending follow-ups" value={analytics.pendingFollowUps} color="bg-orange-100 text-orange-700" />
+        </div>
+      )}
       <div className="flex flex-wrap gap-2 mb-4 items-center">
         {viewMode === "table" && (
           <select value={stageFilter} onChange={(e) => setStageFilter(e.target.value)} className="border rounded-lg px-3 py-2 bg-background text-sm">
@@ -173,8 +245,11 @@ export default function AdminLeads() {
                   </td>
                   <td className="px-3 py-3 text-right whitespace-nowrap">
                     <button onClick={() => setOutreachFor(l)} className="p-1.5 rounded hover:bg-muted" title="AI Outreach"><MessageSquare className="w-4 h-4" /></button>
+                    <button onClick={() => setEmailFor(l)} className="p-1.5 rounded hover:bg-muted text-blue-600" title="Send marketing email"><Mail className="w-4 h-4" /></button>
+                    <button onClick={() => brochure.mutate(l.id)} disabled={brochure.isPending} className="p-1.5 rounded hover:bg-muted disabled:opacity-50 text-emerald-600" title="Send WhatsApp brochure"><FileText className="w-4 h-4" /></button>
                     <button onClick={() => marketing.mutate(l.id)} disabled={marketing.isPending} className="p-1.5 rounded hover:bg-muted disabled:opacity-50" title="Send marketing WhatsApp"><Megaphone className="w-4 h-4" /></button>
                     <button onClick={() => convert.mutate(l.id)} disabled={convert.isPending} className="p-1.5 rounded hover:bg-muted disabled:opacity-50" title="Convert to customer"><UserPlus className="w-4 h-4" /></button>
+                    <button onClick={() => convertVendor.mutate(l.id)} disabled={convertVendor.isPending} className="p-1.5 rounded hover:bg-muted disabled:opacity-50 text-green-700" title="Convert to vendor"><Store className="w-4 h-4" /></button>
                   </td>
                 </tr>
               ))}</tbody>
@@ -239,7 +314,59 @@ export default function AdminLeads() {
           </div>
         </div>
       )}
+
+      {emailFor && (
+        <EmailModal
+          lead={emailFor}
+          busy={sendEmail.isPending}
+          onClose={() => setEmailFor(null)}
+          onSend={(subject, body) => sendEmail.mutate({ id: emailFor.id, subject, body })}
+        />
+      )}
     </AdminLayout>
+  );
+}
+
+// R25a Fix 4 — small analytics stat card for the leads header bar.
+function AnalyticsStat({ label, value, color }: { label: string; value: number | string; color: string }) {
+  return (
+    <div className={`rounded-xl px-3 py-2.5 ${color}`}>
+      <div className="text-xl font-bold leading-tight">{value}</div>
+      <div className="text-[11px] font-semibold opacity-80">{label}</div>
+    </div>
+  );
+}
+
+// R25a Fix 4 — marketing email composer modal.
+function EmailModal({ lead, busy, onClose, onSend }: {
+  lead: Lead; busy: boolean; onClose: () => void; onSend: (subject: string, body: string) => void;
+}) {
+  const [subject, setSubject] = useState("Genuine commercial-vehicle spare parts — Narmada Mobility");
+  const [body, setBody] = useState(
+    `Dear ${lead.name},\n\nThank you for your interest in Narmada Mobility. We supply genuine commercial-vehicle spare parts across India.\n\nPlease let us know your requirement and we'll share our best quote.\n\nBest regards,\nNarmada Mobility`
+  );
+  return (
+    <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50 p-4" onClick={onClose}>
+      <div className="bg-card rounded-xl p-6 w-full max-w-lg shadow-xl" onClick={(e) => e.stopPropagation()}>
+        <h2 className="font-bold text-lg mb-1">Send Marketing Email</h2>
+        <p className="text-xs text-muted-foreground mb-4">To: {lead.email || <span className="text-red-600">no email on lead</span>}</p>
+        <label className="text-xs font-semibold block mb-3">Subject
+          <input value={subject} onChange={(e) => setSubject(e.target.value)}
+            className="mt-1 w-full border rounded-lg px-3 py-2 bg-background text-sm font-normal" />
+        </label>
+        <label className="text-xs font-semibold block">Body
+          <textarea value={body} onChange={(e) => setBody(e.target.value)} rows={8}
+            className="mt-1 w-full border rounded-lg px-3 py-2 bg-background text-sm font-normal" />
+        </label>
+        <div className="flex justify-end gap-2 mt-5">
+          <button onClick={onClose} className="px-4 py-2 border rounded-lg text-sm">Cancel</button>
+          <button onClick={() => onSend(subject, body)} disabled={busy || !lead.email || !body.trim()}
+            className="px-4 py-2 bg-accent text-accent-foreground rounded-lg text-sm font-semibold inline-flex items-center gap-2 disabled:opacity-50">
+            {busy ? <Loader2 className="w-4 h-4 animate-spin" /> : <Mail className="w-4 h-4" />} Send Email
+          </button>
+        </div>
+      </div>
+    </div>
   );
 }
 

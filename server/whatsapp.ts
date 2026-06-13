@@ -622,9 +622,20 @@ export async function sendVendorRateBatch(
   const templateName = "narmada_vendor_rate_batch";
   const ourCompany = "Narmada Mobility";
   const normalized = normalizePhone(phone);
+  // R25a Fix 1: Meta WhatsApp rejects template var values with \n, \t, or 4+ consecutive
+  // spaces ("Param text cannot have new-line/tab..."). Join numbered lines with " • " and
+  // strip control whitespace per field so multi-item batches are no longer rejected. The
+  // "1) ... 2) ..." numbering is preserved so the positional AI reply parser still maps back.
   const partsList = p.lines
-    .map((l, i) => `${i + 1}) ${l.partName || "-"} | ${l.brand && String(l.brand).trim() ? l.brand : "-"} | Qty: ${l.qty}`)
-    .join("\n");
+    .map((l, i) => {
+      const part = String(l.partName || "-").replace(/[\n\t\r]/g, " ").trim() || "-";
+      const brand = String(l.brand ?? "-").replace(/[\n\t\r]/g, " ").trim() || "-";
+      const qty = String(l.qty ?? "");
+      return `${i + 1}) ${part} | ${brand} | Qty: ${qty}`;
+    })
+    .join(" • ")
+    .replace(/ {4,}/g, " ");
+  console.log("[R25 batch-parts] vendor=%s partsList=%j len=%d", p.vendorName, partsList, partsList.length);
   const body = `Namaste ${p.vendorName},\nPlease share your best landed price + GST + availability:\n${partsList}\nReply with rates in this chat. Our team is standing by.\n— Team Narmada Mobility`;
   try {
     const raw = await postAisensy({
