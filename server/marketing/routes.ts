@@ -1,15 +1,22 @@
 // R26.4 Marketing Hub — HTTP routes, mounted under /api/marketing.
 // All endpoints require the admin token (x-admin-token) via the passed-in requireAdmin
 // middleware, EXCEPT the open-tracking pixel and the unsubscribe endpoint (public, no auth).
-// SQLite via better-sqlite3; timestamps are epoch ms. WhatsApp fields are accepted and stored
-// but sends are skipped until R26.4b.
+// SQLite via better-sqlite3; timestamps are epoch ms. R26.4b: WhatsApp templates registry +
+// media upload + WhatsApp sends are now live.
 import type { Express, Request, Response, NextFunction } from "express";
+import fs from "node:fs";
+import path from "node:path";
+import { randomBytes } from "node:crypto";
 import { rawSqlite as sqlite } from "../storage";
 import { resolveAudienceByJson, parseFilter, resolveAudience } from "./audience-resolver";
 import { runCampaign } from "./campaign-runner";
 import { gmailConnectionStatus } from "./gmail-sender";
 
 type Mw = (req: Request, res: Response, next: NextFunction) => void;
+
+// Uploads directory mirrors server/routes.ts (path.resolve(DATA_DIR || ".", "uploads")),
+// served statically at /uploads. Marketing brochure PDFs land here.
+const UPLOADS_DIR = path.resolve(process.env.DATA_DIR || ".", "uploads");
 
 // 1x1 transparent PNG.
 const TRACKING_PIXEL = Buffer.from(
@@ -19,6 +26,15 @@ const TRACKING_PIXEL = Buffer.from(
 
 function now(): number {
   return Date.now();
+}
+
+function safeParse(s: any, fallback: unknown): unknown {
+  if (s == null) return fallback;
+  try {
+    return JSON.parse(String(s));
+  } catch {
+    return fallback;
+  }
 }
 
 export function registerMarketingRoutes(app: Express, requireAdmin: Mw): void {
@@ -371,6 +387,68 @@ export function registerMarketingRoutes(app: Express, requireAdmin: Mw): void {
       res.json({ ok: true });
     } catch (e: any) {
       res.status(400).json({ error: e.message });
+    }
+  });
+
+  // ======================= WHATSAPP TEMPLATES (R26.4b) =======================
+  // Local registry of Meta-approved marketing templates, for the composer dropdown.
+  // Returns active templates with their schemas (variable labels, header type, buttons).
+  app.get("/api/marketing/whatsapp/templates", requireAdmin, (_req, res) => {
+    try {
+      const rows = sqlite
+        .prepare(`SELECT * FROM marketing_whatsapp_templates WHERE status = 'active' ORDER BY is_default DESC, id ASC`)
+        .all() as Array<Record<string, any>>;
+      const parsed = rows.map((r) => ({
+        ...r,
+        variable_labels: safeParse(r.variable_labels, []),
+        buttons: safeParse(r.buttons, []),
+      }));
+      res.json(parsed);
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  // Media upload for document-header templates (brochure PDF) and images. Accepts a base64
+  // data URL ({ dataUrl, filename }) and writes it under UPLOADS_DIR. Returns an absolute URL
+  // so the GoDaddy frontend (different origin) can reference it and AiSensy can fetch it.
+  // We add a marketing-specific route here because the existing /api/admin/upload-image only
+  // accepts image/* data URLs — brochures are PDFs.
+  app.post("/api/marketing/whatsapp/upload-media", requireAdmin, (req: Request, res: Response) => {
+    try {
+      const { dataUrl, filename } = req.body || {};
+      if (!dataUrl) return res.status(400).json({ error: "dataUrl required" });
+      const m = /^data:([a-zA-Z0-9.+/-]+);base64,([\s\S]*)$/.exec(String(dataUrl));
+      if (!m) return res.status(400).json({ error: "Invalid data URL" });
+      const mime = m[1];
+      const buf = Buffer.from(m[2], "base64");
+      if (buf.length > 16 * 1024 * 1024) return res.status(413).json({ error: "File too large (max 16MB)" });
+      // Map common marketing media types to extensions; default to pdf for documents.
+      const extMap: Record<string, string> = {
+        "application/pdf": "pdf",
+        "image/png": "png",
+        "image/jpeg": "jpg",
+        "image/jpg": "jpg",
+        "image/webp": "webp",
+      };
+      const ext = extMap[mime] || (mime.startsWith("image/") ? mime.split("/")[1] : "pdf");
+      const base = String(filename || "media").replace(/\.[^.]+$/, "").replace(/[^a-z0-9_-]/gi, "_").slice(0, 40) || "media";
+      const id = randomBytes(6).toString("hex");
+      const finalName = `mkt-${base}-${id}.${ext}`;
+      fs.mkdirSync(UPLOADS_DIR, { recursive: true });
+      fs.writeFileSync(path.join(UPLOADS_DIR, finalName), buf);
+      const proto = (req.headers["x-forwarded-proto"] as string) || req.protocol || "https";
+      const host = req.get("host");
+      res.json({
+        ok: true,
+        url: `${proto}://${host}/uploads/${finalName}`,
+        path: `/uploads/${finalName}`,
+        filename: finalName,
+        size: buf.length,
+        mime,
+      });
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
     }
   });
 

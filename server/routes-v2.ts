@@ -9,6 +9,7 @@ import multer from "multer";
 import { storage, db } from "./storage";
 import * as v2 from "./storage-v2";
 import { sendNotification, buildTrackingLink, sendGenericEmail } from "./notifications";
+import { recordMarketingWhatsAppReceipt } from "./marketing/webhook-hook";
 import {
   insertPostSchema, insertConsignmentSchema, insertPriceListSchema,
   insertCustomerSchema,
@@ -3901,6 +3902,12 @@ function registerR9Routes(
           const topicLower = (type || "").toLowerCase();
           const isReceipt = RECEIPT_PATTERNS.some((p) => topicLower.includes(p));
           if (isReceipt) {
+            // R26.4b — additive: if this receipt matches a marketing send_job's AiSensy message
+            // id, mirror the delivery/read/failed event into marketing_send_log. This does NOT
+            // change the existing receipt-ignore behavior below; it's a pure side-effect.
+            try {
+              recordMarketingWhatsAppReceipt(externalId ? String(externalId) : null, type);
+            } catch { /* never let the hook break the webhook */ }
             console.log(`[R22.x aisensy] ignoring receipt topic=${type} msgId=${externalId || "?"}`);
             return res.status(200).json({ ok: true, ignored: true, reason: "receipt", topic: type });
           }

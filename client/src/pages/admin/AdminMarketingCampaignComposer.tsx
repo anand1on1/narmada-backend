@@ -5,12 +5,23 @@ import { adminFetch, useAdminAuth } from "@/lib/admin-auth";
 import { useToast } from "@/hooks/use-toast";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useLocation } from "wouter";
-import { Mail, MessageCircle, Layers, Users, Send, Clock, Save, ChevronRight, ChevronLeft, AlertTriangle } from "lucide-react";
+import { Mail, MessageCircle, Layers, Users, Send, Clock, Save, ChevronRight, ChevronLeft, AlertTriangle, Upload, FileText } from "lucide-react";
 
 interface Audience { id: number; name: string; recipient_count: number; }
 type Channel = "email" | "whatsapp" | "both";
 
-const WHATSAPP_NOTE = "WhatsApp sending will activate in R26.4b — UI ready, but sends will skip.";
+interface WaButton { type: string; text: string; }
+interface WaTemplate {
+  template_name: string;
+  display_name: string;
+  header_type: string | null;
+  header_required: number;
+  variable_count: number;
+  variable_labels: string[];
+  buttons: WaButton[];
+}
+
+const PLACEHOLDER_HINT = "You can use {first_name}, {name}, {company} — these are auto-filled per recipient.";
 
 export default function AdminMarketingCampaignComposer() {
   const { token } = useAdminAuth();
@@ -26,8 +37,12 @@ export default function AdminMarketingCampaignComposer() {
   const [emailFromName, setEmailFromName] = useState("Narmada Mobility");
   const [emailReplyTo, setEmailReplyTo] = useState("");
   const [emailBody, setEmailBody] = useState("");
+  // WhatsApp composer state: selected template + per-index variable values + optional media url.
   const [waTemplate, setWaTemplate] = useState("");
-  const [waVars, setWaVars] = useState("");
+  const [waValues, setWaValues] = useState<Record<string, string>>({});
+  const [waMediaUrl, setWaMediaUrl] = useState("");
+  const [waMediaName, setWaMediaName] = useState("");
+  const [waUploading, setWaUploading] = useState(false);
   const [scheduledAt, setScheduledAt] = useState("");
   const [busy, setBusy] = useState(false);
 
@@ -41,8 +56,15 @@ export default function AdminMarketingCampaignComposer() {
     queryFn: async () => { const r = await adminFetch(token, `/api/marketing/gmail-status`); return r.ok ? r.json() : { connected: false, email: null }; },
     enabled: !!token,
   });
+  const { data: waTemplates = [] } = useQuery<WaTemplate[]>({
+    queryKey: ["marketing-wa-templates"],
+    queryFn: async () => { const r = await adminFetch(token, `/api/marketing/whatsapp/templates`); return r.ok ? r.json() : []; },
+    enabled: !!token,
+  });
 
-  const [preview, setPreview] = useState<{ total: number; sample: Array<{ name: string; email: string | null }> } | null>(null);
+  const selectedTemplate = waTemplates.find((t) => t.template_name === waTemplate) || null;
+
+  const [preview, setPreview] = useState<{ total: number; sample: Array<{ name: string; email: string | null; phone?: string | null }> } | null>(null);
   const loadPreview = async (id: number) => {
     setPreview(null);
     const r = await adminFetch(token, `/api/marketing/audiences/${id}/preview`);
@@ -50,6 +72,54 @@ export default function AdminMarketingCampaignComposer() {
   };
 
   const selectedAudience = audiences.find((a) => a.id === audienceId);
+
+  // Build the whatsapp_variables payload: numeric keys "1".."n" plus optional media_url.
+  function buildWaVariables(): Record<string, string> | null {
+    if (channel === "email") return null;
+    if (!selectedTemplate) return null;
+    const out: Record<string, string> = {};
+    for (let i = 1; i <= selectedTemplate.variable_count; i++) out[String(i)] = waValues[String(i)] || "";
+    if (waMediaUrl) out.media_url = waMediaUrl;
+    return out;
+  }
+
+  async function handleMediaUpload(file: File) {
+    setWaUploading(true);
+    try {
+      const dataUrl: string = await new Promise((resolve, reject) => {
+        const fr = new FileReader();
+        fr.onload = () => resolve(String(fr.result));
+        fr.onerror = reject;
+        fr.readAsDataURL(file);
+      });
+      const r = await adminFetch(token, `/api/marketing/whatsapp/upload-media`, {
+        method: "POST",
+        body: JSON.stringify({ dataUrl, filename: file.name }),
+      });
+      if (r.ok) {
+        const j = await r.json();
+        setWaMediaUrl(j.url);
+        setWaMediaName(file.name);
+        toast({ title: "File uploaded", description: file.name });
+      } else {
+        toast({ title: "Upload failed", description: (await r.json().catch(() => ({}))).error, variant: "destructive" });
+      }
+    } catch (e: any) {
+      toast({ title: "Upload failed", description: e?.message, variant: "destructive" });
+    } finally {
+      setWaUploading(false);
+    }
+  }
+
+  // Render a WhatsApp message preview by substituting variable values into a numbered body.
+  function previewBubble(): string {
+    if (!selectedTemplate) return "";
+    const lines = selectedTemplate.variable_labels.map((label, i) => {
+      const v = waValues[String(i + 1)] || `{{${i + 1}}}`;
+      return `${label}: ${v}`;
+    });
+    return lines.join("\n");
+  }
 
   async function createDraft(): Promise<number | null> {
     const r = await adminFetch(token, `/api/marketing/campaigns`, {
@@ -62,8 +132,8 @@ export default function AdminMarketingCampaignComposer() {
         email_from_name: emailFromName,
         email_reply_to: emailReplyTo || gmail?.email || null,
         email_body_html: emailBody,
-        whatsapp_template_name: waTemplate || null,
-        whatsapp_variables: waVars ? safeJson(waVars) : null,
+        whatsapp_template_name: channel !== "email" ? waTemplate || null : null,
+        whatsapp_variables: channel !== "email" ? buildWaVariables() : null,
       }),
     });
     if (!r.ok) { toast({ title: "Save failed", variant: "destructive" }); return null; }
@@ -109,7 +179,7 @@ export default function AdminMarketingCampaignComposer() {
     else toast({ title: "Schedule failed", variant: "destructive" });
   }
 
-  const showWaWarning = channel === "whatsapp" || channel === "both";
+  const includesWhatsApp = channel === "whatsapp" || channel === "both";
 
   return (
     <AdminLayout title="Marketing — New Campaign">
@@ -141,13 +211,9 @@ export default function AdminMarketingCampaignComposer() {
                 <input type="radio" checked={channel === c} onChange={() => setChannel(c)} />
                 {c === "email" ? <Mail className="w-5 h-5 text-indigo-600" /> : c === "whatsapp" ? <MessageCircle className="w-5 h-5 text-emerald-600" /> : <Layers className="w-5 h-5 text-purple-600" />}
                 <span className="capitalize font-medium">{c}</span>
+                {c === "both" && <span className="text-xs text-slate-400">— email if they have an address, WhatsApp if they have a phone</span>}
               </label>
             ))}
-            {showWaWarning && (
-              <div className="flex items-start gap-2 text-amber-800 bg-amber-50 border border-amber-200 rounded-lg p-3 text-sm">
-                <AlertTriangle className="w-4 h-4 mt-0.5 flex-shrink-0" /> {WHATSAPP_NOTE}
-              </div>
-            )}
           </div>
         )}
 
@@ -173,34 +239,85 @@ export default function AdminMarketingCampaignComposer() {
         )}
 
         {step === 3 && (
-          <div className="space-y-4">
-            <div className="flex gap-2 border-b mb-2">
-              <span className="px-3 py-2 text-sm font-semibold border-b-2 border-indigo-600 text-indigo-700 inline-flex items-center gap-1"><Mail className="w-4 h-4" /> Email</span>
-              <span className="px-3 py-2 text-sm text-slate-400 inline-flex items-center gap-1"><MessageCircle className="w-4 h-4" /> WhatsApp {channel === "email" ? "(n/a)" : "(R26.4b)"}</span>
-            </div>
-            <label className="text-xs font-semibold block">Subject
-              <input value={emailSubject} onChange={(e) => setEmailSubject(e.target.value)} className="mt-1 w-full border rounded-lg px-3 py-2 text-sm font-normal" /></label>
-            <div className="grid grid-cols-2 gap-3">
-              <label className="text-xs font-semibold block">From name
-                <input value={emailFromName} onChange={(e) => setEmailFromName(e.target.value)} className="mt-1 w-full border rounded-lg px-3 py-2 text-sm font-normal" /></label>
-              <label className="text-xs font-semibold block">Reply-to
-                <input value={emailReplyTo} onChange={(e) => setEmailReplyTo(e.target.value)} placeholder={gmail?.email || "your Gmail"} className="mt-1 w-full border rounded-lg px-3 py-2 text-sm font-normal" /></label>
-            </div>
-            <label className="text-xs font-semibold block">Body (HTML)
-              <textarea value={emailBody} onChange={(e) => setEmailBody(e.target.value)} rows={10} placeholder="<p>Hello…</p>" className="mt-1 w-full border rounded-lg px-3 py-2 text-sm font-mono" /></label>
-            {emailBody && (
-              <div className="border rounded-lg p-4">
-                <div className="text-[10px] uppercase font-bold text-slate-400 mb-2">Preview</div>
-                <div className="prose prose-sm max-w-none" dangerouslySetInnerHTML={{ __html: emailBody }} />
+          <div className="space-y-6">
+            {/* EMAIL CONTENT */}
+            {(channel === "email" || channel === "both") && (
+              <div className="space-y-4">
+                <div className="flex items-center gap-2 text-sm font-semibold text-indigo-700 border-b pb-2"><Mail className="w-4 h-4" /> Email content</div>
+                <label className="text-xs font-semibold block">Subject
+                  <input value={emailSubject} onChange={(e) => setEmailSubject(e.target.value)} className="mt-1 w-full border rounded-lg px-3 py-2 text-sm font-normal" /></label>
+                <div className="grid grid-cols-2 gap-3">
+                  <label className="text-xs font-semibold block">From name
+                    <input value={emailFromName} onChange={(e) => setEmailFromName(e.target.value)} className="mt-1 w-full border rounded-lg px-3 py-2 text-sm font-normal" /></label>
+                  <label className="text-xs font-semibold block">Reply-to
+                    <input value={emailReplyTo} onChange={(e) => setEmailReplyTo(e.target.value)} placeholder={gmail?.email || "your Gmail"} className="mt-1 w-full border rounded-lg px-3 py-2 text-sm font-normal" /></label>
+                </div>
+                <label className="text-xs font-semibold block">Body (HTML)
+                  <textarea value={emailBody} onChange={(e) => setEmailBody(e.target.value)} rows={8} placeholder="<p>Hello…</p>" className="mt-1 w-full border rounded-lg px-3 py-2 text-sm font-mono" /></label>
+                {emailBody && (
+                  <div className="border rounded-lg p-4">
+                    <div className="text-[10px] uppercase font-bold text-slate-400 mb-2">Preview</div>
+                    <div className="prose prose-sm max-w-none" dangerouslySetInnerHTML={{ __html: emailBody }} />
+                  </div>
+                )}
               </div>
             )}
-            {(channel === "whatsapp" || channel === "both") && (
-              <div className="border rounded-lg p-4 bg-slate-50 opacity-70">
-                <div className="flex items-center gap-2 text-amber-800 text-xs mb-2"><AlertTriangle className="w-4 h-4" /> {WHATSAPP_NOTE}</div>
-                <label className="text-xs font-semibold block mb-2">WhatsApp template name
-                  <input value={waTemplate} onChange={(e) => setWaTemplate(e.target.value)} disabled className="mt-1 w-full border rounded-lg px-3 py-2 text-sm font-normal bg-slate-100" /></label>
-                <label className="text-xs font-semibold block">Variables (JSON)
-                  <input value={waVars} onChange={(e) => setWaVars(e.target.value)} disabled className="mt-1 w-full border rounded-lg px-3 py-2 text-sm font-normal bg-slate-100" /></label>
+
+            {/* WHATSAPP CONTENT */}
+            {includesWhatsApp && (
+              <div className="space-y-4">
+                <div className="flex items-center gap-2 text-sm font-semibold text-emerald-700 border-b pb-2"><MessageCircle className="w-4 h-4" /> WhatsApp content</div>
+                <label className="text-xs font-semibold block">Template
+                  <select value={waTemplate} onChange={(e) => { setWaTemplate(e.target.value); setWaValues({}); setWaMediaUrl(""); setWaMediaName(""); }} className="mt-1 w-full border rounded-lg px-3 py-2 text-sm font-normal">
+                    <option value="">— Select template —</option>
+                    {waTemplates.map((t) => <option key={t.template_name} value={t.template_name}>{t.display_name}</option>)}
+                  </select>
+                </label>
+
+                {selectedTemplate && (
+                  <>
+                    <p className="text-xs text-slate-500">{PLACEHOLDER_HINT}</p>
+                    {selectedTemplate.variable_labels.map((label, i) => {
+                      const key = String(i + 1);
+                      return (
+                        <label key={key} className="text-xs font-semibold block">{`{{${i + 1}}} ${label}`}
+                          <input value={waValues[key] || ""} onChange={(e) => setWaValues((v) => ({ ...v, [key]: e.target.value }))} placeholder={label} className="mt-1 w-full border rounded-lg px-3 py-2 text-sm font-normal" />
+                        </label>
+                      );
+                    })}
+
+                    {selectedTemplate.header_type === "document" && (
+                      <div className="border rounded-lg p-3 bg-slate-50">
+                        <div className="text-xs font-semibold mb-2 flex items-center gap-1"><FileText className="w-4 h-4" /> Header document (PDF) {selectedTemplate.header_required ? <span className="text-rose-600">*required</span> : null}</div>
+                        <label className="inline-flex items-center gap-2 px-3 py-2 border rounded-lg text-sm cursor-pointer bg-white hover:bg-slate-50">
+                          <Upload className="w-4 h-4" /> {waUploading ? "Uploading…" : "Choose PDF"}
+                          <input type="file" accept="application/pdf,image/*" className="hidden" disabled={waUploading} onChange={(e) => { const f = e.target.files?.[0]; if (f) handleMediaUpload(f); }} />
+                        </label>
+                        {waMediaUrl && <div className="text-xs text-emerald-700 mt-2 truncate">Uploaded: {waMediaName} (<a href={waMediaUrl} target="_blank" rel="noreferrer" className="underline">view</a>)</div>}
+                      </div>
+                    )}
+
+                    {selectedTemplate.buttons.length > 0 && (
+                      <div className="text-xs text-slate-500">This template has these buttons: <span className="font-medium text-slate-700">{selectedTemplate.buttons.map((b) => b.text).join(", ")}</span></div>
+                    )}
+
+                    {/* Live WhatsApp bubble preview */}
+                    <div className="border rounded-lg p-4 bg-[#e5ddd5]">
+                      <div className="text-[10px] uppercase font-bold text-slate-500 mb-2">Preview</div>
+                      <div className="bg-white rounded-lg shadow-sm p-3 max-w-sm ml-auto text-sm whitespace-pre-wrap text-slate-800">
+                        {selectedTemplate.header_type === "document" && waMediaName && (
+                          <div className="flex items-center gap-2 text-xs text-slate-600 border-b pb-2 mb-2"><FileText className="w-4 h-4" /> {waMediaName}</div>
+                        )}
+                        {previewBubble() || <span className="text-slate-400">Fill the variables to see a preview…</span>}
+                        {selectedTemplate.buttons.length > 0 && (
+                          <div className="mt-2 pt-2 border-t flex flex-col gap-1">
+                            {selectedTemplate.buttons.map((b, i) => <div key={i} className="text-center text-[#00a5f4] text-xs font-medium py-1">{b.text}</div>)}
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  </>
+                )}
               </div>
             )}
           </div>
@@ -212,8 +329,19 @@ export default function AdminMarketingCampaignComposer() {
               <div><span className="text-slate-500">Name:</span> <span className="font-medium">{name || "Untitled campaign"}</span></div>
               <div><span className="text-slate-500">Channel:</span> <span className="font-medium capitalize">{channel}</span></div>
               <div><span className="text-slate-500">Audience:</span> <span className="font-medium">{selectedAudience?.name || "—"} ({selectedAudience?.recipient_count ?? 0})</span></div>
-              <div><span className="text-slate-500">Subject:</span> <span className="font-medium">{emailSubject || "—"}</span></div>
-              {!gmail?.connected && <div className="flex items-center gap-2 text-rose-700 mt-2"><AlertTriangle className="w-4 h-4" /> Gmail not connected — email sends will fail. Connect in Integrations.</div>}
+              {(channel === "email" || channel === "both") && <div><span className="text-slate-500">Subject:</span> <span className="font-medium">{emailSubject || "—"}</span></div>}
+              {includesWhatsApp && <div><span className="text-slate-500">WhatsApp template:</span> <span className="font-medium">{selectedTemplate?.display_name || "— none selected —"}</span></div>}
+              {includesWhatsApp && preview && (() => {
+                const total = preview.total;
+                const withPhone = preview.sample.filter((s) => s.phone).length;
+                // sample is capped at 10 — only show exact counts when the whole audience fits the sample.
+                if (total <= preview.sample.length) {
+                  return <div className="text-emerald-700">{withPhone} of {total} recipients have phone numbers. {total - withPhone} will be skipped for WhatsApp.</div>;
+                }
+                return <div className="text-slate-500">WhatsApp will be sent to recipients that have a phone number; others are skipped.</div>;
+              })()}
+              {includesWhatsApp && selectedTemplate?.header_required && !waMediaUrl && <div className="flex items-center gap-2 text-rose-700 mt-2"><AlertTriangle className="w-4 h-4" /> This template requires a header document — upload a PDF in Content.</div>}
+              {(channel === "email" || channel === "both") && !gmail?.connected && <div className="flex items-center gap-2 text-rose-700 mt-2"><AlertTriangle className="w-4 h-4" /> Gmail not connected — email sends will fail. Connect in Integrations.</div>}
             </div>
             <label className="text-xs font-semibold block">Schedule for (optional)
               <input type="datetime-local" value={scheduledAt} onChange={(e) => setScheduledAt(e.target.value)} className="mt-1 w-full border rounded-lg px-3 py-2 text-sm font-normal" /></label>
@@ -233,8 +361,4 @@ export default function AdminMarketingCampaignComposer() {
       </div>
     </AdminLayout>
   );
-}
-
-function safeJson(s: string): unknown {
-  try { return JSON.parse(s); } catch { return s; }
 }

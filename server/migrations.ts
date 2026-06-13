@@ -1052,3 +1052,152 @@ export function runR26_4Migrations() {
 
   console.log("[migrations] R26.4 tables/indexes ensured");
 }
+
+// -------- R26.4b additive migrations (Marketing Hub — WhatsApp via AiSensy) --------
+// Additive only — one new table (marketing_whatsapp_templates) + one new column on
+// marketing_send_jobs (aisensy_message_id). Seeds the 5 Meta-approved marketing templates
+// (idempotent via ON CONFLICT DO NOTHING on template_name). Per-statement try/catch with
+// [migrations] R26.4b: markers so a re-run is logged and skipped, never aborting boot.
+// NEVER drops/renames existing tables. The ALTER on marketing_send_jobs is wrapped so a
+// "duplicate column" error on re-run is caught and ignored.
+export function runR26_4bMigrations() {
+  const stmts: Array<{ desc: string; sql: string }> = [
+    {
+      desc: "marketing_whatsapp_templates table",
+      sql: `CREATE TABLE IF NOT EXISTS marketing_whatsapp_templates (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        template_name TEXT NOT NULL UNIQUE,
+        display_name TEXT NOT NULL,
+        category TEXT,
+        language TEXT DEFAULT 'en',
+        header_type TEXT,
+        header_required INTEGER DEFAULT 0,
+        variable_count INTEGER NOT NULL,
+        variable_labels TEXT,
+        buttons TEXT,
+        status TEXT NOT NULL DEFAULT 'active',
+        is_default INTEGER DEFAULT 0,
+        created_at INTEGER DEFAULT (strftime('%s','now')*1000),
+        updated_at INTEGER
+      )`,
+    },
+    {
+      desc: "idx_marketing_wa_templates_status",
+      sql: `CREATE INDEX IF NOT EXISTS idx_marketing_wa_templates_status ON marketing_whatsapp_templates(status)`,
+    },
+    {
+      desc: "marketing_send_jobs.aisensy_message_id column",
+      sql: `ALTER TABLE marketing_send_jobs ADD COLUMN aisensy_message_id TEXT`,
+    },
+    {
+      desc: "idx_marketing_send_jobs_aisensy_msg",
+      sql: `CREATE INDEX IF NOT EXISTS idx_marketing_send_jobs_aisensy_msg ON marketing_send_jobs(aisensy_message_id)`,
+    },
+  ];
+  for (const { desc, sql } of stmts) {
+    console.log(`[migrations] R26.4b: ${desc}`);
+    try {
+      sqlite.exec(sql);
+    } catch (err: any) {
+      // Duplicate-column on ALTER re-run is expected and benign; CREATE IF NOT EXISTS is idempotent.
+      console.log(`[migrations] R26.4b: skipped ${desc} —`, err?.message || err);
+    }
+  }
+
+  // Seed the 5 Meta-approved marketing templates (idempotent — ON CONFLICT DO NOTHING by name).
+  try {
+    const seedTemplates = [
+      {
+        template_name: "narmada_marketing_v1",
+        display_name: "General Promo (Text)",
+        header_type: "none",
+        header_required: 0,
+        variable_count: 3,
+        variable_labels: JSON.stringify(["Customer name", "Vehicle type", "Custom message"]),
+        buttons: JSON.stringify([]),
+        is_default: 1,
+      },
+      {
+        template_name: "narmada_marketing_v1_cta",
+        display_name: "General Promo with CTA",
+        header_type: "none",
+        header_required: 0,
+        variable_count: 3,
+        variable_labels: JSON.stringify(["Customer name", "Vehicle type", "Custom message"]),
+        buttons: JSON.stringify([
+          { type: "quick_reply", text: "Get Quotation" },
+          { type: "quick_reply", text: "View Catalog" },
+        ]),
+        is_default: 0,
+      },
+      {
+        template_name: "narmada_marketing_brochure",
+        display_name: "Catalog/Brochure (PDF)",
+        header_type: "document",
+        header_required: 1,
+        variable_count: 3,
+        variable_labels: JSON.stringify(["Customer name", "Catalog scope", "Highlight line"]),
+        buttons: JSON.stringify([
+          { type: "quick_reply", text: "Request Pricing" },
+          { type: "quick_reply", text: "Place Order" },
+        ]),
+        is_default: 0,
+      },
+      {
+        template_name: "narmada_offer",
+        display_name: "Limited-Time Offer",
+        header_type: "none",
+        header_required: 0,
+        variable_count: 3,
+        variable_labels: JSON.stringify(["Customer name", "Offer headline", "Expiry date"]),
+        buttons: JSON.stringify([
+          { type: "quick_reply", text: "Place Order" },
+          { type: "quick_reply", text: "Talk to Sales" },
+        ]),
+        is_default: 0,
+      },
+      {
+        template_name: "narmada_seller_invite",
+        display_name: "Seller Onboarding Invite",
+        header_type: "none",
+        header_required: 0,
+        variable_count: 3,
+        variable_labels: JSON.stringify(["Dealer name", "Region", "Pitch line"]),
+        buttons: JSON.stringify([
+          { type: "quick_reply", text: "Join Now" },
+          { type: "quick_reply", text: "Learn More" },
+        ]),
+        is_default: 0,
+      },
+    ];
+    const now = Date.now();
+    const insert = sqlite.prepare(
+      `INSERT INTO marketing_whatsapp_templates
+         (template_name, display_name, category, language, header_type, header_required,
+          variable_count, variable_labels, buttons, status, is_default, created_at, updated_at)
+       VALUES (?, ?, 'marketing', 'en', ?, ?, ?, ?, ?, 'active', ?, ?, ?)
+       ON CONFLICT(template_name) DO NOTHING`,
+    );
+    let seeded = 0;
+    for (const t of seedTemplates) {
+      const info = insert.run(
+        t.template_name,
+        t.display_name,
+        t.header_type,
+        t.header_required,
+        t.variable_count,
+        t.variable_labels,
+        t.buttons,
+        t.is_default,
+        now,
+        now,
+      );
+      if (info.changes > 0) seeded++;
+    }
+    console.log(`[migrations] R26.4b: seeded ${seeded} whatsapp template(s) (existing left untouched)`);
+  } catch (err: any) {
+    console.log(`[migrations] R26.4b: template seed failed —`, err?.message || err);
+  }
+
+  console.log("[migrations] R26.4b tables/columns ensured");
+}

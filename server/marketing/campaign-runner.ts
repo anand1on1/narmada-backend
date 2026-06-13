@@ -1,11 +1,12 @@
 // R26.4 Marketing Hub — campaign runner.
 // Executes one campaign end-to-end: resolve audience → materialize send_jobs → process them
-// sequentially (email via gmail-sender; whatsapp skipped until R26.4b) with a Gmail-friendly
-// delay between sends. Errors are caught per-recipient so one bad address never aborts the run.
+// sequentially (email via gmail-sender; whatsapp via AiSensy — R26.4b) with a friendly delay
+// between sends. Errors are caught per-recipient so one bad address never aborts the run.
 // Audience is <50 so a synchronous sequential loop is fine — no queue infrastructure.
 import { rawSqlite as sqlite } from "../storage";
 import { resolveAudienceByJson, type Recipient } from "./audience-resolver";
 import { sendMarketingEmail } from "./gmail-sender";
+import { sendAisensyMarketing } from "./aisensy-sender";
 
 const SEND_DELAY_MS = 1500;
 
@@ -19,8 +20,55 @@ interface CampaignRow {
   email_from_name: string | null;
   email_reply_to: string | null;
   email_body_html: string | null;
+  whatsapp_template_name: string | null;
+  whatsapp_variables: string | null;
   status: string;
   created_by: string | null;
+}
+
+interface WhatsAppTemplateRow {
+  template_name: string;
+  display_name: string;
+  header_type: string | null;
+  header_required: number;
+  variable_count: number;
+  status: string;
+}
+
+// Substitute per-recipient placeholders inside a campaign variable value. The user writes the
+// campaign once with {first_name} / {name} / {company} and we fill them per recipient at send
+// time. Unknown placeholders are left untouched so literal braces in copy are not destroyed.
+function applyPlaceholders(value: string, recipient: Recipient): string {
+  if (!value || value.indexOf("{") === -1) return value;
+  const firstName = (recipient.name || "").trim().split(/\s+/)[0] || "";
+  const map: Record<string, string> = {
+    first_name: firstName,
+    name: recipient.name || "",
+    company: recipient.name || "", // no separate company field on Recipient — fall back to name
+  };
+  return value.replace(/\{(first_name|name|company)\}/gi, (_m, k) => map[String(k).toLowerCase()] ?? `{${k}}`);
+}
+
+// Resolve a campaign's whatsapp_variables JSON ({"1":"...","2":"...","media_url":"..."}) into the
+// positional templateParams array AiSensy expects, applying per-recipient placeholder substitution.
+function resolveTemplateParams(
+  varsJson: string | null,
+  variableCount: number,
+  recipient: Recipient,
+): { params: string[]; mediaUrl: string | null } {
+  let vars: Record<string, any> = {};
+  try {
+    vars = varsJson ? JSON.parse(varsJson) : {};
+  } catch {
+    vars = {};
+  }
+  const params: string[] = [];
+  for (let i = 1; i <= variableCount; i++) {
+    const raw = vars[String(i)] != null ? String(vars[String(i)]) : "";
+    params.push(applyPlaceholders(raw, recipient));
+  }
+  const mediaUrl = vars.media_url ? String(vars.media_url) : null;
+  return { params, mediaUrl };
 }
 
 function sleep(ms: number): Promise<void> {
@@ -133,29 +181,62 @@ export async function runCampaign(campaignId: number): Promise<{ ok: boolean; se
   let failed = 0;
   let skipped = 0;
 
+  const wantsEmail = channel === "email" || channel === "both";
+  const wantsWhatsApp = channel === "whatsapp" || channel === "both";
+
+  // Resolve the WhatsApp template once for the whole run (it's the same for every recipient).
+  // If the campaign wants WhatsApp but the template is missing/inactive, every WA leg skips.
+  let waTemplate: WhatsAppTemplateRow | null = null;
+  let waTemplateError: string | null = null;
+  if (wantsWhatsApp) {
+    if (!c.whatsapp_template_name) {
+      waTemplateError = "no WhatsApp template selected";
+    } else {
+      const row = sqlite
+        .prepare(`SELECT * FROM marketing_whatsapp_templates WHERE template_name = ?`)
+        .get(c.whatsapp_template_name) as WhatsAppTemplateRow | undefined;
+      if (!row) waTemplateError = "template not found";
+      else if (row.status !== "active") waTemplateError = "template inactive";
+      else waTemplate = row;
+    }
+  }
+
   for (const jobId of jobIds) {
     const job = sqlite.prepare(`SELECT * FROM marketing_send_jobs WHERE id = ?`).get(jobId) as any;
     const attemptedAt = Date.now();
     sqlite.prepare(`UPDATE marketing_send_jobs SET status = 'sending', attempted_at = ? WHERE id = ?`).run(attemptedAt, jobId);
 
-    // WhatsApp / Both: WhatsApp leg is inactive until R26.4b — skip.
-    const wantsEmail = channel === "email" || channel === "both";
-    const wantsWhatsAppOnly = channel === "whatsapp";
+    const recipient: Recipient = {
+      id: String(job.recipient_id ?? jobId),
+      name: job.recipient_name || "",
+      email: job.recipient_email || null,
+      phone: job.recipient_phone || null,
+      type: (job.recipient_type as Recipient["type"]) || "customer",
+    };
+
+    // Per-recipient outcome across both legs. The send_job carries a single status, so we
+    // promote to 'sent' if any leg sent, else 'failed' if any leg failed, else 'skipped'.
+    let legSent = false;
+    let legFailed = false;
+    let didRealSend = false; // whether we actually hit a provider (for pacing)
+    const errors: string[] = [];
 
     try {
-      if (wantsWhatsAppOnly) {
+      const unsub = isUnsubscribed(job.recipient_email, job.recipient_phone);
+      if (unsub) {
         sqlite
           .prepare(`UPDATE marketing_send_jobs SET status = 'skipped', error_message = ? WHERE id = ?`)
-          .run("WhatsApp sending will activate in R26.4b", jobId);
-        logEvent(jobId, "failed", { reason: "whatsapp_disabled_r26_4b" });
+          .run("Recipient has unsubscribed", jobId);
+        logEvent(jobId, "skipped", { reason: "unsubscribed" });
         skipped++;
-      } else if (wantsEmail && job.recipient_email) {
-        if (isUnsubscribed(job.recipient_email, job.recipient_phone)) {
-          sqlite
-            .prepare(`UPDATE marketing_send_jobs SET status = 'skipped', error_message = ? WHERE id = ?`)
-            .run("Recipient has unsubscribed", jobId);
-          logEvent(jobId, "failed", { reason: "unsubscribed" });
-          skipped++;
+        continue;
+      }
+
+      // ---- EMAIL leg ----
+      if (wantsEmail) {
+        if (!job.recipient_email) {
+          errors.push("no email");
+          logEvent(jobId, "skipped", { leg: "email", reason: "no_email" });
         } else {
           const result = await sendMarketingEmail({
             to: job.recipient_email,
@@ -165,30 +246,87 @@ export async function runCampaign(campaignId: number): Promise<{ ok: boolean; se
             bodyHtml: c.email_body_html || "",
             sendJobId: jobId,
           });
+          didRealSend = true;
           if (result.success) {
             sqlite
-              .prepare(`UPDATE marketing_send_jobs SET status = 'sent', sent_at = ?, gmail_message_id = ? WHERE id = ?`)
-              .run(Date.now(), result.messageId || null, jobId);
-            logEvent(jobId, "sent", { gmail_message_id: result.messageId });
-            sent++;
+              .prepare(`UPDATE marketing_send_jobs SET gmail_message_id = ? WHERE id = ?`)
+              .run(result.messageId || null, jobId);
+            logEvent(jobId, "sent", { leg: "email", gmail_message_id: result.messageId });
+            legSent = true;
           } else {
-            sqlite
-              .prepare(`UPDATE marketing_send_jobs SET status = 'failed', error_message = ? WHERE id = ?`)
-              .run(result.error || "Unknown send error", jobId);
-            logEvent(jobId, "failed", { error: result.error });
-            failed++;
+            errors.push(`email: ${result.error || "send failed"}`);
+            logEvent(jobId, "failed", { leg: "email", error: result.error });
+            legFailed = true;
           }
-          // Gmail-friendly pacing between real sends only.
-          await sleep(SEND_DELAY_MS);
         }
+      }
+
+      // ---- WHATSAPP leg ----
+      if (wantsWhatsApp) {
+        if (!job.recipient_phone) {
+          errors.push("no phone");
+          logEvent(jobId, "skipped", { leg: "whatsapp", reason: "no_phone" });
+        } else if (!waTemplate) {
+          errors.push(`whatsapp: ${waTemplateError || "template not found or inactive"}`);
+          logEvent(jobId, "skipped", { leg: "whatsapp", reason: waTemplateError || "template_unavailable" });
+        } else {
+          const { params, mediaUrl } = resolveTemplateParams(
+            c.whatsapp_variables,
+            waTemplate.variable_count,
+            recipient,
+          );
+          if (waTemplate.header_required && !mediaUrl) {
+            errors.push("whatsapp: media required but missing");
+            logEvent(jobId, "failed", { leg: "whatsapp", reason: "media_required" });
+            legFailed = true;
+          } else {
+            const result = await sendAisensyMarketing({
+              templateName: waTemplate.template_name,
+              phone: job.recipient_phone,
+              userName: recipient.name || undefined,
+              templateParams: params,
+              mediaUrl,
+            });
+            didRealSend = true;
+            if (result.messageId) {
+              sqlite
+                .prepare(`UPDATE marketing_send_jobs SET aisensy_message_id = ? WHERE id = ?`)
+                .run(result.messageId, jobId);
+            }
+            if (result.status === "sent" || result.status === "queued") {
+              logEvent(jobId, "sent", { leg: "whatsapp", aisensy_message_id: result.messageId, aisensy_status: result.status });
+              legSent = true;
+            } else {
+              errors.push(`whatsapp: ${result.error || "send failed"}`);
+              logEvent(jobId, "failed", { leg: "whatsapp", error: result.error });
+              legFailed = true;
+            }
+          }
+        }
+      }
+
+      // Promote per-recipient status from leg outcomes.
+      const errMsg = errors.length ? errors.join("; ") : null;
+      if (legSent) {
+        sqlite
+          .prepare(`UPDATE marketing_send_jobs SET status = 'sent', sent_at = ?, error_message = ? WHERE id = ?`)
+          .run(Date.now(), errMsg, jobId);
+        sent++;
+      } else if (legFailed) {
+        sqlite
+          .prepare(`UPDATE marketing_send_jobs SET status = 'failed', error_message = ? WHERE id = ?`)
+          .run(errMsg || "Send failed", jobId);
+        failed++;
       } else {
-        // 'both'/'email' but no email address on this recipient.
+        // No leg produced a real send (e.g. recipient lacked any usable contact field).
         sqlite
           .prepare(`UPDATE marketing_send_jobs SET status = 'skipped', error_message = ? WHERE id = ?`)
-          .run("No email address for recipient", jobId);
-        logEvent(jobId, "failed", { reason: "no_email" });
+          .run(errMsg || "No deliverable channel for recipient", jobId);
         skipped++;
       }
+
+      // Friendly pacing between real provider sends only.
+      if (didRealSend) await sleep(SEND_DELAY_MS);
     } catch (e: any) {
       sqlite
         .prepare(`UPDATE marketing_send_jobs SET status = 'failed', error_message = ? WHERE id = ?`)

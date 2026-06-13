@@ -15,7 +15,15 @@ interface Job {
   status: string;
   sent_at: number | null;
   error_message: string | null;
+  gmail_message_id: string | null;
+  aisensy_message_id: string | null;
   log: Array<{ id: number; event: string; created_at: number }>;
+}
+
+// Derive WhatsApp delivery/read status from the send_log events the AiSensy webhook hook writes.
+function waReceipt(job: Job): { delivered: boolean; read: boolean; failed: boolean } {
+  const events = new Set(job.log.map((l) => l.event));
+  return { delivered: events.has("delivered") || events.has("read"), read: events.has("read"), failed: events.has("failed") };
 }
 
 function fmt(d: number | null) {
@@ -67,6 +75,7 @@ export default function AdminMarketingCampaignDetail() {
   });
 
   const c = data?.campaign;
+  const showWa = c?.channel === "whatsapp" || c?.channel === "both";
 
   return (
     <AdminLayout title="Marketing — Campaign">
@@ -97,7 +106,7 @@ export default function AdminMarketingCampaignDetail() {
             )}
           </div>
 
-          <div className="bg-white border rounded-xl overflow-hidden">
+          <div className="bg-white border rounded-xl overflow-hidden overflow-x-auto">
             <table className="w-full text-sm">
               <thead className="bg-slate-50 text-slate-500 text-xs uppercase tracking-wide">
                 <tr>
@@ -105,23 +114,32 @@ export default function AdminMarketingCampaignDetail() {
                   <th className="text-left px-4 py-3">Type</th>
                   <th className="text-left px-4 py-3">Status</th>
                   <th className="text-left px-4 py-3">Sent At</th>
+                  {showWa && <th className="text-left px-4 py-3">AiSensy Msg ID</th>}
+                  {showWa && <th className="text-left px-4 py-3">Delivery</th>}
+                  {showWa && <th className="text-left px-4 py-3">Read</th>}
                   <th className="text-left px-4 py-3">Events</th>
                   <th className="text-left px-4 py-3">Error</th>
                 </tr>
               </thead>
               <tbody className="divide-y">
                 {jobs.length === 0 ? (
-                  <tr><td colSpan={6} className="px-4 py-12 text-center text-slate-400">No send jobs yet.</td></tr>
-                ) : jobs.map((j) => (
+                  <tr><td colSpan={showWa ? 9 : 6} className="px-4 py-12 text-center text-slate-400">No send jobs yet.</td></tr>
+                ) : jobs.map((j) => {
+                  const r = waReceipt(j);
+                  return (
                   <tr key={j.id} className="hover:bg-slate-50">
                     <td className="px-4 py-3"><div className="font-medium text-slate-900">{j.recipient_name || "—"}</div><div className="text-xs text-slate-500">{j.recipient_email || j.recipient_phone || ""}</div></td>
                     <td className="px-4 py-3 capitalize text-slate-600">{j.recipient_type}</td>
                     <td className="px-4 py-3"><span className={`text-[11px] px-2 py-0.5 rounded-full font-semibold uppercase ${JOB_STYLE[j.status] || "bg-slate-100"}`}>{j.status}</span></td>
                     <td className="px-4 py-3 text-slate-600">{fmt(j.sent_at)}</td>
+                    {showWa && <td className="px-4 py-3 text-xs text-slate-500 font-mono max-w-[10rem] truncate" title={j.aisensy_message_id || ""}>{j.aisensy_message_id || "—"}</td>}
+                    {showWa && <td className="px-4 py-3 text-xs">{r.failed ? <span className="text-rose-600">failed</span> : r.delivered ? <span className="text-emerald-600">delivered</span> : <span className="text-slate-400">—</span>}</td>}
+                    {showWa && <td className="px-4 py-3 text-xs">{r.read ? <span className="text-emerald-600">read</span> : <span className="text-slate-400">—</span>}</td>}
                     <td className="px-4 py-3 text-xs text-slate-500">{j.log.map((l) => l.event).join(", ") || "—"}</td>
                     <td className="px-4 py-3 text-xs text-rose-600 max-w-xs truncate" title={j.error_message || ""}>{j.error_message || ""}</td>
                   </tr>
-                ))}
+                  );
+                })}
               </tbody>
             </table>
           </div>
