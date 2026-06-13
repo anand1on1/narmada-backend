@@ -8,7 +8,7 @@ import {
   UserSquare, Wallet, CreditCard, FileQuestion, FileSpreadsheet, ShoppingCart, Landmark,
   Building2, UserCog, ScrollText, ClipboardList, Bell,
   Factory, Inbox, Search, Target, Megaphone, CheckSquare, Sparkles, Facebook, History,
-  Gauge, Radar,
+  Gauge, Radar, Link2,
 } from "lucide-react";
 
 // Session A V2: 4-role sidebar matrix.
@@ -26,7 +26,7 @@ const ROLE_PAGES: Record<AdminRole, Set<string>> = {
     "/admin/quoting-companies", "/admin/data-team", "/admin/audit-logs", "/admin/notification-log", "/admin/account-requests",
     "/admin/vendors", "/admin/vendor-ledger", "/admin/vendor-inbox", "/admin/market-radar", "/admin/companies",
     "/admin/ai-ledger", "/admin/leads", "/admin/targets", "/admin/announcements", "/admin/tasks",
-    "/admin/ads-meta", "/admin/ads-google",
+    "/admin/ads-meta", "/admin/ads-google", "/admin/integrations",
   ]),
   logistics: new Set(["/admin/consignments"]),
   accounts: new Set([
@@ -109,6 +109,7 @@ export function AdminLayout({ children, title }: { children: ReactNode; title: s
     { href: "/admin/tasks", label: "Tasks", icon: CheckSquare },
     { href: "/admin/ads-meta", label: "Meta Ads", icon: Facebook },
     { href: "/admin/ads-google", label: "Google Ads", icon: Search },
+    { href: "/admin/integrations", label: "Integrations", icon: Link2 },
     { href: "/admin/data-team", label: "Data Team", icon: UserCog },
     { href: "/admin/account-requests", label: "Account Requests", icon: ClipboardList },
     { href: "/admin/audit-logs", label: "Audit Log", icon: ScrollText },

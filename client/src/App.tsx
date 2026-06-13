@@ -86,6 +86,7 @@ import AdminAnnouncements from "@/pages/admin/AdminAnnouncements";
 import AdminTasks from "@/pages/admin/AdminTasks";
 import AdminAdsMeta from "@/pages/admin/AdminAdsMeta";
 import AdminAdsGoogle from "@/pages/admin/AdminAdsGoogle";
+import AdminIntegrations from "@/pages/admin/AdminIntegrations";
 // Round 8 — new admin pages
 import AdminParts from "@/pages/admin/AdminParts";
 import AdminPurchaseHistory from "@/pages/admin/AdminPurchaseHistory";
@@ -208,6 +209,8 @@ function AppRouter() {
         <Route path="/admin/tasks" component={AdminTasks} />
         <Route path="/admin/ads-meta" component={AdminAdsMeta} />
         <Route path="/admin/ads-google" component={AdminAdsGoogle} />
+        {/* R26.3b — OAuth Integrations panel */}
+        <Route path="/admin/integrations" component={AdminIntegrations} />
         {/* Round 8 — new admin routes */}
         <Route path="/admin/parts" component={AdminParts} />
         <Route path="/admin/purchase-history" component={AdminPurchaseHistory} />
