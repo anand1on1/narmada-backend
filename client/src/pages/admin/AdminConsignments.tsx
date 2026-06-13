@@ -2,7 +2,9 @@ import { useEffect, useState } from "react";
 import { AdminLayout } from "./AdminLayout";
 import { adminFetch, useAdminAuth, getAdminToken } from "@/lib/admin-auth";
 import { apiUrl } from "@/lib/queryClient";
-import { Plus, Edit3, Trash2, Truck, Search, PackageCheck } from "lucide-react";
+import { StatusBadge } from "@/components/ui/status-badge";
+import { ConsignmentDetailModal } from "./ConsignmentDetailModal";
+import { Plus, Edit3, Trash2, Truck, Search, PackageCheck, Eye, FileDown, Loader2 } from "lucide-react";
 
 interface Consignment {
   id: number;
@@ -67,13 +69,28 @@ interface FromDelhiPO {
   itemCount: number;
   custTotal: number;
   costTotal: number;
+  totalBundles: number;
 }
+
+// R26 — default date range = last 30 days, formatted as YYYY-MM-DD for <input type=date>.
+function isoDaysAgo(days: number): string {
+  return new Date(Date.now() - days * 86400000).toISOString().slice(0, 10);
+}
+function isoToday(): string { return new Date().toISOString().slice(0, 10); }
 
 export default function AdminConsignments() {
   const { token } = useAdminAuth();
   const [tab, setTab] = useState<"consignments" | "from-delhi">("consignments");
   const [delhiPos, setDelhiPos] = useState<FromDelhiPO[]>([]);
   const [delhiBusy, setDelhiBusy] = useState<number | null>(null);
+  // R26 — From-Delhi tab controls
+  const [delhiStatusFilter, setDelhiStatusFilter] = useState<string>("all");
+  const [delhiFrom, setDelhiFrom] = useState<string>(isoDaysAgo(30));
+  const [delhiTo, setDelhiTo] = useState<string>(isoToday());
+  const [delhiQ, setDelhiQ] = useState<string>("");
+  const [delhiSel, setDelhiSel] = useState<Set<number>>(new Set());
+  const [delhiViewId, setDelhiViewId] = useState<number | null>(null);
+  const [delhiExporting, setDelhiExporting] = useState(false);
   const [items, setItems] = useState<Consignment[]>([]);
   const [filter, setFilter] = useState<"all" | Consignment["status"]>("all");
   const [q, setQ] = useState("");
@@ -139,11 +156,16 @@ export default function AdminConsignments() {
   }
   useEffect(() => { load(); }, [token, filter]); // eslint-disable-line
 
-  // R22.1 — load Delhi-dispatched POs and poll while the tab is open.
+  // R22.1 / R26 — load Delhi-dispatched POs (status/date/search filters) and poll while open.
   async function loadDelhi() {
     if (!token) return;
     try {
-      const r = await adminFetch(token, "/api/admin/consignment/from-delhi");
+      const params = new URLSearchParams();
+      if (delhiStatusFilter !== "all") params.set("status", delhiStatusFilter);
+      if (delhiQ.trim()) params.set("q", delhiQ.trim());
+      if (delhiFrom) params.set("from", String(new Date(delhiFrom + "T00:00:00").getTime()));
+      if (delhiTo) params.set("to", String(new Date(delhiTo + "T23:59:59").getTime()));
+      const r = await adminFetch(token, `/api/admin/consignment/from-delhi?${params.toString()}`);
       const _d = await r.json();
       setDelhiPos(Array.isArray(_d) ? _d : []);
     } catch { /* keep last */ }
@@ -153,7 +175,42 @@ export default function AdminConsignments() {
     loadDelhi();
     const id = setInterval(loadDelhi, 20000);
     return () => clearInterval(id);
-  }, [tab, token]); // eslint-disable-line
+  }, [tab, token, delhiStatusFilter, delhiFrom, delhiTo]); // eslint-disable-line
+
+  function toggleDelhiSel(id: number) {
+    setDelhiSel((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id); else next.add(id);
+      return next;
+    });
+  }
+  function toggleDelhiSelAll(ids: number[]) {
+    setDelhiSel((prev) => {
+      const allSelected = ids.length > 0 && ids.every((i) => prev.has(i));
+      return allSelected ? new Set() : new Set(ids);
+    });
+  }
+
+  async function exportDelhiPdf() {
+    if (delhiSel.size === 0) { alert("Select at least one consignment to export."); return; }
+    setDelhiExporting(true);
+    try {
+      const t = getAdminToken();
+      const r = await fetch(apiUrl("/api/admin/consignments/export-pdf"), {
+        method: "POST",
+        headers: { "Content-Type": "application/json", ...(t ? { "x-admin-token": t } : {}) },
+        body: JSON.stringify({ po_ids: Array.from(delhiSel) }),
+      });
+      if (!r.ok) { const e = await r.json().catch(() => ({})); alert(e.error || "Export failed"); return; }
+      const blob = await r.blob();
+      const u = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = u;
+      a.download = `consignments-${new Date().toISOString().slice(0, 10).replace(/-/g, "")}.pdf`;
+      a.click();
+      URL.revokeObjectURL(u);
+    } finally { setDelhiExporting(false); }
+  }
 
   async function setDelhiStatus(poId: number, status: "received" | "processing" | "completed") {
     if (!token) return;
@@ -237,7 +294,14 @@ export default function AdminConsignments() {
       </div>
 
       {tab === "from-delhi" ? (
-        <FromDelhiTab pos={delhiPos} busyId={delhiBusy} onStatus={setDelhiStatus} />
+        <FromDelhiTab
+          pos={delhiPos} busyId={delhiBusy} onStatus={setDelhiStatus}
+          statusFilter={delhiStatusFilter} setStatusFilter={setDelhiStatusFilter}
+          from={delhiFrom} setFrom={setDelhiFrom} to={delhiTo} setTo={setDelhiTo}
+          q={delhiQ} setQ={setDelhiQ} onSearch={loadDelhi}
+          selected={delhiSel} onToggle={toggleDelhiSel} onToggleAll={toggleDelhiSelAll}
+          onView={setDelhiViewId} onExport={exportDelhiPdf} exporting={delhiExporting}
+        />
       ) : (
       <>
       <div className="flex gap-2 mb-4 flex-wrap items-center">
@@ -479,6 +543,10 @@ export default function AdminConsignments() {
           </div>
         </div>
       )}
+
+      {delhiViewId != null && (
+        <ConsignmentDetailModal poId={delhiViewId} onClose={() => setDelhiViewId(null)} />
+      )}
     </AdminLayout>
   );
 }
@@ -494,66 +562,140 @@ function Field({ label, children }: { label: string; children: any }) {
 
 const inr = (n: number) => "₹" + (Number(n) || 0).toLocaleString("en-IN");
 
-// R22.1 — POs dispatched by Delhi, with Mark Received / Process / Complete actions.
+// R26 — the "Processing" backend status maps to the user-facing "Processed" badge.
+const DELHI_STATUS_OPTIONS: Array<{ value: string; label: string }> = [
+  { value: "all", label: "All" },
+  { value: "pending", label: "Pending" },
+  { value: "received", label: "Received" },
+  { value: "processing", label: "Processed" },
+  { value: "completed", label: "Completed" },
+];
+// Map a raw consignment_status to the StatusBadge status token + label.
+function delhiBadge(s: string | null) {
+  if (!s) return <StatusBadge status="pending" label="Pending" />;
+  if (s === "received") return <StatusBadge status="open" label="Received" />;
+  if (s === "processing") return <StatusBadge status="processed" label="Processed" />;
+  if (s === "completed") return <StatusBadge status="fulfilled" label="Completed" />;
+  return <StatusBadge status={s} />;
+}
+
+// R22.1 / R26 — POs dispatched by Delhi. Shows ALL POs (processed stay visible), with
+// status/date/search filters, bundles count, View modal, multi-select + PDF export.
 function FromDelhiTab({
   pos, busyId, onStatus,
+  statusFilter, setStatusFilter, from, setFrom, to, setTo, q, setQ, onSearch,
+  selected, onToggle, onToggleAll, onView, onExport, exporting,
 }: {
   pos: FromDelhiPO[];
   busyId: number | null;
   onStatus: (poId: number, status: "received" | "processing" | "completed") => void;
+  statusFilter: string; setStatusFilter: (s: string) => void;
+  from: string; setFrom: (s: string) => void;
+  to: string; setTo: (s: string) => void;
+  q: string; setQ: (s: string) => void;
+  onSearch: () => void;
+  selected: Set<number>; onToggle: (id: number) => void; onToggleAll: (ids: number[]) => void;
+  onView: (id: number) => void;
+  onExport: () => void; exporting: boolean;
 }) {
-  const statusBadge = (s: string | null) => {
-    if (!s) return <span className="text-[10px] px-2 py-0.5 rounded uppercase tracking-wider font-bold bg-slate-500/15 text-slate-700">awaiting</span>;
-    const map: Record<string, string> = {
-      received: "bg-blue-500/15 text-blue-700",
-      processing: "bg-amber-500/15 text-amber-700",
-      completed: "bg-emerald-500/15 text-emerald-700",
-    };
-    return <span className={`text-[10px] px-2 py-0.5 rounded uppercase tracking-wider font-bold ${map[s] || "bg-muted"}`}>{s}</span>;
-  };
+  const ids = pos.map((p) => p.id);
+  const allSelected = ids.length > 0 && ids.every((i) => selected.has(i));
   return (
-    <div className="bg-card border rounded-xl overflow-x-auto">
-      {pos.length === 0 ? (
-        <div className="p-12 text-center text-muted-foreground">No POs dispatched from Delhi awaiting consignment.</div>
-      ) : (
-        <table className="w-full text-sm">
-          <thead>
-            <tr className="bg-muted/50 text-left">
-              <th className="px-4 py-3 font-semibold">PO #</th>
-              <th className="px-4 py-3 font-semibold">Customer</th>
-              <th className="px-4 py-3 font-semibold">Items</th>
-              <th className="px-4 py-3 font-semibold">Value</th>
-              <th className="px-4 py-3 font-semibold">Consignment</th>
-              <th className="px-4 py-3 font-semibold text-right">Actions</th>
-            </tr>
-          </thead>
-          <tbody className="divide-y">
-            {pos.map((p) => (
-              <tr key={p.id} data-testid={`delhi-po-${p.id}`}>
-                <td className="px-4 py-3 font-mono font-bold">{p.poNumber}</td>
-                <td className="px-4 py-3">{p.customerName || "—"}{p.customerPhone ? <div className="text-xs text-muted-foreground">{p.customerPhone}</div> : null}</td>
-                <td className="px-4 py-3">{p.itemCount}</td>
-                <td className="px-4 py-3">{inr(p.custTotal)}</td>
-                <td className="px-4 py-3">{statusBadge(p.consignmentStatus)}</td>
-                <td className="px-4 py-3 text-right whitespace-nowrap">
-                  {p.consignmentStatus !== "received" && p.consignmentStatus !== "processing" && p.consignmentStatus !== "completed" && (
-                    <button onClick={() => onStatus(p.id, "received")} disabled={busyId === p.id}
-                      className="px-2.5 py-1 border rounded text-xs font-semibold hover:bg-muted disabled:opacity-50 mr-2" data-testid={`btn-received-${p.id}`}>Mark Received</button>
-                  )}
-                  {p.consignmentStatus !== "processing" && p.consignmentStatus !== "completed" && (
-                    <button onClick={() => onStatus(p.id, "processing")} disabled={busyId === p.id}
-                      className="px-2.5 py-1 border rounded text-xs font-semibold hover:bg-muted disabled:opacity-50 mr-2" data-testid={`btn-process-${p.id}`}>Process</button>
-                  )}
-                  {p.consignmentStatus !== "completed" && (
-                    <button onClick={() => onStatus(p.id, "completed")} disabled={busyId === p.id}
-                      className="px-2.5 py-1 bg-emerald-600 text-white rounded text-xs font-semibold hover:bg-emerald-700 disabled:opacity-50" data-testid={`btn-complete-${p.id}`}>Complete</button>
-                  )}
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
+    <div className="space-y-3">
+      <div className="flex gap-2 flex-wrap items-end">
+        <div>
+          <label className="text-[11px] block mb-0.5 text-muted-foreground">Status</label>
+          <select value={statusFilter} onChange={(e) => setStatusFilter(e.target.value)}
+            className="border rounded-lg px-3 py-2 bg-background text-sm" data-testid="delhi-status-filter">
+            {DELHI_STATUS_OPTIONS.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
+          </select>
+        </div>
+        <div>
+          <label className="text-[11px] block mb-0.5 text-muted-foreground">From</label>
+          <input type="date" value={from} onChange={(e) => setFrom(e.target.value)}
+            className="border rounded-lg px-3 py-2 bg-background text-sm" data-testid="delhi-from" />
+        </div>
+        <div>
+          <label className="text-[11px] block mb-0.5 text-muted-foreground">To</label>
+          <input type="date" value={to} onChange={(e) => setTo(e.target.value)}
+            className="border rounded-lg px-3 py-2 bg-background text-sm" data-testid="delhi-to" />
+        </div>
+        <div className="flex-1 min-w-[200px]">
+          <label className="text-[11px] block mb-0.5 text-muted-foreground">Search</label>
+          <div className="relative">
+            <Search className="w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground" />
+            <input value={q} onChange={(e) => setQ(e.target.value)} onKeyDown={(e) => e.key === "Enter" && onSearch()}
+              placeholder="PO #, customer, item, brand…"
+              className="w-full border rounded-lg pl-9 pr-3 py-2 bg-background text-sm" data-testid="delhi-search" />
+          </div>
+        </div>
+        <button onClick={onSearch} className="px-4 py-2 bg-accent text-accent-foreground rounded-lg font-semibold text-sm" data-testid="delhi-search-btn">Search</button>
+      </div>
+
+      {selected.size > 0 && (
+        <div className="flex items-center justify-between bg-accent/10 border border-accent/30 rounded-lg px-4 py-2">
+          <span className="text-sm font-semibold" data-testid="delhi-sel-count">{selected.size} consignment{selected.size > 1 ? "s" : ""} selected</span>
+          <button onClick={onExport} disabled={exporting}
+            className="px-4 py-2 bg-accent text-accent-foreground rounded-lg font-semibold text-sm inline-flex items-center gap-2 disabled:opacity-50"
+            data-testid="delhi-export-btn">
+            {exporting ? <Loader2 className="w-4 h-4 animate-spin" /> : <FileDown className="w-4 h-4" />} Export Selected as PDF
+          </button>
+        </div>
       )}
+
+      <div className="bg-card border rounded-xl overflow-x-auto">
+        {pos.length === 0 ? (
+          <div className="p-12 text-center text-muted-foreground">No Delhi-dispatched POs match the current filters.</div>
+        ) : (
+          <table className="w-full text-sm">
+            <thead>
+              <tr className="bg-muted/50 text-left">
+                <th className="px-3 py-3 w-8">
+                  <input type="checkbox" checked={allSelected} onChange={() => onToggleAll(ids)} data-testid="delhi-select-all" />
+                </th>
+                <th className="px-4 py-3 font-semibold">PO #</th>
+                <th className="px-4 py-3 font-semibold">Status</th>
+                <th className="px-4 py-3 font-semibold">Customer</th>
+                <th className="px-4 py-3 font-semibold">Items</th>
+                <th className="px-4 py-3 font-semibold">Bundles</th>
+                <th className="px-4 py-3 font-semibold">Value</th>
+                <th className="px-4 py-3 font-semibold text-right">Actions</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y">
+              {pos.map((p) => (
+                <tr key={p.id} data-testid={`delhi-po-${p.id}`}>
+                  <td className="px-3 py-3">
+                    <input type="checkbox" checked={selected.has(p.id)} onChange={() => onToggle(p.id)} data-testid={`delhi-sel-${p.id}`} />
+                  </td>
+                  <td className="px-4 py-3 font-mono font-bold">{p.poNumber}</td>
+                  <td className="px-4 py-3">{delhiBadge(p.consignmentStatus)}</td>
+                  <td className="px-4 py-3">{p.customerName || "—"}{p.customerPhone ? <div className="text-xs text-muted-foreground">{p.customerPhone}</div> : null}</td>
+                  <td className="px-4 py-3">{p.itemCount}</td>
+                  <td className="px-4 py-3" data-testid={`delhi-bundles-${p.id}`}>{p.totalBundles}</td>
+                  <td className="px-4 py-3">{inr(p.custTotal)}</td>
+                  <td className="px-4 py-3 text-right whitespace-nowrap">
+                    <button onClick={() => onView(p.id)}
+                      className="px-2.5 py-1 border rounded text-xs font-semibold hover:bg-muted inline-flex items-center gap-1 mr-2" data-testid={`btn-view-${p.id}`}><Eye className="w-3 h-3" /> View</button>
+                    {p.consignmentStatus !== "received" && p.consignmentStatus !== "processing" && p.consignmentStatus !== "completed" && (
+                      <button onClick={() => onStatus(p.id, "received")} disabled={busyId === p.id}
+                        className="px-2.5 py-1 border rounded text-xs font-semibold hover:bg-muted disabled:opacity-50 mr-2" data-testid={`btn-received-${p.id}`}>Mark Received</button>
+                    )}
+                    {p.consignmentStatus !== "processing" && p.consignmentStatus !== "completed" && (
+                      <button onClick={() => onStatus(p.id, "processing")} disabled={busyId === p.id}
+                        className="px-2.5 py-1 border rounded text-xs font-semibold hover:bg-muted disabled:opacity-50 mr-2" data-testid={`btn-process-${p.id}`}>Process</button>
+                    )}
+                    {p.consignmentStatus !== "completed" && (
+                      <button onClick={() => onStatus(p.id, "completed")} disabled={busyId === p.id}
+                        className="px-2.5 py-1 bg-emerald-600 text-white rounded text-xs font-semibold hover:bg-emerald-700 disabled:opacity-50" data-testid={`btn-complete-${p.id}`}>Complete</button>
+                    )}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+      </div>
     </div>
   );
 }

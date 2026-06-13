@@ -4172,7 +4172,86 @@ function registerR9Routes(
       const vendorId = req.query.vendor_id ? parseInt(req.query.vendor_id as string, 10) : undefined;
       const from = req.query.from ? parseInt(req.query.from as string, 10) : undefined;
       const to = req.query.to ? parseInt(req.query.to as string, 10) : undefined;
-      res.json(v2.getVendorLedger({ vendorId, from, to }));
+      const q = req.query.q ? String(req.query.q) : undefined;
+      res.json(v2.getVendorLedger({ vendorId, from, to, q }));
+    } catch (e: any) { res.status(500).json({ error: e.message }); }
+  });
+  // R26 — export selected vendor ledgers as a single PDF (one section per seller).
+  app.post("/api/admin/vendor-ledger/export-pdf", requireAuth, async (req: any, res: any) => {
+    try {
+      const from = req.body?.from != null ? parseInt(String(req.body.from), 10) : undefined;
+      const to = req.body?.to != null ? parseInt(String(req.body.to), 10) : undefined;
+      const reqIds: number[] = Array.isArray(req.body?.vendor_ids)
+        ? req.body.vendor_ids.map((n: any) => parseInt(String(n), 10)).filter((n: number) => !Number.isNaN(n))
+        : [];
+      const ids = reqIds.length > 0 ? reqIds : v2.getVendorLedger({ from, to }).map((r: any) => r.vendor_id);
+      if (ids.length === 0) return res.status(404).json({ error: "No vendor ledgers to export" });
+
+      const { PdfBuilder } = await import("./pdf-utils");
+      const stamp = new Date();
+      const rangeLabel = (from || to)
+        ? `${from ? new Date(from).toLocaleDateString("en-IN") : "…"} – ${to ? new Date(to).toLocaleDateString("en-IN") : "…"}`
+        : "All time";
+      const builder = await PdfBuilder.create(
+        "Vendor Ledger",
+        `Generated ${stamp.toLocaleDateString("en-IN")} · ${rangeLabel}`,
+      );
+      const inr = (n: number) => "₹" + (Number(n) || 0).toLocaleString("en-IN");
+      for (const vendorId of ids) {
+        const summary = v2.getVendorLedger({ vendorId, from, to })[0];
+        const detail = v2.getVendorLedgerDetails(vendorId, from, to);
+        const name = summary?.vendor_name || `Seller #${vendorId}`;
+        const phone = summary?.vendor_phone || "—";
+        builder.sectionTitle(`${name} · ${phone}`);
+        builder.keyValues([
+          ["Date range", rangeLabel],
+          ["Approved value", inr(summary?.total_approved_value || 0)],
+          ["Total paid", inr(summary?.total_paid || 0)],
+          ["Balance", inr(summary?.balance || 0)],
+        ]);
+        // Build a combined transaction list: approved items (debit) + payments (credit).
+        type Txn = { ts: number; date: string; po: string; debit: number; credit: number };
+        const txns: Txn[] = [];
+        for (const it of detail.items) {
+          txns.push({
+            ts: Number(it.approved_at || 0),
+            date: it.approved_at ? new Date(it.approved_at).toLocaleDateString("en-IN") : "—",
+            po: it.po_number || "—",
+            debit: Number(it.line_total || 0), credit: 0,
+          });
+        }
+        for (const p of detail.payments) {
+          txns.push({
+            ts: Number(p.paid_on || 0),
+            date: p.paid_on ? new Date(p.paid_on).toLocaleDateString("en-IN") : "—",
+            po: `Payment (${p.method || "—"})`,
+            debit: 0, credit: Number(p.amount || 0),
+          });
+        }
+        txns.sort((a, b) => a.ts - b.ts);
+        let running = 0;
+        const rows = txns.map((t) => {
+          running += t.debit - t.credit;
+          return [t.date, t.po, t.debit ? inr(t.debit) : "—", t.credit ? inr(t.credit) : "—", inr(running)];
+        });
+        builder.table(
+          [
+            { header: "Date", width: 80 },
+            { header: "PO / Ref", width: 169 },
+            { header: "Debit", width: 80, align: "right" },
+            { header: "Credit", width: 80, align: "right" },
+            { header: "Balance", width: 90, align: "right" },
+          ],
+          rows.length ? rows : [["—", "No transactions", "—", "—", inr(0)]],
+        );
+        builder.note(`Opening balance: ${inr(0)}   ·   Closing balance: ${inr(running)}`);
+        builder.spacer(12);
+      }
+      const buffer = await builder.finish();
+      const fname = `vendor-ledger-${stamp.toISOString().slice(0, 10).replace(/-/g, "")}.pdf`;
+      res.setHeader("Content-Type", "application/pdf");
+      res.setHeader("Content-Disposition", `attachment; filename="${fname}"`);
+      res.send(buffer);
     } catch (e: any) { res.status(500).json({ error: e.message }); }
   });
 
@@ -5096,9 +5175,72 @@ function registerR8Routes(
   // R22 — Consignment visibility + customer create (admin token)
   // ============================================================
   // R22.1 — POs Delhi has dispatched, surfaced as a "From Delhi" category.
-  app.get("/api/admin/consignment/from-delhi", requireAuth, async (_req: any, res: any) => {
-    try { res.json(v2.listDelhiDispatchedForConsignment()); }
-    catch (e: any) { res.status(500).json({ error: e.message }); }
+  app.get("/api/admin/consignment/from-delhi", requireAuth, async (req: any, res: any) => {
+    try {
+      const status = req.query.status ? String(req.query.status) : undefined;
+      const q = req.query.q ? String(req.query.q) : undefined;
+      const from = req.query.from ? parseInt(req.query.from as string, 10) : undefined;
+      const to = req.query.to ? parseInt(req.query.to as string, 10) : undefined;
+      res.json(v2.listDelhiDispatchedForConsignment({ status, q, from, to }));
+    } catch (e: any) { res.status(500).json({ error: e.message }); }
+  });
+  // R26 — full detail for the From-Delhi "View" modal.
+  app.get("/api/admin/consignment/:poId/detail", requireAuth, async (req: any, res: any) => {
+    try {
+      const poId = parseInt(req.params.poId as string, 10);
+      const detail = v2.getConsignmentDetail(poId);
+      if (!detail) return res.status(404).json({ error: "PO not found" });
+      res.json(detail);
+    } catch (e: any) { res.status(500).json({ error: e.message }); }
+  });
+  // R26 — export selected From-Delhi consignments as a single PDF (one section per PO).
+  app.post("/api/admin/consignments/export-pdf", requireAuth, async (req: any, res: any) => {
+    try {
+      const poIds: number[] = Array.isArray(req.body?.po_ids)
+        ? req.body.po_ids.map((n: any) => parseInt(String(n), 10)).filter((n: number) => !Number.isNaN(n))
+        : [];
+      if (poIds.length === 0) return res.status(400).json({ error: "po_ids must be a non-empty array" });
+      const details = poIds.map((id) => v2.getConsignmentDetail(id)).filter(Boolean) as any[];
+      if (details.length === 0) return res.status(404).json({ error: "No matching consignments" });
+
+      const { PdfBuilder } = await import("./pdf-utils");
+      const stamp = new Date();
+      const builder = await PdfBuilder.create(
+        "Consignments — From Delhi",
+        `Generated ${stamp.toLocaleDateString("en-IN")} · ${details.length} PO(s)`,
+      );
+      const fmtDate = (ms: number | null) => ms ? new Date(ms).toLocaleDateString("en-IN") : "—";
+      details.forEach((d, idx) => {
+        const statusLabel = d.consignmentStatus
+          ? d.consignmentStatus.charAt(0).toUpperCase() + d.consignmentStatus.slice(1)
+          : "Pending";
+        builder.sectionTitle(`${d.poNumber} · ${d.customerName || "—"} · ${statusLabel}`);
+        builder.keyValues([
+          ["Customer", d.customerName || "—"],
+          ["PO Number", d.poNumber],
+          ["Delhi Dispatch", fmtDate(d.delhiSubmittedAt)],
+          ["Status", statusLabel],
+        ]);
+        builder.table(
+          [
+            { header: "Item", width: 210 },
+            { header: "Qty", width: 50, align: "right" },
+            { header: "Brand", width: 110 },
+            { header: "Vendor", width: 129 },
+          ],
+          (d.items as any[]).map((it) => [it.name, String(it.qty), it.brand || "—", it.vendorName || "—"]),
+        );
+        builder.note(
+          `Total items: ${d.totalItems}   ·   Total bundles: ${d.totalBundles}   ·   Carrier: ${d.carrier || "—"}   ·   Dockets: ${(d.dockets || []).join(", ") || "—"}`,
+        );
+        if (idx < details.length - 1) builder.spacer(12);
+      });
+      const buffer = await builder.finish();
+      const fname = `consignments-${stamp.toISOString().slice(0, 10).replace(/-/g, "")}.pdf`;
+      res.setHeader("Content-Type", "application/pdf");
+      res.setHeader("Content-Disposition", `attachment; filename="${fname}"`);
+      res.send(buffer);
+    } catch (e: any) { res.status(500).json({ error: e.message }); }
   });
   // R22.1 — mark a Delhi-dispatched PO received / processing / completed in the consignment view.
   app.post("/api/admin/consignment/:poId/status", requireAuth, async (req: any, res: any) => {
@@ -5136,10 +5278,13 @@ function registerR8Routes(
   // ============================================================
   // R23 — Command Center + margin summary + ledger backfill + vendor-ledger CSV
   // ============================================================
-  app.get("/api/admin/command-center", requireAuth, async (_req: any, res: any) => {
+  app.get("/api/admin/command-center", requireAuth, async (req: any, res: any) => {
     try {
       res.set("Cache-Control", "no-cache, no-store, must-revalidate");
-      res.json(v2.commandCenterWidgets());
+      const from = req.query.from ? parseInt(req.query.from as string, 10) : undefined;
+      const to = req.query.to ? parseInt(req.query.to as string, 10) : undefined;
+      const range = (from != null && to != null) ? { from, to } : undefined;
+      res.json(v2.commandCenterWidgets(range));
     } catch (e: any) { res.status(500).json({ error: e.message }); }
   });
   app.get("/api/admin/margin-summary", requireAuth, async (req: any, res: any) => {

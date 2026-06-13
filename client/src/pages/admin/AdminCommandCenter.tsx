@@ -79,21 +79,37 @@ function RoleSwitcher() {
   );
 }
 
+// R26 — date range helpers. Default range = today (so "Today's Revenue" still makes sense).
+function isoToday(): string { return new Date().toISOString().slice(0, 10); }
+function isoDaysAgo(days: number): string { return new Date(Date.now() - days * 86400000).toISOString().slice(0, 10); }
+function startOfMonthIso(): string { const d = new Date(); return new Date(d.getFullYear(), d.getMonth(), 1).toISOString().slice(0, 10); }
+
+type QuickChip = "today" | "7d" | "30d" | "month" | "custom";
+
 export default function AdminCommandCenter() {
   const { token } = useAdminAuth();
   const [data, setData] = useState<CC | null>(null);
   const [err, setErr] = useState<string | null>(null);
+  // R26 — date range. Defaults to today; chips set both ends.
+  const [from, setFrom] = useState<string>(isoToday());
+  const [to, setTo] = useState<string>(isoToday());
+  const [chip, setChip] = useState<QuickChip>("today");
+
+  const isSingleToday = from === isoToday() && to === isoToday();
 
   const load = useCallback(async () => {
     try {
-      const res = await adminFetch(token, "/api/admin/command-center");
+      const params = new URLSearchParams();
+      if (from) params.set("from", String(new Date(from + "T00:00:00").getTime()));
+      if (to) params.set("to", String(new Date(to + "T23:59:59").getTime()));
+      const res = await adminFetch(token, `/api/admin/command-center?${params.toString()}`);
       if (!res.ok) throw new Error(`${res.status}`);
       setData(await res.json());
       setErr(null);
     } catch (e: any) {
       setErr(e?.message || "failed to load");
     }
-  }, [token]);
+  }, [token, from, to]);
 
   useEffect(() => {
     load();
@@ -101,16 +117,53 @@ export default function AdminCommandCenter() {
     return () => clearInterval(id);
   }, [load]);
 
+  function applyChip(c: QuickChip) {
+    setChip(c);
+    const today = isoToday();
+    if (c === "today") { setFrom(today); setTo(today); }
+    else if (c === "7d") { setFrom(isoDaysAgo(7)); setTo(today); }
+    else if (c === "30d") { setFrom(isoDaysAgo(30)); setTo(today); }
+    else if (c === "month") { setFrom(startOfMonthIso()); setTo(today); }
+    // "custom" leaves the inputs as-is
+  }
+
+  const CHIPS: Array<{ value: QuickChip; label: string }> = [
+    { value: "today", label: "Today" },
+    { value: "7d", label: "7d" },
+    { value: "30d", label: "30d" },
+    { value: "month", label: "This Month" },
+    { value: "custom", label: "Custom" },
+  ];
+
   return (
     <AdminLayout title="Command Center">
-      <div className="flex justify-end mb-4">
+      <div className="flex justify-between items-end mb-4 flex-wrap gap-3">
+        <div className="flex items-end gap-2 flex-wrap">
+          <div className="flex gap-1.5 flex-wrap">
+            {CHIPS.map((c) => (
+              <button key={c.value} onClick={() => applyChip(c.value)}
+                className={`px-3 py-1.5 rounded-lg text-xs font-bold uppercase tracking-wider ${chip === c.value ? "bg-accent text-accent-foreground" : "bg-card border hover:bg-muted"}`}
+                data-testid={`cc-chip-${c.value}`}>{c.label}</button>
+            ))}
+          </div>
+          <div>
+            <label className="text-[11px] block mb-0.5 text-muted-foreground">From</label>
+            <input type="date" value={from} onChange={(e) => { setFrom(e.target.value); setChip("custom"); }}
+              className="border rounded-lg px-3 py-2 bg-background text-sm" data-testid="cc-from" />
+          </div>
+          <div>
+            <label className="text-[11px] block mb-0.5 text-muted-foreground">To</label>
+            <input type="date" value={to} onChange={(e) => { setTo(e.target.value); setChip("custom"); }}
+              className="border rounded-lg px-3 py-2 bg-background text-sm" data-testid="cc-to" />
+          </div>
+        </div>
         <RoleSwitcher />
       </div>
       {err && <div className="mb-4 text-sm text-red-600">Error: {err}</div>}
       {!data && !err && <div className="text-sm text-muted-foreground">Loading widgets…</div>}
       {data && (
         <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
-          <Card title="Today's Revenue" gradient="from-emerald-50 to-emerald-100" text="text-emerald-800" icon={DollarSign}>
+          <Card title={isSingleToday ? "Today's Revenue" : "Revenue (range)"} gradient="from-emerald-50 to-emerald-100" text="text-emerald-800" icon={DollarSign}>
             <div className="text-3xl font-bold">{inr(data.todayRevenue)}</div>
           </Card>
           <Card title="Open POs" gradient="from-blue-50 to-blue-100" text="text-blue-800" icon={FileText}>

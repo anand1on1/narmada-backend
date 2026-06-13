@@ -3134,7 +3134,7 @@ export function listVendorPayments(vendorId: number, from?: number, to?: number)
 
 // -------- Vendor ledger (one row per vendor) --------
 // Approved value = sum over approved po_items of vendor_rate * qty. Paid = sum vendor_payments.
-export function getVendorLedger(opts: { vendorId?: number; from?: number; to?: number } = {}): any[] {
+export function getVendorLedger(opts: { vendorId?: number; from?: number; to?: number; q?: string } = {}): any[] {
   const apprConds: string[] = ["pi.approved_vendor_id IS NOT NULL"];
   const apprParams: any[] = [];
   if (opts.vendorId != null) { apprConds.push("pi.approved_vendor_id = ?"); apprParams.push(opts.vendorId); }
@@ -3180,12 +3180,20 @@ export function getVendorLedger(opts: { vendorId?: number; from?: number; to?: n
     if ((p.last_pay || 0) > row.last_activity_at) row.last_activity_at = p.last_pay || 0;
   }
 
-  const rows = Array.from(map.values());
-  // Attach vendor name + compute balance
+  let rows = Array.from(map.values());
+  // Attach vendor name + phone + compute balance
   for (const r of rows) {
-    const v = sqlite.prepare(`SELECT name FROM vendors WHERE id = ?`).get(r.vendor_id) as any;
+    const v = sqlite.prepare(`SELECT name, phone FROM vendors WHERE id = ?`).get(r.vendor_id) as any;
     r.vendor_name = v?.name || `Vendor #${r.vendor_id}`;
+    r.vendor_phone = v?.phone ?? null;
     r.balance = (r.total_approved_value || 0) - (r.total_paid || 0);
+  }
+  // R26 — server-side search across vendor name + phone.
+  const q = (opts.q || "").trim().toLowerCase();
+  if (q) {
+    rows = rows.filter((r) =>
+      String(r.vendor_name || "").toLowerCase().includes(q) ||
+      String(r.vendor_phone || "").toLowerCase().includes(q));
   }
   rows.sort((a, b) => (b.last_activity_at || 0) - (a.last_activity_at || 0));
   return rows;
@@ -3359,14 +3367,46 @@ export function processPurchaseOrder(poId: number): {
 // ============================================================
 // POs Delhi has marked dispatched (delhi_submitted_at set) that are not yet completed in
 // the consignment view. Returns lightweight rows with live totals for the "From Delhi" tab.
-export function listDelhiDispatchedForConsignment(): any[] {
-  const rows = sqlite.prepare(
+// R26 — From-Delhi list with optional status filter, date range (on delhi_submitted_at),
+// server-side search, and a per-PO bundles count. All filters are optional and additive;
+// crucially this NO LONGER hides processed/received/completed POs — every Delhi-dispatched
+// PO is returned and the caller renders a status badge. (R26 Fix A.1)
+export function listDelhiDispatchedForConsignment(opts: {
+  status?: string; from?: number; to?: number; q?: string;
+} = {}): any[] {
+  const conds: string[] = ["delhi_submitted_at IS NOT NULL", "deleted_at IS NULL"];
+  const params: any[] = [];
+  // status filter: "pending" means no consignment_status; otherwise exact match.
+  if (opts.status && opts.status !== "all") {
+    if (opts.status === "pending") conds.push("consignment_status IS NULL");
+    else { conds.push("consignment_status = ?"); params.push(opts.status); }
+  }
+  if (opts.from != null) { conds.push("delhi_submitted_at >= ?"); params.push(opts.from); }
+  if (opts.to != null) { conds.push("delhi_submitted_at <= ?"); params.push(opts.to); }
+
+  let rows = sqlite.prepare(
     `SELECT * FROM purchase_orders_v2
-     WHERE delhi_submitted_at IS NOT NULL
-       AND deleted_at IS NULL
-       AND (consignment_status IS NULL OR consignment_status != 'completed')
+     WHERE ${conds.join(" AND ")}
      ORDER BY delhi_submitted_at DESC`
-  ).all() as any[];
+  ).all(...params) as any[];
+
+  // Server-side search across PO#, customer name, line item description, brand.
+  const q = (opts.q || "").trim().toLowerCase();
+  if (q) {
+    rows = rows.filter((po) => {
+      if (String(po.po_number || "").toLowerCase().includes(q)) return true;
+      const customer = po.customer_id
+        ? (sqlite.prepare(`SELECT name FROM customers WHERE id = ?`).get(po.customer_id) as any)
+        : null;
+      if (customer?.name && String(customer.name).toLowerCase().includes(q)) return true;
+      const hit = sqlite.prepare(
+        `SELECT 1 FROM po_items WHERE po_id = ?
+         AND (LOWER(COALESCE(description,'')) LIKE ? OR LOWER(COALESCE(brand,'')) LIKE ?) LIMIT 1`
+      ).get(po.id, `%${q}%`, `%${q}%`);
+      return !!hit;
+    });
+  }
+
   return rows.map((po) => {
     const items = sqlite.prepare(`SELECT * FROM po_items WHERE po_id = ?`).all(po.id) as any[];
     const customer = po.customer_id
@@ -3379,6 +3419,9 @@ export function listDelhiDispatchedForConsignment(): any[] {
       const cost = it.vendor_rate != null ? Number(it.vendor_rate) : (it.purchase_cost != null ? Number(it.purchase_cost) : 0);
       costTotal += cost * qty;
     }
+    const bundlesRow = sqlite.prepare(
+      `SELECT COALESCE(SUM(bundles), 0) AS total FROM dispatches WHERE po_id = ?`
+    ).get(po.id) as any;
     return {
       id: po.id, poNumber: po.po_number, customerId: po.customer_id,
       customerName: customer?.name ?? null, customerPhone: customer?.phone ?? null,
@@ -3386,8 +3429,58 @@ export function listDelhiDispatchedForConsignment(): any[] {
       consignmentStatus: po.consignment_status ?? null,
       consignmentReceivedAt: po.consignment_received_at ?? null,
       itemCount: items.length, custTotal, costTotal,
+      totalBundles: Number(bundlesRow?.total ?? 0) || 0,
     };
   });
+}
+
+// R26 — full detail for the "View" modal + PDF export of a From-Delhi PO.
+export function getConsignmentDetail(poId: number): any | null {
+  const po = sqlite.prepare(`SELECT * FROM purchase_orders_v2 WHERE id = ?`).get(poId) as any;
+  if (!po) return null;
+  const customer = po.customer_id
+    ? (sqlite.prepare(`SELECT name, phone FROM customers WHERE id = ?`).get(po.customer_id) as any)
+    : null;
+  const items = (sqlite.prepare(`SELECT * FROM po_items WHERE po_id = ?`).all(po.id) as any[]).map((it) => {
+    let vendorName = it.vendor_name || null;
+    if (!vendorName) {
+      const vid = it.approved_vendor_id ?? it.vendor_id;
+      if (vid) {
+        const v = sqlite.prepare(`SELECT name FROM vendors WHERE id = ?`).get(vid) as any;
+        vendorName = v?.name ?? null;
+      }
+    }
+    return {
+      id: it.id,
+      name: it.description || it.part_number || "—",
+      partNumber: it.part_number ?? null,
+      qty: Number(it.qty ?? 0) || 0,
+      brand: it.brand ?? null,
+      vendorName,
+    };
+  });
+  const dispatches = sqlite.prepare(
+    `SELECT docket_no AS docketNo, courier_name AS courier, bundles, dispatch_date AS dispatchDate
+     FROM dispatches WHERE po_id = ? ORDER BY round_no ASC`
+  ).all(po.id) as any[];
+  const totalBundles = dispatches.reduce((s, d) => s + (Number(d.bundles) || 0), 0);
+  const carriers = Array.from(new Set(dispatches.map((d) => d.courier).filter(Boolean)));
+  const dockets = dispatches.map((d) => d.docketNo).filter(Boolean);
+  return {
+    id: po.id,
+    poNumber: po.po_number,
+    customerName: customer?.name ?? null,
+    customerPhone: customer?.phone ?? null,
+    delhiSubmittedAt: po.delhi_submitted_at ?? null,
+    consignmentStatus: po.consignment_status ?? null,
+    status: po.status,
+    items,
+    dispatches,
+    totalItems: items.length,
+    totalBundles,
+    carrier: carriers.join(", ") || null,
+    dockets,
+  };
 }
 
 // Set the consignment marker on a PO (received|processing|completed). Additive — does NOT
@@ -3407,11 +3500,16 @@ export function setConsignmentStatus(poId: number, status: string): any {
 // ============================================================
 // R23 — Command Center aggregates + ledger + margin
 // ============================================================
-export function commandCenterWidgets(): any {
+// R26 — accepts an optional [fromMs, toMs] window. When omitted, defaults preserve the
+// original behaviour (today for revenue, last 7d for quotations/rates, last 30d for tops).
+// When supplied, ALL windowed widgets use the user range.
+export function commandCenterWidgets(range?: { from?: number; to?: number }): any {
   const dayStart = new Date(); dayStart.setHours(0, 0, 0, 0);
-  const todayMs = dayStart.getTime();
-  const weekAgo = Date.now() - 7 * 24 * 60 * 60 * 1000;
-  const monthAgo = Date.now() - 30 * 24 * 60 * 60 * 1000;
+  const hasRange = range && range.from != null && range.to != null;
+  const todayMs = hasRange ? Number(range!.from) : dayStart.getTime();
+  const rangeEnd = hasRange ? Number(range!.to) : Date.now();
+  const weekAgo = hasRange ? Number(range!.from) : Date.now() - 7 * 24 * 60 * 60 * 1000;
+  const monthAgo = hasRange ? Number(range!.from) : Date.now() - 30 * 24 * 60 * 60 * 1000;
 
   // Pull active POs once and compute totals in JS (mirrors computePoTotals).
   const activePos = sqlite.prepare(
@@ -3435,10 +3533,10 @@ export function commandCenterWidgets(): any {
     return { cust, cost };
   };
 
-  // 1. Today's revenue (sum custTotal of POs created today)
+  // 1. Today's revenue (sum custTotal of POs created in window)
   let todayRevenue = 0;
   for (const po of activePos) {
-    if (Number(po.created_at) >= todayMs) todayRevenue += totalsFor(po.id).cust;
+    if (Number(po.created_at) >= todayMs && Number(po.created_at) <= rangeEnd) todayRevenue += totalsFor(po.id).cust;
   }
   // 2. Open POs
   const openPos = activePos.filter((p) => ["open", "draft", "processed", "sent", "partial"].includes(String(p.status)));
@@ -3467,20 +3565,20 @@ export function commandCenterWidgets(): any {
     id: r.id, vendorName: r.vendor_name || r.vendor_phone || "Unknown",
     snippet: String(r.body || "").slice(0, 80), createdAt: r.created_at,
   }));
-  // 6. This week's quotations (sent + accepted)
-  const quotesSent = (sqlite.prepare(`SELECT COUNT(*) AS n FROM quotations WHERE created_at >= ? AND (deleted_at IS NULL)`).get(weekAgo) as any)?.n ?? 0;
+  // 6. This week's quotations (sent + accepted) — windowed
+  const quotesSent = (sqlite.prepare(`SELECT COUNT(*) AS n FROM quotations WHERE created_at >= ? AND created_at <= ? AND (deleted_at IS NULL)`).get(weekAgo, rangeEnd) as any)?.n ?? 0;
   let quotesAccepted = 0;
-  try { quotesAccepted = (sqlite.prepare(`SELECT COUNT(*) AS n FROM quotations WHERE created_at >= ? AND status = 'accepted' AND (deleted_at IS NULL)`).get(weekAgo) as any)?.n ?? 0; } catch { /* status col may differ */ }
-  // 7. Active RFQs awaiting rates
+  try { quotesAccepted = (sqlite.prepare(`SELECT COUNT(*) AS n FROM quotations WHERE created_at >= ? AND created_at <= ? AND status = 'accepted' AND (deleted_at IS NULL)`).get(weekAgo, rangeEnd) as any)?.n ?? 0; } catch { /* status col may differ */ }
+  // 7. Active RFQs awaiting rates — windowed
   const awaitingRates = (sqlite.prepare(
-    `SELECT COUNT(*) AS n FROM po_item_vendor_quotes WHERE status = 'requested' AND rate IS NULL AND requested_at >= ?`
-  ).get(weekAgo) as any)?.n ?? 0;
+    `SELECT COUNT(*) AS n FROM po_item_vendor_quotes WHERE status = 'requested' AND rate IS NULL AND requested_at >= ? AND requested_at <= ?`
+  ).get(weekAgo, rangeEnd) as any)?.n ?? 0;
   // 8. Top customers (30d)
   const topCustomers: any[] = [];
   {
     const byCust = new Map<number, number>();
     for (const po of activePos) {
-      if (Number(po.created_at) >= monthAgo && po.customer_id) {
+      if (Number(po.created_at) >= monthAgo && Number(po.created_at) <= rangeEnd && po.customer_id) {
         byCust.set(po.customer_id, (byCust.get(po.customer_id) || 0) + totalsFor(po.id).cust);
       }
     }
@@ -3495,7 +3593,7 @@ export function commandCenterWidgets(): any {
   {
     const byVendor = new Map<number, number>();
     for (const po of activePos) {
-      if (Number(po.created_at) < monthAgo) continue;
+      if (Number(po.created_at) < monthAgo || Number(po.created_at) > rangeEnd) continue;
       for (const it of (itemsByPo.get(po.id) || [])) {
         if (it.vendor_id && it.vendor_rate != null) {
           byVendor.set(it.vendor_id, (byVendor.get(it.vendor_id) || 0) + Number(it.vendor_rate) * (Number(it.qty) || 0));

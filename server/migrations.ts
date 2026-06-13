@@ -685,3 +685,21 @@ export function runR25Migrations() {
   }
   console.log("[migrations] R25 tables/columns ensured");
 }
+
+// -------- R26 additive migrations --------
+// R26: consignment From-Delhi rebuild + vendor ledger export + command-center date range.
+// No new tables/columns are required — consignment_status (R22) and dispatches.bundles already
+// exist. These ALTERs are defensive/idempotent re-ensures so a fresh DB still has the columns
+// the R26 features read. Failures (column exists) are swallowed, matching prior rounds.
+export function runR26Migrations() {
+  const stmts: Array<{ desc: string; sql: string }> = [
+    { desc: "purchase_orders_v2.consignment_status (re-ensure)", sql: `ALTER TABLE purchase_orders_v2 ADD COLUMN consignment_status TEXT` },
+    { desc: "purchase_orders_v2.consignment_received_at (re-ensure)", sql: `ALTER TABLE purchase_orders_v2 ADD COLUMN consignment_received_at INTEGER` },
+    { desc: "dispatches.bundles (re-ensure)", sql: `ALTER TABLE dispatches ADD COLUMN bundles INTEGER` },
+  ];
+  for (const { desc, sql } of stmts) {
+    console.log(`[migrations] R26: ${desc}`);
+    try { sqlite.exec(sql); } catch (err: any) { console.log(`[migrations] R26: skipped ${desc} —`, err?.message || err); }
+  }
+  console.log("[migrations] R26 tables/columns ensured");
+}

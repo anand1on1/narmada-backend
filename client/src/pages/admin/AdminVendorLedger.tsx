@@ -8,18 +8,24 @@ import { useState } from "react";
 import { AdminLayout } from "./AdminLayout";
 import { adminFetch, useAdminAuth, getAdminToken } from "@/lib/admin-auth";
 import { apiUrl } from "@/lib/queryClient";
-import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { ChevronDown, ChevronRight, Download, Plus, Loader2, Check } from "lucide-react";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { ChevronDown, ChevronRight, Download, Plus, Loader2, Check, Search, FileDown } from "lucide-react";
 
 interface LedgerRow {
   vendor_id: number;
   vendor_name: string | null;
+  vendor_phone: string | null;
   total_approved_value: number;
   total_paid: number;
   balance: number;
   item_count: number;
   last_activity_at: number | null;
 }
+
+function isoDaysAgo(days: number): string {
+  return new Date(Date.now() - days * 86400000).toISOString().slice(0, 10);
+}
+function isoToday(): string { return new Date().toISOString().slice(0, 10); }
 interface LedgerItem {
   po_number: string; part: string | null; brand: string | null;
   qty: number | null; rate: number | null; line_total: number | null; approved_at: number | null;
@@ -166,15 +172,37 @@ export default function AdminVendorLedger() {
   const { token } = useAdminAuth();
   const qc = useQueryClient();
   const [expanded, setExpanded] = useState<number | null>(null);
+  // R26 — search, date range, multi-select, PDF export
+  const [q, setQ] = useState("");
+  const [from, setFrom] = useState(isoDaysAgo(30));
+  const [to, setTo] = useState(isoToday());
+  const [useRange, setUseRange] = useState(false);
+  const [selected, setSelected] = useState<Set<number>>(new Set());
+  const [exporting, setExporting] = useState(false);
 
-  const { data: rows = [] } = useQuery<LedgerRow[]>({
-    queryKey: ["vendor-ledger"],
+  const fromMs = useRange && from ? new Date(from + "T00:00:00").getTime() : undefined;
+  const toMs = useRange && to ? new Date(to + "T23:59:59").getTime() : undefined;
+
+  const { data: rows = [], refetch } = useQuery<LedgerRow[]>({
+    queryKey: ["vendor-ledger", q, fromMs, toMs],
     queryFn: async () => {
-      const r = await adminFetch(token, `/api/admin/vendor-ledger`);
+      const params = new URLSearchParams();
+      if (q.trim()) params.set("q", q.trim());
+      if (fromMs != null) params.set("from", String(fromMs));
+      if (toMs != null) params.set("to", String(toMs));
+      const r = await adminFetch(token, `/api/admin/vendor-ledger?${params.toString()}`);
       return r.ok ? r.json() : [];
     },
     enabled: !!token,
   });
+
+  function toggleSel(id: number) {
+    setSelected((prev) => { const n = new Set(prev); if (n.has(id)) n.delete(id); else n.add(id); return n; });
+  }
+  function toggleSelAll() {
+    const ids = rows.map((r) => r.vendor_id);
+    setSelected((prev) => (ids.length > 0 && ids.every((i) => prev.has(i))) ? new Set() : new Set(ids));
+  }
 
   function exportXlsx() {
     const t = getAdminToken() || "";
@@ -188,29 +216,89 @@ export default function AdminVendorLedger() {
       });
   }
 
+  async function exportPdf() {
+    setExporting(true);
+    try {
+      const t = getAdminToken();
+      const body: any = {};
+      if (selected.size > 0) body.vendor_ids = Array.from(selected);
+      if (fromMs != null) body.from = fromMs;
+      if (toMs != null) body.to = toMs;
+      const r = await fetch(apiUrl("/api/admin/vendor-ledger/export-pdf"), {
+        method: "POST",
+        headers: { "Content-Type": "application/json", ...(t ? { "x-admin-token": t } : {}) },
+        body: JSON.stringify(body),
+      });
+      if (!r.ok) { const e = await r.json().catch(() => ({})); alert(e.error || "Export failed"); return; }
+      const blob = await r.blob();
+      const u = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = u; a.download = `vendor-ledger-${new Date().toISOString().slice(0, 10).replace(/-/g, "")}.pdf`; a.click();
+      URL.revokeObjectURL(u);
+    } finally { setExporting(false); }
+  }
+
   const totals = rows.reduce(
     (s, r) => ({ approved: s.approved + r.total_approved_value, paid: s.paid + r.total_paid, bal: s.bal + r.balance }),
     { approved: 0, paid: 0, bal: 0 }
   );
+  const allSelected = rows.length > 0 && rows.every((r) => selected.has(r.vendor_id));
 
   return (
     <AdminLayout title="Vendor Ledger">
-      <div className="flex items-center justify-between mb-4">
+      <div className="flex items-end gap-2 flex-wrap mb-3">
+        <div className="flex-1 min-w-[220px]">
+          <label className="text-[11px] block mb-0.5 text-muted-foreground">Search seller</label>
+          <div className="relative">
+            <Search className="w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground" />
+            <input value={q} onChange={(e) => setQ(e.target.value)} onKeyDown={(e) => e.key === "Enter" && refetch()}
+              placeholder="Seller name or phone…"
+              className="w-full border rounded-lg pl-9 pr-3 py-2 bg-background text-sm" data-testid="vl-search" />
+          </div>
+        </div>
+        <label className="flex items-center gap-1.5 text-sm pb-2">
+          <input type="checkbox" checked={useRange} onChange={(e) => setUseRange(e.target.checked)} data-testid="vl-use-range" />
+          Date range
+        </label>
+        <div>
+          <label className="text-[11px] block mb-0.5 text-muted-foreground">From</label>
+          <input type="date" value={from} disabled={!useRange} onChange={(e) => setFrom(e.target.value)}
+            className="border rounded-lg px-3 py-2 bg-background text-sm disabled:opacity-50" data-testid="vl-from" />
+        </div>
+        <div>
+          <label className="text-[11px] block mb-0.5 text-muted-foreground">To</label>
+          <input type="date" value={to} disabled={!useRange} onChange={(e) => setTo(e.target.value)}
+            className="border rounded-lg px-3 py-2 bg-background text-sm disabled:opacity-50" data-testid="vl-to" />
+        </div>
+        <button onClick={() => refetch()} className="px-4 py-2 bg-accent text-accent-foreground rounded-lg font-semibold text-sm" data-testid="vl-apply">Apply</button>
+      </div>
+
+      <div className="flex items-center justify-between mb-4 flex-wrap gap-2">
         <div className="flex gap-4 text-sm">
           <span>Approved: <strong>{inr(totals.approved)}</strong></span>
           <span>Paid: <strong className="text-emerald-600">{inr(totals.paid)}</strong></span>
           <span>Balance: <strong className="text-amber-600">{inr(totals.bal)}</strong></span>
+          {selected.size > 0 && <span className="text-accent font-semibold" data-testid="vl-sel-count">{selected.size} selected</span>}
         </div>
-        <button onClick={exportXlsx}
-          className="px-3 py-2 border rounded-lg text-sm font-semibold inline-flex items-center gap-2 hover:bg-muted">
-          <Download className="w-4 h-4" /> Export .xlsx
-        </button>
+        <div className="flex gap-2">
+          <button onClick={exportPdf} disabled={exporting}
+            className="px-3 py-2 border rounded-lg text-sm font-semibold inline-flex items-center gap-2 hover:bg-muted disabled:opacity-50"
+            data-testid="vl-export-pdf">
+            {exporting ? <Loader2 className="w-4 h-4 animate-spin" /> : <FileDown className="w-4 h-4" />}
+            {selected.size > 0 ? "Export Selected (PDF)" : "Export All (PDF)"}
+          </button>
+          <button onClick={exportXlsx}
+            className="px-3 py-2 border rounded-lg text-sm font-semibold inline-flex items-center gap-2 hover:bg-muted">
+            <Download className="w-4 h-4" /> Export .xlsx
+          </button>
+        </div>
       </div>
 
       <div className="bg-card border rounded-xl overflow-hidden">
         <table className="w-full text-sm">
           <thead className="bg-muted/50 text-left">
             <tr>
+              <th className="px-3 py-3 w-8"><input type="checkbox" checked={allSelected} onChange={toggleSelAll} data-testid="vl-select-all" /></th>
               <th className="px-4 py-3 w-8"></th>
               <th className="px-4 py-3 font-semibold">Seller</th>
               <th className="px-4 py-3 font-semibold text-right">Approved Items</th>
@@ -222,13 +310,18 @@ export default function AdminVendorLedger() {
           </thead>
           <tbody className="divide-y">
             {rows.length === 0 ? (
-              <tr><td colSpan={7} className="px-4 py-12 text-center text-muted-foreground text-sm">No seller activity yet.</td></tr>
+              <tr><td colSpan={8} className="px-4 py-12 text-center text-muted-foreground text-sm">No seller activity yet.</td></tr>
             ) : rows.map((r) => (
               <>
-                <tr key={r.vendor_id} className="hover:bg-muted/30 cursor-pointer"
-                  onClick={() => setExpanded(expanded === r.vendor_id ? null : r.vendor_id)}>
-                  <td className="px-4 py-3">{expanded === r.vendor_id ? <ChevronDown className="w-4 h-4" /> : <ChevronRight className="w-4 h-4" />}</td>
-                  <td className="px-4 py-3 font-semibold">{r.vendor_name || `Seller #${r.vendor_id}`}</td>
+                <tr key={r.vendor_id} className="hover:bg-muted/30">
+                  <td className="px-3 py-3" onClick={(e) => e.stopPropagation()}>
+                    <input type="checkbox" checked={selected.has(r.vendor_id)} onChange={() => toggleSel(r.vendor_id)} data-testid={`vl-sel-${r.vendor_id}`} />
+                  </td>
+                  <td className="px-4 py-3 cursor-pointer" onClick={() => setExpanded(expanded === r.vendor_id ? null : r.vendor_id)}>{expanded === r.vendor_id ? <ChevronDown className="w-4 h-4" /> : <ChevronRight className="w-4 h-4" />}</td>
+                  <td className="px-4 py-3 font-semibold cursor-pointer" onClick={() => setExpanded(expanded === r.vendor_id ? null : r.vendor_id)}>
+                    {r.vendor_name || `Seller #${r.vendor_id}`}
+                    {r.vendor_phone ? <div className="text-xs text-muted-foreground font-normal">{r.vendor_phone}</div> : null}
+                  </td>
                   <td className="px-4 py-3 text-right">{r.item_count}</td>
                   <td className="px-4 py-3 text-right">{inr(r.total_approved_value)}</td>
                   <td className="px-4 py-3 text-right text-emerald-600">{inr(r.total_paid)}</td>
@@ -237,7 +330,7 @@ export default function AdminVendorLedger() {
                 </tr>
                 {expanded === r.vendor_id && (
                   <tr key={`${r.vendor_id}-d`}>
-                    <td colSpan={7} className="p-0">
+                    <td colSpan={8} className="p-0">
                       <LedgerDetails vendorId={r.vendor_id} token={token} onPaid={() => qc.invalidateQueries({ queryKey: ["vendor-ledger"] })} />
                     </td>
                   </tr>
