@@ -801,3 +801,67 @@ export function runR26_2gBackfill() {
     console.error("[migrations] R26.2g backfill failed:", e?.message || e);
   }
 }
+
+// -------- R26.2h one-time backfill --------
+// R26.2h: POs that were converted from a quotation BEFORE the quotation's rates were filled in
+// (e.g. AI autofill ran after conversion) carry po_items.unit_price = 0, so Cust. Rate / Line
+// Total / Order Value all show 0 in both Procurement and Delhi views. The rate exists on the
+// source quotation (quotation_items.mrp) but never propagated down. There is NO per-item FK
+// between po_items and quotation_items; the only link is purchase_orders_v2.quotation_id. We
+// therefore match po_items <-> quotation_items by part_number within the same quotation and copy
+// mrp into unit_price + line_total, then refresh PO header totals. Runs BEFORE R26.2g so the
+// recompute there sees the populated unit_prices. IDEMPOTENT — only touches po_items whose
+// unit_price is 0/NULL and that have a matching priced quotation line; priced lines are untouched.
+export function runR26_2hBackfill() {
+  try {
+    const lineInfo = sqlite
+      .prepare(
+        `UPDATE po_items
+         SET unit_price = (
+               SELECT qit.mrp FROM quotation_items qit
+               WHERE qit.quotation_id = (SELECT quotation_id FROM purchase_orders_v2 WHERE id = po_items.po_id)
+                 AND qit.part_number IS NOT NULL
+                 AND qit.part_number = po_items.part_number
+                 AND qit.mrp > 0
+               ORDER BY qit.line_no LIMIT 1
+             ),
+             line_total = COALESCE(qty, 0) * (
+               SELECT qit.mrp FROM quotation_items qit
+               WHERE qit.quotation_id = (SELECT quotation_id FROM purchase_orders_v2 WHERE id = po_items.po_id)
+                 AND qit.part_number IS NOT NULL
+                 AND qit.part_number = po_items.part_number
+                 AND qit.mrp > 0
+               ORDER BY qit.line_no LIMIT 1
+             )
+         WHERE (po_items.unit_price IS NULL OR po_items.unit_price = 0)
+           AND EXISTS (
+             SELECT 1 FROM purchase_orders_v2 po
+             WHERE po.id = po_items.po_id AND po.quotation_id IS NOT NULL
+           )
+           AND EXISTS (
+             SELECT 1 FROM quotation_items qit
+             WHERE qit.quotation_id = (SELECT quotation_id FROM purchase_orders_v2 WHERE id = po_items.po_id)
+               AND qit.part_number IS NOT NULL
+               AND qit.part_number = po_items.part_number
+               AND qit.mrp > 0
+           )`,
+      )
+      .run();
+
+    const headerInfo = sqlite
+      .prepare(
+        `UPDATE purchase_orders_v2
+         SET subtotal = COALESCE((SELECT SUM(COALESCE(line_total, 0)) FROM po_items WHERE po_items.po_id = purchase_orders_v2.id), 0),
+             total    = COALESCE((SELECT SUM(COALESCE(line_total, 0)) FROM po_items WHERE po_items.po_id = purchase_orders_v2.id), 0)
+         WHERE quotation_id IS NOT NULL
+           AND COALESCE(total, 0) <> COALESCE((SELECT SUM(COALESCE(line_total, 0)) FROM po_items WHERE po_items.po_id = purchase_orders_v2.id), 0)`,
+      )
+      .run();
+
+    console.log(
+      `[migrations] R26.2h: backfilled ${lineInfo.changes} po_items unit_price from quotation mrp, refreshed ${headerInfo.changes} PO header total(s)`,
+    );
+  } catch (e: any) {
+    console.error("[migrations] R26.2h backfill failed:", e?.message || e);
+  }
+}

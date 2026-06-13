@@ -2076,6 +2076,14 @@ export function registerV2Routes(app: Express, ctx: V2Context) {
             upsertPartFromQuotation(item.partNumber, item.productName, item.hsn, item.gstPct, item.brand, item.mrp);
           }
         }
+        // R26.2h — if this quotation was already converted to a PO (e.g. rates were set by
+        // AI autofill AFTER conversion), push the new mrp values down into any po_items whose
+        // unit_price is still 0, then refresh line/header totals. No-op when no linked PO exists.
+        try {
+          v2.propagateQuotationRatesToPoItems(id);
+        } catch (e: any) {
+          console.error(`[R26.2h] rate propagation failed for quotation ${id}:`, e?.message || e);
+        }
       }
       const teamUser = (req as any).teamUser;
       await v2.writeAuditLog({ actorType: "data_team", actorId: String(teamUser.id), action: "update_quotation", entityType: "quotation", entityId: String(id) });

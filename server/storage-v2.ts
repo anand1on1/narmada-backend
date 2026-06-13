@@ -1797,6 +1797,62 @@ export async function getPoItem(id: number): Promise<PoItem | undefined> {
 export async function updatePoItem(id: number, data: Partial<PoItem>): Promise<PoItem | undefined> {
   return db.update(poItems).set(data).where(eq(poItems.id, id)).returning().get();
 }
+// R26.2h — When a quotation's line rates (quotation_items.mrp) change AFTER it has already
+// been converted to a PO (e.g. AI autofill ran after conversion), the PO's po_items.unit_price
+// can be stale/0. There is no per-item FK between po_items and quotation_items; the only link
+// is purchase_orders_v2.quotation_id. We therefore match po_items <-> quotation_items by
+// part_number within the same quotation and copy mrp into unit_price, then recompute line_total.
+// Only lines whose unit_price is 0/NULL are touched, so a deliberately-priced PO line is never
+// clobbered. Header subtotal/total are refreshed from the new line totals. IDEMPOTENT + safe.
+export function propagateQuotationRatesToPoItems(quotationId: number): { lines: number; pos: number } {
+  try {
+    const lineInfo = sqlite
+      .prepare(
+        `UPDATE po_items
+         SET unit_price = (
+               SELECT qit.mrp FROM quotation_items qit
+               WHERE qit.quotation_id = (SELECT quotation_id FROM purchase_orders_v2 WHERE id = po_items.po_id)
+                 AND qit.part_number IS NOT NULL
+                 AND qit.part_number = po_items.part_number
+                 AND qit.mrp > 0
+               ORDER BY qit.line_no LIMIT 1
+             ),
+             line_total = COALESCE(qty, 0) * (
+               SELECT qit.mrp FROM quotation_items qit
+               WHERE qit.quotation_id = (SELECT quotation_id FROM purchase_orders_v2 WHERE id = po_items.po_id)
+                 AND qit.part_number IS NOT NULL
+                 AND qit.part_number = po_items.part_number
+                 AND qit.mrp > 0
+               ORDER BY qit.line_no LIMIT 1
+             )
+         WHERE po_items.po_id IN (SELECT id FROM purchase_orders_v2 WHERE quotation_id = ?)
+           AND (po_items.unit_price IS NULL OR po_items.unit_price = 0)
+           AND EXISTS (
+             SELECT 1 FROM quotation_items qit
+             WHERE qit.quotation_id = (SELECT quotation_id FROM purchase_orders_v2 WHERE id = po_items.po_id)
+               AND qit.part_number IS NOT NULL
+               AND qit.part_number = po_items.part_number
+               AND qit.mrp > 0
+           )`,
+      )
+      .run(quotationId);
+    const headerInfo = sqlite
+      .prepare(
+        `UPDATE purchase_orders_v2
+         SET subtotal = COALESCE((SELECT SUM(COALESCE(line_total, 0)) FROM po_items WHERE po_items.po_id = purchase_orders_v2.id), 0),
+             total    = COALESCE((SELECT SUM(COALESCE(line_total, 0)) FROM po_items WHERE po_items.po_id = purchase_orders_v2.id), 0)
+         WHERE quotation_id = ?`,
+      )
+      .run(quotationId);
+    if (lineInfo.changes > 0) {
+      console.log(`[R26.2h] propagated quotation ${quotationId} mrp into ${lineInfo.changes} po_items line(s), refreshed ${headerInfo.changes} PO header(s)`);
+    }
+    return { lines: lineInfo.changes, pos: headerInfo.changes };
+  } catch (e: any) {
+    console.error(`[R26.2h] propagateQuotationRatesToPoItems failed for quotation ${quotationId}:`, e?.message || e);
+    return { lines: 0, pos: 0 };
+  }
+}
 export async function assignVendorToPoItem(id: number, vendorId: number, purchaseCost?: number): Promise<PoItem | undefined> {
   const item = db.update(poItems).set({ vendorId, purchaseCost: purchaseCost ?? null }).where(eq(poItems.id, id)).returning().get();
   if (item && item.partNumber) {
