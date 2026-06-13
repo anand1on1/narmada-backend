@@ -865,3 +865,53 @@ export function runR26_2hBackfill() {
     console.error("[migrations] R26.2h backfill failed:", e?.message || e);
   }
 }
+
+// -------- R26.3 additive migrations (OAuth backend: Google + Meta) --------
+// Additive only. SQLite-backed (this project uses better-sqlite3, not Postgres):
+//   SERIAL  -> INTEGER PRIMARY KEY AUTOINCREMENT
+//   JSONB   -> TEXT (JSON-stringified)
+//   TIMESTAMP -> INTEGER (epoch ms)
+//   BOOLEAN -> INTEGER (0/1)
+// Creates oauth_tokens (provider connections) and meta_leads_inbox (raw Meta leadgen
+// webhook payloads, processed in R26.4). Per-statement try/catch with [migrations] R26.3 markers.
+export function runR26_3Migrations() {
+  const stmts: Array<{ desc: string; sql: string }> = [
+    {
+      desc: "oauth_tokens table",
+      sql: `CREATE TABLE IF NOT EXISTS oauth_tokens (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        provider TEXT NOT NULL,
+        account_email TEXT,
+        account_name TEXT,
+        account_id TEXT,
+        access_token TEXT NOT NULL,
+        refresh_token TEXT,
+        token_expires_at INTEGER,
+        scopes TEXT,
+        meta_pages TEXT,
+        connected_at INTEGER NOT NULL DEFAULT 0,
+        last_used_at INTEGER,
+        is_active INTEGER NOT NULL DEFAULT 1
+      )`,
+    },
+    {
+      desc: "oauth_tokens unique (provider, account_id)",
+      sql: `CREATE UNIQUE INDEX IF NOT EXISTS idx_oauth_tokens_provider_account
+            ON oauth_tokens (provider, account_id)`,
+    },
+    {
+      desc: "meta_leads_inbox table",
+      sql: `CREATE TABLE IF NOT EXISTS meta_leads_inbox (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        raw_payload TEXT,
+        received_at INTEGER NOT NULL DEFAULT 0,
+        processed INTEGER NOT NULL DEFAULT 0
+      )`,
+    },
+  ];
+  for (const { desc, sql } of stmts) {
+    console.log(`[migrations] R26.3: ${desc}`);
+    try { sqlite.exec(sql); } catch (err: any) { console.log(`[migrations] R26.3: skipped ${desc} —`, err?.message || err); }
+  }
+  console.log("[migrations] R26.3 tables/indexes ensured");
+}

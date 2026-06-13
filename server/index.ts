@@ -96,7 +96,7 @@ app.use((req, res, next) => {
   // ---- R4.4→R7: ensure additive tables + seed defaults on boot ----
   console.log("[boot] step: pre-migrations");
   try {
-    const { runR4toR7Migrations, runR8Migrations, runR9Migrations, runR10Migrations, runR11Migrations, runR11_1Migrations, runR12Migrations, runR13Migrations, runR13_4Migrations, runR18Migrations, runR20Migrations, runR21Migrations, runR22Migrations, runR23Migrations, runR24Migrations, runR25Migrations, runR26Migrations, runR26_2Migrations, runR26_2bMigrations, runR26_2fCleanup, runR26_2gBackfill, runR26_2hBackfill } = await import("./migrations");
+    const { runR4toR7Migrations, runR8Migrations, runR9Migrations, runR10Migrations, runR11Migrations, runR11_1Migrations, runR12Migrations, runR13Migrations, runR13_4Migrations, runR18Migrations, runR20Migrations, runR21Migrations, runR22Migrations, runR23Migrations, runR24Migrations, runR25Migrations, runR26Migrations, runR26_2Migrations, runR26_2bMigrations, runR26_2fCleanup, runR26_2gBackfill, runR26_2hBackfill, runR26_3Migrations } = await import("./migrations");
     runR4toR7Migrations();
     console.log("[boot] step: post-R4-R7 migrations");
     runR8Migrations();
@@ -141,11 +141,56 @@ app.use((req, res, next) => {
     console.log("[boot] step: post-R26.2h backfill");
     runR26_2gBackfill();
     console.log("[boot] step: post-R26.2g backfill");
+    runR26_3Migrations();
+    console.log("[boot] step: post-R26.3 migrations");
     const { seedR5Defaults } = await import("./seed-r5");
     await seedR5Defaults();
     console.log("[boot] step: post-seed");
   } catch (e: any) {
     console.error("[migrations] boot setup failed:", e?.message || e);
+  }
+
+  // ---- R26.3: session + passport (OAuth). After body parsers, BEFORE routes. ----
+  // SQLite-backed session store on the same persistent disk as the app DB (Render mounts
+  // DATA_DIR), so sessions survive restarts. The project uses better-sqlite3, not Postgres,
+  // so connect-sqlite3 is used instead of connect-pg-simple.
+  try {
+    const session = (await import("express-session")).default;
+    const SQLiteStoreFactory = (await import("connect-sqlite3")).default as any;
+    const SQLiteStore = SQLiteStoreFactory(session);
+    const { configurePassport, default: passport } = await import("./auth/passport");
+
+    const SESSION_DATA_DIR = process.env.DATA_DIR || ".";
+    const isProd = process.env.NODE_ENV === "production";
+
+    app.set("trust proxy", 1); // Render terminates TLS at the proxy; needed for secure cookies
+    app.use(
+      session({
+        store: new SQLiteStore({ db: "sessions.db", dir: SESSION_DATA_DIR, table: "oauth_sessions" }),
+        secret: process.env.SESSION_SECRET || "dev-insecure-session-secret",
+        resave: false,
+        saveUninitialized: false,
+        name: "narmada.sid",
+        cookie: {
+          secure: isProd,
+          httpOnly: true,
+          sameSite: "lax",
+          maxAge: 7 * 24 * 60 * 60 * 1000, // 7 days
+        },
+      }),
+    );
+
+    configurePassport();
+    app.use(passport.initialize());
+    app.use(passport.session());
+
+    const authRoutes = (await import("./auth/routes")).default;
+    const metaWebhookRoutes = (await import("./webhooks/meta-leads")).default;
+    app.use("/api/auth", authRoutes);
+    app.use("/api/webhooks/meta", metaWebhookRoutes);
+    console.log("[R26.3] OAuth session + passport + routes mounted");
+  } catch (e: any) {
+    console.error("[R26.3] OAuth setup failed:", e?.message || e);
   }
 
   console.log("[boot] step: pre-route-register");
