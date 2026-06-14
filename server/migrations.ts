@@ -1649,3 +1649,50 @@ export function runR26_6cMigrations() {
 
   console.log("[migrations] R26.6c: complete");
 }
+
+// -------- R26.6d additive migrations (heal orphaned targets + consignment user) --------
+// ADDITIVE ONLY. No schema changes. Two fixes for "sales/consignment not fetching
+// previous created data":
+//   1) Heal sales_targets whose sales_rep_user_id was stored NULL (admin form sent a
+//      field name the backend didn't read) — reassign to the demo `sales` user so the
+//      rep portal (/api/sales/targets, filtered by rep id) can see them.
+//   2) Seed the demo `consignment` user — R26.5 only seeded sales/finance/hr, so the
+//      consignment role login never existed and the portal could not authenticate.
+export function runR26_6dMigrations() {
+  // ---- 1. heal orphaned sales targets (null rep) ----
+  try {
+    const salesUser = sqlite.prepare(
+      `SELECT id FROM data_team_users WHERE username = 'sales' AND role = 'sales' LIMIT 1`,
+    ).get() as any;
+    if (salesUser?.id) {
+      const orphaned = sqlite.prepare(`SELECT COUNT(*) c FROM sales_targets WHERE sales_rep_user_id IS NULL`).get() as any;
+      const info = sqlite.prepare(
+        `UPDATE sales_targets SET sales_rep_user_id = ? WHERE sales_rep_user_id IS NULL`,
+      ).run(salesUser.id);
+      console.log(`[migrations] R26.6d: healed ${info.changes}/${orphaned?.c ?? 0} orphaned sales target(s) → rep ${salesUser.id}`);
+    } else {
+      console.log("[migrations] R26.6d: demo sales user not found — skipping target heal");
+    }
+  } catch (err: any) {
+    console.log("[migrations] R26.6d: target heal failed —", err?.message || err);
+  }
+
+  // ---- 2. seed the demo consignment user (was never created by R26.5) ----
+  try {
+    const { scryptSync, randomBytes } = require("node:crypto");
+    const hash = (plain: string) => {
+      const salt = randomBytes(16).toString("hex");
+      return `${salt}:${scryptSync(plain, salt, 64).toString("hex")}`;
+    };
+    const info = sqlite.prepare(
+      `INSERT OR IGNORE INTO data_team_users (username, password_hash, name, role, active, created_at)
+       VALUES (?, ?, ?, ?, 1, ?)`,
+    ).run("consignment", hash("Consignment@123"), "Consignment Demo", "consignment", Date.now());
+    if (info.changes > 0) console.log("[migrations] R26.6d: seeded demo consignment user");
+    else console.log("[migrations] R26.6d: consignment user already present");
+  } catch (err: any) {
+    console.log("[migrations] R26.6d: consignment user seed failed —", err?.message || err);
+  }
+
+  console.log("[migrations] R26.6d: complete");
+}

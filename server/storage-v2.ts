@@ -4278,7 +4278,7 @@ export function createSalesTarget(data: any): any {
     `INSERT INTO sales_targets (sales_rep_user_id, target_type, metric, customer_id, lead_id, period_start, period_end, target_amount, achieved_amount, rolled_over_from, status, onboarding_status, created_at)
      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   ).run(
-    data.sales_rep_user_id ?? data.salesRepUserId ?? null, data.target_type ?? data.targetType ?? "monthly",
+    data.sales_rep_user_id ?? data.salesRepUserId ?? data.repId ?? data.rep_id ?? null, data.target_type ?? data.targetType ?? "monthly",
     data.metric ?? "po", data.customer_id ?? data.customerId ?? null, data.lead_id ?? data.leadId ?? null,
     data.period_start ?? data.periodStart ?? null,
     data.period_end ?? data.periodEnd ?? null, Number(data.target_amount ?? data.targetAmount ?? 0),
@@ -4289,7 +4289,7 @@ export function createSalesTarget(data: any): any {
 }
 // Create one onboarding target per lead. Returns the created rows.
 export function createOnboardingTargets(data: any): any[] {
-  const repId = data.sales_rep_user_id ?? data.salesRepUserId ?? null;
+  const repId = data.sales_rep_user_id ?? data.salesRepUserId ?? data.repId ?? data.rep_id ?? null;
   const leadIds: number[] = Array.isArray(data.lead_ids) ? data.lead_ids
     : Array.isArray(data.leadIds) ? data.leadIds : [];
   const out: any[] = [];

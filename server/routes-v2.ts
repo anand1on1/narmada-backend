@@ -6264,6 +6264,21 @@ function registerR8Routes(
     } catch (e: any) { res.status(400).json({ error: e.message }); }
   });
 
+  // TODO: remove after R26.6d — temporary diagnostic dump for the "sales/consignment
+  // not fetching previous data" report. Reads the live prod SQLite directly.
+  app.get("/api/admin/_debug/r26_6d", requireAdminRole, async (_req, res) => {
+    try {
+      const out: any = {};
+      out.users = rawSqlite.prepare("SELECT id, username, role, active FROM data_team_users ORDER BY id").all();
+      out.salesTargetsAll = rawSqlite.prepare("SELECT id, sales_rep_user_id, customer_id, metric, target_type, target_amount, status, rolled_over_from, created_at FROM sales_targets ORDER BY id DESC LIMIT 50").all();
+      out.salesTargetsByRepGrouped = rawSqlite.prepare("SELECT sales_rep_user_id, COUNT(*) c FROM sales_targets GROUP BY sales_rep_user_id").all();
+      out.consignmentsCount = rawSqlite.prepare("SELECT COUNT(*) c FROM consignments").get();
+      out.consignmentsSample = rawSqlite.prepare("SELECT id, docket_number, origin, destination, status, customer_id, customer_name FROM consignments ORDER BY id DESC LIMIT 10").all();
+      out.consignmentUsers = rawSqlite.prepare("SELECT id, username, role FROM data_team_users WHERE role='consignment'").all();
+      res.json(out);
+    } catch (e: any) { res.status(500).json({ error: e.message }); }
+  });
+
   // ==================== G1. SALES TARGETS ====================
   app.get("/api/admin/sales-targets", requireAuth, async (req, res) => {
     const rows = v2.listSalesTargets({
@@ -6277,6 +6292,11 @@ function registerR8Routes(
   app.post("/api/admin/sales-targets", requireAdminRole, async (req, res) => {
     try {
       const body = req.body || {};
+      // Normalize rep id across every field name the admin UI might send so the
+      // target is never stored orphaned (null rep → invisible in the sales portal).
+      const rep = body.sales_rep_user_id ?? body.salesRepUserId ?? body.repId ?? body.rep_id;
+      if (!rep) return res.status(400).json({ error: "sales_rep_user_id required" });
+      body.sales_rep_user_id = Number(rep);
       // Onboarding: create ONE target per picked lead.
       if (body.metric === "onboarding" && (Array.isArray(body.lead_ids) || Array.isArray(body.leadIds))) {
         return res.json(v2.createOnboardingTargets(body));
