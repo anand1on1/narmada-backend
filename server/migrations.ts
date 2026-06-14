@@ -1536,3 +1536,116 @@ export function runR26_6bMigrations() {
 
   console.log("[migrations] R26.6b: complete");
 }
+
+// -------- R26.6c additive migrations (real-fix seeds: visible sales targets + consignments) --------
+// ADDITIVE ONLY. No schema changes — pure idempotent seed so the Sales and Consignment
+// portals show data out of the box. Resolves the demo `sales` user id via SELECT (never
+// hard-coded), seeds three value targets (po | quotation | payment) plus an onboarding
+// target, one task, two sample consignments, and ensures at least one customer exists.
+// Idempotency: each row keyed on a unique marker (rolled_over_from sentinel / docket / title).
+export function runR26_6cMigrations() {
+  // ---- sales targets across all three metrics + onboarding (idempotent per metric) ----
+  try {
+    const salesUser = sqlite.prepare(
+      `SELECT id FROM data_team_users WHERE username = 'sales' AND role = 'sales' LIMIT 1`,
+    ).get() as any;
+    if (salesUser?.id) {
+      const repId = salesUser.id;
+      const now = Date.now();
+      const d = new Date();
+      const periodStart = new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), 1)).toISOString().slice(0, 10);
+      const periodEnd = new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth() + 1, 0)).toISOString().slice(0, 10);
+      // Distinct sentinel markers (rolled_over_from) per seed row so each is idempotent.
+      const seeds: Array<{ mark: number; metric: string; amount: number }> = [
+        { mark: -26031, metric: "po", amount: 150000 },
+        { mark: -26032, metric: "quotation", amount: 80000 },
+        { mark: -26033, metric: "payment", amount: 120000 },
+      ];
+      const insTarget = sqlite.prepare(
+        `INSERT INTO sales_targets (sales_rep_user_id, target_type, metric, customer_id, period_start, period_end, target_amount, achieved_amount, status, onboarding_status, rolled_over_from, created_at)
+         VALUES (?, 'monthly', ?, NULL, ?, ?, ?, 0, 'active', NULL, ?, ?)`,
+      );
+      let seededTargets = 0;
+      for (const s of seeds) {
+        const existing = sqlite.prepare(`SELECT id FROM sales_targets WHERE rolled_over_from = ? LIMIT 1`).get(s.mark) as any;
+        if (!existing) { insTarget.run(repId, s.metric, periodStart, periodEnd, s.amount, s.mark, now); seededTargets++; }
+      }
+      // One onboarding target (separate sub-card) keyed on its own sentinel.
+      const ONBOARD_MARK = -26034;
+      const onboardExisting = sqlite.prepare(`SELECT id FROM sales_targets WHERE rolled_over_from = ? LIMIT 1`).get(ONBOARD_MARK) as any;
+      if (!onboardExisting) {
+        sqlite.prepare(
+          `INSERT INTO sales_targets (sales_rep_user_id, target_type, metric, customer_id, period_start, period_end, target_amount, achieved_amount, status, onboarding_status, rolled_over_from, created_at)
+           VALUES (?, 'monthly', 'onboarding', NULL, ?, ?, 1, 0, 'active', 'pending', ?, ?)`,
+        ).run(repId, periodStart, periodEnd, ONBOARD_MARK, now);
+        seededTargets++;
+      }
+      console.log(`[migrations] R26.6c: seeded ${seededTargets} sales target(s) for rep ${repId}`);
+
+      // One task assigned to the demo sales rep (assigned_to is the column the list filters on).
+      const TASK_TITLE = "R26.6c follow-up call";
+      const existingTask = sqlite.prepare(`SELECT id FROM task_items WHERE title = ? LIMIT 1`).get(TASK_TITLE) as any;
+      if (!existingTask) {
+        sqlite.prepare(
+          `INSERT INTO task_items (title, description, assigned_to, assigned_to_user_id, assigned_by, status, priority, created_at, updated_at)
+           VALUES (?, 'Call the new lead and confirm onboarding paperwork.', ?, ?, 'system', 'pending', 'high', ?, ?)`,
+        ).run(TASK_TITLE, repId, repId, now, now);
+        console.log(`[migrations] R26.6c: seeded sales task for rep ${repId}`);
+      }
+    } else {
+      console.log("[migrations] R26.6c: demo sales user not found — skipping target/task seed");
+    }
+  } catch (err: any) {
+    console.log("[migrations] R26.6c: sales seed failed —", err?.message || err);
+  }
+
+  // ---- ensure at least one customer + seed two sample consignments (idempotent) ----
+  try {
+    let custId: number | null = null;
+    const anyCustomer = sqlite.prepare(`SELECT id FROM customers ORDER BY id LIMIT 1`).get() as any;
+    if (anyCustomer?.id) {
+      custId = anyCustomer.id;
+    } else {
+      const CUST_CODE = "NRM-DEMO-CUST";
+      const existingDemo = sqlite.prepare(`SELECT id FROM customers WHERE customer_code = ? LIMIT 1`).get(CUST_CODE) as any;
+      if (existingDemo?.id) {
+        custId = existingDemo.id;
+      } else {
+        const info = sqlite.prepare(
+          `INSERT INTO customers (name, phone, email, city, state, customer_code, created_at)
+           VALUES ('Demo Logistics Pvt Ltd', '9000000001', 'demo@narmada.test', 'Patna', 'Bihar', ?, ?)`,
+        ).run(CUST_CODE, Date.now());
+        custId = Number(info.lastInsertRowid);
+        console.log(`[migrations] R26.6c: seeded demo customer ${custId}`);
+      }
+    }
+
+    const now = Date.now();
+    const day = 24 * 60 * 60 * 1000;
+    const consignmentSeeds: Array<{ docket: string; origin: string; dest: string; status: string; carrier: string; bundles: number; invNum: string; invAmt: number }> = [
+      { docket: "NRM-DEMO-001", origin: "Patna", dest: "Delhi", status: "in_transit", carrier: "Narmada Express", bundles: 3, invNum: "INV-DEMO-001", invAmt: 45000 },
+      { docket: "NRM-DEMO-002", origin: "Delhi", dest: "Mumbai", status: "pending", carrier: "Blue Dart", bundles: 1, invNum: "INV-DEMO-002", invAmt: 18500 },
+    ];
+    const insCon = sqlite.prepare(
+      `INSERT INTO consignments (docket_number, carrier, origin, destination, customer_id, customer_name, customer_phone, bundles_count, invoice_number, invoice_amount, dispatch_date, eta_date, status, created_by, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'system', ?, ?)`,
+    );
+    const cust = custId ? sqlite.prepare(`SELECT name, phone FROM customers WHERE id = ?`).get(custId) as any : null;
+    let seededCon = 0;
+    for (const c of consignmentSeeds) {
+      const existing = sqlite.prepare(`SELECT id FROM consignments WHERE docket_number = ? LIMIT 1`).get(c.docket) as any;
+      if (!existing) {
+        insCon.run(
+          c.docket, c.carrier, c.origin, c.dest, custId, cust?.name || "Demo Logistics Pvt Ltd",
+          cust?.phone || "9000000001", c.bundles, c.invNum, c.invAmt, now, now + 3 * day, c.status, now, now,
+        );
+        seededCon++;
+      }
+    }
+    console.log(`[migrations] R26.6c: seeded ${seededCon} consignment(s)`);
+  } catch (err: any) {
+    console.log("[migrations] R26.6c: consignment seed failed —", err?.message || err);
+  }
+
+  console.log("[migrations] R26.6c: complete");
+}

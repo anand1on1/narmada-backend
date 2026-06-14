@@ -26,6 +26,21 @@ import PriceChecker from "@/pages/PriceChecker";
 import TrackConsignment from "@/pages/TrackConsignment";
 import { useParams } from "wouter";
 
+// R26.6c — wouter's useHashLocation returns the FULL hash including any query
+// string (e.g. "/admin/marketing/campaigns/new?compose=1&lead_id=42"), and the
+// path matcher then treats "?compose=1..." as literal path chars — so the route
+// never matches and the deep-link from a lead card falls through to NotFound
+// (the "stuck on loading" symptom). Strip the query for route MATCHING only;
+// pages that need the params still read window.location.hash directly.
+function useHashLocationNoQuery(opts?: { ssrPath?: string }): [string, (to: string, opts?: { replace?: boolean; state?: any }) => void] {
+  const [loc, navigate] = useHashLocation(opts as any) as any;
+  const qIdx = loc.indexOf("?");
+  const path = qIdx === -1 ? loc : loc.slice(0, qIdx);
+  return [path, navigate];
+}
+// Preserve wouter's hrefs helper so <Link>/navigate keep producing hash hrefs.
+(useHashLocationNoQuery as any).hrefs = (href: string) => "#" + href;
+
 // R10 — the old PO "Assign" page was merged into the detail page. Redirect the
 // legacy /:id/edit URL to the merged /:id page.
 function PoEditRedirect() {
@@ -428,7 +443,7 @@ function App() {
             <CustomerAuthProvider>
               <TeamAuthProvider>
                 <Toaster />
-                <Router hook={useHashLocation}>
+                <Router hook={useHashLocationNoQuery}>
                   <AppRouter />
                 </Router>
               </TeamAuthProvider>
