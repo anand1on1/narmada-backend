@@ -5794,6 +5794,7 @@ function registerR8Routes(
       const token = (req.headers["x-sales-token"] as string | undefined)
         || (req.headers["x-finance-token"] as string | undefined)
         || (req.headers["x-hr-token"] as string | undefined)
+        || (req.headers["x-consignment-token"] as string | undefined)
         || (req.headers["x-team-token"] as string | undefined)
         || (req.headers["authorization"] as string | undefined)?.replace("Bearer ", "");
       if (!token) { res.status(401).json({ error: "Unauthorized" }); return; }

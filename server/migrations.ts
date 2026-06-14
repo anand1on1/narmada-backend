@@ -1696,3 +1696,69 @@ export function runR26_6dMigrations() {
 
   console.log("[migrations] R26.6d: complete");
 }
+
+// -------- R26.6e additive migrations (self-healing consignment user) --------
+// ADDITIVE ONLY. No schema changes. The R26.6d seed used INSERT OR IGNORE, so if a
+// `consignment` row already existed with a broken/incompatible hash, the seed was a
+// no-op and `/api/consignment/login` kept returning "Invalid credentials". This
+// migration upserts the consignment user: it rewrites password_hash (in the exact
+// salt:hash scrypt format verifyPassword expects), re-activates the row, and pins the
+// role. Idempotent — safe to run repeatedly. After writing, it self-verifies the hash
+// using the same scrypt comparison the login handler performs and logs the result.
+export function runR26_6eMigrations() {
+  console.log("[migrations] R26.6e: start (heal consignment user hash)");
+  try {
+    const { scryptSync, randomBytes, timingSafeEqual } = require("node:crypto");
+    const hash = (plain: string) => {
+      const salt = randomBytes(16).toString("hex");
+      return `${salt}:${scryptSync(plain, salt, 64).toString("hex")}`;
+    };
+    const verify = (plain: string, stored: string): boolean => {
+      try {
+        const [salt, h] = String(stored).split(":");
+        if (!salt || !h) return false;
+        const test = scryptSync(plain, salt, 64).toString("hex");
+        return timingSafeEqual(Buffer.from(h, "hex"), Buffer.from(test, "hex"));
+      } catch { return false; }
+    };
+
+    const username = "consignment";
+    const password = "Consignment@123";
+    const now = Date.now();
+    const existing = sqlite
+      .prepare(`SELECT id, password_hash FROM data_team_users WHERE username = ? LIMIT 1`)
+      .get(username) as any;
+
+    if (existing) {
+      // Heal in place only if the stored hash does not verify — avoids needless writes.
+      if (verify(password, existing.password_hash)) {
+        console.log("[migrations] R26.6e: consignment user already valid — no change");
+      } else {
+        sqlite
+          .prepare(
+            `UPDATE data_team_users SET password_hash = ?, role = 'consignment', active = 1 WHERE id = ?`,
+          )
+          .run(hash(password), existing.id);
+        console.log("[migrations] R26.6e: re-hashed existing consignment user (was broken)");
+      }
+    } else {
+      sqlite
+        .prepare(
+          `INSERT INTO data_team_users (username, password_hash, name, role, active, created_at)
+           VALUES (?, ?, ?, ?, 1, ?)`,
+        )
+        .run(username, hash(password), "Consignment Demo", "consignment", now);
+      console.log("[migrations] R26.6e: inserted missing consignment user");
+    }
+
+    // Self-verify the row that login will actually read.
+    const final = sqlite
+      .prepare(`SELECT password_hash FROM data_team_users WHERE username = ? LIMIT 1`)
+      .get(username) as any;
+    const ok = final ? verify(password, final.password_hash) : false;
+    console.log(`[migrations] R26.6e: consignment login hash verifies = ${ok}`);
+  } catch (err: any) {
+    console.log("[migrations] R26.6e: consignment user heal failed —", err?.message || err);
+  }
+  console.log("[migrations] R26.6e: complete");
+}
