@@ -53,6 +53,39 @@ export default function AdminTargets() {
     onSuccess: () => { qc.invalidateQueries({ queryKey: ["admin-targets"] }); toast({ title: "Deleted" }); },
   });
 
+  // R26.6a (9) — Sales rep value-targets (the sales_targets table the rep portal reads via
+  // /api/sales/targets). Admin previously had NO UI writing to this table, so reps never saw a
+  // target. This block creates rows keyed by sales_rep_user_id so the assigned rep can see them.
+  const [salesTargetEdit, setSalesTargetEdit] = useState<{ sales_rep_user_id: string; period_start: string; period_end: string; target_amount: string } | null>(null);
+  const { data: salesTargets = [] } = useQuery<any[]>({
+    queryKey: ["admin-sales-targets"],
+    queryFn: async () => { const r = await adminFetch(token, `/api/admin/sales-targets`); return r.ok ? r.json() : []; },
+    enabled: !!token,
+  });
+  const saveSalesTarget = useMutation({
+    mutationFn: async (t: { sales_rep_user_id: string; period_start: string; period_end: string; target_amount: string }) => {
+      if (!t.sales_rep_user_id) throw new Error("Pick a sales rep");
+      const r = await adminFetch(token, `/api/admin/sales-targets`, {
+        method: "POST",
+        body: JSON.stringify({
+          sales_rep_user_id: Number(t.sales_rep_user_id),
+          target_type: "monthly",
+          period_start: t.period_start || null,
+          period_end: t.period_end || null,
+          target_amount: Number(t.target_amount || 0),
+        }),
+      });
+      if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error || "Save failed");
+    },
+    onSuccess: () => { qc.invalidateQueries({ queryKey: ["admin-sales-targets"] }); setSalesTargetEdit(null); toast({ title: "Sales target assigned" }); },
+    onError: (e: any) => toast({ title: "Error", description: e.message, variant: "destructive" }),
+  });
+  const delSalesTarget = useMutation({
+    mutationFn: async (id: number) => { await adminFetch(token, `/api/admin/sales-targets/${id}`, { method: "DELETE" }); },
+    onSuccess: () => { qc.invalidateQueries({ queryKey: ["admin-sales-targets"] }); toast({ title: "Deleted" }); },
+  });
+  const repName = (id: number | null) => salesUsers.find((u) => u.id === id)?.name || salesUsers.find((u) => u.id === id)?.username || (id == null ? "—" : `#${id}`);
+
   return (
     <AdminLayout title="Targets">
       <div className="flex justify-end mb-4">
@@ -92,6 +125,68 @@ export default function AdminTargets() {
           </table>
         )}
       </div>
+
+      {/* R26.6a (9) — Sales rep value-targets (read by the sales portal). */}
+      <div className="flex items-center justify-between mt-10 mb-4">
+        <h2 className="font-display text-lg font-bold">Sales Rep Targets</h2>
+        <button onClick={() => setSalesTargetEdit({ sales_rep_user_id: "", period_start: new Date().toISOString().slice(0, 10), period_end: "", target_amount: "" })} className="px-4 py-2 bg-accent text-accent-foreground rounded-lg text-sm font-semibold inline-flex items-center gap-2" data-testid="button-add-sales-target">
+          <Plus className="w-4 h-4" /> Assign Sales Target
+        </button>
+      </div>
+      <p className="text-xs text-muted-foreground mb-3">Value-based targets assigned to a specific sales rep. The rep sees these in their portal and claims shipped POs against them.</p>
+      <div className="bg-card border rounded-xl overflow-x-auto shadow-sm">
+        {salesTargets.length === 0 ? <div className="p-12 text-center text-muted-foreground">No sales targets assigned.</div> : (
+          <table className="w-full text-sm">
+            <thead><tr className="bg-muted/50 text-left">
+              <th className="px-3 py-3 font-semibold">Rep</th>
+              <th className="px-3 py-3 font-semibold">Period</th>
+              <th className="px-3 py-3 font-semibold text-right">Target</th>
+              <th className="px-3 py-3 font-semibold text-right">Achieved</th>
+              <th className="px-3 py-3 font-semibold">Status</th>
+              <th className="px-3 py-3 font-semibold text-right">Actions</th>
+            </tr></thead>
+            <tbody className="divide-y">{salesTargets.map((t: any) => (
+              <tr key={t.id} className="hover:bg-muted/30" data-testid={`sales-target-row-${t.id}`}>
+                <td className="px-3 py-3 font-semibold">{repName(t.sales_rep_user_id)}</td>
+                <td className="px-3 py-3 text-xs">{t.period_start || "?"} → {t.period_end || "?"}</td>
+                <td className="px-3 py-3 text-right font-semibold">₹{Number(t.target_amount || 0).toLocaleString("en-IN")}</td>
+                <td className="px-3 py-3 text-right">₹{Number(t.achieved_amount || 0).toLocaleString("en-IN")}</td>
+                <td className="px-3 py-3"><span className="text-[10px] uppercase font-bold px-2 py-0.5 rounded bg-amber-500/15 text-amber-700">{t.status}</span></td>
+                <td className="px-3 py-3 text-right">
+                  <button onClick={() => { if (confirm("Delete sales target?")) delSalesTarget.mutate(t.id); }} className="p-1.5 rounded hover:bg-red-500/10 text-red-600" data-testid={`button-delete-sales-target-${t.id}`}><Trash2 className="w-4 h-4" /></button>
+                </td>
+              </tr>
+            ))}</tbody>
+          </table>
+        )}
+      </div>
+
+      {salesTargetEdit && (
+        <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50 p-4" onClick={() => setSalesTargetEdit(null)}>
+          <div className="bg-card rounded-xl p-6 w-full max-w-md shadow-xl" onClick={(e) => e.stopPropagation()}>
+            <h2 className="font-bold text-lg mb-4">Assign Sales Target</h2>
+            <div className="space-y-3">
+              <label className="text-xs font-semibold block">Sales Rep
+                <select value={salesTargetEdit.sales_rep_user_id} onChange={(e) => setSalesTargetEdit({ ...salesTargetEdit, sales_rep_user_id: e.target.value })} className="mt-1 w-full border rounded-lg px-3 py-2 bg-background text-sm font-normal" data-testid="select-sales-target-rep">
+                  <option value="">— Select a sales rep —</option>
+                  {salesUsers.map((u) => <option key={u.id} value={u.id}>{u.name || u.username} ({u.role})</option>)}
+                </select></label>
+              <div className="grid grid-cols-2 gap-3">
+                <label className="text-xs font-semibold block">Period Start
+                  <input type="date" value={salesTargetEdit.period_start} onChange={(e) => setSalesTargetEdit({ ...salesTargetEdit, period_start: e.target.value })} className="mt-1 w-full border rounded-lg px-3 py-2 bg-background text-sm font-normal" /></label>
+                <label className="text-xs font-semibold block">Period End
+                  <input type="date" value={salesTargetEdit.period_end} onChange={(e) => setSalesTargetEdit({ ...salesTargetEdit, period_end: e.target.value })} className="mt-1 w-full border rounded-lg px-3 py-2 bg-background text-sm font-normal" /></label>
+              </div>
+              <label className="text-xs font-semibold block">Target Amount (₹)
+                <input type="number" value={salesTargetEdit.target_amount} onChange={(e) => setSalesTargetEdit({ ...salesTargetEdit, target_amount: e.target.value })} className="mt-1 w-full border rounded-lg px-3 py-2 bg-background text-sm font-normal" data-testid="input-sales-target-amount" /></label>
+            </div>
+            <div className="flex justify-end gap-2 mt-5">
+              <button onClick={() => setSalesTargetEdit(null)} className="px-4 py-2 border rounded-lg text-sm">Cancel</button>
+              <button onClick={() => saveSalesTarget.mutate(salesTargetEdit)} disabled={saveSalesTarget.isPending} className="px-4 py-2 bg-accent text-accent-foreground rounded-lg text-sm font-semibold disabled:opacity-50" data-testid="button-save-sales-target">Save</button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {editing && (
         <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50 p-4" onClick={() => setEditing(null)}>

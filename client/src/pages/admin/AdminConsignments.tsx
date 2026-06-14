@@ -341,6 +341,7 @@ export default function AdminConsignments() {
                 <th className="px-4 py-3 font-semibold">Customer</th>
                 <th className="px-4 py-3 font-semibold">Bundles</th>
                 <th className="px-4 py-3 font-semibold">Invoice</th>
+                <th className="px-4 py-3 font-semibold">Docket</th>
                 <th className="px-4 py-3 font-semibold">Docs</th>
                 <th className="px-4 py-3 font-semibold">ETA</th>
                 <th className="px-4 py-3"></th>
@@ -355,6 +356,13 @@ export default function AdminConsignments() {
                   <td className="px-4 py-3">{c.customerName || "—"}</td>
                   <td className="px-4 py-3">{c.bundlesCount ?? "—"}</td>
                   <td className="px-4 py-3 text-muted-foreground text-xs">{c.invoiceNumber || "—"}</td>
+                  <td className="px-4 py-3 whitespace-nowrap">
+                    {c.docketUrl ? (
+                      <button type="button" onClick={() => openFile(c.docketUrl)} className="text-xs font-semibold text-blue-600 hover:underline" data-testid={`link-docket-slip-${c.id}`}>View Docket</button>
+                    ) : (
+                      <span className="text-[10px] px-2 py-0.5 rounded uppercase tracking-wider font-bold bg-slate-500/15 text-slate-600" data-testid={`badge-docket-pending-${c.id}`}>Pending</span>
+                    )}
+                  </td>
                   <td className="px-4 py-3 text-xs whitespace-nowrap">
                     {c.invoiceUrl ? (
                       <button type="button" onClick={() => openFile(c.invoiceUrl)} className="text-accent hover:underline mr-2" data-testid={`link-invoice-${c.id}`}>Invoice</button>

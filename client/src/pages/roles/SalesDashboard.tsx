@@ -2,7 +2,12 @@ import { useEffect, useState } from "react";
 import RolePortalShell from "./RolePortalShell";
 import { SalesAuth } from "@/lib/role-auth";
 import NotificationsBell from "@/components/NotificationsBell";
-import { Target, KanbanSquare, CheckSquare, MapPin, Camera } from "lucide-react";
+import { Target, KanbanSquare, CheckSquare, MapPin, Camera, Mail, MessageCircle } from "lucide-react";
+
+// R26.6a (8) — open the marketing composer targeted at a single lead.
+function composeForLead(id: number, channel: "email" | "whatsapp") {
+  window.location.hash = `#/admin/marketing?compose=1&channel=${channel}&lead_id=${id}`;
+}
 
 // R26.5 (G) — Sales rep portal. Four tabs over the /api/sales/* mirror endpoints:
 // Targets (claim shipped POs), Leads Kanban (move stage via dropdown — no DnD lib),
@@ -149,6 +154,10 @@ function LeadsKanbanTab() {
                 <select value={l.stage} onChange={(e) => move(l.id, e.target.value)} className="mt-2 w-full border rounded px-2 py-1 text-xs bg-background" data-testid={`select-move-lead-${l.id}`}>
                   {stages.map((s) => <option key={s.id} value={s.name}>Move to: {s.name}</option>)}
                 </select>
+                <div className="mt-2 flex items-center gap-1">
+                  <button onClick={() => composeForLead(l.id, "email")} className="p-1.5 rounded hover:bg-indigo-500/10 text-indigo-600" title="Email via Marketing" data-testid={`button-email-lead-${l.id}`}><Mail className="w-3.5 h-3.5" /></button>
+                  <button onClick={() => composeForLead(l.id, "whatsapp")} className="p-1.5 rounded hover:bg-emerald-500/10 text-emerald-600" title="WhatsApp via Marketing" data-testid={`button-whatsapp-lead-${l.id}`}><MessageCircle className="w-3.5 h-3.5" /></button>
+                </div>
               </div>
             ))}
           </div>

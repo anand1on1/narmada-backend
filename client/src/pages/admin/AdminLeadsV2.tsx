@@ -2,7 +2,12 @@ import { useEffect, useState } from "react";
 import { AdminLayout } from "./AdminLayout";
 import { adminFetch, useAdminAuth, getAdminToken } from "@/lib/admin-auth";
 import { apiUrl } from "@/lib/queryClient";
-import { Plus, Trash2, Pencil, Download, Settings2 } from "lucide-react";
+import { Plus, Trash2, Pencil, Download, Settings2, Mail, MessageCircle } from "lucide-react";
+
+// R26.6a (8) — open the marketing composer targeted at a single lead.
+function composeForLead(id: number, channel: "email" | "whatsapp") {
+  window.location.hash = `#/admin/marketing?compose=1&channel=${channel}&lead_id=${id}`;
+}
 
 // R26.5 (B) — Leads V2 over /api/admin/leads-v2. Stages from /api/admin/lead-stages,
 // sales reps from /api/admin/users?role=sales. Export via /api/admin/leads/export.xlsx.
@@ -133,6 +138,8 @@ export default function AdminLeadsV2() {
                   <td className="px-4 py-3">{stageBadge(l.stage)}</td>
                   <td className="px-4 py-3 text-xs">{repName(l.assigned_to_user_id)}</td>
                   <td className="px-4 py-3 text-right whitespace-nowrap">
+                    <button onClick={() => composeForLead(l.id, "email")} className="p-2 hover:bg-indigo-500/10 text-indigo-600 rounded mr-1" title="Email via Marketing" data-testid={`button-email-lead-${l.id}`}><Mail className="w-4 h-4" /></button>
+                    <button onClick={() => composeForLead(l.id, "whatsapp")} className="p-2 hover:bg-emerald-500/10 text-emerald-600 rounded mr-1" title="WhatsApp via Marketing" data-testid={`button-whatsapp-lead-${l.id}`}><MessageCircle className="w-4 h-4" /></button>
                     <button onClick={() => setEdit(l)} className="p-2 hover:bg-muted rounded mr-1" data-testid={`button-edit-lead-${l.id}`}><Pencil className="w-4 h-4" /></button>
                     <button onClick={() => del(l.id)} className="p-2 hover:bg-red-500/10 text-red-600 rounded" data-testid={`button-delete-lead-${l.id}`}><Trash2 className="w-4 h-4" /></button>
                   </td>

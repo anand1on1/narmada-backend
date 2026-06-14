@@ -1432,3 +1432,39 @@ export function runR26_5Migrations() {
 
   console.log("[migrations] R26.5: complete");
 }
+
+// -------- R26.6a additive migrations (Bug fixes + UX polish) --------
+// This round is logic-only on the client/server side (lead-card outreach buttons, OAuth
+// status surfacing, ledger date-window fix, parts union, PO detail, sales-target admin UI,
+// consignment docket column). It adds NO new columns or tables. The only schema concern is
+// that the oauth_tokens table (introduced in R26.3) must exist, since the new
+// /api/admin/oauth/status + DELETE /api/admin/oauth/:provider endpoints read/write it. We
+// re-ensure it idempotently here so a DB that somehow predates R26.3 still boots cleanly.
+// ADDITIVE ONLY — never drops/renames anything. Per-statement try/catch with R26.6a markers.
+export function runR26_6aMigrations() {
+  const stmts: Array<{ desc: string; sql: string }> = [
+    {
+      desc: "ensure oauth_tokens table (for OAuth status/disconnect)",
+      sql: `CREATE TABLE IF NOT EXISTS oauth_tokens (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        provider TEXT NOT NULL,
+        account_email TEXT,
+        account_name TEXT,
+        account_id TEXT,
+        access_token TEXT NOT NULL,
+        refresh_token TEXT,
+        token_expires_at INTEGER,
+        scopes TEXT,
+        meta_pages TEXT,
+        connected_at INTEGER NOT NULL DEFAULT 0,
+        last_used_at INTEGER,
+        is_active INTEGER NOT NULL DEFAULT 1
+      )`,
+    },
+  ];
+  for (const { desc, sql } of stmts) {
+    console.log(`[migrations] R26.6a: ${desc}`);
+    try { sqlite.exec(sql); } catch (err: any) { console.log(`[migrations] R26.6a: skipped ${desc} —`, err?.message || err); }
+  }
+  console.log("[migrations] R26.6a: complete");
+}

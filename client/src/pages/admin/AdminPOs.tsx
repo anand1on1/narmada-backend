@@ -30,7 +30,6 @@ export default function AdminPOs() {
   const { token } = useAdminAuth();
   const [items, setItems] = useState<PO[]>([]);
   const [filter, setFilter] = useState<"all" | string>("all");
-  const [view, setView] = useState<PO | null>(null);
   const [busy, setBusy] = useState(false);
 
   async function load() {
@@ -125,7 +124,8 @@ export default function AdminPOs() {
                     >
                       <ExternalLink className="w-3 h-3" /> Open
                     </a>
-                    <button onClick={() => setView(p)} className="p-2 hover:bg-muted rounded mr-1" title="View"><Eye className="w-4 h-4" /></button>
+                    {/* R26.6a (5) — View opens the dedicated detail page (was a no-op/404). */}
+                    <a href={`/#/admin/purchase-orders-v2/${p.id}`} className="inline-flex items-center p-2 hover:bg-muted rounded mr-1" title="View detail" data-testid={`button-view-po-${p.id}`}><Eye className="w-4 h-4" /></a>
                     <select value={p.status} disabled={busy} onChange={(e) => setStatus(p.id, e.target.value)} className="text-xs border rounded px-2 py-1 bg-background mr-1" data-testid={`select-po-status-${p.id}`}>
                       {STATUSES.map((s) => <option key={s} value={s}>{s}</option>)}
                     </select>
@@ -137,29 +137,6 @@ export default function AdminPOs() {
           </table>
         )}
       </div>
-
-      {view && (
-        <div className="fixed inset-0 bg-black/60 z-50 flex items-center justify-center p-4">
-          <div className="bg-card border rounded-2xl shadow-2xl w-full max-w-2xl max-h-[92vh] overflow-y-auto">
-            <div className="sticky top-0 bg-card border-b px-6 py-4 flex items-center justify-between">
-              <div>
-                <div className="font-display text-xl font-bold">PO {poNo(view)}</div>
-                <div className="text-xs text-muted-foreground">{view.customerName || "—"} · {view.createdAt ? new Date(view.createdAt).toLocaleDateString("en-IN") : "—"}</div>
-              </div>
-              <button onClick={() => setView(null)} className="px-3 py-1.5 hover:bg-muted rounded text-sm">Close</button>
-            </div>
-            <div className="p-6 space-y-4 text-sm">
-              <div className="grid grid-cols-3 gap-3">
-                <div><div className="text-xs uppercase font-bold text-muted-foreground">Customer Total</div><div className="text-lg font-bold">₹{Number(view.custTotal || 0).toLocaleString("en-IN")}</div></div>
-                <div><div className="text-xs uppercase font-bold text-muted-foreground">Cost Total</div><div>₹{Number(view.costTotal || 0).toLocaleString("en-IN")}</div></div>
-                <div><div className="text-xs uppercase font-bold text-muted-foreground">Status</div><div>{badge(view.status)}</div></div>
-              </div>
-              {view.notes && <div><div className="text-xs uppercase font-bold text-muted-foreground">Notes</div><div className="whitespace-pre-wrap">{view.notes}</div></div>}
-              <a href={`/#/team/po/${view.id}`} className="inline-flex items-center gap-1 px-3 py-2 text-xs font-semibold border rounded hover:bg-muted"><ExternalLink className="w-3 h-3" /> Open full PO in Team portal</a>
-            </div>
-          </div>
-        </div>
-      )}
     </AdminLayout>
   );
 }

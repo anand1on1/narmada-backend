@@ -1,3 +1,4 @@
+import { useEffect } from "react";
 import { Switch, Route, Router, useLocation } from "wouter";
 import { useHashLocation } from "wouter/use-hash-location";
 import { queryClient } from "./lib/queryClient";
@@ -42,9 +43,17 @@ function MarketRadarRedirect() {
 }
 
 // R26.4 — Marketing hub root redirects to the campaigns list.
+// R26.6a (8) — when opened with ?compose=1 (from a lead card), forward to the campaign
+// composer and preserve the query string so it can preset channel + targeted lead.
 function MarketingRedirect() {
   const [, navigate] = useLocation();
-  navigate("/admin/marketing/campaigns", { replace: true });
+  useEffect(() => {
+    const qIndex = window.location.hash.indexOf("?");
+    const query = qIndex === -1 ? "" : window.location.hash.slice(qIndex);
+    const params = new URLSearchParams(query.slice(1));
+    if (params.get("compose") === "1") navigate(`/admin/marketing/campaigns/new${query}`, { replace: true });
+    else navigate("/admin/marketing/campaigns", { replace: true });
+  }, [navigate]);
   return null;
 }
 
@@ -73,6 +82,7 @@ import AdminPayments from "@/pages/admin/AdminPayments";
 import AdminRFQs from "@/pages/admin/AdminRFQs";
 import AdminQuotes from "@/pages/admin/AdminQuotes";
 import AdminPOs from "@/pages/admin/AdminPOs";
+import AdminPODetailV2 from "@/pages/admin/AdminPODetailV2";
 import AdminBank from "@/pages/admin/AdminBank";
 // Session C — new admin pages
 import AdminQuotingCompanies from "@/pages/admin/AdminQuotingCompanies";
@@ -218,6 +228,8 @@ function AppRouter() {
         <Route path="/admin/payments" component={AdminPayments} />
         <Route path="/admin/rfqs" component={AdminRFQs} />
         <Route path="/admin/quotes" component={AdminQuotes} />
+        {/* R26.6a (5) — admin PO detail page (was a 404). Must precede the list route. */}
+        <Route path="/admin/purchase-orders-v2/:id" component={AdminPODetailV2} />
         <Route path="/admin/purchase-orders" component={AdminPOs} />
         <Route path="/admin/bank" component={AdminBank} />
         {/* Session C — new admin routes */}
@@ -400,6 +412,13 @@ function AppRouter() {
 }
 
 function App() {
+  // R26.6a (11) — scroll the window to the top on every hash route change so a
+  // long admin/sales/consignment page doesn't open scrolled mid-way down.
+  useEffect(() => {
+    const onHash = () => window.scrollTo({ top: 0, behavior: "smooth" });
+    window.addEventListener("hashchange", onHash);
+    return () => window.removeEventListener("hashchange", onHash);
+  }, []);
   return (
     <ErrorBoundary label="root">
       <QueryClientProvider client={queryClient}>

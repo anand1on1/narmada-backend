@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { AdminLayout } from "./AdminLayout";
 import { MarketingTabs } from "./AdminMarketingCampaigns";
 import { adminFetch, useAdminAuth } from "@/lib/admin-auth";
@@ -45,6 +45,27 @@ export default function AdminMarketingCampaignComposer() {
   const [waUploading, setWaUploading] = useState(false);
   const [scheduledAt, setScheduledAt] = useState("");
   const [busy, setBusy] = useState(false);
+  // R26.6a (8) — when opened from a lead card (#/admin/marketing?compose=1&channel=&lead_id=),
+  // preset the channel, jump to content, and surface the targeted lead so the admin knows who
+  // this outreach is for. The single-recipient send itself still flows through an audience.
+  const [leadCtx, setLeadCtx] = useState<{ id: number; name: string; email: string | null; phone: string | null } | null>(null);
+
+  useEffect(() => {
+    const qIndex = window.location.hash.indexOf("?");
+    if (qIndex === -1) return;
+    const params = new URLSearchParams(window.location.hash.slice(qIndex + 1));
+    if (params.get("compose") !== "1") return;
+    const ch = params.get("channel");
+    if (ch === "email" || ch === "whatsapp" || ch === "both") setChannel(ch);
+    setStep(3);
+    const leadId = params.get("lead_id");
+    if (leadId && token) {
+      adminFetch(token, `/api/admin/leads/${leadId}`)
+        .then((r) => (r.ok ? r.json() : null))
+        .then((l) => { if (l) setLeadCtx({ id: l.id, name: l.name, email: l.email ?? null, phone: l.phone ?? null }); })
+        .catch(() => { /* ignore */ });
+    }
+  }, [token]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const { data: audiences = [] } = useQuery<Audience[]>({
     queryKey: ["marketing-audiences"],
@@ -226,6 +247,15 @@ export default function AdminMarketingCampaignComposer() {
       </div>
 
       <div className="bg-white border rounded-xl p-6 max-w-3xl">
+        {leadCtx && (
+          <div className="mb-4 flex items-center gap-2 rounded-lg border border-indigo-200 bg-indigo-50 px-4 py-2.5 text-sm" data-testid="composer-lead-banner">
+            <Users className="w-4 h-4 text-indigo-600" />
+            <span className="text-slate-700">Composing for lead <span className="font-semibold">{leadCtx.name}</span>
+              {leadCtx.email ? <> · {leadCtx.email}</> : null}
+              {leadCtx.phone ? <> · {leadCtx.phone}</> : null}
+            </span>
+          </div>
+        )}
         <label className="text-xs font-semibold block mb-4">Campaign name
           <input value={name} onChange={(e) => setName(e.target.value)} placeholder="e.g. June parts promo" className="mt-1 w-full border rounded-lg px-3 py-2 text-sm font-normal" />
         </label>

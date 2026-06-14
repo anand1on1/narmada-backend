@@ -3,7 +3,12 @@ import { AdminLayout } from "./AdminLayout";
 import { adminFetch, useAdminAuth } from "@/lib/admin-auth";
 import { useToast } from "@/hooks/use-toast";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { Plus, Upload, MessageSquare, Send, Loader2, LayoutGrid, List, UserPlus, Megaphone, Mail, FileText, Store } from "lucide-react";
+import { Plus, Upload, MessageSquare, Send, Loader2, LayoutGrid, List, UserPlus, Megaphone, Mail, FileText, Store, MessageCircle } from "lucide-react";
+
+// R26.6a (8) — open the marketing composer targeted at a single lead.
+function composeForLead(id: number, channel: "email" | "whatsapp") {
+  window.location.hash = `#/admin/marketing?compose=1&channel=${channel}&lead_id=${id}`;
+}
 
 interface Lead {
   id: number;
@@ -376,7 +381,7 @@ interface KanbanBoardProps {
   isLoading: boolean;
   onStageChange: (id: number, stage: string) => void;
   onEdit: (lead: Partial<Lead>) => void;
-  onOutreach: (lead: Lead) => void;
+  onOutreach?: (lead: Lead) => void;
 }
 
 const KANBAN_COLS = [
@@ -388,7 +393,7 @@ const KANBAN_COLS = [
   { key: "lost", label: "Lost", color: "border-red-400" },
 ];
 
-function KanbanBoard({ leads, isLoading, onStageChange, onEdit, onOutreach }: KanbanBoardProps) {
+function KanbanBoard({ leads, isLoading, onStageChange, onEdit }: KanbanBoardProps) {
   if (isLoading) return <div className="p-12 text-center text-muted-foreground">Loading…</div>;
 
   return (
@@ -408,7 +413,6 @@ function KanbanBoard({ leads, isLoading, onStageChange, onEdit, onOutreach }: Ka
                   lead={lead}
                   onStageChange={onStageChange}
                   onEdit={onEdit}
-                  onOutreach={onOutreach}
                 />
               ))}
               {colLeads.length === 0 && (
@@ -423,12 +427,11 @@ function KanbanBoard({ leads, isLoading, onStageChange, onEdit, onOutreach }: Ka
 }
 
 function KanbanCard({
-  lead, onStageChange, onEdit, onOutreach,
+  lead, onStageChange, onEdit,
 }: {
   lead: Lead;
   onStageChange: (id: number, stage: string) => void;
   onEdit: (lead: Partial<Lead>) => void;
-  onOutreach: (lead: Lead) => void;
 }) {
   const [showMove, setShowMove] = useState(false);
 
@@ -450,11 +453,20 @@ function KanbanCard({
         <span className="px-1.5 py-0.5 rounded bg-muted text-muted-foreground">{lead.source}</span>
         <div className="flex-1" />
         <button
-          onClick={() => onOutreach(lead)}
-          className="p-1 rounded hover:bg-muted opacity-0 group-hover:opacity-100 transition-opacity"
-          title="Outreach"
+          onClick={() => composeForLead(lead.id, "email")}
+          className="p-1 rounded hover:bg-indigo-500/10 text-indigo-600 opacity-0 group-hover:opacity-100 transition-opacity"
+          title="Email via Marketing"
+          data-testid={`button-email-lead-${lead.id}`}
         >
-          <MessageSquare className="w-3 h-3" />
+          <Mail className="w-3 h-3" />
+        </button>
+        <button
+          onClick={() => composeForLead(lead.id, "whatsapp")}
+          className="p-1 rounded hover:bg-emerald-500/10 text-emerald-600 opacity-0 group-hover:opacity-100 transition-opacity"
+          title="WhatsApp via Marketing"
+          data-testid={`button-whatsapp-lead-${lead.id}`}
+        >
+          <MessageCircle className="w-3 h-3" />
         </button>
         <button
           onClick={() => setShowMove(!showMove)}

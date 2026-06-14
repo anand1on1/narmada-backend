@@ -525,8 +525,12 @@ function recomputeLedgerBalance(customerId: number): void {
 
 export async function listLedgerEntries(customerId: number, opts: { from?: number; to?: number; limit?: number } = {}): Promise<LedgerEntry[]> {
   const conds: any[] = [eq(ledgerEntries.customerId, customerId)];
-  if (opts.from) conds.push(gte(ledgerEntries.entryDate, opts.from));
-  if (opts.to) conds.push(lte(ledgerEntries.entryDate, opts.to));
+  // R26.6a (3) — compare against COALESCE(entry_date, created_at) so rows with a
+  // null/zero entry_date are not excluded by a date-range filter (they were silently
+  // dropped, making Test Wagad / BSC ledgers look empty).
+  const effDate = sql<number>`COALESCE(${ledgerEntries.entryDate}, ${ledgerEntries.createdAt})`;
+  if (opts.from) conds.push(gte(effDate, opts.from));
+  if (opts.to) conds.push(lte(effDate, opts.to));
   let q: any = db.select().from(ledgerEntries).where(and(...conds)!).orderBy(ledgerEntries.entryDate, ledgerEntries.id);
   if (opts.limit) q = q.limit(opts.limit);
   return q.all();
@@ -946,7 +950,7 @@ export function searchPartsEnriched(q: string, limit = 50): EnrichedPartsMasterR
         ORDER BY qi.created_at DESC LIMIT 1
       ) AS lastCustomerName,
       (
-        SELECT c.code
+        SELECT c.customer_code
         FROM quotation_items qi
         LEFT JOIN quotations q ON q.id = qi.quotation_id
         LEFT JOIN customers c ON c.id = q.customer_id
@@ -1012,7 +1016,7 @@ export function getPartQuoteHistory(partNumber: string, limit = 10): PartQuoteHi
       q.id              AS quotationId,
       q.quote_no        AS quoteNo,
       c.name            AS customerName,
-      c.code            AS customerCode,
+      c.customer_code   AS customerCode,
       qi.brand          AS brand,
       qi.mrp            AS mrp,
       qi.discount       AS discount,
@@ -1739,6 +1743,33 @@ export async function getPurchaseOrderV2(id: number): Promise<(PurchaseOrderV2 &
     company: companyRow ? { id: companyRow.id, name: companyRow.name, logo_url: companyRow.logoUrl ?? null } : null,
     custTotal, costTotal,
   };
+}
+
+// R26.6a (5) — admin PO detail bundle: header + lines + dispatches + payments + customer + vendor.
+// The View button on the admin POs list previously 404'd because no detail route/endpoint existed.
+export async function getPurchaseOrderV2Detail(id: number): Promise<any | undefined> {
+  const po = await getPurchaseOrderV2(id);
+  if (!po) return undefined;
+  const dispatches = sqlite.prepare(
+    `SELECT id, round_no, docket_no, courier_name, dispatch_date, docket_photo_url, pdf_url, bundles, submitted_at
+       FROM dispatches WHERE po_id = ? ORDER BY round_no ASC, id ASC`,
+  ).all(id) as any[];
+  // payment_records is customer-level (no po_id FK) — surface this customer's recent receipts.
+  const payments = po.customerId
+    ? sqlite.prepare(
+        `SELECT id, amount_inr, payment_mode, reference_no, payment_date, notes
+           FROM payment_records WHERE customer_id = ? ORDER BY payment_date DESC LIMIT 50`,
+      ).all(po.customerId) as any[]
+    : [];
+  const customer = po.customerId
+    ? sqlite.prepare(`SELECT id, name, phone, email, gst_number FROM customers WHERE id = ?`).get(po.customerId)
+    : null;
+  // No vendor FK on the PO header — vendors live per line. Derive the distinct vendor names.
+  const vendorNames = Array.from(
+    new Set((po.items || []).map((it: any) => it.vendorName).filter(Boolean)),
+  );
+  const vendor = vendorNames.length ? { names: vendorNames } : null;
+  return { po, lines: po.items, dispatches, payments, customer, vendor };
 }
 
 // Live PO totals (R10): cost = Σ(approved vendor rate × qty); customer = Σ(customer rate × qty).
@@ -4083,6 +4114,48 @@ export function listShippedLedgerView(customerId: number, opts: { from?: number;
 // ---- A4. admin parts list (mirrors searchPartsEnriched) ----
 export function adminListParts(q: string, limit = 50): EnrichedPartsMasterRow[] {
   return searchPartsEnriched(q, limit);
+}
+
+// R26.6a (4) — union of the seeded master catalog (parts_master) + DISTINCT parts that
+// only appear on PO v2 line items (po_items). PO-derived rows are tagged source:'po' and
+// excluded when their part_number already exists in parts_master (master row wins).
+export function listPartsUnion(q: string, limit = 50): any[] {
+  const master = searchPartsEnriched(q, limit);
+  const masterPns = new Set(master.map((m) => String(m.partNumber || "").toLowerCase()));
+  const term = (q || "").toLowerCase();
+  const likeTerm = `%${term}%`;
+  // DISTINCT part identity from PO line items, with the most-recent PO it was seen on.
+  const poRows = sqlite.prepare(`
+    SELECT pi.part_number  AS part_number,
+           pi.description   AS part_name,
+           pi.brand         AS brand,
+           MAX(pi.po_id)    AS last_seen_po_id,
+           MAX(po.created_at) AS last_seen_at
+      FROM po_items pi
+      LEFT JOIN purchase_orders_v2 po ON po.id = pi.po_id
+     WHERE pi.part_number IS NOT NULL AND pi.part_number <> ''
+       AND (LOWER(COALESCE(pi.part_number,'')) LIKE ?
+            OR LOWER(COALESCE(pi.description,'')) LIKE ?
+            OR LOWER(COALESCE(pi.brand,'')) LIKE ?)
+     GROUP BY LOWER(pi.part_number)
+     ORDER BY last_seen_at DESC
+     LIMIT ?
+  `).all(likeTerm, likeTerm, likeTerm, limit) as any[];
+  const poParts = poRows
+    .filter((r) => !masterPns.has(String(r.part_number || "").toLowerCase()))
+    .map((r) => ({
+      id: `po-${r.last_seen_po_id}`,
+      partNumber: r.part_number,
+      part_number: r.part_number,
+      name: r.part_name || null,
+      part_name: r.part_name || null,
+      brand: r.brand || null,
+      category: "PO History",
+      source: "po",
+      last_seen_po_id: r.last_seen_po_id,
+      last_seen_at: r.last_seen_at ? Number(r.last_seen_at) : null,
+    }));
+  return [...master, ...poParts];
 }
 export function adminUpsertPart(data: { partNumber: string; name: string; hsn?: string; gstRate?: number; brand?: string; lastMrp?: number }): any {
   const now = Date.now();

@@ -1140,12 +1140,11 @@ export function registerV2Routes(app: Express, ctx: V2Context) {
         const t = Date.parse(s);
         return Number.isNaN(t) ? undefined : t;
       };
-      let from = parseDate(req.query.from);
-      let to = parseDate(req.query.to);
-      if (from == null && to == null) {
-        to = Date.now();
-        from = to - 90 * 24 * 60 * 60 * 1000;
-      }
+      const from = parseDate(req.query.from);
+      const to = parseDate(req.query.to);
+      // R26.6a (3) — do NOT silently default to a 90-day window when no range is
+      // supplied. That window hid older ledger entries (Test Wagad / BSC) entirely.
+      // With no from/to we now return the customer's full ledger history.
       const entries = await v2.listLedgerEntries(cid, { from, to });
       const balance = await v2.getLedgerBalance(cid);
       // R26.5 (A2) — surface shipped customers whose goods left via PO/dispatch even when
@@ -1860,10 +1859,10 @@ export function registerV2Routes(app: Express, ctx: V2Context) {
   // -------- TEAM: PARTS MASTER --------
   app.get("/api/team/parts", requireDataTeam, async (req, res) => {
     try {
-      const q = (req.query.q as string) || "";
+      const q = (req.query.q as string) || (req.query.search as string) || "";
       if (q.length < 3) return res.status(400).json({ error: "q must be at least 3 characters" });
-      // Round 4: enriched view — includes brand / last-customer / last-discount / last-quoted-at
-      res.json(v2.searchPartsEnriched(q, 50));
+      // R26.6a (4) — union master catalog + DISTINCT PO line-item history.
+      res.json(v2.listPartsUnion(q, 50));
     } catch (e: any) { res.status(500).json({ error: e.message }); }
   });
 
@@ -3223,7 +3222,8 @@ function registerR4toR7Routes(
       if (!query) return res.status(400).json({ error: "query required" });
       const key = process.env.PPLX_API_KEY || "";
       if (!key) return res.status(503).json({ error: "PPLX_API_KEY not configured" });
-      const sys = `You are a sourcing assistant for an automotive spare-parts distributor in India. Find 5-10 real candidate vendors/suppliers/manufacturers for the user's requirement. Return ONLY JSON array: [{"name","city","phone","website","source_url","confidence"}]. confidence 0..1. Use null for unknown fields.`;
+      // R26.6a (7) — raise the Market Radar candidate cap from ~12 to 50.
+      const sys = `You are a sourcing assistant for an automotive spare-parts distributor in India. Find up to 50 real candidate vendors/suppliers/manufacturers for the user's requirement. Return ONLY JSON array: [{"name","city","phone","website","source_url","confidence"}]. confidence 0..1. Use null for unknown fields.`;
       const r = await fetch("https://api.perplexity.ai/chat/completions", {
         method: "POST",
         headers: { "Content-Type": "application/json", "Authorization": `Bearer ${key}` },
@@ -5842,9 +5842,10 @@ function registerR8Routes(
   // ---- A4. ADMIN PARTS MASTER (mirror of /api/team/parts) ----
   app.get("/api/admin/parts", requireAuth, async (req, res) => {
     try {
-      const q = (req.query.q as string) || "";
+      const q = (req.query.q as string) || (req.query.search as string) || "";
       if (q.length < 3) return res.json([]);
-      res.json(v2.adminListParts(q, 50));
+      // R26.6a (4) — union master catalog + PO line-item history.
+      res.json(v2.listPartsUnion(q, 50));
     } catch (e: any) { res.status(500).json({ error: e.message }); }
   });
   app.post("/api/admin/parts", requireAdminRole, async (req, res) => {
@@ -5925,6 +5926,14 @@ function registerR8Routes(
       }));
     } catch (e: any) { res.status(500).json({ error: e.message }); }
   });
+  // R26.6a (5) — admin PO detail (header + lines + dispatches + payments + customer + vendor).
+  app.get("/api/admin/purchase-orders-v2/:id", requireAuth, async (req, res) => {
+    try {
+      const detail = await v2.getPurchaseOrderV2Detail(parseInt(req.params.id as string, 10));
+      if (!detail) return res.status(404).json({ error: "Not found" });
+      res.json(detail);
+    } catch (e: any) { res.status(500).json({ error: e.message }); }
+  });
   app.post("/api/admin/purchase-orders-v2", requireAdminRole, async (req, res) => {
     try {
       const { items, ...data } = req.body || {};
@@ -5943,6 +5952,39 @@ function registerR8Routes(
     try {
       rawSqlite.prepare(`UPDATE purchase_orders_v2 SET deleted_at = ?, updated_at = ? WHERE id = ?`).run(Date.now(), Date.now(), parseInt(req.params.id as string, 10));
       res.json({ ok: true });
+    } catch (e: any) { res.status(500).json({ error: e.message }); }
+  });
+
+  // ==================== R26.6a (10). OAUTH STATUS / DISCONNECT ====================
+  // Reads the oauth_tokens table (created in R26.3) so the Google/Meta Ads pages can
+  // reflect their actual connected state and offer a Disconnect action.
+  app.get("/api/admin/oauth/status", requireAuth, async (_req, res) => {
+    try {
+      const row = (provider: string) =>
+        rawSqlite.prepare(
+          `SELECT account_email, account_name, account_id, scopes
+             FROM oauth_tokens WHERE provider = ? AND is_active = 1
+             ORDER BY connected_at DESC LIMIT 1`,
+        ).get(provider) as any | undefined;
+      const g = row("google");
+      const m = row("meta");
+      const parseScopes = (s: any): string[] => {
+        if (!s) return [];
+        try { const j = JSON.parse(s); return Array.isArray(j) ? j : String(s).split(/[\s,]+/).filter(Boolean); }
+        catch { return String(s).split(/[\s,]+/).filter(Boolean); }
+      };
+      res.json({
+        google: { connected: !!g, email: g?.account_email ?? null, scopes: parseScopes(g?.scopes) },
+        meta: { connected: !!m, account_name: m?.account_name ?? null, app_id: m?.account_id ?? null },
+      });
+    } catch (e: any) { res.status(500).json({ error: e.message }); }
+  });
+  app.delete("/api/admin/oauth/:provider", requireAdminRole, async (req, res) => {
+    try {
+      const provider = String(req.params.provider);
+      if (!["google", "meta"].includes(provider)) return res.status(400).json({ error: "Unknown provider" });
+      const info = rawSqlite.prepare(`DELETE FROM oauth_tokens WHERE provider = ?`).run(provider);
+      res.json({ ok: true, provider, removed: info.changes });
     } catch (e: any) { res.status(500).json({ error: e.message }); }
   });
 

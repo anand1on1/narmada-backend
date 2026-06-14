@@ -31,7 +31,7 @@ export default function AdminChats() {
   const [q, setQ] = useState("");
   const [filter, setFilter] = useState<"all" | "unread">("all");
   const [sending, setSending] = useState(false);
-  const bottomRef = useRef<HTMLDivElement | null>(null);
+  const listRef = useRef<HTMLDivElement | null>(null);
 
   const loadConvs = useCallback(async () => {
     try {
@@ -60,7 +60,13 @@ export default function AdminChats() {
     return () => clearInterval(id);
   }, [active, loadThread]);
 
-  useEffect(() => { bottomRef.current?.scrollIntoView({ behavior: "smooth" }); }, [thread]);
+  // R26.6a (2) — scroll only the message-list element to its own bottom on new
+  // messages. The old bottomRef.scrollIntoView() bubbled to the page scroll
+  // container and made the whole admin layout "slide down" on every poll.
+  useEffect(() => {
+    const el = listRef.current;
+    if (el) el.scrollTop = el.scrollHeight;
+  }, [thread]);
 
   const send = async () => {
     if (!active?.vendorId || !text.trim() || sending) return;
@@ -79,7 +85,7 @@ export default function AdminChats() {
 
   return (
     <AdminLayout title="Chats">
-      <div className="flex border rounded-xl overflow-hidden bg-card" style={{ height: "calc(100vh - 200px)" }}>
+      <div className="flex flex-col md:flex-row border rounded-xl overflow-hidden bg-card" style={{ height: "calc(100vh - 200px)" }}>
         {/* Sidebar */}
         <div className="w-[30%] min-w-[260px] border-r flex flex-col">
           <div className="p-3 border-b space-y-2">
@@ -145,7 +151,7 @@ export default function AdminChats() {
                   <div className="text-xs text-muted-foreground">{active.phone || ""}</div>
                 </div>
               </div>
-              <div className="flex-1 overflow-auto p-4 space-y-2">
+              <div ref={listRef} className="flex-1 overflow-y-auto p-4 space-y-2">
                 {thread.map((m) => (
                   <div key={m.id} className={"flex " + (m.direction === "out" ? "justify-end" : "justify-start")}>
                     <div className={"max-w-[70%] rounded-lg px-3 py-2 text-sm shadow-sm " +
@@ -155,9 +161,8 @@ export default function AdminChats() {
                     </div>
                   </div>
                 ))}
-                <div ref={bottomRef} />
               </div>
-              <div className="p-3 border-t bg-card flex gap-2">
+              <div className="p-3 border-t bg-card flex gap-2 shrink-0">
                 <input
                   value={text} onChange={(e) => setText(e.target.value)}
                   onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); } }}

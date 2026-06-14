@@ -52,6 +52,13 @@ const ROLE_LINKS: Array<{ label: string; hash: string }> = [
   { label: "Consignment", hash: "#/admin/consignments" },
   { label: "Customer", hash: "#/portal" },
 ];
+// R26.6a (1) — portal entry cards surfaced on the Command Center.
+const PORTAL_CARDS: Array<{ label: string; hash: string; testid: string }> = [
+  { label: "Consignment Portal", hash: "#/consignment/login", testid: "consignment" },
+  { label: "Sales Team Portal", hash: "#/sales/login", testid: "sales" },
+  { label: "Finance Portal", hash: "#/finance/login", testid: "finance" },
+  { label: "HR Portal", hash: "#/hr/login", testid: "hr" },
+];
 function RoleSwitcher() {
   const [open, setOpen] = useState(false);
   return (
@@ -175,6 +182,17 @@ export default function AdminCommandCenter() {
           </a>
           <RoleSwitcher />
         </div>
+      </div>
+      {/* R26.6a (1) — portal entry cards. Sales / Finance / HR alongside the existing
+          Consignment Portal card. Each opens the role login in a new tab. */}
+      <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mb-6">
+        {PORTAL_CARDS.map((p) => (
+          <a key={p.hash} href={p.hash} target="_blank" rel="noreferrer"
+            className="px-3 py-2 border rounded-lg text-sm font-semibold inline-flex items-center gap-2 bg-card hover:bg-muted"
+            data-testid={`portal-card-${p.testid}`}>
+            <ExternalLink className="w-4 h-4" /> {p.label}
+          </a>
+        ))}
       </div>
       {err && <div className="mb-4 text-sm text-red-600">Error: {err}</div>}
       {!data && !err && <div className="text-sm text-muted-foreground">Loading widgets…</div>}

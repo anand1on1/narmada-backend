@@ -8,7 +8,7 @@ import {
   FileText, Tag, Truck, Users,
   UserSquare, Wallet, CreditCard, FileQuestion, FileSpreadsheet, ShoppingCart, Landmark,
   Building2, UserCog, ScrollText, ClipboardList, Bell,
-  Factory, Inbox, Search, Target, Megaphone, CheckSquare, Sparkles, Facebook, History,
+  Factory, Search, Target, Megaphone, CheckSquare, Sparkles, Facebook, History,
   Gauge, Radar, Link2,
 } from "lucide-react";
 
@@ -103,7 +103,8 @@ export function AdminLayout({ children, title }: { children: ReactNode; title: s
     { href: "/admin/companies", label: "Companies", icon: Building2 },
     { href: "/admin/vendors", label: "Vendors", icon: Factory },
     { href: "/admin/vendor-ledger", label: "Vendor Ledger", icon: Wallet },
-    { href: "/admin/vendor-inbox", label: "Vendor Inbox", icon: Inbox },
+    // R26.6a (6) — Vendor Inbox unlinked from the sidebar (page + endpoints preserved,
+    // still reachable at /#/admin/vendor-inbox). Removed nav item only.
     { href: "/admin/market-radar", label: "Market Radar", icon: Radar },
     { href: "/admin/leads", label: "Leads", icon: Target },
     { href: "/admin/leads-legacy", label: "Leads (Legacy)", icon: Target },
