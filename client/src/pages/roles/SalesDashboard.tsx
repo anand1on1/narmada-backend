@@ -72,6 +72,7 @@ function TargetCard({ t, onClaim }: { t: SalesTarget; onClaim: (t: SalesTarget) 
       <div className="h-2 bg-muted rounded-full mt-2 overflow-hidden"><div className={`h-full ${barColor}`} style={{ width: `${pct}%` }} /></div>
       <div className="text-xs text-muted-foreground mt-1">{pct}% achieved</div>
       {t.metric === "po" && <button onClick={() => onClaim(t)} className="mt-3 px-3 py-1.5 border rounded-lg text-sm font-semibold" data-testid={`button-claim-po-${t.id}`}>Claim a PO</button>}
+      {t.metric === "payment" && <button onClick={() => onClaim(t)} className="mt-3 px-3 py-1.5 border rounded-lg text-sm font-semibold" data-testid={`button-submit-payment-${t.id}`}>Submit Payment</button>}
     </div>
   );
 }
@@ -79,8 +80,13 @@ function TargetCard({ t, onClaim }: { t: SalesTarget; onClaim: (t: SalesTarget) 
 function TargetsTab() {
   const { token } = SalesAuth.useAuth();
   const [targets, setTargets] = useState<SalesTarget[]>([]);
+  // R26.6g — claim modal handles both PO (po_number + amount) and Payment
+  // (payment_date + reference_no + amount) targets via /api/sales/targets/:id/claim.
   const [claimFor, setClaimFor] = useState<SalesTarget | null>(null);
-  const [poId, setPoId] = useState("");
+  const [poNumber, setPoNumber] = useState("");
+  const [claimAmount, setClaimAmount] = useState("");
+  const [paymentDate, setPaymentDate] = useState("");
+  const [referenceNo, setReferenceNo] = useState("");
   const [onboardFor, setOnboardFor] = useState<SalesTarget | null>(null);
   const [onboardPo, setOnboardPo] = useState("");
   const [busy, setBusy] = useState(false);
@@ -92,16 +98,30 @@ function TargetsTab() {
   }
   useEffect(() => { load(); }, [token]); // eslint-disable-line
 
+  function openClaim(t: SalesTarget) {
+    setClaimFor(t); setPoNumber(""); setClaimAmount(""); setPaymentDate(""); setReferenceNo("");
+  }
+
   async function claim() {
     if (!token || !claimFor) return;
-    const id = parseInt(poId, 10);
-    if (!id) { alert("Enter a PO ID."); return; }
+    const isPayment = claimFor.metric === "payment";
+    const amount = Number(claimAmount);
+    if (!amount || amount <= 0) { alert("Enter a valid amount."); return; }
+    let body: any;
+    if (isPayment) {
+      if (!paymentDate) { alert("Payment date is required."); return; }
+      body = { type: "payment", payment_date: paymentDate, reference_no: referenceNo.trim() || null, amount };
+    } else {
+      if (!poNumber.trim()) { alert("Enter a PO number."); return; }
+      body = { type: "po", po_number: poNumber.trim(), amount };
+    }
     setBusy(true);
     try {
-      const r = await SalesAuth.roleFetch(token, `/api/sales/targets/${claimFor.id}/claim-po`, { method: "POST", body: JSON.stringify({ po_id: id }) });
+      const r = await SalesAuth.roleFetch(token, `/api/sales/targets/${claimFor.id}/claim`, { method: "POST", body: JSON.stringify(body) });
       const j = await r.json();
       if (!r.ok) { alert(j.error || "Claim failed"); return; }
-      setClaimFor(null); setPoId(""); load();
+      alert(j.auto_approved ? "PO matched — claim auto-approved and credited!" : "Submitted — awaiting admin approval.");
+      setClaimFor(null); load();
     } finally { setBusy(false); }
   }
 
@@ -137,7 +157,7 @@ function TargetsTab() {
         <div key={g} className="border rounded-xl p-4 bg-muted/20">
           <div className="font-bold text-sm mb-3">{g}</div>
           <div className="grid sm:grid-cols-3 gap-3">
-            {groups[g].map((t) => <TargetCard key={t.id} t={t} onClaim={(x) => { setClaimFor(x); setPoId(""); }} />)}
+            {groups[g].map((t) => <TargetCard key={t.id} t={t} onClaim={openClaim} />)}
           </div>
         </div>
       ))}
@@ -168,12 +188,34 @@ function TargetsTab() {
       {claimFor && (
         <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4" onClick={() => setClaimFor(null)}>
           <div className="bg-card rounded-xl p-6 w-full max-w-sm shadow-xl" onClick={(e) => e.stopPropagation()}>
-            <h2 className="font-bold text-lg mb-1">Claim PO</h2>
-            <p className="text-xs text-muted-foreground mb-4">Enter the ID of a shipped PO for a customer assigned to you.</p>
-            <input value={poId} onChange={(e) => setPoId(e.target.value)} placeholder="PO ID" type="number" className="w-full border rounded-lg px-3 py-2 bg-background text-sm" data-testid="input-claim-po-id" />
+            {claimFor.metric === "payment" ? (
+              <>
+                <h2 className="font-bold text-lg mb-1">Submit Payment</h2>
+                <p className="text-xs text-muted-foreground mb-4">Payment claims are verified by an admin before being credited.</p>
+                <div className="space-y-3">
+                  <label className="block text-xs font-semibold">Payment Date *
+                    <input value={paymentDate} onChange={(e) => setPaymentDate(e.target.value)} type="date" className="mt-1 w-full border rounded-lg px-3 py-2 bg-background text-sm font-normal" data-testid="input-payment-date" /></label>
+                  <label className="block text-xs font-semibold">Reference Number (optional)
+                    <input value={referenceNo} onChange={(e) => setReferenceNo(e.target.value)} placeholder="UTR / cheque no." className="mt-1 w-full border rounded-lg px-3 py-2 bg-background text-sm font-normal" data-testid="input-payment-reference" /></label>
+                  <label className="block text-xs font-semibold">Amount (₹) *
+                    <input value={claimAmount} onChange={(e) => setClaimAmount(e.target.value)} type="number" placeholder="0" className="mt-1 w-full border rounded-lg px-3 py-2 bg-background text-sm font-normal" data-testid="input-payment-amount" /></label>
+                </div>
+              </>
+            ) : (
+              <>
+                <h2 className="font-bold text-lg mb-1">Claim a PO</h2>
+                <p className="text-xs text-muted-foreground mb-4">Matching PO numbers auto-approve and credit instantly; others go to admin review.</p>
+                <div className="space-y-3">
+                  <label className="block text-xs font-semibold">PO Number *
+                    <input value={poNumber} onChange={(e) => setPoNumber(e.target.value)} placeholder="e.g. NM/PO/26/0001" className="mt-1 w-full border rounded-lg px-3 py-2 bg-background text-sm font-normal" data-testid="input-claim-po-number" /></label>
+                  <label className="block text-xs font-semibold">Amount (₹) *
+                    <input value={claimAmount} onChange={(e) => setClaimAmount(e.target.value)} type="number" placeholder="0" className="mt-1 w-full border rounded-lg px-3 py-2 bg-background text-sm font-normal" data-testid="input-claim-amount" /></label>
+                </div>
+              </>
+            )}
             <div className="flex justify-end gap-2 mt-4">
               <button onClick={() => setClaimFor(null)} className="px-4 py-2 border rounded-lg text-sm">Cancel</button>
-              <button onClick={claim} disabled={busy} className="px-4 py-2 bg-accent text-accent-foreground rounded-lg text-sm font-semibold" data-testid="button-confirm-claim">{busy ? "Claiming…" : "Claim"}</button>
+              <button onClick={claim} disabled={busy} className="px-4 py-2 bg-accent text-accent-foreground rounded-lg text-sm font-semibold" data-testid="button-confirm-claim">{busy ? "Submitting…" : "Submit"}</button>
             </div>
           </div>
         </div>
@@ -249,7 +291,73 @@ function LeadsKanbanTab() {
 
 // ---- Tasks ----
 interface Task { id: number; title: string; description: string | null; status: string; priority: string; deadline: string | null; fileUrl: string | null; }
+interface Remark { id: number; user_name: string | null; body: string; created_at: number; }
 const TASK_STATUSES = ["pending", "processing", "standby", "complete", "open", "doing", "done"];
+const CLOSED_STATUSES = new Set(["closed", "complete", "completed", "done"]);
+const isClosed = (s: string) => CLOSED_STATUSES.has(String(s || "").toLowerCase());
+
+function TaskRow({ task, onChanged }: { task: Task; onChanged: () => void }) {
+  const { token } = SalesAuth.useAuth();
+  const [remarks, setRemarks] = useState<Remark[]>([]);
+  const [draft, setDraft] = useState("");
+  const [busy, setBusy] = useState(false);
+  const locked = isClosed(task.status);
+
+  async function loadRemarks() {
+    if (!token) return;
+    const r = await SalesAuth.roleFetch(token, `/api/sales/tasks/${task.id}/remarks`);
+    if (r.ok) setRemarks(await r.json()); else setRemarks([]);
+  }
+  useEffect(() => { loadRemarks(); }, [token, task.id]); // eslint-disable-line
+
+  async function setStatus(status: string) {
+    if (!token) return;
+    const r = await SalesAuth.roleFetch(token, `/api/sales/tasks/${task.id}/status`, { method: "PATCH", body: JSON.stringify({ status }) });
+    if (!r.ok) { alert((await r.json().catch(() => ({}))).error || "Failed"); return; }
+    onChanged();
+  }
+  async function addRemark() {
+    if (!token || !draft.trim()) return;
+    setBusy(true);
+    try {
+      const r = await SalesAuth.roleFetch(token, `/api/sales/tasks/${task.id}/remarks`, { method: "POST", body: JSON.stringify({ body: draft.trim() }) });
+      if (!r.ok) { alert((await r.json().catch(() => ({}))).error || "Failed"); return; }
+      setDraft(""); loadRemarks();
+    } finally { setBusy(false); }
+  }
+
+  return (
+    <div className="bg-card border rounded-xl p-4" data-testid={`sales-task-${task.id}`}>
+      <div className="flex justify-between items-start gap-3">
+        <div>
+          <div className="font-semibold">{task.title}{locked && <span className="ml-2 text-[10px] uppercase font-bold px-2 py-0.5 rounded bg-slate-500/15 text-slate-600" data-testid={`task-locked-${task.id}`}>Closed (locked)</span>}</div>
+          {task.description && <div className="text-xs text-muted-foreground mt-0.5">{task.description}</div>}
+          <div className="text-xs text-muted-foreground mt-1">Priority: {task.priority} · Deadline: {task.deadline || "—"}{task.fileUrl ? <> · <a href={task.fileUrl} target="_blank" rel="noreferrer" className="text-indigo-600 hover:underline">File</a></> : null}</div>
+        </div>
+        <select value={task.status} disabled={locked} onChange={(e) => setStatus(e.target.value)} className="text-xs font-bold rounded px-2 py-1 border bg-background disabled:opacity-50 disabled:cursor-not-allowed" data-testid={`select-sales-task-status-${task.id}`}>
+          {TASK_STATUSES.map((s) => <option key={s} value={s}>{s}</option>)}
+        </select>
+      </div>
+      <div className="mt-3 border-t pt-3">
+        <div className="flex gap-2">
+          <input value={draft} onChange={(e) => setDraft(e.target.value)} disabled={locked} onKeyDown={(e) => e.key === "Enter" && addRemark()} placeholder={locked ? "Task closed — remarks locked" : "Add update remark…"} className="flex-1 border rounded-lg px-3 py-1.5 bg-background text-sm disabled:opacity-50" data-testid={`input-remark-${task.id}`} />
+          <button onClick={addRemark} disabled={locked || busy || !draft.trim()} className="px-3 py-1.5 border rounded-lg text-sm font-semibold disabled:opacity-50" data-testid={`button-remark-${task.id}`}>Update Remark</button>
+        </div>
+        {remarks.length > 0 && (
+          <div className="mt-2 space-y-1 max-h-40 overflow-y-auto">
+            {remarks.map((rm) => (
+              <div key={rm.id} className="text-xs border rounded px-2 py-1" data-testid={`remark-${rm.id}`}>
+                <span className="text-muted-foreground">{new Date(rm.created_at).toLocaleString("en-IN")} — </span>
+                <span className="font-semibold">{rm.user_name || "Rep"}:</span> {rm.body}
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
 function TasksTab() {
   const { token } = SalesAuth.useAuth();
   const [tasks, setTasks] = useState<Task[]>([]);
@@ -261,36 +369,10 @@ function TasksTab() {
   }
   useEffect(() => { load(); }, [token]); // eslint-disable-line
 
-  async function setStatus(id: number, status: string) {
-    if (!token) return;
-    const r = await SalesAuth.roleFetch(token, `/api/sales/tasks/${id}/status`, { method: "PATCH", body: JSON.stringify({ status }) });
-    if (!r.ok) { alert((await r.json()).error || "Failed"); return; }
-    load();
-  }
-
   if (tasks.length === 0) return <div className="p-12 text-center text-muted-foreground bg-card border rounded-xl">No tasks assigned to you.</div>;
   return (
-    <div className="bg-card border rounded-xl overflow-x-auto">
-      <table className="w-full text-sm">
-        <thead><tr className="bg-muted/50 text-left">
-          <th className="px-4 py-3 font-semibold">Task</th><th className="px-4 py-3 font-semibold">Priority</th>
-          <th className="px-4 py-3 font-semibold">Deadline</th><th className="px-4 py-3 font-semibold">File</th>
-          <th className="px-4 py-3 font-semibold">Status</th>
-        </tr></thead>
-        <tbody className="divide-y">{tasks.map((t) => (
-          <tr key={t.id} data-testid={`sales-task-${t.id}`}>
-            <td className="px-4 py-3"><div className="font-semibold">{t.title}</div>{t.description && <div className="text-xs text-muted-foreground">{t.description}</div>}</td>
-            <td className="px-4 py-3 text-xs">{t.priority}</td>
-            <td className="px-4 py-3 text-xs">{t.deadline || "—"}</td>
-            <td className="px-4 py-3 text-xs">{t.fileUrl ? <a href={t.fileUrl} target="_blank" rel="noreferrer" className="text-indigo-600 hover:underline">Open</a> : "—"}</td>
-            <td className="px-4 py-3">
-              <select value={t.status} onChange={(e) => setStatus(t.id, e.target.value)} className="text-xs font-bold rounded px-2 py-1 border bg-background" data-testid={`select-sales-task-status-${t.id}`}>
-                {TASK_STATUSES.map((s) => <option key={s} value={s}>{s}</option>)}
-              </select>
-            </td>
-          </tr>
-        ))}</tbody>
-      </table>
+    <div className="space-y-3">
+      {tasks.map((t) => <TaskRow key={t.id} task={t} onChanged={load} />)}
     </div>
   );
 }

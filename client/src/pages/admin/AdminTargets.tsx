@@ -122,6 +122,28 @@ export default function AdminTargets() {
   });
   const repName = (id: number | null) => salesUsers.find((u) => u.id === id)?.name || salesUsers.find((u) => u.id === id)?.username || (id == null ? "—" : `#${id}`);
 
+  // R26.6g — A1/A2: pending PO + payment claims awaiting admin approval.
+  const { data: pendingClaims = [] } = useQuery<any[]>({
+    queryKey: ["admin-target-claims-pending"],
+    queryFn: async () => { const r = await adminFetch(token, `/api/admin/target-claims?status=pending_admin_approval`); return r.ok ? r.json() : []; },
+    enabled: !!token,
+  });
+  const approveClaim = useMutation({
+    mutationFn: async (id: number) => { const r = await adminFetch(token, `/api/admin/target-claims/${id}/approve`, { method: "POST" }); if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error || "Approve failed"); },
+    onSuccess: () => { qc.invalidateQueries({ queryKey: ["admin-target-claims-pending"] }); qc.invalidateQueries({ queryKey: ["admin-sales-targets"] }); toast({ title: "Claim approved" }); },
+    onError: (e: any) => toast({ title: "Error", description: e.message, variant: "destructive" }),
+  });
+  const rejectClaim = useMutation({
+    mutationFn: async (id: number) => {
+      const reason = prompt("Reason for rejection (optional):") || undefined;
+      const r = await adminFetch(token, `/api/admin/target-claims/${id}/reject`, { method: "POST", body: JSON.stringify({ reason }) });
+      if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error || "Reject failed");
+    },
+    onSuccess: () => { qc.invalidateQueries({ queryKey: ["admin-target-claims-pending"] }); qc.invalidateQueries({ queryKey: ["admin-sales-targets"] }); toast({ title: "Claim rejected" }); },
+    onError: (e: any) => toast({ title: "Error", description: e.message, variant: "destructive" }),
+  });
+  const claimDate = (ms: number | null | undefined) => (ms ? new Date(ms).toLocaleDateString("en-IN") : "—");
+
   return (
     <AdminLayout title="Targets">
       <div className="flex justify-end mb-4">
@@ -199,6 +221,42 @@ export default function AdminTargets() {
                     <button onClick={() => verifyOnboarding.mutate(t.id)} className="px-2 py-1 mr-1 rounded border text-[11px] font-semibold text-emerald-700" data-testid={`button-verify-onboarding-${t.id}`}>Verify</button>
                   )}
                   <button onClick={() => { if (confirm("Delete sales target?")) delSalesTarget.mutate(t.id); }} className="p-1.5 rounded hover:bg-red-500/10 text-red-600" data-testid={`button-delete-sales-target-${t.id}`}><Trash2 className="w-4 h-4" /></button>
+                </td>
+              </tr>
+            ))}</tbody>
+          </table>
+        )}
+      </div>
+
+      {/* R26.6g — A1/A2: Pending PO + Payment claims awaiting admin approval. */}
+      <div className="flex items-center justify-between mt-10 mb-4">
+        <h2 className="font-display text-lg font-bold">Pending Claims</h2>
+        {pendingClaims.length > 0 && <span className="text-[11px] font-bold px-2 py-0.5 rounded bg-amber-500/15 text-amber-700">{pendingClaims.length} awaiting</span>}
+      </div>
+      <p className="text-xs text-muted-foreground mb-3">PO claims with an unrecognized PO number and all payment claims land here for verification. Approving credits the rep's target.</p>
+      <div className="bg-card border rounded-xl overflow-x-auto shadow-sm">
+        {pendingClaims.length === 0 ? <div className="p-12 text-center text-muted-foreground">No pending claims.</div> : (
+          <table className="w-full text-sm">
+            <thead><tr className="bg-muted/50 text-left">
+              <th className="px-3 py-3 font-semibold">Rep</th>
+              <th className="px-3 py-3 font-semibold">Type</th>
+              <th className="px-3 py-3 font-semibold">Customer</th>
+              <th className="px-3 py-3 font-semibold">PO / Reference</th>
+              <th className="px-3 py-3 font-semibold text-right">Amount</th>
+              <th className="px-3 py-3 font-semibold">Date</th>
+              <th className="px-3 py-3 font-semibold text-right">Actions</th>
+            </tr></thead>
+            <tbody className="divide-y">{pendingClaims.map((c: any) => (
+              <tr key={c.id} className="hover:bg-muted/30" data-testid={`pending-claim-${c.id}`}>
+                <td className="px-3 py-3">{c.rep_name}</td>
+                <td className="px-3 py-3 text-xs uppercase font-semibold">{c.type === "payment" ? "Payment" : "PO"}</td>
+                <td className="px-3 py-3">{c.customer_name || "—"}</td>
+                <td className="px-3 py-3 font-mono text-xs">{c.type === "payment" ? (c.reference_no || "—") : (c.po_number || "—")}</td>
+                <td className="px-3 py-3 text-right font-semibold">₹{Number(c.amount || 0).toLocaleString("en-IN")}</td>
+                <td className="px-3 py-3 text-xs">{claimDate(c.claim_date || c.created_at)}</td>
+                <td className="px-3 py-3 text-right whitespace-nowrap">
+                  <button onClick={() => approveClaim.mutate(c.id)} disabled={approveClaim.isPending} className="px-2.5 py-1 mr-1 rounded border text-[11px] font-semibold text-emerald-700 hover:bg-emerald-500/10 disabled:opacity-50" data-testid={`button-approve-claim-${c.id}`}>Approve</button>
+                  <button onClick={() => rejectClaim.mutate(c.id)} disabled={rejectClaim.isPending} className="px-2.5 py-1 rounded border text-[11px] font-semibold text-red-600 hover:bg-red-500/10 disabled:opacity-50" data-testid={`button-reject-claim-${c.id}`}>Reject</button>
                 </td>
               </tr>
             ))}</tbody>

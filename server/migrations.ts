@@ -1762,3 +1762,86 @@ export function runR26_6eMigrations() {
   }
   console.log("[migrations] R26.6e: complete");
 }
+
+// -------- R26.6g additive migrations --------
+// ADDITIVE ONLY. New tables for the PO/Payment claim approval flow and per-task remark log.
+// Per-statement try/catch so one failure never aborts the rest. Also seeds two demo leads
+// assigned to the demo `sales` rep so the leads tab shows real data on first login.
+export function runR26_6gMigrations() {
+  console.log("[migrations] R26.6g: start");
+
+  // ---- 1. target_claims (PO + payment claims awaiting auto/admin verification) ----
+  try {
+    sqlite.exec(`
+      CREATE TABLE IF NOT EXISTS target_claims (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        target_id INTEGER NOT NULL,
+        rep_user_id INTEGER,
+        type TEXT NOT NULL DEFAULT 'po',          -- po | payment
+        po_number TEXT,
+        amount REAL NOT NULL DEFAULT 0,
+        reference_no TEXT,
+        claim_date TEXT,
+        status TEXT NOT NULL DEFAULT 'pending_admin_approval', -- pending_admin_approval | approved | rejected
+        created_at INTEGER NOT NULL DEFAULT 0,
+        approved_at INTEGER,
+        approved_by INTEGER,
+        reject_reason TEXT
+      );
+    `);
+    console.log("[migrations] R26.6g: target_claims ready");
+  } catch (err: any) {
+    console.log("[migrations] R26.6g: target_claims failed —", err?.message || err);
+  }
+
+  // ---- 2. task_remarks (chronological update log per task) ----
+  try {
+    sqlite.exec(`
+      CREATE TABLE IF NOT EXISTS task_remarks (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        task_id INTEGER NOT NULL,
+        user_id INTEGER,
+        user_name TEXT,
+        body TEXT NOT NULL,
+        created_at INTEGER NOT NULL DEFAULT 0
+      );
+    `);
+    console.log("[migrations] R26.6g: task_remarks ready");
+  } catch (err: any) {
+    console.log("[migrations] R26.6g: task_remarks failed —", err?.message || err);
+  }
+
+  // ---- 3. seed two demo leads assigned to the demo sales rep (idempotent) ----
+  try {
+    const salesUser = sqlite.prepare(
+      `SELECT id FROM data_team_users WHERE username = 'sales' AND role = 'sales' LIMIT 1`,
+    ).get() as any;
+    if (salesUser?.id) {
+      const now = Date.now();
+      const seeds = [
+        { name: "Ravi Auto Spares", phone: "9800000011", city: "Patna", contact: "Ravi Kumar", email: "ravi@demo.test" },
+        { name: "Sharma Motors", phone: "9800000012", city: "Muzaffarpur", contact: "Anil Sharma", email: "anil@demo.test" },
+      ];
+      let seeded = 0;
+      for (const s of seeds) {
+        const exists = sqlite.prepare(
+          `SELECT id FROM leads WHERE name = ? AND assigned_to_user_id = ? LIMIT 1`,
+        ).get(s.name, salesUser.id) as any;
+        if (!exists) {
+          sqlite.prepare(
+            `INSERT INTO leads (source, name, phone, whatsapp, email, city, requirement, stage, status, contact_person, assigned_to_user_id, score, created_at, updated_at, last_contact_at)
+             VALUES ('manual', ?, ?, ?, ?, ?, 'Demo requirement', 'new', 'new', ?, ?, 50, ?, ?, ?)`,
+          ).run(s.name, s.phone, s.phone, s.email, s.city, s.contact, salesUser.id, now, now, now);
+          seeded++;
+        }
+      }
+      console.log(`[migrations] R26.6g: seeded ${seeded} demo lead(s) → rep ${salesUser.id}`);
+    } else {
+      console.log("[migrations] R26.6g: demo sales user not found — skipping lead seed");
+    }
+  } catch (err: any) {
+    console.log("[migrations] R26.6g: lead seed failed —", err?.message || err);
+  }
+
+  console.log("[migrations] R26.6g: complete");
+}

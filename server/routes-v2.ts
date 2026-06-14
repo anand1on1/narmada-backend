@@ -2081,6 +2081,10 @@ export function registerV2Routes(app: Express, ctx: V2Context) {
         }
       }
       await v2.writeAuditLog({ actorType: "data_team", actorId: String(teamUser.id), action: "create_quotation", entityType: "quotation", entityId: String(quotation.id), afterJson: JSON.stringify(quotation) });
+      // R26.6g — A3: credit the quotation amount into matching active quotation-type targets.
+      // Best-effort; must never break quotation creation.
+      try { v2.syncQuotationToTargets(quotation.id); }
+      catch (err: any) { console.error("[R26.6g] quotation→target sync skipped:", err?.message || err); }
       res.json({ quotation, items: savedItems });
     } catch (e: any) { res.status(400).json({ error: e.message }); }
   });
@@ -5888,6 +5892,8 @@ function registerR8Routes(
         items.map((item: any, idx: number) => ({ ...item, lineNo: item.lineNo || idx + 1 })),
         companyPrefix,
       );
+      try { v2.syncQuotationToTargets(quotation.id); }
+      catch (err: any) { console.error("[R26.6g] quotation→target sync skipped:", err?.message || err); }
       res.json({ quotation, items: savedItems });
     } catch (e: any) { res.status(400).json({ error: e.message }); }
   });
@@ -6119,16 +6125,52 @@ function registerR8Routes(
     const u = (req as any).teamUser;
     res.json(await v2.listTaskItems({ assignedTo: u.id, status: req.query.status as string | undefined }));
   });
+  // R26.6g — closed/completed tasks are immutable: reject status changes with 409.
+  const CLOSED_TASK_STATUSES = new Set(["closed", "complete", "completed", "done"]);
   app.patch("/api/sales/tasks/:id/status", requireSales, async (req, res) => {
     try {
       const id = parseInt(req.params.id as string, 10);
       const u = (req as any).teamUser;
       const all = await v2.listTaskItems({ assignedTo: u.id });
-      if (!all.find((t: any) => t.id === id)) return res.status(404).json({ error: "Not found" });
+      const current = all.find((t: any) => t.id === id) as any;
+      if (!current) return res.status(404).json({ error: "Not found" });
+      if (CLOSED_TASK_STATUSES.has(String(current.status || "").toLowerCase())) {
+        return res.status(409).json({ error: "Task is closed and cannot be modified." });
+      }
       const status = String(req.body?.status || "");
       if (!TASK_STATUSES.includes(status)) return res.status(400).json({ error: "Invalid status" });
       res.json(await v2.updateTaskItem(id, { status } as any));
     } catch (e: any) { res.status(400).json({ error: e.message }); }
+  });
+  // R26.6g — C2: per-task remark log. Viewable always; adding blocked on closed tasks.
+  app.get("/api/sales/tasks/:id/remarks", requireSales, async (req, res) => {
+    try {
+      const id = parseInt(req.params.id as string, 10);
+      const u = (req as any).teamUser;
+      const all = await v2.listTaskItems({ assignedTo: u.id });
+      if (!all.find((t: any) => t.id === id)) return res.status(404).json({ error: "Not found" });
+      res.json(v2.listTaskRemarks(id));
+    } catch (e: any) { res.status(400).json({ error: e.message }); }
+  });
+  app.post("/api/sales/tasks/:id/remarks", requireSales, async (req, res) => {
+    try {
+      const id = parseInt(req.params.id as string, 10);
+      const u = (req as any).teamUser;
+      const all = await v2.listTaskItems({ assignedTo: u.id });
+      const current = all.find((t: any) => t.id === id) as any;
+      if (!current) return res.status(404).json({ error: "Not found" });
+      if (CLOSED_TASK_STATUSES.has(String(current.status || "").toLowerCase())) {
+        return res.status(409).json({ error: "Task is closed and cannot be modified." });
+      }
+      const body = String(req.body?.body || "").trim();
+      if (!body) return res.status(400).json({ error: "Remark body is required" });
+      res.json(v2.addTaskRemark(id, u.id, u.name || u.username || null, body));
+    } catch (e: any) { res.status(400).json({ error: e.message }); }
+  });
+  // Admin: read remarks for any task (for the admin task view).
+  app.get("/api/admin/tasks/:id/remarks", requireAuth, async (req, res) => {
+    try { res.json(v2.listTaskRemarks(parseInt(req.params.id as string, 10))); }
+    catch (e: any) { res.status(500).json({ error: e.message }); }
   });
 
   // ==================== D. USER MANAGEMENT ====================
@@ -6230,6 +6272,43 @@ function registerR8Routes(
       res.json({ ok: true });
     } catch (e: any) { res.status(400).json({ error: e.message }); }
   });
+  // R26.6g — D1: consignment-portal document upload (docket + invoice). Mirrors the admin
+  // upload route but gated behind requireConsignment. Stores absolute backend URLs so the
+  // GoDaddy SPA never serves them as the homepage.
+  const consignPortalDocsDir = path.join(ctx.uploadsDir || "./uploads", "consignments");
+  if (!fs.existsSync(consignPortalDocsDir)) fs.mkdirSync(consignPortalDocsDir, { recursive: true });
+  const multerConsignPortal = multer({
+    storage: multer.diskStorage({
+      destination: (_req: any, _file: any, cb: any) => cb(null, consignPortalDocsDir),
+      filename: (_req: any, file: any, cb: any) => cb(null, `${Date.now()}-${file.originalname.replace(/[^a-zA-Z0-9._-]/g, "_")}`),
+    }),
+    limits: { fileSize: 20 * 1024 * 1024 },
+    fileFilter: (_req: any, file: any, cb: any) => {
+      if (file.mimetype === "application/pdf" || file.mimetype === "image/jpeg" || file.mimetype === "image/png") cb(null, true);
+      else cb(new Error("Only PDF/JPG/PNG allowed"));
+    },
+  });
+  app.post(
+    "/api/consignment/consignments/:id/upload",
+    requireConsignment,
+    multerConsignPortal.fields([{ name: "invoice", maxCount: 1 }, { name: "docket", maxCount: 1 }]),
+    async (req: any, res: any) => {
+      try {
+        const id = parseInt(req.params.id as string, 10);
+        const existing = await v2.getConsignmentById(id);
+        if (!existing) return res.status(404).json({ error: "Consignment not found" });
+        const proto = req.protocol || "https";
+        const host = req.get("host") || "narmada-backend.onrender.com";
+        const files = (req.files || {}) as Record<string, any[]>;
+        const patch: any = {};
+        if (files.invoice?.[0]) patch.invoiceUrl = `${proto}://${host}/uploads/consignments/${files.invoice[0].filename}`;
+        if (files.docket?.[0]) patch.docketUrl = `${proto}://${host}/uploads/consignments/${files.docket[0].filename}`;
+        if (Object.keys(patch).length === 0) return res.status(400).json({ error: "No invoice or docket file provided" });
+        const updated = await v2.updateConsignment(id, patch);
+        res.json(updated);
+      } catch (e: any) { res.status(400).json({ error: e.message }); }
+    },
+  );
   // From-Delhi (origin=Delhi) dispatched POs for the consignment portal — same as admin.
   app.get("/api/consignment/from-delhi", requireConsignment, async (req, res) => {
     try {
@@ -6238,6 +6317,15 @@ function registerR8Routes(
       const from = req.query.from ? parseInt(req.query.from as string, 10) : undefined;
       const to = req.query.to ? parseInt(req.query.to as string, 10) : undefined;
       res.json(v2.listDelhiDispatchedForConsignment({ status, q, from, to }));
+    } catch (e: any) { res.status(500).json({ error: e.message }); }
+  });
+  // R26.6g — D3: From-Delhi PO detail for the consignment portal (items + docket/invoice).
+  app.get("/api/consignment/from-delhi/:poId", requireConsignment, async (req, res) => {
+    try {
+      const poId = parseInt(req.params.poId as string, 10);
+      const detail = v2.getConsignmentPortalDetail(poId);
+      if (!detail) return res.status(404).json({ error: "PO not found" });
+      res.json(detail);
     } catch (e: any) { res.status(500).json({ error: e.message }); }
   });
   // Consignment portal — customer directory CRUD (mirror of admin customers).
@@ -6367,6 +6455,45 @@ function registerR8Routes(
       const result = v2.claimPoForTarget(parseInt(req.params.id as string, 10), poId, u.id);
       if (!result.ok) return res.status(400).json({ error: result.error });
       res.json({ ok: true, achievement: result.achievement });
+    } catch (e: any) { res.status(400).json({ error: e.message }); }
+  });
+  // R26.6g — A1/A2: PO or Payment claim with amount. PO that matches an existing PO number
+  // auto-approves + credits; otherwise (and all payment claims) goes to admin approval.
+  app.post("/api/sales/targets/:id/claim", requireSales, async (req, res) => {
+    try {
+      const u = (req as any).teamUser;
+      const result = v2.submitTargetClaim(parseInt(req.params.id as string, 10), u.id, req.body || {});
+      if (!result.ok) return res.status(400).json({ error: result.error });
+      res.json({ ok: true, claim: result.claim, auto_approved: !!result.autoApproved });
+    } catch (e: any) { res.status(400).json({ error: e.message }); }
+  });
+  app.get("/api/sales/targets/:id/claims", requireSales, async (req, res) => {
+    try {
+      const u = (req as any).teamUser;
+      const target = v2.getSalesTarget(parseInt(req.params.id as string, 10));
+      if (!target || target.sales_rep_user_id !== u.id) return res.status(404).json({ error: "Not found" });
+      res.json(v2.listTargetClaimsForTarget(target.id));
+    } catch (e: any) { res.status(400).json({ error: e.message }); }
+  });
+  // R26.6g — admin claim review.
+  app.get("/api/admin/target-claims", requireAuth, async (req, res) => {
+    try { res.json(v2.listTargetClaimsAdmin(req.query.status as string | undefined)); }
+    catch (e: any) { res.status(500).json({ error: e.message }); }
+  });
+  app.post("/api/admin/target-claims/:id/approve", requireAdminRole, async (req, res) => {
+    try {
+      const adminUser = (req as any).user;
+      const result = v2.approveTargetClaim(parseInt(req.params.id as string, 10), adminUser?.id ?? 0);
+      if (!result.ok) return res.status(400).json({ error: result.error });
+      res.json({ ok: true, claim: result.claim });
+    } catch (e: any) { res.status(400).json({ error: e.message }); }
+  });
+  app.post("/api/admin/target-claims/:id/reject", requireAdminRole, async (req, res) => {
+    try {
+      const adminUser = (req as any).user;
+      const result = v2.rejectTargetClaim(parseInt(req.params.id as string, 10), adminUser?.id ?? 0, req.body?.reason ? String(req.body.reason) : undefined);
+      if (!result.ok) return res.status(400).json({ error: result.error });
+      res.json({ ok: true, claim: result.claim });
     } catch (e: any) { res.status(400).json({ error: e.message }); }
   });
 

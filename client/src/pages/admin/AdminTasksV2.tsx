@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { AdminLayout } from "./AdminLayout";
 import { adminFetch, useAdminAuth } from "@/lib/admin-auth";
-import { Plus, Trash2, Paperclip, ExternalLink } from "lucide-react";
+import { Plus, Trash2, Paperclip, ExternalLink, MessageSquare, X } from "lucide-react";
 
 // R26.5 (C) — Tasks V2 over /api/admin/tasks (camelCase TaskItem). Adds file upload
 // (POST /api/admin/tasks/:id/file) and granular status PATCH (/api/admin/tasks/:id/status).
@@ -21,6 +21,8 @@ const STATUS_COLOR: Record<string, string> = {
 };
 
 interface Draft { title: string; description: string; assignedTo: string; priority: string; deadline: string; file: File | null; }
+interface Remark { id: number; user_name: string | null; body: string; created_at: number; }
+const fmtTs = (ms: number | null | undefined) => (ms ? new Date(ms).toLocaleString("en-IN") : "—");
 
 export default function AdminTasksV2() {
   const { token } = useAdminAuth();
@@ -28,6 +30,20 @@ export default function AdminTasksV2() {
   const [users, setUsers] = useState<User[]>([]);
   const [edit, setEdit] = useState<Draft | null>(null);
   const [busy, setBusy] = useState(false);
+  const [remarksFor, setRemarksFor] = useState<Task | null>(null);
+  const [remarks, setRemarks] = useState<Remark[]>([]);
+  const [remarksLoading, setRemarksLoading] = useState(false);
+
+  async function openRemarks(t: Task) {
+    if (!token) return;
+    setRemarksFor(t);
+    setRemarks([]);
+    setRemarksLoading(true);
+    try {
+      const r = await adminFetch(token, `/api/admin/tasks/${t.id}/remarks`);
+      if (r.ok) setRemarks(await r.json()); else setRemarks([]);
+    } finally { setRemarksLoading(false); }
+  }
 
   async function load() {
     if (!token) return;
@@ -101,6 +117,7 @@ export default function AdminTasksV2() {
               <th className="px-3 py-3 font-semibold">Deadline</th>
               <th className="px-3 py-3 font-semibold">File</th>
               <th className="px-3 py-3 font-semibold">Status</th>
+              <th className="px-3 py-3 font-semibold">Remarks</th>
               <th className="px-3 py-3 font-semibold text-right">Actions</th>
             </tr></thead>
             <tbody className="divide-y">{tasks.map((t) => (
@@ -117,6 +134,9 @@ export default function AdminTasksV2() {
                     className={`text-xs font-bold rounded px-2 py-1 border-0 ${STATUS_COLOR[t.status] || "bg-muted"}`} data-testid={`select-task-status-${t.id}`}>
                     {STATUSES.map((s) => <option key={s} value={s}>{s}</option>)}
                   </select>
+                </td>
+                <td className="px-3 py-3">
+                  <button onClick={() => openRemarks(t)} className="inline-flex items-center gap-1 text-xs font-semibold text-indigo-600 hover:underline" data-testid={`button-task-remarks-${t.id}`}><MessageSquare className="w-3.5 h-3.5" /> View</button>
                 </td>
                 <td className="px-3 py-3 text-right">
                   <button onClick={() => del(t.id)} className="p-1.5 rounded hover:bg-red-500/10 text-red-600" data-testid={`button-delete-task-${t.id}`}><Trash2 className="w-4 h-4" /></button>
@@ -159,6 +179,35 @@ export default function AdminTasksV2() {
               <button onClick={() => setEdit(null)} className="px-4 py-2 border rounded-lg text-sm">Cancel</button>
               <button onClick={save} disabled={!edit.title.trim() || busy} className="px-4 py-2 bg-accent text-accent-foreground rounded-lg text-sm font-semibold disabled:opacity-50" data-testid="button-save-task">{busy ? "Saving…" : "Create"}</button>
             </div>
+          </div>
+        </div>
+      )}
+
+      {remarksFor && (
+        <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50 p-4" onClick={() => setRemarksFor(null)}>
+          <div className="bg-card rounded-xl p-6 w-full max-w-md shadow-xl" onClick={(e) => e.stopPropagation()}>
+            <div className="flex items-center justify-between mb-1">
+              <h2 className="font-bold text-lg">Remarks — {remarksFor.title}</h2>
+              <button onClick={() => setRemarksFor(null)} className="p-1 hover:bg-muted rounded"><X className="w-5 h-5" /></button>
+            </div>
+            <p className="text-xs text-muted-foreground mb-4">Last update: {remarks.length ? fmtTs(remarks[0].created_at) : "—"}</p>
+            {remarksLoading ? (
+              <div className="py-8 text-center text-sm text-muted-foreground">Loading…</div>
+            ) : remarks.length === 0 ? (
+              <div className="py-8 text-center text-sm text-muted-foreground">No remarks yet.</div>
+            ) : (
+              <div className="space-y-3 max-h-[60vh] overflow-y-auto" data-testid="admin-task-remarks-list">
+                {remarks.map((r) => (
+                  <div key={r.id} className="border rounded-lg p-3" data-testid={`admin-task-remark-${r.id}`}>
+                    <div className="flex items-center justify-between text-[11px] text-muted-foreground mb-1">
+                      <span className="font-semibold text-foreground">{r.user_name || "—"}</span>
+                      <span>{fmtTs(r.created_at)}</span>
+                    </div>
+                    <div className="text-sm whitespace-pre-wrap">{r.body}</div>
+                  </div>
+                ))}
+              </div>
+            )}
           </div>
         </div>
       )}

@@ -4454,6 +4454,196 @@ export function approveTargetAchievement(achievementId: number): any {
   return getTargetAchievement(achievementId);
 }
 
+// ============================================================
+// R26.6g — target_claims: PO + Payment claims with admin approval.
+// PO claim: if the submitted po_number matches an existing PO → auto-approve and credit
+// the target immediately. Otherwise create a pending claim for admin review.
+// Payment claim: always pending_admin_approval (admin verifies the deposit).
+// ============================================================
+export function getTargetClaim(id: number): any {
+  return sqlite.prepare(`SELECT * FROM target_claims WHERE id = ?`).get(id);
+}
+export function createTargetClaim(data: {
+  targetId: number; repUserId: number; type: "po" | "payment";
+  poNumber?: string | null; amount: number; referenceNo?: string | null;
+  claimDate?: string | null; status: string;
+}): any {
+  const info = sqlite.prepare(
+    `INSERT INTO target_claims (target_id, rep_user_id, type, po_number, amount, reference_no, claim_date, status, created_at, approved_at, approved_by)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+  ).run(
+    data.targetId, data.repUserId, data.type, data.poNumber ?? null, Number(data.amount || 0),
+    data.referenceNo ?? null, data.claimDate ?? null, data.status, Date.now(),
+    data.status === "approved" ? Date.now() : null, null,
+  );
+  return getTargetClaim(Number(info.lastInsertRowid));
+}
+// Submit a claim against a target. Returns the created claim row + whether it auto-approved.
+export function submitTargetClaim(
+  targetId: number, repUserId: number,
+  body: { po_number?: string; amount?: number | string; payment_date?: string; reference_no?: string; type?: string },
+): { ok: boolean; error?: string; claim?: any; autoApproved?: boolean } {
+  const target = getSalesTarget(targetId);
+  if (!target) return { ok: false, error: "Target not found" };
+  if (target.sales_rep_user_id !== repUserId) return { ok: false, error: "Target does not belong to this rep" };
+
+  const isPayment = body.type === "payment" || String(target.metric || "") === "payment";
+  const amount = Number(body.amount ?? 0);
+  if (!amount || amount <= 0) return { ok: false, error: "Amount is required" };
+
+  if (isPayment) {
+    if (!body.payment_date) return { ok: false, error: "Payment date is required" };
+    const claim = createTargetClaim({
+      targetId, repUserId, type: "payment", amount,
+      referenceNo: body.reference_no ?? null, claimDate: body.payment_date,
+      status: "pending_admin_approval",
+    });
+    return { ok: true, claim, autoApproved: false };
+  }
+
+  // PO claim
+  const poNumber = String(body.po_number || "").trim();
+  if (!poNumber) return { ok: false, error: "PO number is required" };
+  const po = sqlite.prepare(
+    `SELECT * FROM purchase_orders_v2 WHERE deleted_at IS NULL AND (LOWER(po_number) = LOWER(?) OR LOWER(COALESCE(customer_po_number,'')) = LOWER(?)) LIMIT 1`,
+  ).get(poNumber, poNumber) as any;
+
+  if (po) {
+    // PO exists → auto-approve and credit immediately.
+    const claim = createTargetClaim({
+      targetId, repUserId, type: "po", poNumber, amount, status: "approved",
+    });
+    sqlite.prepare(`UPDATE sales_targets SET achieved_amount = COALESCE(achieved_amount,0) + ? WHERE id = ?`).run(amount, targetId);
+    return { ok: true, claim, autoApproved: true };
+  }
+  // PO not found → pending admin approval, no credit yet.
+  const claim = createTargetClaim({
+    targetId, repUserId, type: "po", poNumber, amount, status: "pending_admin_approval",
+  });
+  return { ok: true, claim, autoApproved: false };
+}
+export function listTargetClaimsForTarget(targetId: number): any[] {
+  return sqlite.prepare(`SELECT * FROM target_claims WHERE target_id = ? ORDER BY created_at DESC`).all(targetId) as any[];
+}
+// Admin: list claims (optionally by status) enriched with rep + customer + target context.
+export function listTargetClaimsAdmin(status?: string): any[] {
+  const where = status ? `WHERE tc.status = ?` : "";
+  const rows = sqlite.prepare(
+    `SELECT tc.* FROM target_claims tc ${where} ORDER BY tc.created_at DESC`,
+  ).all(...(status ? [status] : [])) as any[];
+  return rows.map((c) => {
+    const t = getSalesTarget(c.target_id);
+    const rep = c.rep_user_id ? sqlite.prepare(`SELECT name, username FROM data_team_users WHERE id = ?`).get(c.rep_user_id) as any : null;
+    const cust = t?.customer_id ? sqlite.prepare(`SELECT name FROM customers WHERE id = ?`).get(t.customer_id) as any : null;
+    return {
+      ...c,
+      rep_name: rep?.name || rep?.username || (c.rep_user_id ? `#${c.rep_user_id}` : "—"),
+      customer_name: cust?.name || null,
+      target_metric: t?.metric || null,
+      target_type: t?.target_type || null,
+    };
+  });
+}
+export function approveTargetClaim(id: number, adminUserId: number): { ok: boolean; error?: string; claim?: any } {
+  const claim = getTargetClaim(id);
+  if (!claim) return { ok: false, error: "Claim not found" };
+  if (claim.status === "approved") return { ok: true, claim };
+  sqlite.prepare(
+    `UPDATE target_claims SET status = 'approved', approved_at = ?, approved_by = ?, reject_reason = NULL WHERE id = ?`,
+  ).run(Date.now(), adminUserId, id);
+  // Credit the target (only if it was not already credited at submit-time).
+  sqlite.prepare(`UPDATE sales_targets SET achieved_amount = COALESCE(achieved_amount,0) + ? WHERE id = ?`).run(Number(claim.amount || 0), claim.target_id);
+  return { ok: true, claim: getTargetClaim(id) };
+}
+export function rejectTargetClaim(id: number, adminUserId: number, reason?: string): { ok: boolean; error?: string; claim?: any } {
+  const claim = getTargetClaim(id);
+  if (!claim) return { ok: false, error: "Claim not found" };
+  // If it had been auto-approved/credited, roll the credit back.
+  if (claim.status === "approved") {
+    sqlite.prepare(`UPDATE sales_targets SET achieved_amount = MAX(0, COALESCE(achieved_amount,0) - ?) WHERE id = ?`).run(Number(claim.amount || 0), claim.target_id);
+  }
+  sqlite.prepare(
+    `UPDATE target_claims SET status = 'rejected', approved_at = ?, approved_by = ?, reject_reason = ? WHERE id = ?`,
+  ).run(Date.now(), adminUserId, reason ?? null, id);
+  return { ok: true, claim: getTargetClaim(id) };
+}
+
+// ============================================================
+// R26.6g — task_remarks: per-task chronological update log.
+// ============================================================
+export function listTaskRemarks(taskId: number): any[] {
+  return sqlite.prepare(`SELECT * FROM task_remarks WHERE task_id = ? ORDER BY created_at DESC`).all(taskId) as any[];
+}
+export function addTaskRemark(taskId: number, userId: number | null, userName: string | null, body: string): any {
+  const info = sqlite.prepare(
+    `INSERT INTO task_remarks (task_id, user_id, user_name, body, created_at) VALUES (?, ?, ?, ?, ?)`,
+  ).run(taskId, userId, userName, body, Date.now());
+  // Bump the parent task's updated_at so admin "last update" reflects the remark.
+  try { sqlite.prepare(`UPDATE task_items SET updated_at = ? WHERE id = ?`).run(Date.now(), taskId); } catch { /* best-effort */ }
+  return sqlite.prepare(`SELECT * FROM task_remarks WHERE id = ?`).get(Number(info.lastInsertRowid));
+}
+export function latestTaskRemarkAt(taskId: number): number | null {
+  const row = sqlite.prepare(`SELECT MAX(created_at) AS m FROM task_remarks WHERE task_id = ?`).get(taskId) as any;
+  return row?.m ?? null;
+}
+
+// ============================================================
+// R26.6g — A3: sync a freshly-created quotation into matching quotation-type targets.
+// Best-effort; the caller wraps this in try/catch so it never breaks quotation create.
+// ============================================================
+export function syncQuotationToTargets(quotationId: number): void {
+  const quote = sqlite.prepare(`SELECT * FROM quotations WHERE id = ?`).get(quotationId) as any;
+  if (!quote) return;
+  const amount = Number(quote.grand_total ?? 0);
+  if (!amount) return;
+  const createdAt = Number(quote.created_at ?? Date.now());
+  // Active quotation-type targets whose period covers the quotation's created_at.
+  const targets = sqlite.prepare(
+    `SELECT * FROM sales_targets WHERE metric = 'quotation' AND status = 'active'`,
+  ).all() as any[];
+  for (const t of targets) {
+    // Per-customer targets must match the quotation's customer.
+    if (t.customer_id && quote.customer_id && t.customer_id !== quote.customer_id) continue;
+    if (t.customer_id && !quote.customer_id) continue;
+    const startMs = t.period_start ? Date.parse(t.period_start) : 0;
+    const endBase = t.period_end ? Date.parse(t.period_end) : Date.now();
+    const endMs = Number.isNaN(endBase) ? Date.now() : endBase + (24 * 60 * 60 * 1000 - 1);
+    const okStart = Number.isNaN(startMs) ? true : createdAt >= startMs;
+    if (!(okStart && createdAt <= endMs)) continue;
+    sqlite.prepare(`UPDATE sales_targets SET achieved_amount = COALESCE(achieved_amount,0) + ? WHERE id = ?`).run(amount, t.id);
+  }
+}
+
+// R26.6g — consignment-portal From-Delhi detail (extends getConsignmentDetail with
+// per-line pricing + invoice URL so the portal modal can show items + downloads).
+export function getConsignmentPortalDetail(poId: number): any | null {
+  const base = getConsignmentDetail(poId);
+  if (!base) return null;
+  const po = sqlite.prepare(`SELECT * FROM purchase_orders_v2 WHERE id = ?`).get(poId) as any;
+  const items = (sqlite.prepare(`SELECT * FROM po_items WHERE po_id = ?`).all(poId) as any[]).map((it) => {
+    const qty = Number(it.qty ?? 0) || 0;
+    const unitPrice = it.unit_price != null ? Number(it.unit_price) : 0;
+    return {
+      id: it.id,
+      name: it.description || it.part_number || "—",
+      partNumber: it.part_number ?? null,
+      brand: it.brand ?? null,
+      qty, unitPrice, total: unitPrice * qty,
+    };
+  });
+  const totalValue = items.reduce((s, it) => s + it.total, 0);
+  return {
+    ...base,
+    origin: "Delhi",
+    destination: "Patna",
+    itemCount: items.length,
+    items,
+    totalValue,
+    invoiceUrl: po?.customer_po_url || null,
+    docketUrl: base.docketUrl || null,
+  };
+}
+
 // Idempotent auto-rollover: expired active targets that fell short get marked rolled_over
 // and a fresh target for the next equal-length period is created with the remaining amount.
 export function autoRolloverTargets(repUserId: number): void {

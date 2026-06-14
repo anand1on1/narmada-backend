@@ -21,6 +21,13 @@ interface FromDelhiPO {
   consignmentStatus: string | null; itemCount: number; totalBundles: number; custTotal: number;
   docketUrl: string | null; docketNumber: string | null;
 }
+interface FromDelhiItem { name: string; partNumber: string | null; brand: string | null; qty: number; unitPrice: number; total: number; }
+interface FromDelhiDetail {
+  id: number; poNumber: string; customerName: string | null; customerPhone: string | null;
+  origin: string; destination: string | null; status: string | null;
+  itemCount: number; totalBundles: number; totalValue: number;
+  items: FromDelhiItem[]; docketUrl: string | null; invoiceUrl: string | null; docketNumber: string | null;
+}
 interface CustomerRow {
   id: number; name: string; phone: string | null; email: string | null;
   city: string | null; state: string | null; gstNumber: string | null; contactPerson: string | null;
@@ -216,6 +223,11 @@ function ConsignmentsTab({ token }: { token: string | null }) {
             <Field label="ETA Date"><input type="date" value={open.etaDate || ""} onChange={(e) => setOpen({ ...open, etaDate: e.target.value })} className={INP} /></Field>
             <Field label="Notes" full><textarea value={open.notes || ""} onChange={(e) => setOpen({ ...open, notes: e.target.value })} className={INP} rows={2} /></Field>
           </div>
+          {open.id ? (
+            <UploadSection token={token} consignment={open} onUploaded={(patch) => { setOpen({ ...open, ...patch }); load(); }} />
+          ) : (
+            <p className="mt-3 text-xs text-muted-foreground">Save the consignment first, then re-open it to attach docket / invoice files.</p>
+          )}
           <div className="flex justify-end gap-2 mt-4">
             <button onClick={() => setOpen(null)} className="px-4 py-2 border rounded-lg text-sm">Cancel</button>
             <button onClick={save} disabled={saving || !open.docketNumber || !open.destination} className="px-4 py-2 bg-blue-600 text-white rounded-lg text-sm font-semibold disabled:opacity-50" data-testid="btn-save-consignment">{saving ? "Saving…" : "Save"}</button>
@@ -251,12 +263,24 @@ function ConsignmentsTab({ token }: { token: string | null }) {
 function FromDelhiTab({ token }: { token: string | null }) {
   const [pos, setPos] = useState<FromDelhiPO[]>([]);
   const [q, setQ] = useState("");
+  const [detail, setDetail] = useState<FromDelhiDetail | null>(null);
+  const [loadingDetail, setLoadingDetail] = useState(false);
   async function load() {
     if (!token) return;
     const p = new URLSearchParams();
     if (q.trim()) p.set("q", q.trim());
     const r = await ConsignmentAuth.roleFetch(token, `/api/consignment/from-delhi?${p}`);
     if (r.ok) setPos(await r.json()); else setPos([]);
+  }
+  async function openDetail(poId: number) {
+    if (!token) return;
+    setLoadingDetail(true);
+    setDetail(null);
+    try {
+      const r = await ConsignmentAuth.roleFetch(token, `/api/consignment/from-delhi/${poId}`);
+      if (r.ok) setDetail(await r.json());
+      else { const e = await r.json().catch(() => ({})); alert(e.error || "Failed to load PO detail"); }
+    } finally { setLoadingDetail(false); }
   }
   useEffect(() => { load(); }, [token]); // eslint-disable-line
 
@@ -281,15 +305,15 @@ function FromDelhiTab({ token }: { token: string | null }) {
             </tr></thead>
             <tbody className="divide-y">
               {pos.map((p) => (
-                <tr key={p.id} data-testid={`from-delhi-${p.id}`}>
-                  <td className="px-4 py-3 font-mono font-bold">{p.poNumber}</td>
+                <tr key={p.id} data-testid={`from-delhi-${p.id}`} className="hover:bg-muted/40 cursor-pointer" onClick={() => openDetail(p.id)}>
+                  <td className="px-4 py-3 font-mono font-bold text-blue-600 underline" data-testid={`btn-po-detail-${p.id}`}>{p.poNumber}</td>
                   <td className="px-4 py-3">{p.customerName || "—"}{p.customerPhone ? <div className="text-xs text-muted-foreground">{p.customerPhone}</div> : null}</td>
                   <td className="px-4 py-3">{p.itemCount}</td>
                   <td className="px-4 py-3">{p.totalBundles}</td>
                   <td className="px-4 py-3">{inr(p.custTotal)}</td>
                   <td className="px-4 py-3 whitespace-nowrap">
                     {p.docketUrl ? (
-                      <button onClick={() => openFile(p.docketUrl)} className="px-2.5 py-1 border rounded text-xs font-semibold text-blue-600 hover:bg-muted inline-flex items-center gap-1" data-testid={`btn-view-docket-${p.id}`}><FileText className="w-3 h-3" /> View Docket</button>
+                      <button onClick={(e) => { e.stopPropagation(); openFile(p.docketUrl); }} className="px-2.5 py-1 border rounded text-xs font-semibold text-blue-600 hover:bg-muted inline-flex items-center gap-1" data-testid={`btn-view-docket-${p.id}`}><FileText className="w-3 h-3" /> View Docket</button>
                     ) : (
                       <span title="No docket uploaded yet" className="px-2.5 py-1 border rounded text-xs font-semibold text-muted-foreground opacity-50 cursor-not-allowed inline-flex items-center gap-1"><FileText className="w-3 h-3" /> View Docket</span>
                     )}
@@ -300,6 +324,51 @@ function FromDelhiTab({ token }: { token: string | null }) {
           </table>
         )}
       </div>
+
+      {loadingDetail && (
+        <div className="fixed inset-0 bg-black/40 z-50 flex items-center justify-center"><div className="bg-card border rounded-xl px-6 py-4 text-sm">Loading PO detail…</div></div>
+      )}
+      {detail && (
+        <Modal title={`PO ${detail.poNumber} — From Delhi`} onClose={() => setDetail(null)}>
+          <dl className="grid grid-cols-2 gap-x-4 gap-y-2 text-sm mb-4">
+            <Info label="Customer" value={detail.customerName || "—"} />
+            <Info label="Phone" value={detail.customerPhone || "—"} />
+            <Info label="Route" value={`${detail.origin} → ${detail.destination || "—"}`} />
+            <Info label="Status" value={(detail.status || "—").replace(/_/g, " ")} />
+            <Info label="Items" value={String(detail.itemCount)} />
+            <Info label="Bundles" value={String(detail.totalBundles)} />
+            <Info label="Docket #" value={detail.docketNumber || "—"} />
+            <Info label="Total Value" value={inr(detail.totalValue)} />
+          </dl>
+          <div className="border rounded-lg overflow-x-auto">
+            <table className="w-full text-sm" data-testid="table-po-items">
+              <thead><tr className="bg-muted/50 text-left">
+                <th className="px-3 py-2 font-semibold">Part</th>
+                <th className="px-3 py-2 font-semibold text-right">Qty</th>
+                <th className="px-3 py-2 font-semibold text-right">Unit Price</th>
+                <th className="px-3 py-2 font-semibold text-right">Total</th>
+              </tr></thead>
+              <tbody className="divide-y">
+                {detail.items.length === 0 ? (
+                  <tr><td colSpan={4} className="px-3 py-4 text-center text-muted-foreground">No line items.</td></tr>
+                ) : detail.items.map((it, i) => (
+                  <tr key={i} data-testid={`po-item-${i}`}>
+                    <td className="px-3 py-2">{it.name}<div className="text-[11px] text-muted-foreground">{[it.partNumber, it.brand].filter(Boolean).join(" · ")}</div></td>
+                    <td className="px-3 py-2 text-right">{it.qty}</td>
+                    <td className="px-3 py-2 text-right">{inr(it.unitPrice)}</td>
+                    <td className="px-3 py-2 text-right font-medium">{inr(it.total)}</td>
+                  </tr>
+                ))}
+              </tbody>
+              <tfoot><tr className="border-t font-semibold"><td className="px-3 py-2" colSpan={3}>Total</td><td className="px-3 py-2 text-right">{inr(detail.totalValue)}</td></tr></tfoot>
+            </table>
+          </div>
+          <div className="flex gap-2 mt-4">
+            {detail.docketUrl && <button onClick={() => openFile(detail.docketUrl)} className="px-3 py-1.5 border rounded text-xs font-semibold inline-flex items-center gap-1 text-blue-600" data-testid="btn-detail-docket"><FileText className="w-3 h-3" /> Download Docket</button>}
+            {detail.invoiceUrl && <button onClick={() => openFile(detail.invoiceUrl)} className="px-3 py-1.5 border rounded text-xs font-semibold inline-flex items-center gap-1 text-blue-600" data-testid="btn-detail-invoice"><FileText className="w-3 h-3" /> Download Invoice</button>}
+          </div>
+        </Modal>
+      )}
     </div>
   );
 }
@@ -423,4 +492,50 @@ function Field({ label, children, full }: { label: string; children: React.React
 }
 function Info({ label, value }: { label: string; value: string }) {
   return (<><dt className="text-xs text-muted-foreground">{label}</dt><dd className="font-medium">{value}</dd></>);
+}
+
+// D1 — docket + invoice upload for an existing consignment.
+function UploadSection({ token, consignment, onUploaded }: { token: string | null; consignment: Consignment; onUploaded: (patch: Partial<Consignment>) => void; }) {
+  const [busy, setBusy] = useState<"docket" | "invoice" | null>(null);
+  async function upload(kind: "docket" | "invoice", file: File) {
+    if (!token || !consignment.id) return;
+    setBusy(kind);
+    try {
+      const fd = new FormData();
+      fd.append(kind, file);
+      const r = await ConsignmentAuth.roleFetch(token, `/api/consignment/consignments/${consignment.id}/upload`, { method: "POST", body: fd });
+      if (r.ok) {
+        const data = await r.json().catch(() => ({}));
+        onUploaded({ docketUrl: data.docketUrl ?? consignment.docketUrl, invoiceUrl: data.invoiceUrl ?? consignment.invoiceUrl });
+      } else {
+        const e = await r.json().catch(() => ({}));
+        alert(e.error || "Upload failed");
+      }
+    } finally { setBusy(null); }
+  }
+  const fileName = (url: string | null | undefined) => (url ? url.split("/").pop() : null);
+  return (
+    <div className="mt-4 border-t pt-4 grid grid-cols-2 gap-3">
+      {(["docket", "invoice"] as const).map((kind) => {
+        const url = kind === "docket" ? consignment.docketUrl : consignment.invoiceUrl;
+        return (
+          <div key={kind}>
+            <span className="text-xs font-semibold text-muted-foreground capitalize">{kind} (PDF / JPG / PNG)</span>
+            <div className="mt-1 flex items-center gap-2">
+              <input type="file" accept=".pdf,.jpg,.jpeg,.png,application/pdf,image/jpeg,image/png" disabled={busy === kind}
+                onChange={(e) => { const f = e.target.files?.[0]; if (f) upload(kind, f); e.target.value = ""; }}
+                className="text-xs flex-1" data-testid={`upload-${kind}`} />
+            </div>
+            {busy === kind && <div className="text-[11px] text-muted-foreground mt-1">Uploading…</div>}
+            {url && (
+              <div className="text-[11px] mt-1 flex items-center gap-1">
+                <FileText className="w-3 h-3 text-blue-600" />
+                <button type="button" onClick={() => openFile(url)} className="text-blue-600 underline truncate" data-testid={`link-${kind}`}>{fileName(url)}</button>
+              </div>
+            )}
+          </div>
+        );
+      })}
+    </div>
+  );
 }
