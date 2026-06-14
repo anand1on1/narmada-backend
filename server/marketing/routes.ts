@@ -270,6 +270,28 @@ export function registerMarketingRoutes(app: Express, requireAdmin: Mw): void {
     }
   });
 
+  // R26.6b — candidate contacts for the include/exclude pickers, by source.
+  // Returns typed ids ("<type>:<id>") so include/exclude stays unambiguous.
+  app.get("/api/marketing/audiences/contacts", requireAdmin, (req, res) => {
+    try {
+      const src = String(req.query.source || "customers");
+      const q = String(req.query.q || "").trim().toLowerCase();
+      const like = `%${q}%`;
+      let rows: any[] = [];
+      if (src === "sellers") {
+        rows = sqlite.prepare(`SELECT id, name, phone, email FROM vendors WHERE is_active = 1 AND (? = '' OR LOWER(COALESCE(name,'')) LIKE ? OR COALESCE(phone,'') LIKE ?) ORDER BY name LIMIT 200`).all(q, like, like) as any[];
+        rows = rows.map((r) => ({ typed_id: `seller:${r.id}`, ...r }));
+      } else if (src === "leads") {
+        rows = sqlite.prepare(`SELECT id, name, phone, email FROM leads WHERE (? = '' OR LOWER(COALESCE(name,'')) LIKE ? OR COALESCE(phone,'') LIKE ?) ORDER BY name LIMIT 200`).all(q, like, like) as any[];
+        rows = rows.map((r) => ({ typed_id: `lead:${r.id}`, ...r }));
+      } else {
+        rows = sqlite.prepare(`SELECT id, name, phone, email FROM customers WHERE (? = '' OR LOWER(COALESCE(name,'')) LIKE ? OR COALESCE(phone,'') LIKE ?) ORDER BY name LIMIT 200`).all(q, like, like) as any[];
+        rows = rows.map((r) => ({ typed_id: `customer:${r.id}`, ...r }));
+      }
+      res.json(rows);
+    } catch (e: any) { res.status(500).json({ error: e.message }); }
+  });
+
   // Preview an unsaved filter (composer "Build new" flow).
   app.post("/api/marketing/audiences/preview", requireAdmin, (req, res) => {
     try {

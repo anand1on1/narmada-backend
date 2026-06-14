@@ -3607,6 +3607,16 @@ export function processPurchaseOrder(poId: number): {
 // server-side search, and a per-PO bundles count. All filters are optional and additive;
 // crucially this NO LONGER hides processed/received/completed POs — every Delhi-dispatched
 // PO is returned and the caller renders a status badge. (R26 Fix A.1)
+// R26.6b — normalize a stored docket slip path into a browser-openable URL.
+// New uploads store a server-relative "/uploads/..." path; some legacy rows store a full URL.
+function docketUrlFromPath(p: string | null | undefined): string | null {
+  if (!p) return null;
+  const s = String(p).trim();
+  if (!s) return null;
+  if (/^https?:\/\//i.test(s)) return s;
+  return s.startsWith("/") ? s : `/uploads/${s}`;
+}
+
 export function listDelhiDispatchedForConsignment(opts: {
   status?: string; from?: number; to?: number; q?: string;
 } = {}): any[] {
@@ -3666,6 +3676,8 @@ export function listDelhiDispatchedForConsignment(opts: {
       consignmentReceivedAt: po.consignment_received_at ?? null,
       itemCount: items.length, custTotal, costTotal,
       totalBundles: Number(bundlesRow?.total ?? 0) || 0,
+      docketUrl: docketUrlFromPath(po.docket_slip_path),
+      docketNumber: po.docket_number ?? null,
     };
   });
 }
@@ -3721,6 +3733,7 @@ export function getConsignmentDetail(poId: number): any | null {
     docketNumber: po.docket_number ?? null,
     docketDate: po.docket_date ?? null,
     docketSlipPath: po.docket_slip_path ?? null,
+    docketUrl: docketUrlFromPath(po.docket_slip_path),
   };
 }
 
@@ -4248,10 +4261,12 @@ export function deleteLeadStage(id: number): void {
 }
 
 // ---- G1. sales targets ----
-export function listSalesTargets(opts: { repId?: number; status?: string } = {}): any[] {
+export function listSalesTargets(opts: { repId?: number; status?: string; customerId?: number; metric?: string } = {}): any[] {
   const conds: string[] = []; const args: any[] = [];
   if (opts.repId != null) { conds.push("sales_rep_user_id = ?"); args.push(opts.repId); }
   if (opts.status) { conds.push("status = ?"); args.push(opts.status); }
+  if (opts.customerId != null) { conds.push("customer_id = ?"); args.push(opts.customerId); }
+  if (opts.metric) { conds.push("metric = ?"); args.push(opts.metric); }
   const where = conds.length ? `WHERE ${conds.join(" AND ")}` : "";
   return sqlite.prepare(`SELECT * FROM sales_targets ${where} ORDER BY created_at DESC`).all(...args) as any[];
 }
@@ -4260,26 +4275,46 @@ export function getSalesTarget(id: number): any {
 }
 export function createSalesTarget(data: any): any {
   const info = sqlite.prepare(
-    `INSERT INTO sales_targets (sales_rep_user_id, target_type, customer_id, period_start, period_end, target_amount, achieved_amount, rolled_over_from, status, created_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    `INSERT INTO sales_targets (sales_rep_user_id, target_type, metric, customer_id, lead_id, period_start, period_end, target_amount, achieved_amount, rolled_over_from, status, onboarding_status, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   ).run(
     data.sales_rep_user_id ?? data.salesRepUserId ?? null, data.target_type ?? data.targetType ?? "monthly",
-    data.customer_id ?? data.customerId ?? null, data.period_start ?? data.periodStart ?? null,
+    data.metric ?? "po", data.customer_id ?? data.customerId ?? null, data.lead_id ?? data.leadId ?? null,
+    data.period_start ?? data.periodStart ?? null,
     data.period_end ?? data.periodEnd ?? null, Number(data.target_amount ?? data.targetAmount ?? 0),
-    Number(data.achieved_amount ?? 0), data.rolled_over_from ?? null, data.status ?? "active", Date.now(),
+    Number(data.achieved_amount ?? 0), data.rolled_over_from ?? null, data.status ?? "active",
+    (data.metric ?? "po") === "onboarding" ? "pending" : null, Date.now(),
   );
   return getSalesTarget(Number(info.lastInsertRowid));
+}
+// Create one onboarding target per lead. Returns the created rows.
+export function createOnboardingTargets(data: any): any[] {
+  const repId = data.sales_rep_user_id ?? data.salesRepUserId ?? null;
+  const leadIds: number[] = Array.isArray(data.lead_ids) ? data.lead_ids
+    : Array.isArray(data.leadIds) ? data.leadIds : [];
+  const out: any[] = [];
+  for (const lid of leadIds) {
+    out.push(createSalesTarget({
+      sales_rep_user_id: repId, target_type: data.target_type ?? "monthly", metric: "onboarding",
+      lead_id: lid, period_start: data.period_start ?? null, period_end: data.period_end ?? null,
+      target_amount: data.target_amount ?? 0,
+    }));
+  }
+  return out;
 }
 export function updateSalesTarget(id: number, data: any): any {
   const map: Record<string, any> = {
     sales_rep_user_id: data.sales_rep_user_id ?? data.salesRepUserId,
     target_type: data.target_type ?? data.targetType,
+    metric: data.metric,
     customer_id: data.customer_id ?? data.customerId,
+    lead_id: data.lead_id ?? data.leadId,
     period_start: data.period_start ?? data.periodStart,
     period_end: data.period_end ?? data.periodEnd,
     target_amount: data.target_amount ?? data.targetAmount,
     achieved_amount: data.achieved_amount ?? data.achievedAmount,
     status: data.status,
+    onboarding_status: data.onboarding_status,
   };
   const cols: string[] = []; const args: any[] = [];
   for (const [k, v] of Object.entries(map)) { if (v !== undefined) { cols.push(`${k} = ?`); args.push(v); } }
@@ -4294,6 +4329,100 @@ export function listTargetAchievements(targetId: number): any[] {
 }
 export function getTargetAchievement(id: number): any {
   return sqlite.prepare(`SELECT * FROM target_achievements WHERE id = ?`).get(id);
+}
+
+// R26.6b — compute achieved amount on the fly per metric (po | quotation | payment).
+// Attribution requires the target's customer match AND (for PO) the customer's sales_rep_id
+// to equal the target's rep. Period is [period_start, period_end] inclusive (date strings).
+// PO/quotation date columns are unix-ms integers; payments use payment_date (unix-ms).
+function periodMsBounds(t: any): { startMs: number; endMs: number } {
+  const startMs = t.period_start ? Date.parse(t.period_start) : 0;
+  const endBase = t.period_end ? Date.parse(t.period_end) : Date.now();
+  const endMs = Number.isNaN(endBase) ? Date.now() : endBase + (24 * 60 * 60 * 1000 - 1);
+  return { startMs: Number.isNaN(startMs) ? 0 : startMs, endMs };
+}
+export function computeTargetAchieved(t: any): number {
+  const metric = String(t.metric || "po");
+  if (metric === "onboarding") return 0;
+  if (!t.customer_id) return Number(t.achieved_amount || 0);
+  const { startMs, endMs } = periodMsBounds(t);
+  try {
+    if (metric === "po") {
+      const row = sqlite.prepare(
+        `SELECT COALESCE(SUM(po.total),0) AS s
+           FROM purchase_orders_v2 po
+           JOIN customers c ON c.id = po.customer_id
+          WHERE po.deleted_at IS NULL AND po.customer_id = ?
+            AND c.sales_rep_id = ?
+            AND COALESCE(po.po_date, po.created_at) BETWEEN ? AND ?`,
+      ).get(t.customer_id, t.sales_rep_user_id, startMs, endMs) as any;
+      return Number(row?.s || 0);
+    }
+    if (metric === "quotation") {
+      const row = sqlite.prepare(
+        `SELECT COALESCE(SUM(grand_total),0) AS s FROM quotations
+          WHERE customer_id = ? AND created_at BETWEEN ? AND ?`,
+      ).get(t.customer_id, startMs, endMs) as any;
+      return Number(row?.s || 0);
+    }
+    if (metric === "payment") {
+      const row = sqlite.prepare(
+        `SELECT COALESCE(SUM(amount_inr),0) AS s FROM payment_records
+          WHERE customer_id = ? AND payment_date BETWEEN ? AND ?`,
+      ).get(t.customer_id, startMs, endMs) as any;
+      return Number(row?.s || 0);
+    }
+  } catch { /* best-effort; fall through to stored value */ }
+  return Number(t.achieved_amount || 0);
+}
+// Enrich targets with computed achieved + customer/lead display info.
+export function enrichTargets(rows: any[]): any[] {
+  return rows.map((t) => {
+    const computed = computeTargetAchieved(t);
+    let customer_name: string | null = null;
+    if (t.customer_id) {
+      const c = sqlite.prepare(`SELECT name FROM customers WHERE id = ?`).get(t.customer_id) as any;
+      customer_name = c?.name ?? null;
+    }
+    if (t.lead_id) {
+      const l = sqlite.prepare(`SELECT name, phone, email, contact_person FROM leads WHERE id = ?`).get(t.lead_id) as any;
+      return { ...t, achieved_computed: computed, customer_name, lead_name: l?.name ?? null, lead_phone: l?.phone ?? null, lead_email: l?.email ?? null, lead_contact_person: l?.contact_person ?? null };
+    }
+    return { ...t, achieved_computed: computed, customer_name, lead_name: null };
+  });
+}
+// Onboarding PO submission: verify PO number against purchase_orders_v2 + rep attribution.
+export function submitOnboardingPo(targetId: number, repUserId: number, poNumber: string): { ok: boolean; error?: string; target?: any } {
+  const target = getSalesTarget(targetId);
+  if (!target) return { ok: false, error: "Target not found" };
+  if (target.sales_rep_user_id !== repUserId) return { ok: false, error: "Target does not belong to this rep" };
+  const pn = String(poNumber || "").trim();
+  if (!pn) return { ok: false, error: "PO number required" };
+  const po = sqlite.prepare(
+    `SELECT * FROM purchase_orders_v2 WHERE deleted_at IS NULL AND (LOWER(po_number) = LOWER(?) OR LOWER(customer_po_number) = LOWER(?)) LIMIT 1`,
+  ).get(pn, pn) as any;
+  const now = new Date().toISOString();
+  let verified = false;
+  if (po && po.customer_id) {
+    const cust = sqlite.prepare(`SELECT sales_rep_id FROM customers WHERE id = ?`).get(po.customer_id) as any;
+    if (cust && cust.sales_rep_id === repUserId) verified = true;
+  }
+  if (verified) {
+    sqlite.prepare(
+      `UPDATE sales_targets SET onboarding_status = 'verified', submitted_po_number = ?, verified_by_user_id = ?, verified_at = ? WHERE id = ?`,
+    ).run(pn, repUserId, now, targetId);
+  } else {
+    sqlite.prepare(
+      `UPDATE sales_targets SET onboarding_status = 'po_submitted', submitted_po_number = ? WHERE id = ?`,
+    ).run(pn, targetId);
+  }
+  return { ok: true, target: getSalesTarget(targetId) };
+}
+export function verifyOnboardingByAdmin(targetId: number, adminUserId: number): any {
+  sqlite.prepare(
+    `UPDATE sales_targets SET onboarding_status = 'verified', verified_by_user_id = ?, verified_at = ? WHERE id = ?`,
+  ).run(adminUserId, new Date().toISOString(), targetId);
+  return getSalesTarget(targetId);
 }
 
 // Claim a PO against a target. Returns { ok, error?, achievement? }. Verification:
@@ -4501,14 +4630,71 @@ export function deleteMarketingWhatsappTemplate(id: number): void {
   sqlite.prepare(`DELETE FROM marketing_whatsapp_templates WHERE id = ?`).run(id);
 }
 
+// R26.6b — upsert a Meta/AiSensy template by template_name (idempotent re-sync).
+// Inserts new rows or refreshes the synced metadata of existing ones; never duplicates.
+export function upsertMarketingWhatsappTemplateByName(data: {
+  template_name: string; display_name?: string; category?: string; language?: string;
+  header_type?: string; variable_count?: number; variable_labels?: string; buttons?: string; status?: string;
+}): { action: "inserted" | "updated"; row: any } {
+  const now = Date.now();
+  const existing = sqlite.prepare(`SELECT id FROM marketing_whatsapp_templates WHERE template_name = ?`).get(data.template_name) as any;
+  if (existing) {
+    sqlite.prepare(
+      `UPDATE marketing_whatsapp_templates
+         SET display_name = ?, category = ?, language = ?, header_type = ?,
+             variable_count = ?, variable_labels = ?, buttons = ?, status = ?, updated_at = ?
+       WHERE id = ?`,
+    ).run(
+      data.display_name ?? data.template_name, data.category ?? "marketing", data.language ?? "en",
+      data.header_type ?? "none", data.variable_count ?? 0, data.variable_labels ?? "[]",
+      data.buttons ?? "[]", data.status ?? "active", now, existing.id,
+    );
+    return { action: "updated", row: sqlite.prepare(`SELECT * FROM marketing_whatsapp_templates WHERE id = ?`).get(existing.id) };
+  }
+  const info = sqlite.prepare(
+    `INSERT INTO marketing_whatsapp_templates
+       (template_name, display_name, category, language, header_type, header_required, variable_count, variable_labels, buttons, status, is_default, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, 0, ?, ?, ?, ?, 0, ?, ?)`,
+  ).run(
+    data.template_name, data.display_name ?? data.template_name, data.category ?? "marketing",
+    data.language ?? "en", data.header_type ?? "none", data.variable_count ?? 0,
+    data.variable_labels ?? "[]", data.buttons ?? "[]", data.status ?? "active", now, now,
+  );
+  return { action: "inserted", row: sqlite.prepare(`SELECT * FROM marketing_whatsapp_templates WHERE id = ?`).get(info.lastInsertRowid) };
+}
+
 // ---- I2. audience include/exclude preview ----
 export function getAudienceRow(id: number): any {
   return sqlite.prepare(`SELECT * FROM marketing_audiences WHERE id = ?`).get(id);
 }
-export function updateAudienceIncludeExclude(id: number, includeIds?: number[], excludeIds?: number[]): any {
+export function updateAudienceIncludeExclude(id: number, includeIds?: number[], excludeIds?: number[], source?: string): any {
   const cols: string[] = []; const args: any[] = [];
   if (includeIds !== undefined) { cols.push("include_user_ids_json = ?"); args.push(JSON.stringify(includeIds)); }
   if (excludeIds !== undefined) { cols.push("exclude_user_ids_json = ?"); args.push(JSON.stringify(excludeIds)); }
+  if (source !== undefined && ["customers", "vendors", "leads"].includes(source)) { cols.push("source = ?"); args.push(source); }
   if (cols.length) { args.push(id); sqlite.prepare(`UPDATE marketing_audiences SET ${cols.join(", ")} WHERE id = ?`).run(...args); }
   return getAudienceRow(id);
+}
+
+// R26.6b — resolve an audience's source table to its contact rows. Source switches the
+// base table between customers / vendors / leads; all three expose id/name/phone/email/state.
+export function audienceSourceTable(source?: string | null): "customers" | "vendors" | "leads" {
+  const s = String(source || "customers").toLowerCase();
+  return s === "vendors" || s === "leads" ? s : "customers";
+}
+export function materializeAudience(audienceId: number, limit?: number): { rows: any[]; summary: any } {
+  const aud = getAudienceRow(audienceId);
+  if (!aud) return { rows: [], summary: { matched: 0, included_extra: 0, excluded: 0, final_count: 0, source: "customers" } };
+  const table = audienceSourceTable(aud.source);
+  const base = sqlite.prepare(`SELECT id, name, phone, email, state FROM ${table}`).all() as any[];
+  const includeIds: number[] = aud.include_user_ids_json ? JSON.parse(aud.include_user_ids_json) : [];
+  const excludeIds: number[] = aud.exclude_user_ids_json ? JSON.parse(aud.exclude_user_ids_json) : [];
+  const matched = new Set(base.map((c) => c.id));
+  const includedExtra = includeIds.filter((cid) => !matched.has(cid));
+  for (const cid of includeIds) matched.add(cid);
+  for (const cid of excludeIds) matched.delete(cid);
+  const ids = Array.from(matched);
+  const sliced = limit != null ? ids.slice(0, limit) : ids;
+  const rows = sliced.map((cid) => sqlite.prepare(`SELECT id, name, phone, email, state FROM ${table} WHERE id = ?`).get(cid)).filter(Boolean);
+  return { rows, summary: { matched: base.length, included_extra: includedExtra.length, excluded: excludeIds.length, final_count: matched.size, source: table } };
 }

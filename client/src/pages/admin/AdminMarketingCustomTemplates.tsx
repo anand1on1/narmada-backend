@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { AdminLayout } from "./AdminLayout";
 import { MarketingTabs } from "./AdminMarketingCampaigns";
 import { adminFetch, useAdminAuth } from "@/lib/admin-auth";
-import { Plus, Trash2, Pencil } from "lucide-react";
+import { Plus, Trash2, Pencil, RefreshCw } from "lucide-react";
 
 // R26.5 (I) — Custom WhatsApp templates over /api/admin/marketing/whatsapp-templates.
 // These are operator-defined approved templates (separate from the built-in defaults).
@@ -63,10 +63,24 @@ export default function AdminMarketingCustomTemplates() {
     load();
   }
 
+  const [syncing, setSyncing] = useState(false);
+  async function syncFromMeta() {
+    if (!token || syncing) return;
+    setSyncing(true);
+    try {
+      const r = await adminFetch(token, "/api/admin/marketing/whatsapp-templates/sync", { method: "POST" });
+      const data = await r.json().catch(() => ({}));
+      if (!r.ok) { alert(data.error || "Sync failed"); return; }
+      alert(`Synced ${data.synced} template(s): ${data.inserted} new, ${data.updated} updated.`);
+      load();
+    } finally { setSyncing(false); }
+  }
+
   return (
     <AdminLayout title="Marketing — Custom Templates">
       <MarketingTabs active="custom-templates" />
-      <div className="flex justify-end mb-4">
+      <div className="flex justify-end gap-2 mb-4">
+        <button onClick={syncFromMeta} disabled={syncing} className="px-4 py-2 border rounded-lg text-sm font-semibold inline-flex items-center gap-2 hover:bg-slate-50 disabled:opacity-50" data-testid="button-sync-meta-templates"><RefreshCw className={`w-4 h-4 ${syncing ? "animate-spin" : ""}`} /> {syncing ? "Syncing…" : "Sync from Meta"}</button>
         <button onClick={newTpl} className="px-4 py-2 bg-indigo-600 text-white rounded-lg text-sm font-semibold inline-flex items-center gap-2 hover:bg-indigo-700" data-testid="button-new-custom-template"><Plus className="w-4 h-4" /> New Custom Template</button>
       </div>
 

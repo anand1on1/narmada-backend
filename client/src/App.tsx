@@ -249,6 +249,7 @@ function AppRouter() {
         <Route path="/admin/vendor-inbox" component={AdminVendorInbox} />
         <Route path="/admin/vendor-discovery" component={AdminVendorDiscovery} />
         <Route path="/admin/targets" component={AdminTargets} />
+        <Route path="/admin/sales-targets" component={AdminTargets} />
         <Route path="/admin/announcements" component={AdminAnnouncements} />
         {/* R26.5 — Tasks V2 is now canonical at /admin/tasks; old page kept at -legacy */}
         <Route path="/admin/tasks-legacy" component={AdminTasks} />

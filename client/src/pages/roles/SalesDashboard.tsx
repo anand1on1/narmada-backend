@@ -6,7 +6,7 @@ import { Target, KanbanSquare, CheckSquare, MapPin, Camera, Mail, MessageCircle 
 
 // R26.6a (8) — open the marketing composer targeted at a single lead.
 function composeForLead(id: number, channel: "email" | "whatsapp") {
-  window.location.hash = `#/admin/marketing?compose=1&channel=${channel}&lead_id=${id}`;
+  window.location.hash = `#/admin/marketing/campaigns/new?compose=1&channel=${channel}&lead_id=${id}`;
 }
 
 // R26.5 (G) — Sales rep portal. Four tabs over the /api/sales/* mirror endpoints:
@@ -49,14 +49,40 @@ const inr = (n: any) => `₹${Number(n || 0).toLocaleString("en-IN")}`;
 // ---- Targets ----
 interface Achievement { id: number; po_id: number; amount: number; admin_approved: number; }
 interface SalesTarget {
-  id: number; target_type: string; period_start: string | null; period_end: string | null;
-  target_amount: number; achieved_amount: number; status: string; achievements?: Achievement[];
+  id: number; target_type: string; metric?: string; customer_id?: number | null; customer_name?: string | null;
+  lead_id?: number | null; lead_name?: string | null; lead_phone?: string | null; lead_email?: string | null;
+  lead_contact_person?: string | null; onboarding_status?: string | null; submitted_po_number?: string | null;
+  period_start: string | null; period_end: string | null;
+  target_amount: number; achieved_amount: number; achieved_computed?: number; status: string; achievements?: Achievement[];
 }
+const METRIC_LABEL: Record<string, string> = { po: "PO", quotation: "Quotation", payment: "Payment", onboarding: "Onboarding" };
+
+function TargetCard({ t, onClaim }: { t: SalesTarget; onClaim: (t: SalesTarget) => void }) {
+  const achieved = t.achieved_computed != null ? t.achieved_computed : t.achieved_amount;
+  const pct = t.target_amount ? Math.min(100, Math.round((achieved / t.target_amount) * 100)) : 0;
+  const barColor = t.metric === "quotation" ? "bg-sky-500" : t.metric === "payment" ? "bg-emerald-500" : "bg-amber-500";
+  return (
+    <div className="bg-card border rounded-xl p-4" data-testid={`target-${t.id}`}>
+      <div className="flex justify-between items-start mb-1">
+        <div className="text-xs uppercase font-bold text-muted-foreground">{METRIC_LABEL[t.metric || "po"]}</div>
+        <span className="text-[10px] uppercase font-bold px-2 py-0.5 rounded bg-amber-500/15 text-amber-700">{t.target_type}</span>
+      </div>
+      <div className="text-[11px] text-muted-foreground mb-1">{t.period_start || "?"} → {t.period_end || "?"}</div>
+      <div className="text-xl font-bold">{inr(achieved)} <span className="text-sm font-normal text-muted-foreground">/ {inr(t.target_amount)}</span></div>
+      <div className="h-2 bg-muted rounded-full mt-2 overflow-hidden"><div className={`h-full ${barColor}`} style={{ width: `${pct}%` }} /></div>
+      <div className="text-xs text-muted-foreground mt-1">{pct}% achieved</div>
+      {t.metric === "po" && <button onClick={() => onClaim(t)} className="mt-3 px-3 py-1.5 border rounded-lg text-sm font-semibold" data-testid={`button-claim-po-${t.id}`}>Claim a PO</button>}
+    </div>
+  );
+}
+
 function TargetsTab() {
   const { token } = SalesAuth.useAuth();
   const [targets, setTargets] = useState<SalesTarget[]>([]);
   const [claimFor, setClaimFor] = useState<SalesTarget | null>(null);
   const [poId, setPoId] = useState("");
+  const [onboardFor, setOnboardFor] = useState<SalesTarget | null>(null);
+  const [onboardPo, setOnboardPo] = useState("");
   const [busy, setBusy] = useState(false);
 
   async function load() {
@@ -79,25 +105,66 @@ function TargetsTab() {
     } finally { setBusy(false); }
   }
 
+  async function submitOnboarding() {
+    if (!token || !onboardFor) return;
+    if (!onboardPo.trim()) { alert("Enter a PO number."); return; }
+    setBusy(true);
+    try {
+      const r = await SalesAuth.roleFetch(token, `/api/sales/targets/${onboardFor.id}/submit-onboarding-po`, { method: "POST", body: JSON.stringify({ po_number: onboardPo.trim() }) });
+      const j = await r.json();
+      if (!r.ok) { alert(j.error || "Submit failed"); return; }
+      setOnboardFor(null); setOnboardPo("");
+      alert(j.target?.onboarding_status === "verified" ? "Verified! PO matched a customer assigned to you." : "PO submitted — awaiting admin verification.");
+      load();
+    } finally { setBusy(false); }
+  }
+
+  const valueTargets = targets.filter((t) => (t.metric || "po") !== "onboarding");
+  const onboardingTargets = targets.filter((t) => t.metric === "onboarding");
+
+  // Group value targets by customer name (uncustomered targets fall under "General").
+  const groups: Record<string, SalesTarget[]> = {};
+  for (const t of valueTargets) {
+    const key = t.customer_name || "General";
+    (groups[key] = groups[key] || []).push(t);
+  }
+  const groupKeys = Object.keys(groups);
+
   if (targets.length === 0) return <div className="p-12 text-center text-muted-foreground bg-card border rounded-xl">No active targets.</div>;
   return (
-    <div className="grid sm:grid-cols-2 gap-4">
-      {targets.map((t) => {
-        const pct = t.target_amount ? Math.min(100, Math.round((t.achieved_amount / t.target_amount) * 100)) : 0;
-        return (
-          <div key={t.id} className="bg-card border rounded-xl p-5" data-testid={`target-${t.id}`}>
-            <div className="flex justify-between items-start mb-2">
-              <div><div className="text-xs uppercase font-bold text-muted-foreground">{t.target_type}</div>
-                <div className="text-[11px] text-muted-foreground">{t.period_start || "?"} → {t.period_end || "?"}</div></div>
-              <span className="text-[10px] uppercase font-bold px-2 py-0.5 rounded bg-amber-500/15 text-amber-700">{t.status}</span>
-            </div>
-            <div className="text-2xl font-bold">{inr(t.achieved_amount)} <span className="text-sm font-normal text-muted-foreground">/ {inr(t.target_amount)}</span></div>
-            <div className="h-2 bg-muted rounded-full mt-2 overflow-hidden"><div className="h-full bg-amber-500" style={{ width: `${pct}%` }} /></div>
-            <div className="text-xs text-muted-foreground mt-1">{pct}% achieved · {t.achievements?.length || 0} claimed PO(s)</div>
-            <button onClick={() => { setClaimFor(t); setPoId(""); }} className="mt-3 px-3 py-1.5 border rounded-lg text-sm font-semibold" data-testid={`button-claim-po-${t.id}`}>Claim a PO</button>
+    <div className="space-y-6">
+      {groupKeys.map((g) => (
+        <div key={g} className="border rounded-xl p-4 bg-muted/20">
+          <div className="font-bold text-sm mb-3">{g}</div>
+          <div className="grid sm:grid-cols-3 gap-3">
+            {groups[g].map((t) => <TargetCard key={t.id} t={t} onClaim={(x) => { setClaimFor(x); setPoId(""); }} />)}
           </div>
-        );
-      })}
+        </div>
+      ))}
+
+      {onboardingTargets.length > 0 && (
+        <div className="border rounded-xl p-4 bg-muted/20">
+          <div className="font-bold text-sm mb-3">Onboarding Targets</div>
+          <div className="space-y-2">
+            {onboardingTargets.map((t) => (
+              <div key={t.id} className="bg-card border rounded-lg p-3 flex items-center justify-between gap-3" data-testid={`onboarding-target-${t.id}`}>
+                <div>
+                  <div className="font-semibold text-sm">{t.lead_name || `Lead #${t.lead_id}`}</div>
+                  <div className="text-xs text-muted-foreground">{t.lead_contact_person ? `${t.lead_contact_person} · ` : ""}{t.lead_phone || ""}{t.lead_email ? ` · ${t.lead_email}` : ""}</div>
+                  {t.submitted_po_number && <div className="text-[11px] text-muted-foreground mt-0.5">PO: {t.submitted_po_number}</div>}
+                </div>
+                <div className="flex items-center gap-2">
+                  <span className={`text-[10px] uppercase font-bold px-2 py-0.5 rounded ${t.onboarding_status === "verified" ? "bg-emerald-500/15 text-emerald-700" : t.onboarding_status === "po_submitted" ? "bg-amber-500/15 text-amber-700" : "bg-slate-500/15 text-slate-600"}`}>{t.onboarding_status || "pending"}</span>
+                  {t.onboarding_status !== "verified" && (
+                    <button onClick={() => { setOnboardFor(t); setOnboardPo(""); }} className="px-3 py-1.5 border rounded-lg text-xs font-semibold" data-testid={`button-onboard-${t.id}`}>Mark Onboarded</button>
+                  )}
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
       {claimFor && (
         <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4" onClick={() => setClaimFor(null)}>
           <div className="bg-card rounded-xl p-6 w-full max-w-sm shadow-xl" onClick={(e) => e.stopPropagation()}>
@@ -107,6 +174,19 @@ function TargetsTab() {
             <div className="flex justify-end gap-2 mt-4">
               <button onClick={() => setClaimFor(null)} className="px-4 py-2 border rounded-lg text-sm">Cancel</button>
               <button onClick={claim} disabled={busy} className="px-4 py-2 bg-accent text-accent-foreground rounded-lg text-sm font-semibold" data-testid="button-confirm-claim">{busy ? "Claiming…" : "Claim"}</button>
+            </div>
+          </div>
+        </div>
+      )}
+      {onboardFor && (
+        <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4" onClick={() => setOnboardFor(null)}>
+          <div className="bg-card rounded-xl p-6 w-full max-w-sm shadow-xl" onClick={(e) => e.stopPropagation()}>
+            <h2 className="font-bold text-lg mb-1">Mark Onboarded</h2>
+            <p className="text-xs text-muted-foreground mb-4">Enter the PO number this lead placed. If it matches a customer assigned to you, it auto-verifies.</p>
+            <input value={onboardPo} onChange={(e) => setOnboardPo(e.target.value)} placeholder="PO number (e.g. NM/PO/26/0001)" className="w-full border rounded-lg px-3 py-2 bg-background text-sm" data-testid="input-onboard-po" />
+            <div className="flex justify-end gap-2 mt-4">
+              <button onClick={() => setOnboardFor(null)} className="px-4 py-2 border rounded-lg text-sm">Cancel</button>
+              <button onClick={submitOnboarding} disabled={busy} className="px-4 py-2 bg-accent text-accent-foreground rounded-lg text-sm font-semibold" data-testid="button-confirm-onboard">{busy ? "Submitting…" : "Submit"}</button>
             </div>
           </div>
         </div>

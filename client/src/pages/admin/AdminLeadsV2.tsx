@@ -6,7 +6,7 @@ import { Plus, Trash2, Pencil, Download, Settings2, Mail, MessageCircle } from "
 
 // R26.6a (8) — open the marketing composer targeted at a single lead.
 function composeForLead(id: number, channel: "email" | "whatsapp") {
-  window.location.hash = `#/admin/marketing?compose=1&channel=${channel}&lead_id=${id}`;
+  window.location.hash = `#/admin/marketing/campaigns/new?compose=1&channel=${channel}&lead_id=${id}`;
 }
 
 // R26.5 (B) — Leads V2 over /api/admin/leads-v2. Stages from /api/admin/lead-stages,

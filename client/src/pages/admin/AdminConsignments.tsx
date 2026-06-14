@@ -4,7 +4,7 @@ import { adminFetch, useAdminAuth, getAdminToken } from "@/lib/admin-auth";
 import { apiUrl } from "@/lib/queryClient";
 import { StatusBadge } from "@/components/ui/status-badge";
 import { ConsignmentDetailModal } from "./ConsignmentDetailModal";
-import { Plus, Edit3, Trash2, Truck, Search, PackageCheck, Eye, FileDown, Loader2 } from "lucide-react";
+import { Plus, Edit3, Trash2, Truck, Search, PackageCheck, Eye, FileDown, Loader2, FileText } from "lucide-react";
 
 interface Consignment {
   id: number;
@@ -70,6 +70,8 @@ interface FromDelhiPO {
   custTotal: number;
   costTotal: number;
   totalBundles: number;
+  docketUrl: string | null;
+  docketNumber: string | null;
 }
 
 // R26 — default date range = last 30 days, formatted as YYYY-MM-DD for <input type=date>.
@@ -667,6 +669,7 @@ function FromDelhiTab({
                 <th className="px-4 py-3 font-semibold">Items</th>
                 <th className="px-4 py-3 font-semibold">Bundles</th>
                 <th className="px-4 py-3 font-semibold">Value</th>
+                <th className="px-4 py-3 font-semibold">Docket</th>
                 <th className="px-4 py-3 font-semibold text-right">Actions</th>
               </tr>
             </thead>
@@ -682,6 +685,15 @@ function FromDelhiTab({
                   <td className="px-4 py-3">{p.itemCount}</td>
                   <td className="px-4 py-3" data-testid={`delhi-bundles-${p.id}`}>{p.totalBundles}</td>
                   <td className="px-4 py-3">{inr(p.custTotal)}</td>
+                  <td className="px-4 py-3 whitespace-nowrap">
+                    {p.docketUrl ? (
+                      <button type="button" onClick={() => openFile(p.docketUrl)}
+                        className="px-2.5 py-1 border rounded text-xs font-semibold text-blue-600 hover:bg-muted inline-flex items-center gap-1" data-testid={`btn-view-docket-${p.id}`}><FileText className="w-3 h-3" /> View Docket</button>
+                    ) : (
+                      <span title="No docket uploaded yet"
+                        className="px-2.5 py-1 border rounded text-xs font-semibold text-muted-foreground opacity-50 cursor-not-allowed inline-flex items-center gap-1" data-testid={`btn-view-docket-disabled-${p.id}`}><FileText className="w-3 h-3" /> View Docket</span>
+                    )}
+                  </td>
                   <td className="px-4 py-3 text-right whitespace-nowrap">
                     <button onClick={() => onView(p.id)}
                       className="px-2.5 py-1 border rounded text-xs font-semibold hover:bg-muted inline-flex items-center gap-1 mr-2" data-testid={`btn-view-${p.id}`}><Eye className="w-3 h-3" /> View</button>

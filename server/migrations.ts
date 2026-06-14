@@ -1468,3 +1468,71 @@ export function runR26_6aMigrations() {
   }
   console.log("[migrations] R26.6a: complete");
 }
+
+// -------- R26.6b additive migrations (customer-wise + onboarding targets, audience source) --------
+// ADDITIVE ONLY. Adds columns to sales_targets (metric, lead_id, onboarding workflow) and
+// audiences.source. Each ALTER wrapped in try/catch (duplicate-column on re-run is benign).
+// Seeds ONE smoke target + ONE smoke task for the demo `sales` user so the portal shows data.
+export function runR26_6bMigrations() {
+  const stmts: Array<{ desc: string; sql: string }> = [
+    // ---- sales_targets: metric + onboarding workflow ----
+    { desc: "sales_targets.metric", sql: `ALTER TABLE sales_targets ADD COLUMN metric TEXT DEFAULT 'po'` },
+    { desc: "sales_targets.lead_id", sql: `ALTER TABLE sales_targets ADD COLUMN lead_id INTEGER` },
+    { desc: "sales_targets.onboarding_status", sql: `ALTER TABLE sales_targets ADD COLUMN onboarding_status TEXT DEFAULT 'pending'` },
+    { desc: "sales_targets.submitted_po_number", sql: `ALTER TABLE sales_targets ADD COLUMN submitted_po_number TEXT` },
+    { desc: "sales_targets.verified_by_user_id", sql: `ALTER TABLE sales_targets ADD COLUMN verified_by_user_id INTEGER` },
+    { desc: "sales_targets.verified_at", sql: `ALTER TABLE sales_targets ADD COLUMN verified_at TEXT` },
+    { desc: "idx_sales_targets_customer", sql: `CREATE INDEX IF NOT EXISTS idx_sales_targets_customer ON sales_targets(customer_id)` },
+    { desc: "idx_sales_targets_lead", sql: `CREATE INDEX IF NOT EXISTS idx_sales_targets_lead ON sales_targets(lead_id)` },
+    // ---- marketing_audiences: source switch (customers/vendors/leads) ----
+    { desc: "marketing_audiences.source", sql: `ALTER TABLE marketing_audiences ADD COLUMN source TEXT DEFAULT 'customers'` },
+  ];
+  for (const { desc, sql } of stmts) {
+    console.log(`[migrations] R26.6b: ${desc}`);
+    try { sqlite.exec(sql); } catch (err: any) { console.log(`[migrations] R26.6b: skipped ${desc} —`, err?.message || err); }
+  }
+
+  // ---- seed: ONE smoke target + ONE smoke task for the demo `sales` user (idempotent) ----
+  try {
+    const salesUser = sqlite.prepare(`SELECT id FROM data_team_users WHERE username = 'sales' LIMIT 1`).get() as any;
+    if (salesUser?.id) {
+      const repId = salesUser.id;
+      const now = Date.now();
+      // Period = current calendar month.
+      const d = new Date();
+      const periodStart = new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), 1)).toISOString().slice(0, 10);
+      const periodEnd = new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth() + 1, 0)).toISOString().slice(0, 10);
+      // Idempotency marker: rolled_over_from = -26006 (an impossible real id) flags the seed row.
+      const SEED_MARK = -26006;
+      const existing = sqlite.prepare(`SELECT id FROM sales_targets WHERE rolled_over_from = ? LIMIT 1`).get(SEED_MARK) as any;
+      if (!existing) {
+        sqlite.prepare(
+          `INSERT INTO sales_targets (sales_rep_user_id, target_type, metric, customer_id, period_start, period_end, target_amount, achieved_amount, status, rolled_over_from, created_at)
+           VALUES (?, 'monthly', 'po', NULL, ?, ?, 100000, 0, 'active', ?, ?)`,
+        ).run(repId, periodStart, periodEnd, SEED_MARK, now);
+        console.log(`[migrations] R26.6b: seeded smoke sales target for rep ${repId}`);
+      } else {
+        console.log(`[migrations] R26.6b: smoke sales target already present`);
+      }
+      // Smoke task — keyed on a unique title marker, written to assigned_to (the column the
+      // sales /api/sales/tasks list filters on via taskItems.assignedTo).
+      const TASK_TITLE = "R26.6b smoke task";
+      const existingTask = sqlite.prepare(`SELECT id FROM task_items WHERE title = ? LIMIT 1`).get(TASK_TITLE) as any;
+      if (!existingTask) {
+        sqlite.prepare(
+          `INSERT INTO task_items (title, description, assigned_to, assigned_to_user_id, assigned_by, status, priority, created_at, updated_at)
+           VALUES (?, 'Verify the sales portal can see assigned tasks.', ?, ?, 'system', 'pending', 'normal', ?, ?)`,
+        ).run(TASK_TITLE, repId, repId, now, now);
+        console.log(`[migrations] R26.6b: seeded smoke task for rep ${repId}`);
+      } else {
+        console.log(`[migrations] R26.6b: smoke task already present`);
+      }
+    } else {
+      console.log(`[migrations] R26.6b: demo sales user not found — skipping smoke seed`);
+    }
+  } catch (err: any) {
+    console.log(`[migrations] R26.6b: smoke seed failed —`, err?.message || err);
+  }
+
+  console.log("[migrations] R26.6b: complete");
+}

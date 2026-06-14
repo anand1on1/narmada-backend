@@ -6180,13 +6180,117 @@ function registerR8Routes(
     } catch (e: any) { res.status(500).json({ error: e.message }); }
   });
 
+  // R26.6b — Consignment portal full CRUD. Mirrors the admin consignment + customer
+  // endpoints but gated behind requireConsignment. Reuses the same storage layer so
+  // the data is identical to the admin view (additive — admin routes untouched).
+  app.get("/api/consignment/consignments", requireConsignment, async (req, res) => {
+    try {
+      const list = await v2.listConsignments({ status: req.query.status as string | undefined, q: req.query.q as string | undefined });
+      res.json(list);
+    } catch (e: any) { res.status(500).json({ error: e.message }); }
+  });
+  app.post("/api/consignment/consignments", requireConsignment, async (req: any, res) => {
+    try {
+      const teamUser = req.teamUser;
+      const body = normalizeDateFields(req.body || {});
+      if (body.customerId) {
+        const customer = await v2.getCustomer(parseInt(body.customerId, 10));
+        if (customer) {
+          if (!body.customerName) body.customerName = customer.name;
+          if (!body.customerPhone) body.customerPhone = customer.phone || null;
+          if (!body.customerEmail) body.customerEmail = customer.email || null;
+        }
+      }
+      const parsed = insertConsignmentSchema.parse(body);
+      const created = await v2.createConsignment(parsed, teamUser?.username || "consignment");
+      res.json(created);
+    } catch (e: any) { res.status(400).json({ error: e.message, details: e.errors }); }
+  });
+  app.patch("/api/consignment/consignments/:id", requireConsignment, async (req, res) => {
+    try {
+      const id = parseInt(req.params.id as string, 10);
+      const body = normalizeDateFields(req.body || {});
+      if (body.customerId) {
+        const customer = await v2.getCustomer(parseInt(body.customerId, 10));
+        if (customer) {
+          if (!body.customerName) body.customerName = customer.name;
+          if (!body.customerPhone && customer.phone) body.customerPhone = customer.phone;
+          if (!body.customerEmail && customer.email) body.customerEmail = customer.email;
+        }
+      }
+      const updated = await v2.updateConsignment(id, body);
+      if (!updated) return res.status(404).json({ error: "Not found" });
+      res.json(updated);
+    } catch (e: any) { res.status(400).json({ error: e.message }); }
+  });
+  app.delete("/api/consignment/consignments/:id", requireConsignment, async (req, res) => {
+    try {
+      await v2.deleteConsignment(parseInt(req.params.id as string, 10));
+      res.json({ ok: true });
+    } catch (e: any) { res.status(400).json({ error: e.message }); }
+  });
+  // From-Delhi (origin=Delhi) dispatched POs for the consignment portal — same as admin.
+  app.get("/api/consignment/from-delhi", requireConsignment, async (req, res) => {
+    try {
+      const status = req.query.status ? String(req.query.status) : undefined;
+      const q = req.query.q ? String(req.query.q) : undefined;
+      const from = req.query.from ? parseInt(req.query.from as string, 10) : undefined;
+      const to = req.query.to ? parseInt(req.query.to as string, 10) : undefined;
+      res.json(v2.listDelhiDispatchedForConsignment({ status, q, from, to }));
+    } catch (e: any) { res.status(500).json({ error: e.message }); }
+  });
+  // Consignment portal — customer directory CRUD (mirror of admin customers).
+  app.get("/api/consignment/customers", requireConsignment, async (req, res) => {
+    try {
+      res.json(await v2.getCustomers(req.query.q as string | undefined));
+    } catch (e: any) { res.status(500).json({ error: e.message }); }
+  });
+  app.post("/api/consignment/customers", requireConsignment, async (req, res) => {
+    try {
+      res.json(await v2.createCustomer(req.body || {}));
+    } catch (e: any) { res.status(400).json({ error: e.message }); }
+  });
+  app.patch("/api/consignment/customers/:id", requireConsignment, async (req, res) => {
+    try {
+      const updated = await v2.updateCustomer(parseInt(req.params.id as string, 10), req.body || {});
+      if (!updated) return res.status(404).json({ error: "Not found" });
+      res.json(updated);
+    } catch (e: any) { res.status(400).json({ error: e.message }); }
+  });
+  app.delete("/api/consignment/customers/:id", requireConsignment, async (req, res) => {
+    try {
+      await v2.deleteCustomer(parseInt(req.params.id as string, 10));
+      res.json({ ok: true });
+    } catch (e: any) { res.status(400).json({ error: e.message }); }
+  });
+
   // ==================== G1. SALES TARGETS ====================
   app.get("/api/admin/sales-targets", requireAuth, async (req, res) => {
-    res.json(v2.listSalesTargets({ repId: req.query.rep_id ? parseInt(req.query.rep_id as string, 10) : undefined, status: req.query.status as string | undefined }));
+    const rows = v2.listSalesTargets({
+      repId: req.query.rep_id ? parseInt(req.query.rep_id as string, 10) : undefined,
+      status: req.query.status as string | undefined,
+      customerId: req.query.customer_id ? parseInt(req.query.customer_id as string, 10) : undefined,
+      metric: req.query.metric as string | undefined,
+    });
+    res.json(v2.enrichTargets(rows));
   });
   app.post("/api/admin/sales-targets", requireAdminRole, async (req, res) => {
-    try { res.json(v2.createSalesTarget(req.body || {})); }
+    try {
+      const body = req.body || {};
+      // Onboarding: create ONE target per picked lead.
+      if (body.metric === "onboarding" && (Array.isArray(body.lead_ids) || Array.isArray(body.leadIds))) {
+        return res.json(v2.createOnboardingTargets(body));
+      }
+      res.json(v2.createSalesTarget(body));
+    }
     catch (e: any) { res.status(400).json({ error: e.message }); }
+  });
+  // Admin manual override: mark an onboarding target verified.
+  app.post("/api/admin/sales-targets/:id/verify-onboarding", requireAdminRole, async (req, res) => {
+    try {
+      const adminUser = (req as any).user;
+      res.json(v2.verifyOnboardingByAdmin(parseInt(req.params.id as string, 10), adminUser?.id ?? 0));
+    } catch (e: any) { res.status(400).json({ error: e.message }); }
   });
   app.patch("/api/admin/sales-targets/:id", requireAdminRole, async (req, res) => {
     try {
@@ -6220,9 +6324,19 @@ function registerR8Routes(
           emitCrossTeamEvent("target_deadline_approaching", { target_id: t.id, days_left: daysLeft, rep_id: u.id }, { target_user_id: u.id, target_role: "admin" });
         }
       }
-      const withProgress = targetsList.map((t: any) => ({ ...t, achievements: v2.listTargetAchievements(t.id) }));
+      const enriched = v2.enrichTargets(targetsList);
+      const withProgress = enriched.map((t: any) => ({ ...t, achievements: v2.listTargetAchievements(t.id) }));
       res.json(withProgress);
     } catch (e: any) { res.status(500).json({ error: e.message }); }
+  });
+  // Rep submits a PO number to fulfil an onboarding target (auto-verify if attribution matches).
+  app.post("/api/sales/targets/:id/submit-onboarding-po", requireSales, async (req, res) => {
+    try {
+      const u = (req as any).teamUser;
+      const result = v2.submitOnboardingPo(parseInt(req.params.id as string, 10), u.id, String(req.body?.po_number || ""));
+      if (!result.ok) return res.status(400).json({ error: result.error });
+      res.json({ ok: true, target: result.target });
+    } catch (e: any) { res.status(400).json({ error: e.message }); }
   });
   app.post("/api/sales/targets/:id/claim-po", requireSales, async (req, res) => {
     try {
@@ -6342,13 +6456,57 @@ function registerR8Routes(
     try { v2.deleteMarketingWhatsappTemplate(parseInt(req.params.id as string, 10)); res.json({ ok: true }); }
     catch (e: any) { res.status(500).json({ error: e.message }); }
   });
+  // R26.6b — sync approved WhatsApp templates from the Meta Graph API (AiSensy uses Meta WABA).
+  // Env-gated: requires META_WABA_ID + META_SYSTEM_USER_TOKEN, else 503. Upserts by template_name.
+  app.post("/api/admin/marketing/whatsapp-templates/sync", requireAdminRole, async (_req, res) => {
+    const wabaId = process.env.META_WABA_ID;
+    const sysToken = process.env.META_SYSTEM_USER_TOKEN;
+    if (!wabaId || !sysToken) {
+      return res.status(503).json({ error: "Meta sync not configured. Set META_WABA_ID and META_SYSTEM_USER_TOKEN." });
+    }
+    try {
+      const url = `https://graph.facebook.com/v19.0/${encodeURIComponent(wabaId)}/message_templates?limit=200&access_token=${encodeURIComponent(sysToken)}`;
+      const r = await fetch(url);
+      if (!r.ok) {
+        const txt = await r.text().catch(() => "");
+        return res.status(502).json({ error: `Meta API error ${r.status}`, detail: txt.slice(0, 500) });
+      }
+      const payload: any = await r.json();
+      const templates: any[] = Array.isArray(payload?.data) ? payload.data : [];
+      let inserted = 0, updated = 0;
+      for (const t of templates) {
+        const comps: any[] = Array.isArray(t.components) ? t.components : [];
+        const header = comps.find((c) => c.type === "HEADER");
+        const body = comps.find((c) => c.type === "BODY");
+        const buttonsComp = comps.find((c) => c.type === "BUTTONS");
+        // Count {{n}} placeholders in the BODY text.
+        const varCount = body?.text ? (String(body.text).match(/\{\{\s*\d+\s*\}\}/g) || []).length : 0;
+        const headerType = header ? String(header.format || "TEXT").toLowerCase() : "none";
+        const buttons = buttonsComp?.buttons ? JSON.stringify(buttonsComp.buttons) : "[]";
+        const result = v2.upsertMarketingWhatsappTemplateByName({
+          template_name: t.name,
+          display_name: t.name,
+          category: (t.category || "marketing").toLowerCase(),
+          language: t.language || "en",
+          header_type: headerType,
+          variable_count: varCount,
+          variable_labels: "[]",
+          buttons,
+          status: (t.status || "APPROVED").toLowerCase() === "approved" ? "active" : "inactive",
+        });
+        if (result.action === "inserted") inserted++; else updated++;
+      }
+      res.json({ ok: true, synced: templates.length, inserted, updated });
+    } catch (e: any) { res.status(500).json({ error: e.message }); }
+  });
   // I2. Audience include/exclude preview + patch
   app.patch("/api/admin/audiences/:id", requireAdminRole, async (req, res) => {
     try {
       const id = parseInt(req.params.id as string, 10);
       const includeIds = Array.isArray(req.body?.include_user_ids) ? req.body.include_user_ids.map((n: any) => Number(n)) : undefined;
       const excludeIds = Array.isArray(req.body?.exclude_user_ids) ? req.body.exclude_user_ids.map((n: any) => Number(n)) : undefined;
-      res.json(v2.updateAudienceIncludeExclude(id, includeIds, excludeIds));
+      const source = typeof req.body?.source === "string" ? req.body.source : undefined;
+      res.json(v2.updateAudienceIncludeExclude(id, includeIds, excludeIds, source));
     } catch (e: any) { res.status(400).json({ error: e.message }); }
   });
   app.get("/api/admin/audiences/:id/preview", requireAuth, async (req, res) => {
@@ -6356,19 +6514,20 @@ function registerR8Routes(
       const id = parseInt(req.params.id as string, 10);
       const aud = v2.getAudienceRow(id);
       if (!aud) return res.status(404).json({ error: "Not found" });
-      // Base filter-matched customers (best-effort: all customers; resolver applies finer filters at send time).
-      const filterMatched = rawSqlite.prepare(`SELECT id, name, phone, email, state FROM customers`).all() as any[];
-      const includeIds: number[] = aud.include_user_ids_json ? JSON.parse(aud.include_user_ids_json) : [];
-      const excludeIds: number[] = aud.exclude_user_ids_json ? JSON.parse(aud.exclude_user_ids_json) : [];
-      const matchedIds = new Set(filterMatched.map((c) => c.id));
-      const includedExtra = includeIds.filter((cid) => !matchedIds.has(cid));
-      for (const cid of includeIds) matchedIds.add(cid);
-      for (const cid of excludeIds) matchedIds.delete(cid);
-      const finalList = Array.from(matchedIds).slice(0, 50).map((cid) => rawSqlite.prepare(`SELECT id, name, phone, email, state FROM customers WHERE id = ?`).get(cid)).filter(Boolean);
-      res.json({
-        customers: finalList,
-        summary: { matched: filterMatched.length, included_extra: includedExtra.length, excluded: excludeIds.length, final_count: finalList.length },
-      });
+      const { rows, summary } = v2.materializeAudience(id, 50);
+      res.json({ customers: rows, summary });
+    } catch (e: any) { res.status(500).json({ error: e.message }); }
+  });
+  // R26.6b — list candidate contacts for the include/exclude pickers, filtered by source.
+  app.get("/api/admin/audiences/source/:source/contacts", requireAuth, async (req, res) => {
+    try {
+      const table = v2.audienceSourceTable(req.params.source);
+      const q = (req.query.q as string | undefined)?.trim();
+      let sql = `SELECT id, name, phone, email, state FROM ${table}`;
+      const params: any[] = [];
+      if (q) { sql += ` WHERE LOWER(COALESCE(name,'')) LIKE ? OR COALESCE(phone,'') LIKE ?`; params.push(`%${q.toLowerCase()}%`, `%${q}%`); }
+      sql += ` ORDER BY name LIMIT 200`;
+      res.json(rawSqlite.prepare(sql).all(...params));
     } catch (e: any) { res.status(500).json({ error: e.message }); }
   });
 }

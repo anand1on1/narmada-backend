@@ -7,7 +7,9 @@ import { Plus, Upload, MessageSquare, Send, Loader2, LayoutGrid, List, UserPlus,
 
 // R26.6a (8) — open the marketing composer targeted at a single lead.
 function composeForLead(id: number, channel: "email" | "whatsapp") {
-  window.location.hash = `#/admin/marketing?compose=1&channel=${channel}&lead_id=${id}`;
+  // Go straight to the composer route (bypassing the marketing redirect) so the deep-link
+  // mounts the composer with the query intact even when already inside the marketing hub.
+  window.location.hash = `#/admin/marketing/campaigns/new?compose=1&channel=${channel}&lead_id=${id}`;
 }
 
 interface Lead {

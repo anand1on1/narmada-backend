@@ -25,6 +25,10 @@ export interface AudienceFilter {
     last_order_after?: number; // epoch ms — customers only
     min_spend?: number; // INR — customers only
   };
+  // R26.6b — explicit include/exclude overrides on top of the filter-matched set.
+  // IDs are "<type>:<id>" so they stay unambiguous when audience_type is 'all'.
+  include_ids?: string[];
+  exclude_ids?: string[];
 }
 
 export function parseFilter(filterJson: string | null | undefined): AudienceFilter {
@@ -72,6 +76,40 @@ function resolveSellers(f: AudienceFilter["filters"]): Recipient[] {
     .map((r) => ({ id: String(r.id), name: r.name, email: r.email, phone: r.phone || r.whatsapp, type: "seller" as const }));
 }
 
+// R26.6b — leads source. The leads table exists in this codebase (id/name/phone/email/state).
+function resolveLeads(f: AudienceFilter["filters"]): Recipient[] {
+  const rows = sqlite
+    .prepare(`SELECT id, name, email, phone, state FROM leads`)
+    .all() as Array<{ id: number; name: string; email: string | null; phone: string | null; state: string | null }>;
+  return rows
+    .filter((r) => {
+      if (f?.state && (r.state || "").toLowerCase() !== f.state.toLowerCase()) return false;
+      return true;
+    })
+    .map((r) => ({ id: String(r.id), name: r.name, email: r.email, phone: r.phone, type: "lead" as const }));
+}
+
+function recipientByTypedId(typedId: string): Recipient | null {
+  const [t, rawId] = typedId.split(":");
+  const id = parseInt(rawId, 10);
+  if (!id) return null;
+  if (t === "customer") {
+    const r = sqlite.prepare(`SELECT id, name, email, phone FROM customers WHERE id = ?`).get(id) as any;
+    return r ? { id: String(r.id), name: r.name, email: r.email, phone: r.phone, type: "customer" } : null;
+  }
+  if (t === "seller") {
+    const r = sqlite.prepare(`SELECT id, name, email, phone, whatsapp FROM vendors WHERE id = ?`).get(id) as any;
+    return r ? { id: String(r.id), name: r.name, email: r.email, phone: r.phone || r.whatsapp, type: "seller" } : null;
+  }
+  if (t === "lead") {
+    const r = sqlite.prepare(`SELECT id, name, email, phone FROM leads WHERE id = ?`).get(id) as any;
+    return r ? { id: String(r.id), name: r.name, email: r.email, phone: r.phone, type: "lead" } : null;
+  }
+  return null;
+}
+
+const typedKey = (r: Recipient) => `${r.type}:${r.id}`;
+
 // Resolve a filter to recipients, capped at MAX_AUDIENCE. Returns the (uncapped) total too.
 export function resolveAudience(filter: AudienceFilter): { recipients: Recipient[]; total: number } {
   const type = filter.audience_type || "all";
@@ -83,10 +121,22 @@ export function resolveAudience(filter: AudienceFilter): { recipients: Recipient
   } else if (type === "sellers") {
     recipients = resolveSellers(f);
   } else if (type === "leads") {
-    recipients = []; // leads table not present in this codebase yet
+    recipients = resolveLeads(f);
   } else {
-    // 'all' — customers + sellers
-    recipients = [...resolveCustomers(f), ...resolveSellers(f)];
+    // 'all' — customers + sellers + leads
+    recipients = [...resolveCustomers(f), ...resolveSellers(f), ...resolveLeads(f)];
+  }
+
+  // R26.6b — apply explicit include/exclude overrides (typed "<type>:<id>" keys).
+  const exclude = new Set(filter.exclude_ids || []);
+  if (exclude.size) recipients = recipients.filter((r) => !exclude.has(typedKey(r)));
+  if (filter.include_ids?.length) {
+    const present = new Set(recipients.map(typedKey));
+    for (const tid of filter.include_ids) {
+      if (present.has(tid) || exclude.has(tid)) continue;
+      const extra = recipientByTypedId(tid);
+      if (extra) { recipients.push(extra); present.add(tid); }
+    }
   }
 
   const total = recipients.length;
