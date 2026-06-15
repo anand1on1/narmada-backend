@@ -1915,3 +1915,26 @@ export function runR26_6jMigrations() {
   }
   console.log("[migrations] R26.6j: complete");
 }
+
+// -------- R26.6k diagnostics --------
+// READ-ONLY. No schema change. The vendor-code (MAX-based generator) and docket-URL
+// (read-side absolute heal) fixes are pure code. This only logs how many Delhi-dispatched
+// POs still have a NULL docket_slip_path so the user can see post-deploy why some
+// "View Docket" buttons remain disabled (those rows genuinely have no slip uploaded yet).
+export function runR26_6kMigrations() {
+  console.log("[migrations] R26.6k: start");
+  try {
+    const total = (sqlite.prepare(
+      `SELECT COUNT(*) AS c FROM purchase_orders_v2 WHERE delhi_submitted_at IS NOT NULL AND deleted_at IS NULL`
+    ).get() as any)?.c ?? 0;
+    const nullDocket = (sqlite.prepare(
+      `SELECT COUNT(*) AS c FROM purchase_orders_v2
+         WHERE delhi_submitted_at IS NOT NULL AND deleted_at IS NULL
+           AND (docket_slip_path IS NULL OR TRIM(docket_slip_path) = '')`
+    ).get() as any)?.c ?? 0;
+    console.log(`[migrations] R26.6k: from-delhi POs=${total}, NULL docket_slip_path=${nullDocket} (these "View Docket" buttons stay disabled until Delhi uploads)`);
+  } catch (e: any) {
+    console.error('[migrations] R26.6k diagnostics failed:', e?.message || e);
+  }
+  console.log("[migrations] R26.6k: complete");
+}

@@ -5659,14 +5659,16 @@ function registerR8Routes(
       const q = req.query.q ? String(req.query.q) : undefined;
       const from = req.query.from ? parseInt(req.query.from as string, 10) : undefined;
       const to = req.query.to ? parseInt(req.query.to as string, 10) : undefined;
-      res.json(v2.listDelhiDispatchedForConsignment({ status, q, from, to }));
+      const origin = `${req.protocol || "https"}://${req.get("host") || "narmada-backend.onrender.com"}`;
+      res.json(v2.listDelhiDispatchedForConsignment({ status, q, from, to, origin }));
     } catch (e: any) { res.status(500).json({ error: e.message }); }
   });
   // R26 — full detail for the From-Delhi "View" modal.
   app.get("/api/admin/consignment/:poId/detail", requireAuth, async (req: any, res: any) => {
     try {
       const poId = parseInt(req.params.poId as string, 10);
-      const detail = v2.getConsignmentDetail(poId);
+      const origin = `${req.protocol || "https"}://${req.get("host") || "narmada-backend.onrender.com"}`;
+      const detail = v2.getConsignmentDetail(poId, origin);
       if (!detail) return res.status(404).json({ error: "PO not found" });
       res.json(detail);
     } catch (e: any) { res.status(500).json({ error: e.message }); }
@@ -6477,14 +6479,16 @@ function registerR8Routes(
       const q = req.query.q ? String(req.query.q) : undefined;
       const from = req.query.from ? parseInt(req.query.from as string, 10) : undefined;
       const to = req.query.to ? parseInt(req.query.to as string, 10) : undefined;
-      res.json(v2.listDelhiDispatchedForConsignment({ status, q, from, to }));
+      const origin = `${req.protocol || "https"}://${req.get("host") || "narmada-backend.onrender.com"}`;
+      res.json(v2.listDelhiDispatchedForConsignment({ status, q, from, to, origin }));
     } catch (e: any) { res.status(500).json({ error: e.message }); }
   });
   // R26.6g — D3: From-Delhi PO detail for the consignment portal (items + docket/invoice).
   app.get("/api/consignment/from-delhi/:poId", requireConsignment, async (req, res) => {
     try {
       const poId = parseInt(req.params.poId as string, 10);
-      const detail = v2.getConsignmentPortalDetail(poId);
+      const origin = `${req.protocol || "https"}://${req.get("host") || "narmada-backend.onrender.com"}`;
+      const detail = v2.getConsignmentPortalDetail(poId, origin);
       if (!detail) return res.status(404).json({ error: "PO not found" });
       res.json(detail);
     } catch (e: any) { res.status(500).json({ error: e.message }); }

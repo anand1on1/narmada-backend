@@ -1613,6 +1613,42 @@ function nextPoNumber(prefix = "NM/PO"): string {
   throw new Error(`nextPoNumber: could not allocate a free PO number for ${pfx} after 100 attempts`);
 }
 
+// R26.6k — MAX-based code generator for vendors/companies. The legacy COUNT(*)+1 (seqNumber)
+// collides whenever a deletion leaves a gap (e.g. 43 vendors but max seq 0048 → COUNT+1=0044,
+// a duplicate). Mirror nextPoNumber: take MAX(sequence)+1 over the matching prefix, then
+// defensively confirm the candidate is free, looping past any gaps/collisions.
+function nextSeqCode(tableName: string, columnName: string, prefix: string): string {
+  const yy = String(new Date().getFullYear()).slice(-2);
+  const pfx = `${prefix}/${yy}/`;
+  const maxRow = sqlite
+    .prepare(
+      `SELECT ${columnName} AS code FROM ${tableName}
+         WHERE ${columnName} LIKE ?
+         ORDER BY CAST(SUBSTR(${columnName}, -4) AS INTEGER) DESC
+         LIMIT 1`,
+    )
+    .get(`${pfx}%`) as { code?: string } | undefined;
+  const parseSeq = (n?: string): number => {
+    if (!n) return 0;
+    const seq = parseInt(n.slice(-4), 10);
+    return Number.isFinite(seq) ? seq : 0;
+  };
+  let nextSeq = parseSeq(maxRow?.code) + 1;
+  const existsStmt = sqlite.prepare(`SELECT 1 FROM ${tableName} WHERE ${columnName} = ? LIMIT 1`);
+  for (let attempt = 0; attempt < 100; attempt++) {
+    const candidate = `${pfx}${String(nextSeq).padStart(4, "0")}`;
+    if (!existsStmt.get(candidate)) return candidate;
+    nextSeq++;
+  }
+  throw new Error(`nextSeqCode: could not allocate a free code for ${pfx} after 100 attempts`);
+}
+function nextVendorCode(): string {
+  return nextSeqCode("vendors", "code", "NM/V");
+}
+function nextCompanyCode(): string {
+  return nextSeqCode("companies", "code", "NM/C");
+}
+
 // -------- VENDORS --------
 export async function listVendors(opts: { q?: string; brand?: string; category?: string; activeOnly?: boolean } = {}): Promise<Vendor[]> {
   const conds: any[] = [];
@@ -1633,7 +1669,7 @@ export async function getVendorByPhone(phone: string): Promise<Vendor | undefine
   return all.find((v) => (v.whatsapp || "").replace(/[^0-9]/g, "").endsWith(norm.slice(-10)) || (v.phone || "").replace(/[^0-9]/g, "").endsWith(norm.slice(-10)));
 }
 export async function createVendor(data: Partial<InsertVendor>): Promise<Vendor> {
-  const code = data.code || seqNumber(vendors, vendors.code, "NM/V");
+  const code = data.code || nextVendorCode();
   const now = Date.now();
   return db.insert(vendors).values({ ...data, code, name: data.name || "Unnamed", createdAt: now, updatedAt: now } as any).returning().get();
 }
@@ -1663,7 +1699,7 @@ export async function getDefaultCompany(): Promise<Company | undefined> {
   return db.select().from(companies).where(eq(companies.isDefault, true)).get() || db.select().from(companies).get();
 }
 export async function createCompany(data: Partial<InsertCompany>): Promise<Company> {
-  const code = data.code || seqNumber(companies, companies.code, "NM/C");
+  const code = data.code || nextCompanyCode();
   const now = Date.now();
   return db.insert(companies).values({ ...data, code, name: data.name || "Company", createdAt: now, updatedAt: now } as any).returning().get();
 }
@@ -3609,16 +3645,19 @@ export function processPurchaseOrder(poId: number): {
 // PO is returned and the caller renders a status badge. (R26 Fix A.1)
 // R26.6b — normalize a stored docket slip path into a browser-openable URL.
 // New uploads store a server-relative "/uploads/..." path; some legacy rows store a full URL.
-function docketUrlFromPath(p: string | null | undefined): string | null {
+// R26.6k — `origin` (e.g. "https://host") prefixes relative paths so old rows that stored a
+// server-relative "/uploads/..." path open from the prod frontend (GoDaddy) instead of 404ing.
+function docketUrlFromPath(p: string | null | undefined, origin?: string | null): string | null {
   if (!p) return null;
   const s = String(p).trim();
   if (!s) return null;
   if (/^https?:\/\//i.test(s)) return s;
-  return s.startsWith("/") ? s : `/uploads/${s}`;
+  const rel = s.startsWith("/") ? s : `/uploads/${s}`;
+  return origin ? `${origin.replace(/\/+$/, "")}${rel}` : rel;
 }
 
 export function listDelhiDispatchedForConsignment(opts: {
-  status?: string; from?: number; to?: number; q?: string;
+  status?: string; from?: number; to?: number; q?: string; origin?: string | null;
 } = {}): any[] {
   const conds: string[] = ["delhi_submitted_at IS NOT NULL", "deleted_at IS NULL"];
   const params: any[] = [];
@@ -3676,14 +3715,14 @@ export function listDelhiDispatchedForConsignment(opts: {
       consignmentReceivedAt: po.consignment_received_at ?? null,
       itemCount: items.length, custTotal, costTotal,
       totalBundles: Number(bundlesRow?.total ?? 0) || 0,
-      docketUrl: docketUrlFromPath(po.docket_slip_path),
+      docketUrl: docketUrlFromPath(po.docket_slip_path, opts.origin),
       docketNumber: po.docket_number ?? null,
     };
   });
 }
 
 // R26 — full detail for the "View" modal + PDF export of a From-Delhi PO.
-export function getConsignmentDetail(poId: number): any | null {
+export function getConsignmentDetail(poId: number, origin?: string | null): any | null {
   const po = sqlite.prepare(`SELECT * FROM purchase_orders_v2 WHERE id = ?`).get(poId) as any;
   if (!po) return null;
   const customer = po.customer_id
@@ -3733,7 +3772,7 @@ export function getConsignmentDetail(poId: number): any | null {
     docketNumber: po.docket_number ?? null,
     docketDate: po.docket_date ?? null,
     docketSlipPath: po.docket_slip_path ?? null,
-    docketUrl: docketUrlFromPath(po.docket_slip_path),
+    docketUrl: docketUrlFromPath(po.docket_slip_path, origin),
   };
 }
 
@@ -4675,8 +4714,8 @@ export function syncQuotationToTargets(quotationId: number): void {
 
 // R26.6g — consignment-portal From-Delhi detail (extends getConsignmentDetail with
 // per-line pricing + invoice URL so the portal modal can show items + downloads).
-export function getConsignmentPortalDetail(poId: number): any | null {
-  const base = getConsignmentDetail(poId);
+export function getConsignmentPortalDetail(poId: number, origin?: string | null): any | null {
+  const base = getConsignmentDetail(poId, origin);
   if (!base) return null;
   const po = sqlite.prepare(`SELECT * FROM purchase_orders_v2 WHERE id = ?`).get(poId) as any;
   const items = (sqlite.prepare(`SELECT * FROM po_items WHERE po_id = ?`).all(poId) as any[]).map((it) => {
