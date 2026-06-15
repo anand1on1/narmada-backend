@@ -1938,3 +1938,86 @@ export function runR26_6kMigrations() {
   }
   console.log("[migrations] R26.6k: complete");
 }
+
+// -------- R26.6l one-time heal --------
+// ADDITIVE / ONE-SHOT / IDEMPOTENT. The R26.6i audit log captured dozens of real inbound
+// vendor replies (topic=message.created, sender=USER) that the old parser wrongly rejected
+// as ignored_reason='non_phone' (it read the literal role token in `sender` as the phone
+// instead of data.message.phone_number). Now that the parser is fixed, re-parse those stored
+// bodies and insert the missing inbound chat rows so the user instantly sees the historical
+// replies in /#/admin/chats after deploy — without anyone re-sending anything.
+// Dedup is on external_message_id; re-running inserts nothing new.
+export function runR26_6lMigrations() {
+  console.log("[migrations] R26.6l: start (heal historical non_phone inbound)");
+  let inserted = 0;
+  let healedRows = 0;
+  try {
+    // webhook_events may not exist on a brand-new DB that hasn't run R26.6i yet — guard.
+    const tbl = sqlite.prepare(
+      `SELECT name FROM sqlite_master WHERE type='table' AND name='webhook_events'`,
+    ).get();
+    if (!tbl) {
+      console.log("[migrations] R26.6l: webhook_events table absent — nothing to heal");
+      console.log("[migrations] R26.6l: complete");
+      return;
+    }
+
+    const rows = sqlite.prepare(
+      `SELECT id, body_json FROM webhook_events
+        WHERE topic = 'message.created' AND ignored_reason = 'non_phone' AND processed = 0`,
+    ).all() as Array<{ id: number; body_json: string | null }>;
+
+    const existsByExtId = sqlite.prepare(
+      `SELECT 1 FROM vendor_rfq_messages WHERE external_message_id = ? LIMIT 1`,
+    );
+    const insertMsg = sqlite.prepare(
+      `INSERT INTO vendor_rfq_messages (vendor_id, vendor_phone, direction, body, aisensy_msg_id, external_message_id, status, created_at)
+       VALUES (?, ?, 'in', ?, ?, ?, NULL, ?)`,
+    );
+    const findVendor = sqlite.prepare(
+      `SELECT id FROM vendors
+        WHERE REPLACE(REPLACE(COALESCE(whatsapp,''),'+',''),' ','') LIKE ?
+           OR REPLACE(REPLACE(COALESCE(phone,''),'+',''),' ','') LIKE ?
+        LIMIT 1`,
+    );
+    const markProcessed = sqlite.prepare(
+      `UPDATE webhook_events SET processed = 1, ignored_reason = NULL,
+              notes = COALESCE(notes,'') || ' | R26.6l backfilled' WHERE id = ?`,
+    );
+
+    for (const r of rows) {
+      try {
+        if (!r.body_json) continue;
+        const b = JSON.parse(r.body_json);
+        const msg = b?.data?.message || {};
+        const sender = String(msg.sender ?? "").trim().toUpperCase();
+        // Only re-insert genuine inbound vendor replies. Outbound echoes (API/SYSTEM) stay out.
+        if (sender && sender !== "USER") { markProcessed.run(r.id); healedRows++; continue; }
+        const phone = String(msg.phone_number ?? msg.phoneNumber ?? "").trim();
+        if (!phone) continue; // truly malformed — leave as non_phone
+        const extId = String(msg.id ?? msg.messageId ?? "").trim() || null;
+        if (extId && existsByExtId.get(extId)) { markProcessed.run(r.id); healedRows++; continue; }
+        const msgType = String(msg.message_type ?? "").trim();
+        const text = String(
+          (typeof msg.message_content === "object" ? msg.message_content?.text : "") ||
+          msg.message_content ||
+          (msgType && msgType.toUpperCase() !== "TEXT" ? `[${msgType}]` : "") || "",
+        );
+        // Tolerant vendor match: last-10-digit suffix.
+        const last10 = phone.replace(/[^0-9]/g, "").slice(-10);
+        const v = last10 ? (findVendor.get(`%${last10}`, `%${last10}`) as any) : null;
+        const createdAt = Number(msg.sent_at ?? msg.sentAt) || Date.now();
+        insertMsg.run(v?.id ?? null, phone, text, extId, extId, createdAt);
+        inserted++;
+        markProcessed.run(r.id);
+        healedRows++;
+      } catch (rowErr: any) {
+        console.log(`[migrations] R26.6l: row ${r.id} skipped — ${rowErr?.message || rowErr}`);
+      }
+    }
+    console.log(`[migrations] R26.6l: backfilled ${inserted} inbound messages from webhook_events (healed ${healedRows}/${rows.length} rows)`);
+  } catch (e: any) {
+    console.error("[migrations] R26.6l backfill failed:", e?.message || e);
+  }
+  console.log("[migrations] R26.6l: complete");
+}

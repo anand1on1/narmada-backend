@@ -3945,13 +3945,30 @@ function registerR9Routes(
       for (const ev of rawEvents) {
         try {
           const envelope = ev || {};
-          // R26.2e — per-event v0.0.1 envelope detection (also covers arrays of envelopes).
+          // R26.2e / R26.6l — per-event v0.0.1 envelope detection. The real AiSensy
+          // payload is {topic, data:{message:{...}}}; project_id may or may not be present
+          // (synthetic/test posts omit it), so detect on topic + data presence.
           const isV1Envelope =
-            !!envelope?.topic && !!envelope?.data && !!envelope?.project_id;
+            !!envelope?.topic && !!envelope?.data &&
+            (!!envelope?.project_id || !!envelope?.data?.message || typeof envelope?.data === "object");
           const e = isV1Envelope ? envelope.data || {} : envelope;
           // R22.x — AiSensy nests the real payload under data.messageData / messageData /
           // message. Merge those nested objects so field lookups work regardless of shape.
           const md = e.messageData || e.data?.messageData || e.message || {};
+          // R26.6l — AiSensy "message.created" inbound shape: the real fields live on
+          // data.message: phone_number (12-digit canonical phone), sender ("USER" inbound /
+          // "API"/"SYSTEM" outbound echo), message_content.text, userName, message_type,
+          // id/messageId, sent_at. Capture them explicitly so we stop mistaking the literal
+          // role token in `sender` for a phone number (that was the non_phone bug).
+          const aiPhone = String(md.phone_number ?? md.phoneNumber ?? "").trim();
+          const aiSender = String(md.sender ?? "").trim().toUpperCase();
+          const aiMsgType = String(md.message_type ?? md.messageType ?? "").trim();
+          const aiContentText = String(
+            (typeof md.message_content === "object" ? md.message_content?.text : "") ||
+            md.message_content || "",
+          );
+          const aiUserName = String(md.userName ?? md.user_name ?? "").trim();
+          const aiSentAt = md.sent_at ?? md.sentAt ?? null;
           const pick = (...keys: string[]): any => {
             for (const k of keys) {
               if (e[k] != null && e[k] !== "") return e[k];
@@ -3967,27 +3984,37 @@ function registerR9Routes(
               : e.event || e.type || e.eventType || e.event_type || "",
           ).trim();
 
-          // Phone — extended fallback chain (R26.2e).
+          // Phone — R26.6l: prefer AiSensy's explicit phone_number, then the extended
+          // fallback chain (R26.2e). Critically we DROP "sender" from this chain because in
+          // AiSensy's real shape `sender` is a role token ("USER"/"API"), not a phone.
           const from = String(
-            pick("from", "sender", "phone", "mobile", "waId", "wa_id") ||
+            aiPhone ||
+            pick("from", "phone", "mobile", "waId", "wa_id") ||
             e.contact?.wa_id || e.contact?.phone || e.contact?.mobile ||
             e.user?.phone || e.payload?.from || e.message?.from || "",
           );
 
-          // External message id: envelope.id first (v0.0.1), then inner ids.
+          // External message id — R26.6l: prefer the inner message id (data.message.id /
+          // messageId) for idempotency since that's stable per inbound reply across AiSensy
+          // retries (x-retry-count). Fall back to the envelope id then legacy ids.
           const externalId =
-            envelope.id ||
+            md.id || md.messageId ||
             pick("external_message_id", "message_id", "messageId", "id", "msgId") ||
+            envelope.id ||
             null;
 
-          // Text — extended fallback chain (R26.2e). `message` can be a string directly.
+          // Text — R26.6l: prefer AiSensy message_content.text, then extended fallback chain.
+          // For non-text messages (image/doc), fall back to a "[TYPE]" placeholder so the row
+          // still records something meaningful.
           const text = String(
+            aiContentText ||
             (typeof e.message === "string" ? e.message : "") ||
             pick("text", "body", "content", "message_text") ||
             e.message?.body || e.message?.text ||
             e.payload?.text?.body || e.payload?.body ||
             (typeof e.text === "object" ? e.text?.body : "") ||
-            md.text?.body || "",
+            md.text?.body ||
+            (aiMsgType && aiMsgType.toUpperCase() !== "TEXT" ? `[${aiMsgType}]` : "") || "",
           );
 
           // R26.2e — recognized inbound message topics (case-insensitive substring match).
@@ -4047,6 +4074,44 @@ function registerR9Routes(
             console.log(`[R22.x aisensy] ignoring receipt topic=${type} msgId=${externalId || "?"}`);
             updateWebhookEvent(_whId, { topic: type || null, fromPhone: from || null, textPreview: text, processed: 0, ignoredReason: "receipt" });
             return res.status(200).json({ ok: true, ignored: true, reason: "receipt", topic: type });
+          }
+
+          // R26.6l — AiSensy real "message.created" handling. When we have an explicit
+          // phone_number (aiPhone) the event is a genuine inbound/outbound message, NOT a
+          // synthetic role event. Route on the `sender` direction:
+          //   sender === "USER"          → inbound vendor reply (record it)
+          //   sender === "API"/"SYSTEM"  → outbound echo of a message WE sent (skip; the
+          //                                outbound send path already recorded it — re-inserting
+          //                                would duplicate every outbound line)
+          if (aiPhone && type.toLowerCase() === "message.created") {
+            if (aiSender && aiSender !== "USER") {
+              console.log(`[R26.6l aisensy] outbound echo sender=${aiSender} phone=${aiPhone} msgId=${externalId || "?"} — skip`);
+              updateWebhookEvent(_whId, { topic: type || null, fromPhone: from || null, textPreview: text, processed: 0, ignoredReason: "outbound_echo" });
+              return res.status(200).json({ ok: true, ignored: true, reason: "outbound_echo", topic: type });
+            }
+            // Inbound vendor reply. processInboundReply dedups on externalId and records the
+            // row even when no vendor matches (vendor_id NULL → orphan thread in chats UI).
+            const n = await processInboundReply(from, text, externalId ? String(externalId) : null);
+            processed += n;
+            // R26.6l — if the matched/created chat row has no vendor name, AiSensy gave us
+            // userName; best-effort auto-create a placeholder vendor so the thread shows a name.
+            try {
+              if (n > 0 && aiUserName) {
+                const existing = from ? await v2.getVendorByPhone(from) : undefined;
+                if (!existing) {
+                  await v2.createVendor({ name: aiUserName, phone: from, whatsapp: from, notes: "auto-created from AiSensy inbound (R26.6l)" } as any);
+                }
+              }
+            } catch (ce: any) {
+              console.log(`[R26.6l aisensy] placeholder vendor create skipped — ${ce?.message || ce}`);
+            }
+            updateWebhookEvent(_whId, {
+              topic: type || null, fromPhone: from || null, textPreview: text,
+              processed: n > 0 ? 1 : 0,
+              ignoredReason: n > 0 ? null : "duplicate",
+              notes: `R26.6l inbound sender=USER name=${aiUserName || "?"} sentAt=${aiSentAt || "?"}`,
+            });
+            return res.status(200).json({ ok: true, processed: n, inbound: true });
           }
 
           // R26.2f — non-phone placeholder guard. AiSensy sometimes emits literal
