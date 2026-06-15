@@ -1845,3 +1845,50 @@ export function runR26_6gMigrations() {
 
   console.log("[migrations] R26.6g: complete");
 }
+
+// -------- R26.6i additive migrations --------
+// ADDITIVE ONLY. Permanent inbound webhook audit log so admin can inspect every
+// request that hits the AiSensy webhooks — used to diagnose why real vendor
+// replies are not landing in production. Per-statement try/catch; never alters
+// or drops existing tables.
+export function runR26_6iMigrations() {
+  console.log("[migrations] R26.6i: start");
+
+  try {
+    sqlite.exec(`
+      CREATE TABLE IF NOT EXISTS webhook_events (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        source TEXT NOT NULL DEFAULT 'aisensy',
+        received_at INTEGER NOT NULL,
+        method TEXT,
+        topic TEXT,
+        from_phone TEXT,
+        text_preview TEXT,
+        processed INTEGER DEFAULT 0,
+        ignored_reason TEXT,
+        headers_json TEXT,
+        body_json TEXT,
+        notes TEXT
+      );
+    `);
+    console.log("[migrations] R26.6i: webhook_events ready");
+  } catch (err: any) {
+    console.log("[migrations] R26.6i: webhook_events failed —", err?.message || err);
+  }
+
+  try {
+    sqlite.exec(`CREATE INDEX IF NOT EXISTS idx_webhook_events_received_at ON webhook_events(received_at DESC);`);
+    console.log("[migrations] R26.6i: idx received_at ready");
+  } catch (err: any) {
+    console.log("[migrations] R26.6i: idx received_at failed —", err?.message || err);
+  }
+
+  try {
+    sqlite.exec(`CREATE INDEX IF NOT EXISTS idx_webhook_events_source ON webhook_events(source);`);
+    console.log("[migrations] R26.6i: idx source ready");
+  } catch (err: any) {
+    console.log("[migrations] R26.6i: idx source failed —", err?.message || err);
+  }
+
+  console.log("[migrations] R26.6i: complete");
+}

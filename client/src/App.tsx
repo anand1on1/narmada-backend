@@ -125,6 +125,7 @@ import AdminPurchaseHistory from "@/pages/admin/AdminPurchaseHistory";
 // R23/R24 — Command Center + WhatsApp-web Chats
 import AdminCommandCenter from "@/pages/admin/AdminCommandCenter";
 import AdminChats from "@/pages/admin/AdminChats";
+import AdminWebhookEvents from "@/pages/admin/AdminWebhookEvents";
 // R26.4 — Marketing Hub
 import AdminMarketingCampaigns from "@/pages/admin/AdminMarketingCampaigns";
 import AdminMarketingCampaignComposer from "@/pages/admin/AdminMarketingCampaignComposer";
@@ -282,6 +283,8 @@ function AppRouter() {
         <Route path="/admin/command-center" component={AdminCommandCenter} />
         {/* R24.4 — WhatsApp-web style Chats */}
         <Route path="/admin/chats" component={AdminChats} />
+        {/* R26.6i — webhook events diagnostics */}
+        <Route path="/admin/webhook-events" component={AdminWebhookEvents} />
         {/* R26.4 — Marketing Hub (new BEFORE :id to avoid shadowing) */}
         <Route path="/admin/marketing" component={MarketingRedirect} />
         <Route path="/admin/marketing/campaigns/new" component={AdminMarketingCampaignComposer} />

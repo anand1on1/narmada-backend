@@ -9,7 +9,7 @@ import {
   UserSquare, Wallet, CreditCard, FileQuestion, FileSpreadsheet, ShoppingCart, Landmark,
   Building2, UserCog, ScrollText, ClipboardList, Bell,
   Factory, Search, Target, Megaphone, CheckSquare, Sparkles, Facebook, History,
-  Gauge, Radar, Link2,
+  Gauge, Radar, Link2, Bug,
 } from "lucide-react";
 
 // Session A V2: 4-role sidebar matrix.
@@ -30,6 +30,7 @@ const ROLE_PAGES: Record<AdminRole, Set<string>> = {
     "/admin/users", "/admin/sales-targets", "/admin/attendance",
     "/admin/ads-meta", "/admin/ads-google", "/admin/integrations",
     "/admin/marketing/campaigns", "/admin/marketing/audiences", "/admin/marketing/templates", "/admin/marketing/custom-templates",
+    "/admin/webhook-events",
   ]),
   logistics: new Set(["/admin/consignments"]),
   accounts: new Set([
@@ -130,6 +131,8 @@ export function AdminLayout({ children, title }: { children: ReactNode; title: s
     { href: "/admin/sitemap", label: "Sitemap & SEO", icon: Map },
     { href: "/admin/team", label: "Team", icon: Users },
     { href: "/admin/settings", label: "Settings", icon: Settings },
+    // R26.6i — Diagnostics
+    { href: "/admin/webhook-events", label: "Webhook Events", icon: Bug },
   ];
 
   // Default to admin if role is somehow missing (legacy sessions)

@@ -186,6 +186,7 @@ export function triggerSitemapRegen(regenFn: () => Promise<{ urlCount: number }>
   }, 5000);
 }
 
+
 const INDEXNOW_KEY = process.env.INDEXNOW_KEY || "narmada-mobility-indexnow-key-2026";
 const SITE_HOST = process.env.SITE_HOST || "narmadamobility.com";
 
@@ -2679,6 +2680,41 @@ function registerR4toR7Routes(
   const claude = require("./claude-service");
   const wa = require("./whatsapp");
   const { rawSqlite } = require("./storage");
+  // R26.6i — webhook audit helpers (local; esbuild splits route-register functions into
+  // separate lazy module chunks, so a shared module-level symbol is not reliably in scope).
+  const SECRET_HEADER_KEYS = ["x-aisensy-signature", "x-webhook-secret", "x-aisensy-secret", "authorization", "cookie", "x-admin-token"];
+  const logWebhookEvent = (source: string, req: any): number | null => {
+    try {
+      const redactedHeaders: Record<string, any> = { ...(req.headers || {}) };
+      for (const k of SECRET_HEADER_KEYS) { if (redactedHeaders[k] != null) redactedHeaders[k] = "<redacted>"; }
+      let bodyJson = "";
+      try { bodyJson = JSON.stringify(req.body ?? {}); } catch { bodyJson = "<unserializable>"; }
+      if (bodyJson.length > 8000) bodyJson = bodyJson.slice(0, 8000);
+      const info = rawSqlite
+        .prepare(`INSERT INTO webhook_events (source, received_at, method, headers_json, body_json) VALUES (?, ?, ?, ?, ?)`)
+        .run(source, Date.now(), String(req.method || "POST"), JSON.stringify(redactedHeaders), bodyJson);
+      return Number(info.lastInsertRowid);
+    } catch (err: any) { console.error("[R26.6i webhook-log] insert failed:", err?.message || err); return null; }
+  };
+  const updateWebhookEvent = (
+    id: number | null,
+    fields: { topic?: string | null; fromPhone?: string | null; textPreview?: string | null; processed?: number; ignoredReason?: string | null; notes?: string | null },
+  ): void => {
+    if (id == null) return;
+    try {
+      rawSqlite
+        .prepare(`UPDATE webhook_events SET topic = ?, from_phone = ?, text_preview = ?, processed = ?, ignored_reason = ?, notes = ? WHERE id = ?`)
+        .run(
+          fields.topic ?? null,
+          fields.fromPhone ?? null,
+          fields.textPreview != null ? String(fields.textPreview).slice(0, 200) : null,
+          fields.processed ?? 0,
+          fields.ignoredReason ?? null,
+          fields.notes ?? null,
+          id,
+        );
+    } catch (err: any) { console.error("[R26.6i webhook-log] update failed:", err?.message || err); }
+  };
 
   // Delhi-warehouse middleware: a data-team session whose user.role === "delhi_warehouse".
   async function requireDelhi(req: Request, res: Response, next: NextFunction): Promise<void> {
@@ -3113,6 +3149,7 @@ function registerR4toR7Routes(
 
   // ---------------- R5.5 AISENSY INBOUND WEBHOOK ----------------
   app.post("/api/webhooks/aisensy", async (req, res) => {
+    const _whId = logWebhookEvent("aisensy", req);
     try {
       const secret = process.env.AISENSY_WEBHOOK_SECRET || "";
       if (secret) {
@@ -3124,9 +3161,15 @@ function registerR4toR7Routes(
       const message = String(b.message || b.text || b.body || "");
       const mediaUrl = b.media_url || b.mediaUrl || null;
       const messageId = b.message_id || b.messageId || null;
-      if (!from) return res.json({ ok: true, ignored: "no from" });
+      if (!from) {
+        updateWebhookEvent(_whId, { fromPhone: from || null, textPreview: message, processed: 0, ignoredReason: "no_from" });
+        return res.json({ ok: true, ignored: "no from" });
+      }
       const vendor = await v2.getVendorByPhone(from);
-      if (!vendor) { res.json({ ok: true, ignored: "unknown vendor" }); return; }
+      if (!vendor) {
+        updateWebhookEvent(_whId, { fromPhone: from, textPreview: message, processed: 0, ignoredReason: "unknown_vendor" });
+        res.json({ ok: true, ignored: "unknown vendor" }); return;
+      }
 
       // Find an active RFQ for this vendor (most recent open one)
       const rfqVendorRows = await v2.listRfqVendorsForVendor(vendor.id);
@@ -3151,9 +3194,11 @@ function registerR4toR7Routes(
           notes: extracted.notes, rawMessage: message, extractedBy: "ai", photoUrl: mediaUrl,
         });
       }
+      updateWebhookEvent(_whId, { fromPhone: from, textPreview: message, processed: 1, ignoredReason: null, notes: `vendor=${vendor.id} extracted=${!!extracted}` });
       res.json({ ok: true, vendor: vendor.id, extracted: !!extracted });
     } catch (e: any) {
       console.error("[webhook:aisensy]", e?.message);
+      updateWebhookEvent(_whId, { processed: 0, ignoredReason: "handler_error", notes: e?.message || String(e) });
       res.json({ ok: false, error: e?.message });
     }
   });
@@ -3454,6 +3499,42 @@ function registerR9Routes(
   app: Express,
   { requireAuth, requireDataTeam }: { requireAuth: any; requireDataTeam: any }
 ) {
+  // R26.6i — webhook audit helpers (local; esbuild splits route-register functions into
+  // separate lazy module chunks, so a shared module-level symbol is not reliably in scope).
+  const SECRET_HEADER_KEYS = ["x-aisensy-signature", "x-webhook-secret", "x-aisensy-secret", "authorization", "cookie", "x-admin-token"];
+  const logWebhookEvent = (source: string, req: any): number | null => {
+    try {
+      const redactedHeaders: Record<string, any> = { ...(req.headers || {}) };
+      for (const k of SECRET_HEADER_KEYS) { if (redactedHeaders[k] != null) redactedHeaders[k] = "<redacted>"; }
+      let bodyJson = "";
+      try { bodyJson = JSON.stringify(req.body ?? {}); } catch { bodyJson = "<unserializable>"; }
+      if (bodyJson.length > 8000) bodyJson = bodyJson.slice(0, 8000);
+      const info = rawSqlite
+        .prepare(`INSERT INTO webhook_events (source, received_at, method, headers_json, body_json) VALUES (?, ?, ?, ?, ?)`)
+        .run(source, Date.now(), String(req.method || "POST"), JSON.stringify(redactedHeaders), bodyJson);
+      return Number(info.lastInsertRowid);
+    } catch (err: any) { console.error("[R26.6i webhook-log] insert failed:", err?.message || err); return null; }
+  };
+  const updateWebhookEvent = (
+    id: number | null,
+    fields: { topic?: string | null; fromPhone?: string | null; textPreview?: string | null; processed?: number; ignoredReason?: string | null; notes?: string | null },
+  ): void => {
+    if (id == null) return;
+    try {
+      rawSqlite
+        .prepare(`UPDATE webhook_events SET topic = ?, from_phone = ?, text_preview = ?, processed = ?, ignored_reason = ?, notes = ? WHERE id = ?`)
+        .run(
+          fields.topic ?? null,
+          fields.fromPhone ?? null,
+          fields.textPreview != null ? String(fields.textPreview).slice(0, 200) : null,
+          fields.processed ?? 0,
+          fields.ignoredReason ?? null,
+          fields.notes ?? null,
+          id,
+        );
+    } catch (err: any) { console.error("[R26.6i webhook-log] update failed:", err?.message || err); }
+  };
+
   // ---- Per-line multi-vendor management (proc / data team) ----
   app.get("/api/team/po-items/:id/quotes", requireDataTeam, async (req: any, res: any) => {
     try {
@@ -3817,6 +3898,8 @@ function registerR9Routes(
   }
 
   app.post("/api/aisensy/webhook", async (req: any, res: any) => {
+    // R26.6i — permanent audit: record the raw request BEFORE any parsing/filtering.
+    const _whId = logWebhookEvent("aisensy", req);
     // R22.x — if auth fails we no longer return 401 (that triggers AiSensy retry storms and
     // hides legit messages). Instead: log the full inbound shape (secrets redacted) for
     // diagnosis, then fall through and process anyway so the user's vendor replies land.
@@ -3833,6 +3916,11 @@ function registerR9Routes(
     }
 
     let processed = 0;
+    // R26.6i — capture the last event's resolved fields for the audit log final update.
+    let _whTopic: string | null = null;
+    let _whFrom: string | null = null;
+    let _whText: string | null = null;
+    let _whIgnored: string | null = null;
     try {
       const b = req.body || {};
 
@@ -3920,6 +4008,10 @@ function registerR9Routes(
           console.log(
             `[R22.x aisensy] topic=${type || "?"} from=${from || "?"} msgId=${externalId || "?"} textLen=${text.length}`,
           );
+          // R26.6i — remember the resolved fields for the audit-log final update.
+          _whTopic = type || null;
+          _whFrom = from || null;
+          _whText = text || null;
 
           // R26.2f — receipt/status filter. The R26.2e check was bypassed because
           // INBOUND_TOPICS contains the substring "message", and topics like
@@ -3953,6 +4045,7 @@ function registerR9Routes(
               recordMarketingWhatsAppReceipt(externalId ? String(externalId) : null, type);
             } catch { /* never let the hook break the webhook */ }
             console.log(`[R22.x aisensy] ignoring receipt topic=${type} msgId=${externalId || "?"}`);
+            updateWebhookEvent(_whId, { topic: type || null, fromPhone: from || null, textPreview: text, processed: 0, ignoredReason: "receipt" });
             return res.status(200).json({ ok: true, ignored: true, reason: "receipt", topic: type });
           }
 
@@ -3961,6 +4054,7 @@ function registerR9Routes(
           // synthetic/system events. These are junk, not real sellers → ignore.
           if (from && /^(API|USER|SYSTEM|BOT|TEST)$/i.test(from.trim())) {
             console.log(`[R22.x aisensy] skip non-phone from=${from} topic=${type} msgId=${externalId || "?"}`);
+            updateWebhookEvent(_whId, { topic: type || null, fromPhone: from || null, textPreview: text, processed: 0, ignoredReason: "non_phone" });
             return res.status(200).json({ ok: true, ignored: true, reason: "non-phone" });
           }
 
@@ -3968,6 +4062,7 @@ function registerR9Routes(
           // chat row with neither a sender nor text.
           if (!from && !text) {
             console.log(`[R22.x aisensy] skip empty inbound topic=${type} msgId=${externalId || "?"}`);
+            updateWebhookEvent(_whId, { topic: type || null, fromPhone: from || null, textPreview: text, processed: 0, ignoredReason: "empty" });
             return res.status(200).json({ ok: true, ignored: true, reason: "empty", topic: type });
           }
 
@@ -3979,6 +4074,7 @@ function registerR9Routes(
               );
             } else {
               console.log(`[R22.x aisensy] ignoring topic=${type}`);
+              updateWebhookEvent(_whId, { topic: type || null, fromPhone: from || null, textPreview: text, processed: 0, ignoredReason: "ignored_topic" });
               return res.json({ ok: true, ignored: true, topic: type });
             }
             continue;
@@ -4058,7 +4154,18 @@ function registerR9Routes(
     } catch (e: any) {
       // Top-level failure: still return 200 so AiSensy does not retry-storm us.
       console.error("[R18 aisensy] webhook error:", e?.message || e);
+      _whIgnored = "handler_error";
     }
+    // R26.6i — final audit update for paths that fell through to here (inbound success,
+    // message.created/status/contact events). Early-return paths already updated above.
+    updateWebhookEvent(_whId, {
+      topic: _whTopic,
+      fromPhone: _whFrom,
+      textPreview: _whText,
+      processed: processed > 0 ? 1 : 0,
+      ignoredReason: processed > 0 ? null : (_whIgnored || "not_processed"),
+      notes: `processed=${processed}`,
+    });
     return res.json({ ok: true, processed });
   });
 
@@ -4073,6 +4180,60 @@ function registerR9Routes(
       // We attempt a best-effort fetch; on any failure we degrade gracefully so the UI's
       // webhook-driven thread remains the source of truth.
       res.json({ ok: true, synced: 0, note: "Inbound is webhook-driven; no pull performed" });
+    } catch (e: any) { res.status(500).json({ error: e.message }); }
+  });
+
+  // ---------------- R26.6i WEBHOOK EVENTS ADMIN VIEWER ----------------
+  app.get("/api/admin/webhook-events", requireAuth, async (req: any, res: any) => {
+    try {
+      const limit = Math.min(Math.max(parseInt(String(req.query.limit ?? "100"), 10) || 100, 1), 1000);
+      const where: string[] = [];
+      const params: any[] = [];
+      const source = req.query.source ? String(req.query.source) : "";
+      if (source) { where.push("source = ?"); params.push(source); }
+      if (req.query.from_phone) { where.push("from_phone = ?"); params.push(String(req.query.from_phone)); }
+      if (req.query.topic) { where.push("topic = ?"); params.push(String(req.query.topic)); }
+      if (req.query.processed === "0" || req.query.processed === "1") {
+        where.push("processed = ?"); params.push(parseInt(String(req.query.processed), 10));
+      }
+      const sql =
+        `SELECT id, source, received_at, method, topic, from_phone, text_preview, processed, ignored_reason, headers_json, body_json, notes
+         FROM webhook_events
+         ${where.length ? "WHERE " + where.join(" AND ") : ""}
+         ORDER BY received_at DESC
+         LIMIT ?`;
+      params.push(limit);
+      const rows = rawSqlite.prepare(sql).all(...params);
+      res.json(rows);
+    } catch (e: any) { res.status(500).json({ error: e.message }); }
+  });
+
+  // R26.6i — at-a-glance diagnostic: did AiSensy fire any message.sender.user today?
+  app.get("/api/admin/webhook-events/stats", requireAuth, async (_req: any, res: any) => {
+    try {
+      const startOfDay = new Date(); startOfDay.setHours(0, 0, 0, 0);
+      const dayStart = startOfDay.getTime();
+      const one = (sql: string, ...p: any[]) => (rawSqlite.prepare(sql).get(...p) as any) || {};
+      const totalToday = one(`SELECT COUNT(*) AS c FROM webhook_events WHERE received_at >= ?`, dayStart).c || 0;
+      const inboundProcessedToday = one(
+        `SELECT COUNT(*) AS c FROM webhook_events WHERE received_at >= ? AND processed = 1`, dayStart,
+      ).c || 0;
+      const receiptsIgnoredToday = one(
+        `SELECT COUNT(*) AS c FROM webhook_events WHERE received_at >= ? AND ignored_reason = 'receipt'`, dayStart,
+      ).c || 0;
+      const lastSenderUser = one(
+        `SELECT MAX(received_at) AS t FROM webhook_events WHERE topic = 'message.sender.user'`,
+      ).t || null;
+      const lastStatusUpdated = one(
+        `SELECT MAX(received_at) AS t FROM webhook_events WHERE topic = 'message.status.updated'`,
+      ).t || null;
+      res.json({
+        totalToday,
+        inbound_processed_today: inboundProcessedToday,
+        receipts_ignored_today: receiptsIgnoredToday,
+        last_message_sender_user_at: lastSenderUser,
+        last_message_status_updated_at: lastStatusUpdated,
+      });
     } catch (e: any) { res.status(500).json({ error: e.message }); }
   });
 
