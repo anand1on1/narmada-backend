@@ -1962,9 +1962,12 @@ export function runR26_6lMigrations() {
       return;
     }
 
+    // Both message.created AND message.sender.user carry the same AiSensy wrapped shape and
+    // were both wrongly rejected as non_phone by the old parser. Heal both.
     const rows = sqlite.prepare(
       `SELECT id, body_json FROM webhook_events
-        WHERE topic = 'message.created' AND ignored_reason = 'non_phone' AND processed = 0`,
+        WHERE topic IN ('message.created','message.sender.user')
+          AND ignored_reason = 'non_phone' AND processed = 0`,
     ).all() as Array<{ id: number; body_json: string | null }>;
 
     const existsByExtId = sqlite.prepare(
