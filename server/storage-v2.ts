@@ -4199,6 +4199,15 @@ export function listLeadsV2(opts: { stage?: string; assignedTo?: number; search?
   }
   return sqlite.prepare(`SELECT * FROM leads WHERE ${conds.join(" AND ")} ORDER BY created_at DESC`).all(...args) as any[];
 }
+function normalizeLeadStage(input: any): string {
+  const v = String(input ?? '').trim();
+  if (!v) return 'New';
+  try {
+    const row = sqlite.prepare(`SELECT name FROM lead_stages WHERE LOWER(name) = LOWER(?) LIMIT 1`).get(v) as any;
+    if (row?.name) return row.name;
+  } catch {}
+  return v; // fallback: keep what user passed
+}
 export function createLeadV2(data: any): any {
   const now = Date.now();
   const info = sqlite.prepare(
@@ -4206,7 +4215,7 @@ export function createLeadV2(data: any): any {
      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   ).run(
     data.source || "manual", data.name || "Lead", data.phone ?? null, data.email ?? null,
-    data.city ?? null, data.state ?? null, data.requirement ?? null, data.stage || "New",
+    data.city ?? null, data.state ?? null, data.requirement ?? null, normalizeLeadStage(data.stage),
     data.contact_person ?? data.contactPerson ?? null, data.address ?? null,
     data.assigned_to_user_id ?? data.assignedToUserId ?? null, now, now,
   );
@@ -4217,7 +4226,7 @@ export function updateLeadV2(id: number, data: any): any {
   const args: any[] = [];
   const map: Record<string, any> = {
     name: data.name, phone: data.phone, email: data.email, city: data.city, state: data.state,
-    requirement: data.requirement, stage: data.stage, source: data.source,
+    requirement: data.requirement, stage: data.stage != null ? normalizeLeadStage(data.stage) : undefined, source: data.source,
     contact_person: data.contact_person ?? data.contactPerson,
     address: data.address,
     assigned_to_user_id: data.assigned_to_user_id ?? data.assignedToUserId,
@@ -4730,9 +4739,13 @@ export function leadsKanbanForRep(repUserId: number): any {
   const out: any[] = [];
   for (const st of stages) {
     const leadsForStage = sqlite.prepare(
-      `SELECT * FROM leads WHERE deleted_at IS NULL AND assigned_to_user_id = ? AND stage = ? ORDER BY created_at DESC`,
+      `SELECT * FROM leads
+        WHERE deleted_at IS NULL
+          AND assigned_to_user_id = ?
+          AND LOWER(stage) = LOWER(?)
+        ORDER BY created_at DESC`,
     ).all(repUserId, st.name) as any[];
-    if (leadsForStage.length) out.push({ stage_name: st.name, count: leadsForStage.length, leads: leadsForStage });
+    out.push({ stage_name: st.name, count: leadsForStage.length, leads: leadsForStage });
   }
   return { stages: out };
 }

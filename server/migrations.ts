@@ -1892,3 +1892,26 @@ export function runR26_6iMigrations() {
 
   console.log("[migrations] R26.6i: complete");
 }
+
+// -------- R26.6j additive migrations --------
+// ADDITIVE / ONE-SHOT / IDEMPOTENT. Heals existing leads whose stage value differs
+// only in case from the canonical lead_stages.name (e.g. 'new' → 'New'). Combined
+// with the case-insensitive kanban read query this makes both old and new leads
+// display. Re-running rewrites nothing once values are canonical.
+export function runR26_6jMigrations() {
+  console.log("[migrations] R26.6j: start");
+  try {
+    const updated = sqlite.prepare(`
+      UPDATE leads
+         SET stage = (SELECT name FROM lead_stages WHERE LOWER(lead_stages.name) = LOWER(leads.stage) LIMIT 1)
+       WHERE deleted_at IS NULL
+         AND stage IS NOT NULL
+         AND stage <> ''
+         AND EXISTS (SELECT 1 FROM lead_stages WHERE LOWER(lead_stages.name) = LOWER(leads.stage) AND lead_stages.name <> leads.stage)
+    `).run();
+    console.log(`[migrations] R26.6j: normalized ${updated.changes ?? 0} leads.stage → canonical case`);
+  } catch (e: any) {
+    console.error('[migrations] R26.6j leads.stage heal failed:', e?.message);
+  }
+  console.log("[migrations] R26.6j: complete");
+}
