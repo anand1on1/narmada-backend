@@ -4344,8 +4344,29 @@ function periodMsBounds(t: any): { startMs: number; endMs: number } {
 export function computeTargetAchieved(t: any): number {
   const metric = String(t.metric || "po");
   if (metric === "onboarding") return 0;
-  if (!t.customer_id) return Number(t.achieved_amount || 0);
+
+  // R26.6h — approved target_claims are explicit credits the rep submitted (PO/Payment).
+  // computeTargetAchieved previously ignored them, so admin-approved claims never surfaced
+  // on per-customer targets (no matching purchase_orders_v2 row → aggregate was 0).
+  const claimsSum = (() => {
+    try {
+      const row = sqlite.prepare(
+        `SELECT COALESCE(SUM(amount), 0) AS s
+           FROM target_claims
+          WHERE target_id = ? AND status = 'approved'`,
+      ).get(t.id) as any;
+      return Number(row?.s || 0);
+    } catch { return 0; }
+  })();
+
+  if (!t.customer_id) {
+    // Global target: stored achieved_amount already reflects approved claims (approveTargetClaim
+    // writes to it). max() guards against the stored value drifting below the claim total.
+    return Math.max(Number(t.achieved_amount || 0), claimsSum);
+  }
+
   const { startMs, endMs } = periodMsBounds(t);
+  let aggregate = 0;
   try {
     if (metric === "po") {
       const row = sqlite.prepare(
@@ -4356,24 +4377,53 @@ export function computeTargetAchieved(t: any): number {
             AND c.sales_rep_id = ?
             AND COALESCE(po.po_date, po.created_at) BETWEEN ? AND ?`,
       ).get(t.customer_id, t.sales_rep_user_id, startMs, endMs) as any;
-      return Number(row?.s || 0);
-    }
-    if (metric === "quotation") {
+      aggregate = Number(row?.s || 0);
+    } else if (metric === "quotation") {
       const row = sqlite.prepare(
         `SELECT COALESCE(SUM(grand_total),0) AS s FROM quotations
           WHERE customer_id = ? AND created_at BETWEEN ? AND ?`,
       ).get(t.customer_id, startMs, endMs) as any;
-      return Number(row?.s || 0);
-    }
-    if (metric === "payment") {
+      aggregate = Number(row?.s || 0);
+    } else if (metric === "payment") {
       const row = sqlite.prepare(
         `SELECT COALESCE(SUM(amount_inr),0) AS s FROM payment_records
           WHERE customer_id = ? AND payment_date BETWEEN ? AND ?`,
       ).get(t.customer_id, startMs, endMs) as any;
-      return Number(row?.s || 0);
+      aggregate = Number(row?.s || 0);
     }
-  } catch { /* best-effort; fall through to stored value */ }
-  return Number(t.achieved_amount || 0);
+  } catch {
+    return Number(t.achieved_amount || 0);
+  }
+
+  if (metric === "payment") {
+    // payment_records is rarely populated for these targets; approved claims are the canonical
+    // source and never overlap with the aggregate, so add them outright.
+    return aggregate + claimsSum;
+  }
+  if (metric === "po") {
+    // Auto-approved PO claims matched a real purchase_orders_v2 row → already counted in `aggregate`.
+    // Only add approved PO claims whose po_number is NULL or has no matching PO for this customer,
+    // so admin-approved (PO-not-in-DB) claims surface without double-counting matched ones.
+    try {
+      const row = sqlite.prepare(
+        `SELECT COALESCE(SUM(tc.amount), 0) AS s
+           FROM target_claims tc
+          WHERE tc.target_id = ? AND tc.status = 'approved' AND tc.type = 'po'
+            AND (tc.po_number IS NULL OR NOT EXISTS (
+              SELECT 1 FROM purchase_orders_v2 po
+               WHERE po.deleted_at IS NULL
+                 AND (LOWER(po.po_number) = LOWER(tc.po_number)
+                      OR LOWER(COALESCE(po.customer_po_number,'')) = LOWER(tc.po_number))
+                 AND po.customer_id = ?
+            ))`,
+      ).get(t.id, t.customer_id) as any;
+      return aggregate + Number(row?.s || 0);
+    } catch {
+      return aggregate;
+    }
+  }
+  // quotation: no claim path, aggregate is canonical.
+  return aggregate;
 }
 // Enrich targets with computed achieved + customer/lead display info.
 export function enrichTargets(rows: any[]): any[] {
