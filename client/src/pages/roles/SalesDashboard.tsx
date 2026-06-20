@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import RolePortalShell from "./RolePortalShell";
 import { SalesAuth } from "@/lib/role-auth";
 import NotificationsBell from "@/components/NotificationsBell";
-import { Target, KanbanSquare, CheckSquare, MapPin, Camera, Mail, MessageCircle } from "lucide-react";
+import { Target, KanbanSquare, CheckSquare, MapPin, Camera, Mail, MessageCircle, Wallet, Plus, Trash2 } from "lucide-react";
 
 // R26.6a (8) — open the marketing composer targeted at a single lead.
 function composeForLead(id: number, channel: "email" | "whatsapp") {
@@ -17,6 +17,7 @@ const TABS = [
   { key: "leads", label: "Leads", icon: KanbanSquare },
   { key: "tasks", label: "Tasks", icon: CheckSquare },
   { key: "checkin", label: "Check-in", icon: MapPin },
+  { key: "expenses", label: "Expenses", icon: Wallet },
 ] as const;
 type TabKey = typeof TABS[number]["key"];
 
@@ -40,6 +41,7 @@ export default function SalesDashboard() {
       {tab === "leads" && <LeadsKanbanTab />}
       {tab === "tasks" && <TasksTab />}
       {tab === "checkin" && <CheckinTab />}
+      {tab === "expenses" && <ExpensesTab />}
     </RolePortalShell>
   );
 }
@@ -461,6 +463,176 @@ function CheckinTab() {
           ))}
         </div>
       </div>
+    </div>
+  );
+}
+
+// ---- Expenses (R27.0) ----
+interface SalesExpense {
+  id: number; expense_type: string; expense_date: string; amount: number;
+  fields?: any; proof_url?: string | null; notes?: string | null; status: string;
+  rejection_reason?: string | null; created_at: string;
+}
+
+// Per-type field schemas — keep in sync with the server's documented shapes.
+const EXPENSE_TYPE_FIELDS: Record<string, { key: string; label: string }[]> = {
+  hotel: [
+    { key: "hotel_name", label: "Hotel name" }, { key: "location", label: "Location" },
+    { key: "contact", label: "Contact" }, { key: "nights", label: "Nights" },
+    { key: "tariff_per_night", label: "Tariff / night" },
+  ],
+  train: [
+    { key: "from_station", label: "From station" }, { key: "to_station", label: "To station" },
+    { key: "train_name_no", label: "Train name / no." }, { key: "class", label: "Class" },
+    { key: "fare", label: "Fare" },
+  ],
+  flight: [
+    { key: "from_airport", label: "From airport" }, { key: "to_airport", label: "To airport" },
+    { key: "airline", label: "Airline" }, { key: "flight_no", label: "Flight no." },
+    { key: "fare", label: "Fare" },
+  ],
+  auto: [
+    { key: "from_location", label: "From" }, { key: "to_location", label: "To" },
+    { key: "distance_km", label: "Distance (km)" }, { key: "fare", label: "Fare" },
+  ],
+  meal: [
+    { key: "location", label: "Location" }, { key: "restaurant_name", label: "Restaurant" },
+    { key: "persons", label: "Persons" },
+  ],
+  misc: [
+    { key: "description", label: "Description" },
+  ],
+};
+const EXPENSE_TYPE_LABEL: Record<string, string> = {
+  hotel: "Hotel", train: "Train", flight: "Flight", auto: "Auto / Cab", meal: "Meal", misc: "Misc",
+};
+const EXPENSE_STATUS_BADGE: Record<string, string> = {
+  pending: "bg-amber-500/15 text-amber-700",
+  approved: "bg-emerald-500/15 text-emerald-700",
+  rejected: "bg-red-500/15 text-red-700",
+};
+
+function ExpensesTab() {
+  const { token } = SalesAuth.useAuth();
+  const [expenses, setExpenses] = useState<SalesExpense[]>([]);
+  const [open, setOpen] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [expenseType, setExpenseType] = useState("hotel");
+  const [expenseDate, setExpenseDate] = useState(() => new Date().toISOString().slice(0, 10));
+  const [amount, setAmount] = useState("");
+  const [fields, setFields] = useState<Record<string, string>>({});
+  const [notes, setNotes] = useState("");
+  const [proof, setProof] = useState<File | null>(null);
+
+  async function load() {
+    if (!token) return;
+    const r = await SalesAuth.roleFetch(token, "/api/sales/expenses");
+    if (r.ok) setExpenses(await r.json()); else setExpenses([]);
+  }
+  useEffect(() => { load(); }, [token]); // eslint-disable-line
+
+  function resetForm() {
+    setExpenseType("hotel"); setExpenseDate(new Date().toISOString().slice(0, 10));
+    setAmount(""); setFields({}); setNotes(""); setProof(null);
+  }
+
+  async function submit() {
+    if (!token) return;
+    if (!(Number(amount) > 0)) { alert("Enter an amount greater than 0"); return; }
+    if (!expenseDate) { alert("Pick a date"); return; }
+    setBusy(true);
+    try {
+      const fd = new FormData();
+      fd.append("expense_type", expenseType);
+      fd.append("expense_date", expenseDate);
+      fd.append("amount", String(Number(amount)));
+      fd.append("fields", JSON.stringify(fields));
+      if (notes) fd.append("notes", notes);
+      if (proof) fd.append("proof", proof);
+      const r = await SalesAuth.roleFetch(token, "/api/sales/expenses", { method: "POST", body: fd });
+      if (!r.ok) { alert((await r.json().catch(() => ({}))).error || "Submit failed"); return; }
+      setOpen(false); resetForm(); load();
+    } finally { setBusy(false); }
+  }
+
+  async function del(id: number) {
+    if (!token || !confirm("Delete this pending expense?")) return;
+    const r = await SalesAuth.roleFetch(token, `/api/sales/expenses/${id}`, { method: "DELETE" });
+    if (!r.ok) { alert((await r.json().catch(() => ({}))).error || "Delete failed"); return; }
+    load();
+  }
+
+  const typeFields = EXPENSE_TYPE_FIELDS[expenseType] || [];
+
+  return (
+    <div className="space-y-4">
+      <div className="flex justify-between items-center">
+        <div className="font-bold text-sm">My Expenses</div>
+        <button onClick={() => { resetForm(); setOpen(true); }} className="px-4 py-2 bg-accent text-accent-foreground rounded-lg text-sm font-semibold inline-flex items-center gap-1.5" data-testid="button-new-expense">
+          <Plus className="w-4 h-4" /> Submit New Expense
+        </button>
+      </div>
+
+      {expenses.length === 0 ? (
+        <div className="p-12 text-center text-muted-foreground bg-card border rounded-xl">No expenses submitted yet.</div>
+      ) : (
+        <div className="space-y-2">
+          {expenses.map((e) => (
+            <div key={e.id} className="bg-card border rounded-xl p-3 flex items-center justify-between gap-3" data-testid={`expense-${e.id}`}>
+              <div className="min-w-0">
+                <div className="flex items-center gap-2">
+                  <span className="font-semibold text-sm">{EXPENSE_TYPE_LABEL[e.expense_type] || e.expense_type}</span>
+                  <span className={`text-[10px] uppercase font-bold px-2 py-0.5 rounded ${EXPENSE_STATUS_BADGE[e.status] || EXPENSE_STATUS_BADGE.pending}`}>{e.status}</span>
+                </div>
+                <div className="text-xs text-muted-foreground">{e.expense_date} · {inr(e.amount)}{e.notes ? ` · ${e.notes}` : ""}</div>
+                {e.status === "rejected" && e.rejection_reason && <div className="text-xs text-red-600 mt-0.5">Reason: {e.rejection_reason}</div>}
+              </div>
+              <div className="flex items-center gap-2 shrink-0">
+                {e.proof_url && <a href={e.proof_url} target="_blank" rel="noopener noreferrer" className="text-xs text-blue-600 hover:underline">Proof</a>}
+                {e.status === "pending" && (
+                  <button onClick={() => del(e.id)} className="p-1.5 hover:bg-red-500/10 text-red-600 rounded" data-testid={`button-delete-expense-${e.id}`} title="Delete (pending only)"><Trash2 className="w-4 h-4" /></button>
+                )}
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {open && (
+        <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50 p-4" onClick={() => setOpen(false)}>
+          <div className="bg-card rounded-xl p-5 w-full max-w-md max-h-[85vh] overflow-y-auto" onClick={(ev) => ev.stopPropagation()}>
+            <h2 className="font-bold text-lg mb-4">Submit New Expense</h2>
+            <div className="space-y-3">
+              <label className="text-xs font-semibold block">Expense Type
+                <select value={expenseType} onChange={(e) => { setExpenseType(e.target.value); setFields({}); }} className="mt-1 w-full border rounded-lg px-3 py-2 bg-background text-sm font-normal" data-testid="select-expense-type">
+                  {Object.keys(EXPENSE_TYPE_FIELDS).map((t) => <option key={t} value={t}>{EXPENSE_TYPE_LABEL[t]}</option>)}
+                </select>
+              </label>
+              <label className="text-xs font-semibold block">Date
+                <input type="date" value={expenseDate} onChange={(e) => setExpenseDate(e.target.value)} className="mt-1 w-full border rounded-lg px-3 py-2 bg-background text-sm font-normal" data-testid="input-expense-date" />
+              </label>
+              {typeFields.map((f) => (
+                <label key={f.key} className="text-xs font-semibold block">{f.label}
+                  <input value={fields[f.key] || ""} onChange={(e) => setFields({ ...fields, [f.key]: e.target.value })} className="mt-1 w-full border rounded-lg px-3 py-2 bg-background text-sm font-normal" data-testid={`input-expense-field-${f.key}`} />
+                </label>
+              ))}
+              <label className="text-xs font-semibold block">Amount (₹)
+                <input type="number" value={amount} onChange={(e) => setAmount(e.target.value)} min="0" step="0.01" className="mt-1 w-full border rounded-lg px-3 py-2 bg-background text-sm font-normal" data-testid="input-expense-amount" />
+              </label>
+              <label className="text-xs font-semibold block">Proof (image/PDF)
+                <input type="file" accept="image/*,application/pdf" onChange={(e) => setProof(e.target.files?.[0] || null)} className="mt-1 w-full text-sm font-normal" data-testid="input-expense-proof" />
+              </label>
+              <label className="text-xs font-semibold block">Notes
+                <textarea value={notes} onChange={(e) => setNotes(e.target.value)} rows={2} className="mt-1 w-full border rounded-lg px-3 py-2 bg-background text-sm font-normal" data-testid="input-expense-notes" />
+              </label>
+            </div>
+            <div className="flex justify-end gap-2 mt-5">
+              <button onClick={() => setOpen(false)} className="px-4 py-2 border rounded-lg text-sm font-semibold">Cancel</button>
+              <button onClick={submit} disabled={busy} className="px-4 py-2 bg-accent text-accent-foreground rounded-lg text-sm font-semibold disabled:opacity-50" data-testid="button-submit-expense">{busy ? "Submitting…" : "Submit"}</button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

@@ -476,8 +476,8 @@ export default function TeamQuotationEdit() {
           <Send className="w-4 h-4" /> {finalizeMut.isPending ? "Sending…" : "Save & Share"}
         </button>
         <button onClick={() => markProcessedMut.mutate()}
-          disabled={markProcessedMut.isPending || quotation.status !== "accepted"}
-          title={quotation.status !== "accepted" ? "Only an Accepted quotation can be marked Processed" : "Mark this quotation Processed"}
+          disabled={markProcessedMut.isPending || (quotation.status !== "sent" && quotation.status !== "accepted")}
+          title={(quotation.status !== "sent" && quotation.status !== "accepted") ? "Only a Sent or Accepted quotation can be marked Processed" : "Mark this quotation Processed"}
           className="px-4 py-2 bg-green-600 text-white rounded-lg text-sm font-semibold inline-flex items-center gap-2 disabled:opacity-50">
           {markProcessedMut.isPending ? <RefreshCw className="w-4 h-4 animate-spin" /> : null}
           Mark Processed

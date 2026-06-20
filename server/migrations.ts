@@ -2024,3 +2024,36 @@ export function runR26_6lMigrations() {
   }
   console.log("[migrations] R26.6l: complete");
 }
+
+// -------- R27.0 sales expenses --------
+// ADDITIVE / IDEMPOTENT. Creates the sales_expenses table so sales reps can submit
+// travel expenses for approval from the sales portal. Approval workflow (accounts
+// dashboard) lands in R27.3 — for now rows queue with status='pending'.
+export function runR27_0Migrations() {
+  console.log("[migrations] R27.0: start");
+  try {
+    sqlite.exec(`
+      CREATE TABLE IF NOT EXISTS sales_expenses (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        sales_user_id INTEGER NOT NULL,
+        expense_type TEXT NOT NULL,
+        expense_date TEXT NOT NULL,
+        amount REAL NOT NULL,
+        fields_json TEXT,
+        proof_url TEXT,
+        notes TEXT,
+        status TEXT NOT NULL DEFAULT 'pending',
+        approved_by_user_id INTEGER,
+        approved_at TEXT,
+        rejection_reason TEXT,
+        created_at TEXT NOT NULL DEFAULT (datetime('now'))
+      );
+    `);
+    sqlite.exec(`CREATE INDEX IF NOT EXISTS idx_sales_expenses_user ON sales_expenses(sales_user_id);`);
+    sqlite.exec(`CREATE INDEX IF NOT EXISTS idx_sales_expenses_status ON sales_expenses(status);`);
+    console.log("[migrations] R27.0: sales_expenses table + indexes ready");
+  } catch (e: any) {
+    console.error("[migrations] R27.0: sales_expenses migration failed:", e?.message || e);
+  }
+  console.log("[migrations] R27.0: complete");
+}

@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { AdminLayout } from "./AdminLayout";
 import { adminFetch, useAdminAuth } from "@/lib/admin-auth";
-import { Trash2, Eye, ExternalLink, Truck } from "lucide-react";
+import { Trash2, Eye, ExternalLink, Truck, Search } from "lucide-react";
 
 // R26.5 (A5) — repointed to the v2 purchase_orders_v2 table (Data Team source of truth).
 // GET /api/admin/purchase-orders-v2 returns camelCase Drizzle rows with live totals
@@ -31,17 +31,26 @@ export default function AdminPOs() {
   const [items, setItems] = useState<PO[]>([]);
   const [filter, setFilter] = useState<"all" | string>("all");
   const [busy, setBusy] = useState(false);
+  const [search, setSearch] = useState("");
+  const [debouncedSearch, setDebouncedSearch] = useState("");
+
+  // R27.0 — debounce the search box (250ms) so each keystroke doesn't refetch.
+  useEffect(() => {
+    const id = setTimeout(() => setDebouncedSearch(search.trim()), 250);
+    return () => clearTimeout(id);
+  }, [search]);
 
   async function load() {
     if (!token) return;
     const params = new URLSearchParams();
     if (filter !== "all") params.set("status", filter);
+    if (debouncedSearch) params.set("q", debouncedSearch);
     const r = await adminFetch(token, `/api/admin/purchase-orders-v2?${params}`);
     if (!r.ok) { setItems([]); return; }
     const d = await r.json();
     setItems(Array.isArray(d) ? d : (Array.isArray(d?.purchaseOrders) ? d.purchaseOrders : []));
   }
-  useEffect(() => { load(); }, [token, filter]); // eslint-disable-line
+  useEffect(() => { load(); }, [token, filter, debouncedSearch]); // eslint-disable-line
 
   async function setStatus(id: number, status: string) {
     if (!token) return;
@@ -75,6 +84,16 @@ export default function AdminPOs() {
 
   return (
     <AdminLayout title="Purchase Orders">
+      <div className="mb-4 relative max-w-md">
+        <Search className="w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground" />
+        <input
+          value={search}
+          onChange={(e) => setSearch(e.target.value)}
+          placeholder="Search PO #, customer, vendor, part number…"
+          className="w-full border rounded-lg pl-9 pr-3 py-2 bg-background text-sm"
+          data-testid="input-po-search"
+        />
+      </div>
       <div className="flex gap-2 mb-4 flex-wrap items-center">
         <button onClick={() => setFilter("all")} className={`px-3 py-1.5 rounded-lg text-xs font-bold uppercase tracking-wider ${filter === "all" ? "bg-accent text-accent-foreground" : "bg-card border"}`}>All</button>
         {STATUSES.map((s) => (

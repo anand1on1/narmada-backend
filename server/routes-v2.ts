@@ -1156,6 +1156,71 @@ export function registerV2Routes(app: Express, ctx: V2Context) {
       res.json({ entries, shippedEntries, balanceInr: balance });
     } catch (e: any) { res.status(500).json({ error: e.message }); }
   });
+  // R27.0 — customer ledger Excel export. The old client-side CSV wrote amounts as
+  // quoted strings (Excel read them as text, not numbers) and used "/"-style dates,
+  // which made the sheet look distorted: amounts left-aligned, no totals, columns
+  // shifting on multi-line narration. This server-side .xlsx writes typed numeric
+  // cells with Indian number format, DD-MM-YYYY dates, and a frozen header row.
+  app.get("/api/admin/customers/:id/ledger/export.xlsx", requireAuth, async (req, res) => {
+    try {
+      const cid = parseInt(req.params.id as string, 10);
+      const parseDate = (v: any): number | undefined => {
+        if (v == null || v === "") return undefined;
+        const s = String(v);
+        if (/^\d+$/.test(s)) return parseInt(s, 10);
+        const t = Date.parse(s);
+        return Number.isNaN(t) ? undefined : t;
+      };
+      const from = parseDate(req.query.from);
+      const to = parseDate(req.query.to);
+      const customer = await v2.getCustomer(cid);
+      const entries = await v2.listLedgerEntries(cid, { from, to });
+      const XLSX = require("xlsx");
+      const fmtDate = (ms: number) => {
+        const d = new Date(ms);
+        const dd = String(d.getDate()).padStart(2, "0");
+        const mm = String(d.getMonth() + 1).padStart(2, "0");
+        return `${dd}-${mm}-${d.getFullYear()}`;
+      };
+      const header = ["Date", "Type", "Voucher", "Description", "Debit", "Credit", "Balance"];
+      const aoa: any[][] = [header];
+      let totalDebit = 0, totalCredit = 0;
+      for (const e of entries) {
+        const debit = Number(e.debitInr) || 0;
+        const credit = Number(e.creditInr) || 0;
+        totalDebit += debit; totalCredit += credit;
+        aoa.push([
+          fmtDate(e.entryDate),
+          e.voucherType || "",
+          e.voucherNo || "",
+          (e.description || "").replace(/\s+/g, " ").trim(),
+          debit, credit, Number(e.balanceInr) || 0,
+        ]);
+      }
+      const closing = entries.length ? (Number(entries[entries.length - 1].balanceInr) || 0) : 0;
+      aoa.push(["", "", "", "TOTAL", totalDebit, totalCredit, closing]);
+      const ws = XLSX.utils.aoa_to_sheet(aoa);
+      // Indian-comma currency format on the three amount columns (E, F, G), every data row.
+      const moneyFmt = "#,##,##0.00";
+      const lastRow = aoa.length; // 1-based incl. header
+      for (let r = 1; r < lastRow; r++) {
+        for (const col of [4, 5, 6]) {
+          const addr = XLSX.utils.encode_cell({ r, c: col });
+          if (ws[addr]) { ws[addr].t = "n"; ws[addr].z = moneyFmt; }
+        }
+      }
+      ws["!cols"] = [{ wch: 12 }, { wch: 12 }, { wch: 16 }, { wch: 40 }, { wch: 14 }, { wch: 14 }, { wch: 16 }];
+      ws["!freeze"] = { xSplit: 0, ySplit: 1 };
+      ws["!autofilter"] = { ref: XLSX.utils.encode_range({ s: { r: 0, c: 0 }, e: { r: 0, c: 6 } }) };
+      const wb = XLSX.utils.book_new();
+      XLSX.utils.book_append_sheet(wb, ws, "Ledger");
+      const buffer = XLSX.write(wb, { type: "buffer", bookType: "xlsx" });
+      const safeName = (customer?.name || `customer-${cid}`).replace(/[^a-zA-Z0-9._-]/g, "_");
+      res.setHeader("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
+      res.setHeader("Content-Disposition", `attachment; filename="ledger-${safeName}.xlsx"`);
+      res.send(buffer);
+    } catch (e: any) { res.status(500).json({ error: e.message }); }
+  });
   app.post("/api/admin/customers/:id/ledger", requireRole("accounts"), async (req, res) => {
     try {
       const cid = parseInt(req.params.id as string, 10);
@@ -2155,8 +2220,12 @@ export function registerV2Routes(app: Express, ctx: V2Context) {
       const id = parseInt(req.params.id as string, 10);
       const existing = await v2.getQuotation(id);
       if (!existing) return res.status(404).json({ error: "Quotation not found" });
-      if (existing.status !== "accepted") {
-        return res.status(409).json({ error: "Only an Accepted quotation can be marked Processed." });
+      // A quotation reaches the data team for processing once it has been sent
+      // to (or accepted by) the customer. Quotations are created with status
+      // "sent" and there is no transition that produces "accepted", so gating
+      // solely on "accepted" left this action permanently disabled.
+      if (existing.status !== "sent" && existing.status !== "accepted") {
+        return res.status(409).json({ error: "Only a Sent or Accepted quotation can be marked Processed." });
       }
       const updated = await v2.updateQuotation(id, { status: "processed" } as any);
       const teamUser = (req as any).teamUser;
@@ -4697,15 +4766,31 @@ function registerR9Routes(
       const to = req.query.to ? parseInt(req.query.to as string, 10) : undefined;
       const rows = v2.getVendorLedger({ from, to });
       const XLSX = require("xlsx");
+      const fmtDate = (ms: number) => {
+        const d = new Date(ms);
+        return `${String(d.getDate()).padStart(2, "0")}-${String(d.getMonth() + 1).padStart(2, "0")}-${d.getFullYear()}`;
+      };
       const sheetData = [
         ["Vendor", "Approved Items", "Approved Value", "Total Paid", "Balance", "Last Activity"],
         ...rows.map((r: any) => [
-          r.vendor_name, r.item_count, r.total_approved_value, r.total_paid, r.balance,
-          r.last_activity_at ? new Date(r.last_activity_at).toISOString().slice(0, 10) : "",
+          r.vendor_name, Number(r.item_count) || 0, Number(r.total_approved_value) || 0,
+          Number(r.total_paid) || 0, Number(r.balance) || 0,
+          r.last_activity_at ? fmtDate(r.last_activity_at) : "",
         ]),
       ];
       const wb = XLSX.utils.book_new();
       const ws = XLSX.utils.aoa_to_sheet(sheetData);
+      // R27.0 — type the amount columns (C, D, E) as numbers with Indian currency
+      // format so Excel right-aligns and sums them instead of treating them as text.
+      const moneyFmt = "#,##,##0.00";
+      for (let r = 1; r < sheetData.length; r++) {
+        for (const c of [2, 3, 4]) {
+          const addr = XLSX.utils.encode_cell({ r, c });
+          if (ws[addr]) { ws[addr].t = "n"; ws[addr].z = moneyFmt; }
+        }
+      }
+      ws["!cols"] = [{ wch: 30 }, { wch: 14 }, { wch: 16 }, { wch: 14 }, { wch: 16 }, { wch: 14 }];
+      ws["!freeze"] = { xSplit: 0, ySplit: 1 };
       XLSX.utils.book_append_sheet(wb, ws, "Vendor Ledger");
       const buffer = XLSX.write(wb, { type: "buffer", bookType: "xlsx" });
       res.setHeader("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
@@ -6153,6 +6238,7 @@ function registerR8Routes(
       const rows = await v2.listPurchaseOrdersV2WithTotals({
         status: req.query.status as string | undefined,
         customerId: req.query.customer_id ? parseInt(req.query.customer_id as string, 10) : undefined,
+        q: req.query.q as string | undefined,
       });
       const summary = await v2.getDispatchSummaryForPOs(rows.map((r: any) => r.id));
       res.json(rows.map((r: any) => {
@@ -6651,7 +6737,11 @@ function registerR8Routes(
     try {
       const u = (req as any).teamUser;
       v2.autoRolloverTargets(u.id);
-      const targetsList = v2.listSalesTargets({ repId: u.id, status: "active" });
+      // Return every target assigned to this rep, not just status="active", so the
+      // sales portal mirrors exactly what admin sees for the same rep. Filtering on
+      // "active" here previously hid targets the moment auto-rollover flipped them to
+      // "rolled_over", making admin-visible targets vanish from the rep's view.
+      const targetsList = v2.listSalesTargets({ repId: u.id });
       // H E5 — target deadline approaching (<=3 days), deduped per target per day.
       const todayMs = Date.now();
       for (const t of targetsList) {
@@ -6791,6 +6881,63 @@ function registerR8Routes(
   });
   app.get("/api/admin/visits", requireAuth, async (req, res) => {
     res.json(v2.listVisits({ repId: req.query.rep_id ? parseInt(req.query.rep_id as string, 10) : undefined, date: req.query.date as string | undefined }));
+  });
+
+  // ==================== R27.0 — SALES EXPENSES ====================
+  // Travel expense submission for sales reps. Optional proof receipt (image/PDF).
+  // Approval workflow (accounts dashboard) ships in R27.3 — rows queue as 'pending'.
+  const expensesDir = path.join(ctx.uploadsDir || "./uploads", "expenses");
+  if (!fs.existsSync(expensesDir)) fs.mkdirSync(expensesDir, { recursive: true });
+  const multerExpense = multer({
+    storage: multer.diskStorage({
+      destination: (_req: any, _file: any, cb: any) => cb(null, expensesDir),
+      filename: (_req: any, file: any, cb: any) => cb(null, `${Date.now()}-${file.originalname.replace(/[^a-zA-Z0-9._-]/g, "_")}`),
+    }),
+    limits: { fileSize: 20 * 1024 * 1024 },
+    fileFilter: (_req: any, file: any, cb: any) => {
+      if (file.mimetype === "application/pdf" || file.mimetype === "image/jpeg" || file.mimetype === "image/png") cb(null, true);
+      else cb(new Error("Only PDF/JPG/PNG allowed"));
+    },
+  });
+  const EXPENSE_TYPES = ["hotel", "train", "flight", "auto", "meal", "misc"];
+  app.post("/api/sales/expenses", requireSales, multerExpense.single("proof"), async (req: any, res: any) => {
+    try {
+      const u = (req as any).teamUser;
+      const expenseType = String(req.body?.expense_type || "").trim().toLowerCase();
+      if (!EXPENSE_TYPES.includes(expenseType)) return res.status(400).json({ error: "Invalid expense_type" });
+      const expenseDate = String(req.body?.expense_date || "").trim();
+      if (!expenseDate) return res.status(400).json({ error: "expense_date required" });
+      const amount = Number(req.body?.amount);
+      if (!(amount > 0)) return res.status(400).json({ error: "amount must be greater than 0" });
+      let fields: any = undefined;
+      if (req.body?.fields) {
+        try { fields = typeof req.body.fields === "string" ? JSON.parse(req.body.fields) : req.body.fields; }
+        catch { fields = { raw: String(req.body.fields) }; }
+      }
+      let proofUrl: string | undefined;
+      if (req.file) {
+        const proto = req.protocol || "https";
+        const host = req.get("host") || "narmada-backend.onrender.com";
+        proofUrl = `${proto}://${host}/uploads/expenses/${req.file.filename}`;
+      }
+      res.json(v2.createSalesExpense({
+        salesUserId: u.id, expenseType, expenseDate, amount, fields, proofUrl, notes: req.body?.notes,
+      }));
+    } catch (e: any) { res.status(400).json({ error: e.message }); }
+  });
+  app.get("/api/sales/expenses", requireSales, async (req, res) => {
+    try {
+      const u = (req as any).teamUser;
+      res.json(v2.listSalesExpenses({ salesUserId: u.id }));
+    } catch (e: any) { res.status(500).json({ error: e.message }); }
+  });
+  app.delete("/api/sales/expenses/:id", requireSales, async (req, res) => {
+    try {
+      const u = (req as any).teamUser;
+      const result = v2.deleteSalesExpense(parseInt(req.params.id as string, 10), u.id);
+      if (!result.ok) return res.status(400).json({ error: result.error });
+      res.json({ ok: true });
+    } catch (e: any) { res.status(400).json({ error: e.message }); }
   });
 
   // ==================== H. CROSS-TEAM NOTIFICATIONS FEED ====================

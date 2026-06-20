@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { AdminLayout } from "./AdminLayout";
 import { adminFetch, useAdminAuth } from "@/lib/admin-auth";
+import { apiUrl } from "@/lib/queryClient";
 import { Plus, Trash2, Upload, Download } from "lucide-react";
 
 interface Customer { id: number; name: string; }
@@ -92,20 +93,25 @@ export default function AdminLedger() {
     loadEntries();
   }
 
-  function exportCsv() {
-    if (entries.length === 0) return;
-    const rows = [["Date", "Type", "Voucher", "Description", "Debit", "Credit", "Balance"]];
-    entries.forEach((e) => rows.push([
-      new Date(e.entryDate).toLocaleDateString("en-IN"),
-      e.voucherType, e.voucherNo || "", e.description || "",
-      String(e.debitInr || 0), String(e.creditInr || 0), String(e.runningBalanceInr || 0),
-    ]));
-    const csv = rows.map((r) => r.map((c) => `"${String(c).replace(/"/g, '""')}"`).join(",")).join("\n");
-    const blob = new Blob([csv], { type: "text/csv" });
+  // R27.0 — export the ledger as a properly-typed .xlsx (numbers as numbers, Indian
+  // currency format, DD-MM-YYYY dates, frozen header). The previous client-side CSV
+  // wrote amounts as quoted text, which Excel rendered distorted/unsummable.
+  async function exportXlsx() {
+    if (!token || !customerId) return;
+    const params = new URLSearchParams();
+    if (from) params.set("from", from);
+    if (to) params.set("to", to);
+    const qs = params.toString();
+    const r = await fetch(apiUrl(`/api/admin/customers/${customerId}/ledger/export.xlsx${qs ? `?${qs}` : ""}`), {
+      headers: { "x-admin-token": token },
+    });
+    if (!r.ok) { alert("Export failed"); return; }
+    const blob = await r.blob();
     const a = document.createElement("a");
     a.href = URL.createObjectURL(blob);
-    a.download = `ledger-${customerId}-${Date.now()}.csv`;
+    a.download = `ledger-${(currentCustomer?.name || customerId)}.xlsx`;
     a.click();
+    URL.revokeObjectURL(a.href);
   }
 
   const currentCustomer = customers.find((c) => c.id === customerId);
@@ -147,7 +153,7 @@ export default function AdminLedger() {
         </div>
         <button onClick={loadEntries} className="px-3 py-2 border rounded-lg text-sm">Apply</button>
         <div className="flex-1" />
-        <button onClick={exportCsv} className="px-3 py-2 border rounded-lg text-sm inline-flex items-center gap-1.5"><Download className="w-4 h-4" />Export CSV</button>
+        <button onClick={exportXlsx} className="px-3 py-2 border rounded-lg text-sm inline-flex items-center gap-1.5" data-testid="button-export-ledger"><Download className="w-4 h-4" />Export Excel</button>
         <button onClick={() => setCsvOpen(true)} className="px-3 py-2 border rounded-lg text-sm inline-flex items-center gap-1.5"><Upload className="w-4 h-4" />Import CSV</button>
         <button onClick={() => setOpen({ entryDate: new Date().toISOString().slice(0, 10), voucherType: "manual", voucherNo: "", description: "", debitInr: 0, creditInr: 0 })}
           className="px-4 py-2 bg-accent text-accent-foreground rounded-lg font-semibold text-sm inline-flex items-center gap-2" data-testid="button-new-entry">

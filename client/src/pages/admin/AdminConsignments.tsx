@@ -38,7 +38,16 @@ const STATUSES: Consignment["status"][] = ["pending", "in_transit", "out_for_del
 // would hit the hash-router fallback and bounce to "/").
 function openFile(url: string | null | undefined) {
   if (!url) return;
-  window.open(apiUrl(url), "_blank", "noopener,noreferrer");
+  // Opening via a transient anchor (rather than window.open with a features
+  // string) avoids popup-blocker false-positives that made repeated clicks on
+  // the same button silently fail until a page reload.
+  const a = document.createElement("a");
+  a.href = apiUrl(url);
+  a.target = "_blank";
+  a.rel = "noopener noreferrer";
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
 }
 
 const emptyConsignment: Partial<Consignment> = {
@@ -687,8 +696,8 @@ function FromDelhiTab({
                   <td className="px-4 py-3">{inr(p.custTotal)}</td>
                   <td className="px-4 py-3 whitespace-nowrap">
                     {p.docketUrl ? (
-                      <button type="button" onClick={() => openFile(p.docketUrl)}
-                        className="px-2.5 py-1 border rounded text-xs font-semibold text-blue-600 hover:bg-muted inline-flex items-center gap-1" data-testid={`btn-view-docket-${p.id}`}><FileText className="w-3 h-3" /> View Docket</button>
+                      <a href={apiUrl(p.docketUrl)} target="_blank" rel="noopener noreferrer"
+                        className="px-2.5 py-1 border rounded text-xs font-semibold text-blue-600 hover:bg-muted inline-flex items-center gap-1" data-testid={`btn-view-docket-${p.id}`}><FileText className="w-3 h-3" /> View Docket</a>
                     ) : (
                       <span title="No docket uploaded yet"
                         className="px-2.5 py-1 border rounded text-xs font-semibold text-muted-foreground opacity-50 cursor-not-allowed inline-flex items-center gap-1" data-testid={`btn-view-docket-disabled-${p.id}`}><FileText className="w-3 h-3" /> View Docket</span>

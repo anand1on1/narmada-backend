@@ -196,6 +196,7 @@ function PublicRoutes() {
       <Switch>
         <Route path="/" component={HomePage} />
         <Route path="/products" component={ProductsPage} />
+        <Route path="/product/:slug/:partNumber" component={ProductDetailPage} />
         <Route path="/product/:slug" component={ProductDetailPage} />
         <Route path="/category/:slug" component={CategoryPage} />
         <Route path="/contact" component={ContactPage} />

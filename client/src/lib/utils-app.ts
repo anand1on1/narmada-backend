@@ -8,6 +8,15 @@ export function fromSlug(s: string): string {
   return s.replace(/-/g, " ").replace(/\b\w/g, (m) => m.toUpperCase());
 }
 
+// R27.0 — product detail href. Appends the part number as a second path segment
+// (URL-encoded) so the part number is visible/bookmarkable in the address bar and
+// indexable for SEO. Falls back to the plain slug route when no part number exists.
+export function productHref(product: { slug: string; partNumber?: string | null }): string {
+  return product.partNumber
+    ? `/product/${product.slug}/${encodeURIComponent(product.partNumber)}`
+    : `/product/${product.slug}`;
+}
+
 export function formatUSD(inr: number, usdInr: number): string {
   const usd = inr / Math.max(usdInr, 0.0001);
   return new Intl.NumberFormat("en-US", { style: "currency", currency: "USD", maximumFractionDigits: 2 }).format(usd);

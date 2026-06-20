@@ -13,8 +13,12 @@ import NotFound from "@/pages/not-found";
 import { useState } from "react";
 
 export default function ProductDetailPage() {
-  const [, params] = useRoute<{ slug: string }>("/product/:slug");
-  const slug = params?.slug;
+  // Match both /product/:slug and the SEO-friendly /product/:slug/:partNumber.
+  // The part number in the URL is purely for bookmarkability/SEO — the product is
+  // still loaded by slug, so either route resolves to the same page.
+  const [, params2] = useRoute<{ slug: string; partNumber: string }>("/product/:slug/:partNumber");
+  const [, params1] = useRoute<{ slug: string }>("/product/:slug");
+  const slug = params2?.slug || params1?.slug;
   const { data: product, isLoading } = useQuery<Product>({
     queryKey: [`/api/products/${slug}`],
     queryFn: async () => { const r = await fetch(apiUrl(`/api/products/${slug}`)); if (!r.ok) throw new Error("Not found"); return r.json(); },
@@ -96,7 +100,20 @@ export default function ProductDetailPage() {
             )}
           </div>
           <h1 className="font-display font-black text-3xl md:text-4xl tracking-tight leading-tight" data-testid="product-title">{product.name}</h1>
-          {product.partNumber && <div className="mt-2 font-mono text-sm text-[hsl(220_60%_12%)]/75 font-medium">Part No. <span className="text-foreground">{product.partNumber}</span>{product.oemNumber && <> · OEM <span className="text-foreground">{product.oemNumber}</span></>}</div>}
+          {(product.partNumber || product.oemNumber) && (
+            <div className="mt-3 flex flex-wrap items-center gap-2" data-testid="product-part-number">
+              {product.partNumber && (
+                <span className="inline-flex items-center gap-1.5 rounded-md bg-secondary border border-card-border px-3 py-1.5 font-mono text-sm font-semibold text-foreground">
+                  <span className="text-muted-foreground font-normal">Part #</span>{product.partNumber}
+                </span>
+              )}
+              {product.oemNumber && (
+                <span className="inline-flex items-center gap-1.5 rounded-md bg-secondary border border-card-border px-3 py-1.5 font-mono text-sm font-semibold text-foreground">
+                  <span className="text-muted-foreground font-normal">OEM #</span>{product.oemNumber}
+                </span>
+              )}
+            </div>
+          )}
 
           <div className="mt-6 p-5 rounded-xl bg-secondary/40 border border-card-border">
             <div className="text-xs uppercase tracking-wider text-[hsl(220_60%_12%)]/75 font-medium">Price</div>

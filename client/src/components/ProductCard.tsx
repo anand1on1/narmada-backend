@@ -2,7 +2,7 @@ import { Link } from "wouter";
 import type { Product } from "@shared/schema";
 import { Button } from "@/components/ui/button";
 import { MessageCircle, Package, ArrowUpRight } from "lucide-react";
-import { whatsappLink, buildBuyMessage, formatUSD, parseJsonArray } from "@/lib/utils-app";
+import { whatsappLink, buildBuyMessage, formatUSD, parseJsonArray, productHref } from "@/lib/utils-app";
 import { BRANDS } from "@/data/brands";
 import stockTurbo from "@/assets/v2/product-turbo.png";
 import stockBrake from "@/assets/v2/product-brake.png";
@@ -22,7 +22,7 @@ export function ProductCard({ product, usdInr }: { product: Product; usdInr: num
   }));
   return (
     <div className="group relative rounded-xl overflow-hidden bg-[hsl(210_35%_98%)] border border-[hsl(220_45%_20%)]/8 hover:border-[hsl(212_95%_55%)]/40 transition-all duration-300" data-testid={`card-product-${product.id}`}>
-      <Link href={`/product/${product.slug}`}>
+      <Link href={productHref(product)}>
         <a className="block aspect-[4/3] relative overflow-hidden bg-[hsl(210_22%_90%)]" data-testid={`link-product-${product.id}`}>
           {cover ? (
             <img src={cover} alt={product.name} loading="lazy" className="w-full h-full object-cover transition-transform duration-700 group-hover:scale-110" />
@@ -51,7 +51,7 @@ export function ProductCard({ product, usdInr }: { product: Product; usdInr: num
         </a>
       </Link>
       <div className="p-5 flex flex-col gap-2.5">
-        <Link href={`/product/${product.slug}`}>
+        <Link href={productHref(product)}>
           <a className="font-display font-bold text-[15px] leading-snug text-[hsl(220_60%_12%)] hover:text-[hsl(212_95%_65%)] transition-colors line-clamp-2" data-testid={`text-product-name-${product.id}`}>{product.name}</a>
         </Link>
         {product.model && (
@@ -65,7 +65,7 @@ export function ProductCard({ product, usdInr }: { product: Product; usdInr: num
             <div className="text-xl font-display font-black text-[hsl(220_60%_12%)]" data-testid={`text-price-${product.id}`}>{formatUSD(product.priceInr, usdInr)}</div>
           </div>
           <div className="flex items-center gap-1.5">
-            <Link href={`/product/${product.slug}`}>
+            <Link href={productHref(product)}>
               <a className="inline-flex h-8 w-8 items-center justify-center rounded-md border border-[hsl(220_45%_20%)]/15 text-[hsl(220_60%_12%)]/82 hover:text-[hsl(220_60%_12%)] hover:border-[hsl(220_45%_20%)]/30 transition-colors" aria-label="View details">
                 <ArrowUpRight className="h-3.5 w-3.5" />
               </a>

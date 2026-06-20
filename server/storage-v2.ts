@@ -1747,9 +1747,9 @@ export async function listPurchaseOrdersV2(opts: { status?: string; customerId?:
   return conds.length ? base.where(and(...conds)).orderBy(desc(purchaseOrdersV2.createdAt)).all() : base.orderBy(desc(purchaseOrdersV2.createdAt)).all();
 }
 // R10 — list with live customer/cost totals + customer name for the team PO list.
-export async function listPurchaseOrdersV2WithTotals(opts: { status?: string; customerId?: number } = {}): Promise<Array<PurchaseOrderV2 & { customerName: string | null; companyName: string | null; companyLogoUrl: string | null; custTotal: number; costTotal: number }>> {
+export async function listPurchaseOrdersV2WithTotals(opts: { status?: string; customerId?: number; q?: string } = {}): Promise<Array<PurchaseOrderV2 & { customerName: string | null; companyName: string | null; companyLogoUrl: string | null; custTotal: number; costTotal: number }>> {
   const rows = await listPurchaseOrdersV2(opts);
-  return rows.map((po) => {
+  const mapped = rows.map((po) => {
     const items = db.select().from(poItems).where(eq(poItems.poId, po.id)).all();
     const customer = po.customerId ? db.select().from(customers).where(eq(customers.id, po.customerId)).get() : undefined;
     const company = po.companyId ? db.select().from(companies).where(eq(companies.id, po.companyId)).get() : undefined;
@@ -1757,10 +1757,30 @@ export async function listPurchaseOrdersV2WithTotals(opts: { status?: string; cu
     // R21.2 — surface qty-deviation rollup for the Patna PO list "Deviation" column.
     const deviationCount = items.filter((it: any) => Number((it as any).isDeviated) === 1).length;
     return {
-      ...po, customerName: customer?.name ?? null, companyName: company?.name ?? null, companyLogoUrl: company?.logoUrl ?? null, custTotal, costTotal,
+      ...po, items, customerName: customer?.name ?? null, companyName: company?.name ?? null, companyLogoUrl: company?.logoUrl ?? null, custTotal, costTotal,
       hasDeviation: deviationCount > 0, deviationCount,
     };
   });
+  // R27.0 — server-side PO search across PO number, customer/company name, and the
+  // part numbers + vendor names of any line item. Done after mapping so item rows are
+  // already loaded; keeps "hundreds of POs" filterable without scrolling.
+  const q = (opts.q || "").trim().toLowerCase();
+  const filtered = q
+    ? mapped.filter((po: any) => {
+        const haystack: string[] = [
+          po.customerPoNumber, po.internalPoNumber, `po-${po.id}`,
+          po.customerName, po.companyName,
+        ].filter(Boolean) as string[];
+        for (const it of (po.items || [])) {
+          if (it.partNumber) haystack.push(it.partNumber);
+          if (it.vendorName) haystack.push(it.vendorName);
+          if (it.description) haystack.push(it.description);
+        }
+        return haystack.some((s) => String(s).toLowerCase().includes(q));
+      })
+    : mapped;
+  // Strip the line items we only needed for searching back off the list payload.
+  return filtered.map(({ items: _items, ...rest }: any) => rest);
 }
 // R13: has this quotation already been converted to a PO? Used to lock the quotation's
 // ordered-company once it's downstream of a PO.
@@ -4989,4 +5009,45 @@ export function materializeAudience(audienceId: number, limit?: number): { rows:
   const sliced = limit != null ? ids.slice(0, limit) : ids;
   const rows = sliced.map((cid) => sqlite.prepare(`SELECT id, name, phone, email, state FROM ${table} WHERE id = ?`).get(cid)).filter(Boolean);
   return { rows, summary: { matched: base.length, included_extra: includedExtra.length, excluded: excludeIds.length, final_count: matched.size, source: table } };
+}
+
+// ==================== R27.0 — SALES EXPENSES ====================
+// Sales reps submit travel expenses (hotel/train/flight/auto/meal/misc) for approval.
+// Approval workflow (accounts dashboard) ships in R27.3; rows queue with status='pending'.
+export function createSalesExpense(data: {
+  salesUserId: number; expenseType: string; expenseDate: string; amount: number;
+  fields?: any; proofUrl?: string | null; notes?: string | null;
+}): any {
+  const info = sqlite.prepare(
+    `INSERT INTO sales_expenses (sales_user_id, expense_type, expense_date, amount, fields_json, proof_url, notes, status)
+     VALUES (?, ?, ?, ?, ?, ?, ?, 'pending')`,
+  ).run(
+    data.salesUserId, data.expenseType, data.expenseDate, Number(data.amount) || 0,
+    data.fields != null ? JSON.stringify(data.fields) : null,
+    data.proofUrl ?? null, data.notes ?? null,
+  );
+  return getSalesExpense(Number(info.lastInsertRowid));
+}
+export function getSalesExpense(id: number): any {
+  const row = sqlite.prepare(`SELECT * FROM sales_expenses WHERE id = ?`).get(id) as any;
+  if (row && row.fields_json) { try { row.fields = JSON.parse(row.fields_json); } catch { row.fields = null; } }
+  return row;
+}
+export function listSalesExpenses(opts: { salesUserId?: number; status?: string } = {}): any[] {
+  const conds: string[] = []; const args: any[] = [];
+  if (opts.salesUserId != null) { conds.push("sales_user_id = ?"); args.push(opts.salesUserId); }
+  if (opts.status) { conds.push("status = ?"); args.push(opts.status); }
+  const where = conds.length ? `WHERE ${conds.join(" AND ")}` : "";
+  const rows = sqlite.prepare(`SELECT * FROM sales_expenses ${where} ORDER BY expense_date DESC, id DESC`).all(...args) as any[];
+  for (const r of rows) { if (r.fields_json) { try { r.fields = JSON.parse(r.fields_json); } catch { r.fields = null; } } }
+  return rows;
+}
+// Reps may delete only their own still-pending expenses.
+export function deleteSalesExpense(id: number, salesUserId: number): { ok: boolean; error?: string } {
+  const row = getSalesExpense(id);
+  if (!row) return { ok: false, error: "Expense not found" };
+  if (row.sales_user_id !== salesUserId) return { ok: false, error: "Not your expense" };
+  if (row.status !== "pending") return { ok: false, error: "Only pending expenses can be deleted" };
+  sqlite.prepare(`DELETE FROM sales_expenses WHERE id = ?`).run(id);
+  return { ok: true };
 }
