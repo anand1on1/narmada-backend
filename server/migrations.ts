@@ -2827,3 +2827,27 @@ export function runR27_8Migrations() {
 
   console.log("[migrations] R27.8: complete");
 }
+
+// R27.9 — admin-only salary history. Additive; lets admin record salary changes
+// over time. Finance never reads this table (no finance endpoint touches it).
+export function runR27_9Migrations() {
+  console.log("[migrations] R27.9: start");
+  const run = (desc: string, sql: string) => {
+    try { sqlite.exec(sql); console.log(`[migrations] R27.9: ${desc} ok`); }
+    catch (e: any) { console.log(`[migrations] R27.9: ${desc} skip (${e?.message || e})`); }
+  };
+
+  run("employee_salary_history", `
+    CREATE TABLE IF NOT EXISTS employee_salary_history (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      employee_id INTEGER NOT NULL,
+      monthly_salary REAL NOT NULL,
+      effective_from TEXT,
+      set_by TEXT,
+      set_at TEXT DEFAULT CURRENT_TIMESTAMP,
+      notes TEXT
+    );`);
+  run("idx_employee_salary_history_emp", `CREATE INDEX IF NOT EXISTS idx_employee_salary_history_emp ON employee_salary_history(employee_id, id DESC);`);
+
+  console.log("[migrations] R27.9: complete");
+}

@@ -43,7 +43,8 @@ function AccountsTabs({ token, isAdmin, tab, setTab }: { token: string | null; i
   return (
     <>
       <div className="flex flex-wrap gap-2 mb-5">
-        {([["cash", "Cash in Hand"], ["headers", "Expense Headers"], ["expenses", "Expenses"], ["current", "Current Expenses"], ["advances", "Advances"], ["employees", "Employees"], ["ledger", "Person Ledger"], ["attendance", "Attendance"], ["salary", "Salary"]] as [Tab, string][]).map(([k, label]) => (
+        {/* R27.9 #2 — the Salary tab is admin-only. Finance never sees it. */}
+        {(([["cash", "Cash in Hand"], ["headers", "Expense Headers"], ["expenses", "Expenses"], ["current", "Current Expenses"], ["advances", "Advances"], ["employees", "Employees"], ["ledger", "Person Ledger"], ["attendance", "Attendance"], ...(isAdmin ? [["salary", "Salary"]] : [])] as [Tab, string][])).map(([k, label]) => (
           <button key={k} onClick={() => setTab(k)} data-testid={`accounts-tab-${k}`} className={`px-3 py-1.5 rounded-lg text-sm font-semibold ${tab === k ? "bg-accent text-accent-foreground" : "border hover:bg-muted"}`}>{label}</button>
         ))}
       </div>
@@ -55,7 +56,7 @@ function AccountsTabs({ token, isAdmin, tab, setTab }: { token: string | null; i
       {tab === "employees" && <EmployeesTab token={token} isAdmin={isAdmin} />}
       {tab === "ledger" && <LedgerTab token={token} />}
       {tab === "attendance" && <AttendanceTab token={token} />}
-      {tab === "salary" && <SalaryTab token={token} isAdmin={isAdmin} />}
+      {tab === "salary" && isAdmin && <SalaryTab token={token} isAdmin={isAdmin} />}
     </>
   );
 }
@@ -241,11 +242,19 @@ function ExpensesTab({ token }: { token: string | null }) {
     const j = await r.json().catch(() => ({}));
     if (r.ok) {
       const synced = j.synced || 0, already = j.alreadySynced || 0, total = j.totalApproved || 0;
+      const totalRows = j.totalRows || 0;
+      // R27.9 #1 — when nothing is approved, say WHY (how many rows exist and in
+      // what states) instead of a vague "0", so the user can see the real reason.
+      const breakdown = j.breakdown && typeof j.breakdown === "object"
+        ? Object.entries(j.breakdown).map(([k, v]) => `${v} ${k}`).join(", ")
+        : "";
       flash(synced > 0
         ? `Synced ${synced} new sales expense(s). ${already} already in ledger (of ${total} approved).`
         : total > 0
           ? `All ${total} approved sales expense(s) already synced — nothing new.`
-          : `No approved sales expenses to sync yet.`);
+          : totalRows > 0
+            ? `No APPROVED sales expenses to sync. ${totalRows} total — states: ${breakdown}. Approve them first in Admin → Sales Expenses.`
+            : `No sales expenses exist yet.`);
       load();
     } else flash("Failed");
   }
@@ -452,6 +461,8 @@ function EmployeesTab({ token, isAdmin }: { token: string | null; isAdmin: boole
     const r = await f(token, `/api/finance/employees/${emp.id}`, { method: "PUT", body: JSON.stringify({ active: !emp.active }) });
     if (r.ok) load();
   }
+  // R27.9 #2 — admin-only salary entry + history, gated behind /api/admin/* (x-admin-token).
+  const [salaryFor, setSalaryFor] = useState<any | null>(null);
   const inp = "block px-3 py-1.5 rounded-lg border bg-background text-sm w-full";
   return (
     <div>
@@ -492,12 +503,76 @@ function EmployeesTab({ token, isAdmin }: { token: string | null; isAdmin: boole
                   <td className="p-3 text-xs">{r.contact || "—"}</td>
                   <td className="p-3">{r.gross_salary != null ? `₹${Number(r.gross_salary).toLocaleString("en-IN")}` : (isAdmin ? "—" : "•••")}</td>
                   <td className="p-3">{r.active ? <span className="text-emerald-600 text-xs font-semibold">Active</span> : <span className="text-muted-foreground text-xs">Inactive</span>}</td>
-                  <td className="p-3"><button onClick={() => toggleActive(r)} className="text-accent text-xs font-semibold hover:underline">{r.active ? "Deactivate" : "Activate"}</button></td>
+                  <td className="p-3 whitespace-nowrap">
+                    {isAdmin && <button onClick={() => setSalaryFor(r)} data-testid={`employee-salary-${r.id}`} className="text-accent text-xs font-semibold hover:underline mr-3">Salary</button>}
+                    <button onClick={() => toggleActive(r)} className="text-accent text-xs font-semibold hover:underline">{r.active ? "Deactivate" : "Activate"}</button>
+                  </td>
                 </tr>
               ))}
             </tbody>
           </table>
         )}
+      </div>
+      {isAdmin && salaryFor && <SalaryEntryPanel token={token} emp={salaryFor} onClose={() => { setSalaryFor(null); load(); }} />}
+    </div>
+  );
+}
+
+// R27.9 #2 — admin-only salary entry. POSTs to /api/admin/employees/:id/salary
+// (x-admin-token strict) so finance can never reach it. Shows the audit history.
+function SalaryEntryPanel({ token, emp, onClose }: { token: string | null; emp: any; onClose: () => void }) {
+  const f = useF();
+  const [data, setData] = useState<{ monthlySalary: number | null; history: any[] } | null>(null);
+  const [amount, setAmount] = useState("");
+  const [effectiveFrom, setEffectiveFrom] = useState(new Date().toISOString().slice(0, 10));
+  const [notes, setNotes] = useState("");
+  const [msg, setMsg] = useState<string | null>(null);
+  async function load() {
+    const r = await f(token, `/api/admin/employees/${emp.id}/salary`);
+    if (r.ok) setData(await r.json());
+  }
+  useEffect(() => { if (token) load(); }, [token, emp.id]); // eslint-disable-line
+  async function save() {
+    if (!amount || Number(amount) < 0) { setMsg("Enter a valid monthly salary."); return; }
+    const r = await f(token, `/api/admin/employees/${emp.id}/salary`, { method: "POST", body: JSON.stringify({ monthly_salary: Number(amount), effective_from: effectiveFrom || undefined, notes: notes || undefined }) });
+    if (r.ok) { setMsg("Salary saved."); setAmount(""); setNotes(""); load(); setTimeout(() => setMsg(null), 2500); }
+    else { const j = await r.json().catch(() => ({})); setMsg(j.error || "Failed to save salary."); }
+  }
+  const inp = "block px-3 py-1.5 rounded-lg border bg-background text-sm w-full";
+  return (
+    <div className="fixed inset-0 bg-black/40 flex items-start justify-center z-50 p-4 overflow-y-auto" onClick={onClose}>
+      <div className="bg-card border rounded-xl p-5 w-full max-w-lg mt-12" onClick={(e) => e.stopPropagation()}>
+        <div className="flex items-center justify-between mb-3">
+          <h3 className="font-bold text-lg">Salary — {emp.name}</h3>
+          <button onClick={onClose} className="text-muted-foreground hover:text-foreground text-sm">Close</button>
+        </div>
+        <p className="text-sm mb-4">Current monthly salary: <span className="font-bold">{data?.monthlySalary != null ? `₹${Number(data.monthlySalary).toLocaleString("en-IN")}` : "—"}</span></p>
+        <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 mb-3">
+          <div><label className="text-xs text-muted-foreground">Monthly salary (₹) *</label><input type="number" value={amount} onChange={(e) => setAmount(e.target.value)} className={inp} data-testid="salary-amount" /></div>
+          <div><label className="text-xs text-muted-foreground">Effective from</label><input type="date" value={effectiveFrom} onChange={(e) => setEffectiveFrom(e.target.value)} className={inp} /></div>
+          <div><label className="text-xs text-muted-foreground">Notes</label><input value={notes} onChange={(e) => setNotes(e.target.value)} className={inp} /></div>
+        </div>
+        <button onClick={save} data-testid="salary-save" className="px-4 py-2 rounded-lg bg-accent text-accent-foreground text-sm font-semibold">Save Salary</button>
+        {msg && <p className="text-sm mt-2 text-emerald-700">{msg}</p>}
+        <div className="mt-5">
+          <h4 className="text-sm font-semibold mb-2">History</h4>
+          {!data || data.history.length === 0 ? <p className="text-sm text-muted-foreground">No salary history yet.</p> : (
+            <table className="w-full text-sm">
+              <thead className="bg-muted/50 text-left"><tr><th className="p-2">When</th><th className="p-2">By</th><th className="p-2">Amount</th><th className="p-2">Effective</th><th className="p-2">Notes</th></tr></thead>
+              <tbody className="divide-y">
+                {data.history.map((h) => (
+                  <tr key={h.id}>
+                    <td className="p-2 text-xs">{h.set_at ? new Date(h.set_at).toLocaleString("en-IN") : "—"}</td>
+                    <td className="p-2 text-xs">{h.set_by || "—"}</td>
+                    <td className="p-2 text-xs font-semibold">₹{Number(h.monthly_salary).toLocaleString("en-IN")}</td>
+                    <td className="p-2 text-xs">{h.effective_from || "—"}</td>
+                    <td className="p-2 text-xs">{h.notes || "—"}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
+        </div>
       </div>
     </div>
   );

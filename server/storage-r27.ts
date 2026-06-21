@@ -958,8 +958,12 @@ export function addPersonLedger(personId: number, kind: string, amount: number, 
   sqlite.prepare(`INSERT INTO person_ledger (person_id, kind, amount, reference_id, reference_table, notes, entry_date) VALUES (?, ?, ?, ?, ?, ?, ?)`)
     .run(personId, kind, amount, refId ?? null, refTable ?? null, notes ?? null, nowIso());
 }
-export function getPersonLedger(personId: number) {
-  const rows = sqlite.prepare(`SELECT * FROM person_ledger WHERE person_id = ? ORDER BY id ASC`).all(personId) as any[];
+// R27.9 #2 — finance must see NOTHING salary-related. When hideSalary is set
+// (finance caller, not admin) we drop salary_paid entries and recompute the
+// running balance so no salary disbursement leaks through the person ledger.
+export function getPersonLedger(personId: number, hideSalary = false) {
+  let rows = sqlite.prepare(`SELECT * FROM person_ledger WHERE person_id = ? ORDER BY id ASC`).all(personId) as any[];
+  if (hideSalary) rows = rows.filter((r) => !/salary/i.test(String(r.kind || "")));
   let running = 0;
   const withBalance = rows.map((r) => { running += Number(r.amount) || 0; return { ...r, balance: running }; });
   return { rows: withBalance, balance: running };
@@ -1279,13 +1283,24 @@ export function createAdvanceExpense(body: { advance_id: number; amount: number;
 // either `status` or `approval_status` carrying the value, any case) and creates the
 // unified-expenses ledger row for any that are missing one. Returns real counts so the
 // finance user sees "Synced N (M already synced of T approved)" instead of a bare 0.
-export function syncAllApprovedSalesExpenses(by?: number): { synced: number; alreadySynced: number; totalApproved: number } {
+export function syncAllApprovedSalesExpenses(by?: number): { synced: number; alreadySynced: number; totalApproved: number; totalRows: number; breakdown: Record<string, number> } {
+  // R27.9 #1 — the approved-state normalization: prefer approval_status, fall back
+  // to status, both trimmed/empty-tolerant and lowered, default 'pending'.
+  const STATE_EXPR = `LOWER(TRIM(COALESCE(NULLIF(TRIM(approval_status),''), NULLIF(TRIM(status),''), 'pending')))`;
+  let totalRows = 0;
+  const breakdown: Record<string, number> = {};
+  try {
+    totalRows = Number((sqlite.prepare(`SELECT COUNT(*) AS n FROM sales_expenses`).get() as any)?.n || 0);
+    // Per-normalized-state counts so a "0 synced" result is explainable (e.g. 5 rows,
+    // all 'pending') rather than a silent mystery — surfaced to the finance user.
+    const grp = sqlite.prepare(`SELECT ${STATE_EXPR} AS st, COUNT(*) AS n FROM sales_expenses GROUP BY st`).all() as any[];
+    for (const g of grp) breakdown[String(g.st)] = Number(g.n) || 0;
+  } catch { /* table may not exist on a brand-new DB */ }
+
   let approved: any[] = [];
   try {
     approved = sqlite.prepare(
-      `SELECT id FROM sales_expenses
-       WHERE LOWER(TRIM(COALESCE(NULLIF(TRIM(approval_status),''), NULLIF(TRIM(status),''), 'pending'))) = 'approved'
-       ORDER BY id ASC`,
+      `SELECT id FROM sales_expenses WHERE ${STATE_EXPR} = 'approved' ORDER BY id ASC`,
     ).all() as any[];
   } catch { approved = []; }
   let synced = 0, alreadySynced = 0;
@@ -1296,7 +1311,8 @@ export function syncAllApprovedSalesExpenses(by?: number): { synced: number; alr
       else if (r?.id) synced++;
     } catch { /* skip bad row */ }
   }
-  return { synced, alreadySynced, totalApproved: approved.length };
+  console.log(`[R27.9 #1] sync-sales: ${totalRows} rows, breakdown=${JSON.stringify(breakdown)}, approved=${approved.length}, synced=${synced}, alreadySynced=${alreadySynced}`);
+  return { synced, alreadySynced, totalApproved: approved.length, totalRows, breakdown };
 }
 
 export function syncSalesExpenseToAccounts(salesExpenseId: number, by?: number) {
@@ -1398,6 +1414,41 @@ export function updateEmployee(id: number, body: any, allowSalary: boolean) {
   params.push(id);
   sqlite.prepare(`UPDATE employees SET ${fields.join(", ")} WHERE id = ?`).run(...params);
   return sqlite.prepare(`SELECT * FROM employees WHERE id = ?`).get(id);
+}
+
+// R27.9 #2 — admin-only salary entry + history. employee_salary_history is created by
+// runR27_9Migrations. Setting a new salary records an audit row AND updates the live
+// employees.monthly_salary so the existing salary-slip math keeps working unchanged.
+export function setEmployeeSalary(
+  id: number,
+  body: { monthly_salary: number; effective_from?: string | null; set_by?: string | null; notes?: string | null },
+) {
+  const amount = Number(body.monthly_salary);
+  if (!Number.isFinite(amount) || amount < 0) throw new Error("monthly_salary must be a non-negative number");
+  const emp = sqlite.prepare(`SELECT id FROM employees WHERE id = ?`).get(id) as any;
+  if (!emp) throw new Error("employee not found");
+  const tx = sqlite.transaction(() => {
+    sqlite.prepare(
+      `INSERT INTO employee_salary_history (employee_id, monthly_salary, effective_from, set_by, set_at, notes)
+       VALUES (?, ?, ?, ?, ?, ?)`,
+    ).run(id, amount, body.effective_from ?? null, body.set_by ?? null, nowIso(), body.notes ?? null);
+    sqlite.prepare(`UPDATE employees SET monthly_salary = ? WHERE id = ?`).run(amount, id);
+  });
+  tx();
+  return getEmployeeSalary(id);
+}
+export function getEmployeeSalary(id: number) {
+  const emp = sqlite.prepare(`SELECT id, name, monthly_salary FROM employees WHERE id = ?`).get(id) as any;
+  if (!emp) return undefined;
+  const history = sqlite.prepare(
+    `SELECT * FROM employee_salary_history WHERE employee_id = ? ORDER BY id DESC`,
+  ).all(id) as any[];
+  return {
+    employeeId: id,
+    name: emp.name,
+    monthlySalary: emp.monthly_salary ?? null,
+    history,
+  };
 }
 
 // Attendance

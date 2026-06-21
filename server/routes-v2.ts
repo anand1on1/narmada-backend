@@ -7556,8 +7556,10 @@ function registerR8Routes(
   });
 
   // Person ledger
-  app.get("/api/finance/person-ledger/:personId", acctAuth, async (req, res) => {
-    const s = await r27(); res.json(s.getPersonLedger(parseInt(req.params.personId as string, 10)));
+  app.get("/api/finance/person-ledger/:personId", acctAuth, async (req: any, res) => {
+    // R27.9 #2 — salary entries (kind='salary_paid') are filtered for the finance
+    // role; only admin sees them in the ledger.
+    const s = await r27(); res.json(s.getPersonLedger(parseInt(req.params.personId as string, 10), !req.isAdminAcct));
   });
 
   // ---- R27.6 #6/#7 — unified expenses (advance + direct) + advances ----
@@ -7803,6 +7805,33 @@ function registerR8Routes(
       res.setHeader("Content-Disposition", `attachment; filename="salary.xlsx"`);
       res.send(buf);
     } catch (e: any) { res.status(500).json({ error: e.message }); }
+  });
+
+  // R27.9 #2 — admin-only salary entry + history. requireAdminRole reads ONLY
+  // x-admin-token, so a finance session (x-team-token) can never reach these —
+  // it gets 401/403, never the salary figures.
+  app.get("/api/admin/employees/:id/salary", requireAdminRole, async (req, res) => {
+    try {
+      const s = await r27();
+      const out = s.getEmployeeSalary(parseInt(req.params.id as string, 10));
+      if (!out) return res.status(404).json({ error: "Employee not found" });
+      res.json(out);
+    } catch (e: any) { res.status(400).json({ error: e.message }); }
+  });
+  app.post("/api/admin/employees/:id/salary", requireAdminRole, async (req: any, res) => {
+    try {
+      const { monthly_salary, effective_from, notes } = req.body || {};
+      if (monthly_salary == null) return res.status(400).json({ error: "monthly_salary required" });
+      const s = await r27();
+      const setBy = (req.user?.username || req.user?.role || "admin") as string;
+      const out = s.setEmployeeSalary(parseInt(req.params.id as string, 10), {
+        monthly_salary: Number(monthly_salary),
+        effective_from: effective_from ?? null,
+        set_by: setBy,
+        notes: notes ?? null,
+      });
+      res.json(out);
+    } catch (e: any) { res.status(400).json({ error: e.message }); }
   });
 
   // ============================================================================
