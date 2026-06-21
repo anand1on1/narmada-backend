@@ -3,11 +3,14 @@ import { useEffect, useState } from "react";
 import { Logo } from "./Logo";
 import { Button } from "@/components/ui/button";
 import { Sheet, SheetContent, SheetTrigger } from "@/components/ui/sheet";
-import { Menu, Phone, Mail, MapPin, MessageCircle, ChevronDown, Globe, ArrowUpRight, MapPinned } from "lucide-react";
+import { Menu, Phone, Mail, MapPin, MessageCircle, ChevronDown, Globe, ArrowUpRight, MapPinned, ShoppingCart, User } from "lucide-react";
 import { BRANDS, BRAND_WALL } from "@/data/brands";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 import { whatsappLink } from "@/lib/utils-app";
 import { StickyGetQuote } from "./StickyGetQuote";
+import { cartCount, subscribeCart } from "@/lib/cart";
+import { getCurrency, setCurrency, subscribeCurrency, loadFxRate, Currency } from "@/lib/currency";
+import { useShopAuth } from "@/lib/shop-auth";
 
 const NAV = [
   { to: "/", label: "Home" },
@@ -93,14 +96,15 @@ export function SiteLayout({ children }: { children: React.ReactNode }) {
           </nav>
 
           <div className="hidden md:flex items-center gap-2">
-            <div className="hidden lg:inline-flex items-center rounded-md border border-[hsl(220_45%_20%)]/15 overflow-hidden text-[13px] font-medium">
-              <Link href="/portal"><a className="px-3 py-1.5 text-[hsl(220_60%_12%)]/82 hover:text-[hsl(220_60%_12%)] hover:bg-[hsl(220_45%_20%)]/5 transition-colors" data-testid="btn-login">Login</a></Link>
-              <span className="h-4 w-px bg-[hsl(220_45%_20%)]/15" />
-              <Link href="/portal/register"><a className="px-3 py-1.5 text-[hsl(212_95%_55%)] hover:bg-[hsl(212_95%_55%)]/8 transition-colors" data-testid="btn-register">Register</a></Link>
-            </div>
+            <HeaderActions />
             <Button asChild size="sm" className="bg-[hsl(212_95%_55%)] hover:bg-[hsl(212_95%_50%)] text-[hsl(220_60%_12%)] font-semibold rounded-md shadow-none" data-testid="btn-quote">
               <Link href="/contact">Request a Quote</Link>
             </Button>
+          </div>
+
+          {/* Mobile cart icon (always visible) */}
+          <div className="md:hidden flex items-center">
+            <CartIcon />
           </div>
 
           {/* Mobile menu */}
@@ -167,6 +171,63 @@ export function SiteLayout({ children }: { children: React.ReactNode }) {
 
       {/* Sticky Get-Quote button (bottom-left) */}
       <StickyGetQuote />
+    </div>
+  );
+}
+
+function CartIcon() {
+  const [count, setCount] = useState(cartCount());
+  useEffect(() => subscribeCart(() => setCount(cartCount())), []);
+  return (
+    <Link href="/cart">
+      <a className="relative inline-flex items-center justify-center h-9 w-9 rounded-md text-[hsl(220_60%_12%)]/82 hover:text-[hsl(220_60%_12%)] hover:bg-[hsl(220_45%_20%)]/5 transition-colors" data-testid="link-cart" aria-label="Cart">
+        <ShoppingCart className="h-5 w-5" />
+        {count > 0 && (
+          <span className="absolute -top-0.5 -right-0.5 min-w-[18px] h-[18px] px-1 rounded-full bg-[hsl(212_95%_50%)] text-white text-[10px] font-bold inline-flex items-center justify-center" data-testid="cart-badge">{count}</span>
+        )}
+      </a>
+    </Link>
+  );
+}
+
+function CurrencyPicker() {
+  const [cur, setCur] = useState<Currency>(getCurrency());
+  useEffect(() => {
+    loadFxRate();
+    return subscribeCurrency(() => setCur(getCurrency()));
+  }, []);
+  return (
+    <DropdownMenu>
+      <DropdownMenuTrigger className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-md text-[13px] font-medium text-[hsl(220_60%_12%)]/82 hover:text-[hsl(220_60%_12%)] hover:bg-[hsl(220_45%_20%)]/5 transition-colors" data-testid="currency-picker">
+        <Globe className="h-3.5 w-3.5" /> {cur} <ChevronDown className="h-3 w-3" />
+      </DropdownMenuTrigger>
+      <DropdownMenuContent align="end" className="bg-[hsl(210_35%_98%)] border-[hsl(220_45%_20%)]/10 text-[hsl(220_60%_12%)] min-w-[120px]">
+        <DropdownMenuItem onClick={() => setCurrency("INR")} data-testid="currency-inr">₹ INR</DropdownMenuItem>
+        <DropdownMenuItem onClick={() => setCurrency("USD")} data-testid="currency-usd">$ USD</DropdownMenuItem>
+      </DropdownMenuContent>
+    </DropdownMenu>
+  );
+}
+
+function HeaderActions() {
+  const { user, ready } = useShopAuth();
+  return (
+    <div className="flex items-center gap-1">
+      <CurrencyPicker />
+      <CartIcon />
+      {ready && user ? (
+        <Link href="/customer/account">
+          <a className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md text-[13px] font-medium text-[hsl(220_60%_12%)]/82 hover:text-[hsl(220_60%_12%)] hover:bg-[hsl(220_45%_20%)]/5 transition-colors" data-testid="link-account">
+            <User className="h-4 w-4" /> {user.fullName?.split(" ")[0] || "Account"}
+          </a>
+        </Link>
+      ) : (
+        <Link href="/customer/login">
+          <a className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md text-[13px] font-medium text-[hsl(220_60%_12%)]/82 hover:text-[hsl(220_60%_12%)] hover:bg-[hsl(220_45%_20%)]/5 transition-colors" data-testid="link-signin">
+            <User className="h-4 w-4" /> Sign In
+          </a>
+        </Link>
+      )}
     </div>
   );
 }

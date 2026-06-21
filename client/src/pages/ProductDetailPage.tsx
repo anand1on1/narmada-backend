@@ -5,12 +5,16 @@ import type { Product } from "@shared/schema";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Card } from "@/components/ui/card";
-import { MessageCircle, Phone, Mail, Package, ShieldCheck, Truck, ArrowLeft } from "lucide-react";
-import { whatsappLink, buildBuyMessage, formatUSD, formatINR, parseJsonArray } from "@/lib/utils-app";
+import { MessageCircle, Phone, Mail, Package, ShieldCheck, Truck, ArrowLeft, ShoppingCart, Plus, Minus } from "lucide-react";
+import { whatsappLink, buildBuyMessage, parseJsonArray, productHref } from "@/lib/utils-app";
 import { BRANDS } from "@/data/brands";
 import { SeoHead } from "@/components/SeoHead";
 import NotFound from "@/pages/not-found";
 import { useState } from "react";
+import { useLocation } from "wouter";
+import { addToCart } from "@/lib/cart";
+import { formatPrice, getCurrency } from "@/lib/currency";
+import { useToast } from "@/hooks/use-toast";
 
 export default function ProductDetailPage() {
   // Match both /product/:slug and the SEO-friendly /product/:slug/:partNumber.
@@ -27,6 +31,9 @@ export default function ProductDetailPage() {
   const { data: fx } = useQuery<{ usdInr: number }>({ queryKey: ["/api/settings/fx"] });
   const usdInr = fx?.usdInr || 83.5;
   const [activeImg, setActiveImg] = useState(0);
+  const [qty, setQty] = useState(1);
+  const [, navigate] = useLocation();
+  const { toast } = useToast();
 
   if (isLoading) return <div className="max-w-7xl mx-auto px-4 sm:px-6 py-20"><div className="h-96 bg-secondary animate-pulse rounded-lg" /></div>;
   if (!product) return <NotFound />;
@@ -37,6 +44,23 @@ export default function ProductDetailPage() {
   const buyUrl = whatsappLink("7909083806", buildBuyMessage({
     name: product.name, partNumber: product.partNumber || undefined, slug: product.slug, brand: brandInfo?.name || product.brand,
   }));
+
+  const cartLine = {
+    productId: product.id,
+    slug: product.slug,
+    partNumber: product.partNumber || null,
+    name: product.name,
+    image: images[0] || null,
+    unitPriceInr: product.priceInr,
+  };
+  const handleAddToCart = () => {
+    addToCart(cartLine, qty);
+    toast({ title: "Added to cart", description: `${qty} × ${product.name}` });
+  };
+  const handleBuyNow = () => {
+    addToCart(cartLine, qty);
+    navigate("/checkout");
+  };
 
   return (
     <>
@@ -117,17 +141,36 @@ export default function ProductDetailPage() {
 
           <div className="mt-6 p-5 rounded-xl bg-secondary/40 border border-card-border">
             <div className="text-xs uppercase tracking-wider text-[hsl(220_60%_12%)]/75 font-medium">Price</div>
-            <div className="text-4xl font-display font-black text-foreground" data-testid="product-price-usd">{formatUSD(product.priceInr, usdInr)}</div>
-            <div className="text-sm text-muted-foreground mt-0.5">≈ {formatINR(product.priceInr)} · auto-converted at live USD/INR rate</div>
+            <div className="text-4xl font-display font-black text-foreground" data-testid="product-price">{formatPrice(product.priceInr)}</div>
+            <div className="text-sm text-muted-foreground mt-0.5">{getCurrency() === "USD" ? "Converted at live USD/INR rate" : "Inclusive of GST · freight calculated at checkout"}</div>
+
+            {/* Qty stepper */}
+            <div className="mt-5 flex items-center gap-3">
+              <span className="text-sm font-medium">Quantity</span>
+              <div className="inline-flex items-center rounded-md border border-card-border">
+                <button onClick={() => setQty((q) => Math.max(1, q - 1))} className="px-3 py-2 hover:bg-secondary" data-testid="qty-dec" aria-label="Decrease quantity"><Minus className="h-4 w-4" /></button>
+                <input type="number" min={1} value={qty} onChange={(e) => setQty(Math.max(1, parseInt(e.target.value, 10) || 1))} className="w-14 text-center bg-transparent outline-none" data-testid="qty-input" />
+                <button onClick={() => setQty((q) => q + 1)} className="px-3 py-2 hover:bg-secondary" data-testid="qty-inc" aria-label="Increase quantity"><Plus className="h-4 w-4" /></button>
+              </div>
+            </div>
+
             <div className="mt-5 flex flex-wrap gap-3">
-              <Button asChild size="lg" className="bg-[#25D366] hover:bg-[#1da851] text-white" data-testid="button-buy-now">
-                <a href={buyUrl} target="_blank" rel="noopener noreferrer"><MessageCircle className="h-4 w-4 mr-2" /> Buy Now on WhatsApp</a>
+              <Button size="lg" onClick={handleBuyNow} className="bg-[hsl(212_95%_50%)] hover:bg-[hsl(212_95%_45%)] text-white" data-testid="button-buy-now">
+                <ShoppingCart className="h-4 w-4 mr-2" /> Buy Now
               </Button>
-              <Button asChild size="lg" variant="outline" data-testid="button-call">
+              <Button size="lg" variant="outline" onClick={handleAddToCart} data-testid="button-add-cart">
+                <ShoppingCart className="h-4 w-4 mr-2" /> Add to Cart
+              </Button>
+            </div>
+            <div className="mt-3 flex flex-wrap gap-3">
+              <Button asChild size="sm" variant="ghost" className="text-[#25D366] hover:text-[#1da851]" data-testid="button-whatsapp">
+                <a href={buyUrl} target="_blank" rel="noopener noreferrer"><MessageCircle className="h-4 w-4 mr-2" /> Enquire on WhatsApp</a>
+              </Button>
+              <Button asChild size="sm" variant="ghost" data-testid="button-call">
                 <a href="tel:+917909083806"><Phone className="h-4 w-4 mr-2" /> Call to Order</a>
               </Button>
             </div>
-            <p className="mt-4 text-xs text-[hsl(220_60%_12%)]/75 font-medium">Clicking Buy Now opens WhatsApp with this part pre-filled. Our sales team confirms availability, freight, and lead time within an hour during business hours.</p>
+            <p className="mt-4 text-xs text-[hsl(220_60%_12%)]/75 font-medium">Cash on Delivery available. Our team confirms availability and freight before dispatch.</p>
           </div>
 
           <div className="mt-6 grid grid-cols-3 gap-3 text-center">

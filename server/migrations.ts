@@ -2057,3 +2057,146 @@ export function runR27_0Migrations() {
   }
   console.log("[migrations] R27.0: complete");
 }
+
+// ============================================================================
+// R27.1 — E-commerce Phase 1. ALL new tables are namespaced `shop_*` to avoid
+// colliding with the existing B2B portal tables (customers / customer_logins /
+// customer_addresses / customer_sessions). Additive only; each statement is
+// wrapped so a re-run (or "duplicate column") never aborts boot.
+// ============================================================================
+export function runR27_1Migrations() {
+  console.log("[migrations] R27.1: start");
+  const exec = (label: string, sql: string) => {
+    try { sqlite.exec(sql); console.log(`[migrations] R27.1: ${label} ready`); }
+    catch (e: any) { console.error(`[migrations] R27.1: ${label} failed:`, e?.message || e); }
+  };
+
+  exec("shop_users", `
+    CREATE TABLE IF NOT EXISTS shop_users (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      email TEXT NOT NULL UNIQUE,
+      password_hash TEXT NOT NULL,
+      full_name TEXT,
+      phone TEXT,
+      created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+      last_login_at TEXT
+    );`);
+
+  exec("shop_sessions", `
+    CREATE TABLE IF NOT EXISTS shop_sessions (
+      token TEXT PRIMARY KEY,
+      shop_user_id INTEGER NOT NULL,
+      created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+      expires_at INTEGER NOT NULL
+    );`);
+  exec("idx_shop_sessions_user", `CREATE INDEX IF NOT EXISTS idx_shop_sessions_user ON shop_sessions(shop_user_id);`);
+
+  exec("shop_addresses", `
+    CREATE TABLE IF NOT EXISTS shop_addresses (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      shop_user_id INTEGER NOT NULL,
+      label TEXT,
+      full_name TEXT NOT NULL,
+      phone TEXT NOT NULL,
+      line1 TEXT NOT NULL,
+      line2 TEXT,
+      city TEXT NOT NULL,
+      state TEXT NOT NULL,
+      pincode TEXT NOT NULL,
+      country TEXT DEFAULT 'IN',
+      is_default INTEGER DEFAULT 0,
+      created_at TEXT DEFAULT CURRENT_TIMESTAMP
+    );`);
+  exec("idx_shop_addresses_user", `CREATE INDEX IF NOT EXISTS idx_shop_addresses_user ON shop_addresses(shop_user_id);`);
+
+  exec("shop_wishlist", `
+    CREATE TABLE IF NOT EXISTS shop_wishlist (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      shop_user_id INTEGER NOT NULL,
+      product_id INTEGER NOT NULL,
+      part_number TEXT,
+      created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+      UNIQUE(shop_user_id, product_id, part_number)
+    );`);
+
+  exec("shop_orders", `
+    CREATE TABLE IF NOT EXISTS shop_orders (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      order_number TEXT NOT NULL UNIQUE,
+      shop_user_id INTEGER,
+      customer_email TEXT NOT NULL,
+      customer_phone TEXT,
+      customer_name TEXT,
+      ship_full_name TEXT, ship_phone TEXT, ship_line1 TEXT, ship_line2 TEXT,
+      ship_city TEXT, ship_state TEXT, ship_pincode TEXT, ship_country TEXT DEFAULT 'IN',
+      subtotal_inr REAL DEFAULT 0,
+      freight_inr REAL DEFAULT 0,
+      total_inr REAL DEFAULT 0,
+      currency TEXT DEFAULT 'INR',
+      fx_rate REAL DEFAULT 1,
+      payment_mode TEXT DEFAULT 'COD',
+      payment_status TEXT DEFAULT 'pending',
+      status TEXT DEFAULT 'placed',
+      dispatched_carrier TEXT,
+      dispatched_docket TEXT,
+      dispatched_at TEXT,
+      delivered_at TEXT,
+      notes TEXT,
+      procurement_po_id INTEGER,
+      created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+      updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+    );`);
+  exec("idx_shop_orders_user", `CREATE INDEX IF NOT EXISTS idx_shop_orders_user ON shop_orders(shop_user_id);`);
+  exec("idx_shop_orders_status", `CREATE INDEX IF NOT EXISTS idx_shop_orders_status ON shop_orders(status);`);
+
+  exec("shop_order_items", `
+    CREATE TABLE IF NOT EXISTS shop_order_items (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      order_id INTEGER NOT NULL,
+      product_id INTEGER,
+      part_number TEXT,
+      name TEXT NOT NULL,
+      image TEXT,
+      unit_price_inr REAL NOT NULL,
+      qty INTEGER NOT NULL,
+      total_inr REAL NOT NULL
+    );`);
+  exec("idx_shop_order_items_order", `CREATE INDEX IF NOT EXISTS idx_shop_order_items_order ON shop_order_items(order_id);`);
+
+  exec("shop_order_status_history", `
+    CREATE TABLE IF NOT EXISTS shop_order_status_history (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      order_id INTEGER NOT NULL,
+      status TEXT NOT NULL,
+      note TEXT,
+      created_by TEXT,
+      created_at TEXT DEFAULT CURRENT_TIMESTAMP
+    );`);
+
+  exec("freight_charges", `
+    CREATE TABLE IF NOT EXISTS freight_charges (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      part_number TEXT NOT NULL UNIQUE,
+      freight_inr REAL NOT NULL DEFAULT 0,
+      updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+    );`);
+
+  exec("shop_settings", `
+    CREATE TABLE IF NOT EXISTS shop_settings (
+      key TEXT PRIMARY KEY,
+      value TEXT,
+      updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+    );`);
+  exec("seed shop_settings", `
+    INSERT OR IGNORE INTO shop_settings (key, value) VALUES ('payment_modes_enabled', 'cod');
+    INSERT OR IGNORE INTO shop_settings (key, value) VALUES ('auto_product_markup_pct', '20');
+    INSERT OR IGNORE INTO shop_settings (key, value) VALUES ('default_currency', 'INR');`);
+
+  // R27.1 TASK 9 — chat attachment columns (additive, per-column try/catch for "duplicate column").
+  for (const [col, type] of [["attachment_url", "TEXT"], ["attachment_type", "TEXT"]] as const) {
+    try { sqlite.exec(`ALTER TABLE customer_chat_messages ADD COLUMN ${col} ${type};`); console.log(`[migrations] R27.1: customer_chat_messages.${col} added`); }
+    catch (e: any) { /* duplicate column on re-run is expected */ console.log(`[migrations] R27.1: customer_chat_messages.${col} skip (${e?.message || e})`); }
+  }
+
+  console.log("[migrations] R27.1: complete");
+}

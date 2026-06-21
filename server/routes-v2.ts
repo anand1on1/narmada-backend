@@ -7055,4 +7055,323 @@ function registerR8Routes(
       res.json(rawSqlite.prepare(sql).all(...params));
     } catch (e: any) { res.status(500).json({ error: e.message }); }
   });
+
+  // ==========================================================================
+  // R27.1 — E-commerce Phase 1: website shopper accounts, cart-driven checkout,
+  // freight, currency, admin orders/customers. Namespaced `/api/shop/*` and
+  // `x-shop-token` so it never collides with the B2B `/api/customer/*` portal.
+  // ==========================================================================
+  const shop = require("./storage-shop") as typeof import("./storage-shop");
+
+  // Local multer store for the freight CSV upload (registerR8Routes scope has no docStore).
+  const freightCsvStore = multer({
+    storage: multer.diskStorage({
+      destination: (_req: any, _file: any, cb: any) => cb(null, uploadsRoot),
+      filename: (_req: any, file: any, cb: any) => cb(null, `${Date.now()}-${file.originalname.replace(/[^a-zA-Z0-9._-]/g, "_")}`),
+    }),
+    limits: { fileSize: 5 * 1024 * 1024 },
+  });
+
+  function requireShop(req: Request, res: Response, next: NextFunction) {
+    const token = req.headers["x-shop-token"] as string | undefined;
+    if (!token) return res.status(401).json({ error: "Please sign in to continue" });
+    const session = shop.getShopSession(token);
+    if (!session) return res.status(401).json({ error: "Session expired — please sign in again" });
+    (req as any).shopUserId = session.shopUserId;
+    next();
+  }
+
+  // ---- public: currencies (TASK 7) ----
+  app.get("/api/public/currencies", async (_req, res) => {
+    try {
+      const { getFXRate } = await import("./fx-service");
+      const defaultCurrency = shop.getShopSetting("default_currency", "INR");
+      let usdRateInr: number | null = null;
+      try {
+        // open.er-api.com / exchangerate.host both keyed via getFXRate(USD→INR)
+        usdRateInr = await getFXRate("USD", "INR");
+      } catch { usdRateInr = null; }
+      const rates: Record<string, any> = {};
+      if (usdRateInr && usdRateInr > 0) {
+        rates.USD = { rate_inr: usdRateInr, fetched_at: new Date().toISOString() };
+      } else {
+        // graceful fallback so the picker still works if the FX API is down
+        rates.USD = { rate_inr: 83.5, fetched_at: null, fallback: true };
+      }
+      res.json({ default: defaultCurrency, available: ["INR", "USD"], rates });
+    } catch (e: any) { res.status(500).json({ error: e.message }); }
+  });
+
+  // ---- shop auth (TASK 2) ----
+  app.post("/api/shop/signup", async (req, res) => {
+    try {
+      const { email, password, full_name, fullName, phone } = req.body || {};
+      if (!email || !password) return res.status(400).json({ error: "Email and password required" });
+      if (String(password).length < 6) return res.status(400).json({ error: "Password must be at least 6 characters" });
+      const user = shop.createShopUser(email, password, full_name ?? fullName, phone);
+      const login = shop.loginShopUser(email, password);
+      res.json({ token: login!.token, user });
+    } catch (e: any) { res.status(400).json({ error: e.message }); }
+  });
+
+  app.post("/api/shop/login", async (req, res) => {
+    try {
+      const { email, password } = req.body || {};
+      if (!email || !password) return res.status(400).json({ error: "Email and password required" });
+      const result = shop.loginShopUser(email, password);
+      if (!result) return res.status(401).json({ error: "Invalid email or password" });
+      res.json(result);
+    } catch (e: any) { res.status(500).json({ error: e.message }); }
+  });
+
+  app.post("/api/shop/logout", requireShop, async (req, res) => {
+    shop.deleteShopSession(req.headers["x-shop-token"] as string);
+    res.json({ ok: true });
+  });
+
+  app.get("/api/shop/me", requireShop, async (req, res) => {
+    const user = shop.getShopUserById((req as any).shopUserId);
+    if (!user) return res.status(404).json({ error: "Account not found" });
+    res.json(user);
+  });
+
+  // ---- addresses ----
+  app.get("/api/shop/addresses", requireShop, (req, res) => res.json(shop.listAddresses((req as any).shopUserId)));
+  app.post("/api/shop/addresses", requireShop, (req, res) => {
+    try { res.json(shop.createAddress((req as any).shopUserId, req.body || {})); }
+    catch (e: any) { res.status(400).json({ error: e.message }); }
+  });
+  app.put("/api/shop/addresses/:id", requireShop, (req, res) => {
+    const r = shop.updateAddress((req as any).shopUserId, parseInt(String(req.params.id), 10), req.body || {});
+    if (!r) return res.status(404).json({ error: "Address not found" });
+    res.json(r);
+  });
+  app.delete("/api/shop/addresses/:id", requireShop, (req, res) => {
+    shop.deleteAddress((req as any).shopUserId, parseInt(String(req.params.id), 10));
+    res.json({ ok: true });
+  });
+  app.post("/api/shop/addresses/:id/default", requireShop, (req, res) => {
+    const r = shop.setDefaultAddress((req as any).shopUserId, parseInt(String(req.params.id), 10));
+    if (!r) return res.status(404).json({ error: "Address not found" });
+    res.json(r);
+  });
+
+  // ---- wishlist ----
+  app.get("/api/shop/wishlist", requireShop, (req, res) => res.json(shop.listWishlist((req as any).shopUserId)));
+  app.post("/api/shop/wishlist", requireShop, (req, res) => {
+    const { product_id, productId, part_number, partNumber } = req.body || {};
+    const pid = parseInt(String(product_id ?? productId), 10);
+    if (!pid) return res.status(400).json({ error: "product_id required" });
+    res.json(shop.addWishlist((req as any).shopUserId, pid, part_number ?? partNumber));
+  });
+  app.delete("/api/shop/wishlist/:id", requireShop, (req, res) => res.json(shop.removeWishlist((req as any).shopUserId, parseInt(String(req.params.id), 10))));
+
+  // ---- freight quote for cart (public) ----
+  app.post("/api/shop/freight-quote", (req, res) => {
+    try {
+      const items: any[] = Array.isArray(req.body?.items) ? req.body.items : [];
+      let freight = 0;
+      const lines = items.map((it) => {
+        const per = shop.getFreightForPart(it.part_number ?? it.partNumber);
+        const qty = Math.max(1, Number(it.qty) || 1);
+        freight += per * qty;
+        return { partNumber: it.part_number ?? it.partNumber ?? null, freightPerUnit: per, qty };
+      });
+      res.json({ freightInr: freight, lines });
+    } catch (e: any) { res.status(400).json({ error: e.message }); }
+  });
+
+  // ---- checkout / orders (TASK 3) ----
+  app.post("/api/shop/orders", requireShop, async (req, res) => {
+    try {
+      const shopUserId = (req as any).shopUserId as number;
+      const user = shop.getShopUserById(shopUserId);
+      if (!user) return res.status(404).json({ error: "Account not found" });
+      const body = req.body || {};
+      const ship = body.ship || body.address || {};
+      const order = shop.createShopOrder({
+        shopUserId,
+        customerEmail: (user as any).email,
+        customerPhone: (user as any).phone || ship.phone || null,
+        customerName: (user as any).fullName || ship.fullName || null,
+        ship: {
+          fullName: ship.fullName || ship.full_name,
+          phone: ship.phone,
+          line1: ship.line1, line2: ship.line2,
+          city: ship.city, state: ship.state, pincode: ship.pincode, country: ship.country || "IN",
+        },
+        items: (body.items || []).map((it: any) => ({
+          productId: it.product_id ?? it.productId ?? null,
+          partNumber: it.part_number ?? it.partNumber ?? null,
+          name: it.name, image: it.image ?? null,
+          unitPriceInr: Number(it.unit_price ?? it.unitPriceInr ?? it.unit_price_inr ?? 0),
+          qty: Number(it.qty) || 1,
+        })),
+        currency: body.currency || "INR",
+        fxRate: Number(body.fx_rate ?? body.fxRate ?? 1) || 1,
+        paymentMode: "COD",
+      });
+
+      // Order confirmation email (fire-and-forget, never blocks order placement).
+      try {
+        const itemRows = (order!.items || []).map((it: any) =>
+          `<tr><td style="padding:6px 8px;border-bottom:1px solid #eee;">${escapeHtml(it.name)}${it.partNumber ? ` <span style="color:#888;">(${escapeHtml(it.partNumber)})</span>` : ""}</td>
+           <td style="padding:6px 8px;border-bottom:1px solid #eee;text-align:center;">${it.qty}</td>
+           <td style="padding:6px 8px;border-bottom:1px solid #eee;text-align:right;">₹${Number(it.totalInr).toLocaleString("en-IN")}</td></tr>`
+        ).join("");
+        const s = order!.ship || ({} as any);
+        sendGenericEmail({
+          to: (user as any).email,
+          subject: `Order Confirmed - ${order!.orderNumber} - Narmada Mobility`,
+          html: `<div style="font-family:system-ui,-apple-system,sans-serif;max-width:560px;margin:0 auto;">
+            <div style="background:#001a4d;color:#fff;padding:18px;border-radius:8px 8px 0 0;"><h2 style="margin:0;">Thank you for your order!</h2></div>
+            <div style="border:1px solid #e5e7eb;border-top:none;padding:20px;border-radius:0 0 8px 8px;">
+              <p>Your order <strong>${order!.orderNumber}</strong> has been placed.</p>
+              <table style="width:100%;border-collapse:collapse;font-size:14px;margin:12px 0;">
+                <thead><tr style="background:#f3f4f6;"><th style="padding:6px 8px;text-align:left;">Item</th><th style="padding:6px 8px;">Qty</th><th style="padding:6px 8px;text-align:right;">Total</th></tr></thead>
+                <tbody>${itemRows}</tbody>
+              </table>
+              <p style="text-align:right;margin:4px 0;">Subtotal: ₹${Number(order!.subtotalInr).toLocaleString("en-IN")}</p>
+              <p style="text-align:right;margin:4px 0;">Freight: ₹${Number(order!.freightInr).toLocaleString("en-IN")}</p>
+              <p style="text-align:right;margin:4px 0;font-size:16px;"><strong>Total: ₹${Number(order!.totalInr).toLocaleString("en-IN")}</strong> (Cash on Delivery)</p>
+              <p style="margin-top:14px;"><strong>Ship to:</strong><br/>${escapeHtml(s.fullName || "")}, ${escapeHtml(s.phone || "")}<br/>${escapeHtml(s.line1 || "")}${s.line2 ? ", " + escapeHtml(s.line2) : ""}<br/>${escapeHtml(s.city || "")}, ${escapeHtml(s.state || "")} - ${escapeHtml(s.pincode || "")}</p>
+              <p style="margin-top:14px;">Track your order at <a href="https://narmadamobility.com/#/customer/orders/${order!.id}">narmadamobility.com</a></p>
+            </div></div>`,
+        }).catch((e: any) => console.error("[shop] order email error:", e?.message));
+      } catch (e: any) { console.error("[shop] order email build error:", e?.message); }
+
+      // Auto-PO into procurement (fire-and-forget; failure must NOT fail the order).
+      try {
+        const poItems = (order!.items || []).map((it: any) => ({
+          description: it.name, partNumber: it.partNumber || undefined,
+          qty: it.qty, unitPrice: it.unitPriceInr,
+        }));
+        const po = await v2.createPurchaseOrderV2(
+          { customerName: `Web Order — ${order!.customerName || (user as any).email}`, status: "draft", notes: `Auto-created from web order ${order!.orderNumber}` } as any,
+          poItems as any,
+        );
+        if (po?.id) shop.linkProcurementPo(order!.id, po.id);
+      } catch (e: any) { console.error("[shop] auto-PO error:", e?.message); }
+
+      res.json(shop.getShopOrder(order!.id));
+    } catch (e: any) { res.status(400).json({ error: e.message }); }
+  });
+
+  app.get("/api/shop/orders", requireShop, (req, res) => res.json(shop.listOrdersForUser((req as any).shopUserId)));
+  app.get("/api/shop/orders/:id", requireShop, (req, res) => {
+    const o = shop.getOrderForUser((req as any).shopUserId, parseInt(String(req.params.id), 10));
+    if (!o) return res.status(404).json({ error: "Order not found" });
+    res.json(o);
+  });
+
+  // ---- admin: orders (TASK 4) ----
+  app.get("/api/admin/shop-orders", requireAuth, (req, res) => {
+    res.json(shop.adminListOrders({
+      status: req.query.status as string, from: req.query.from as string, to: req.query.to as string,
+      q: req.query.q as string,
+      limit: req.query.limit ? parseInt(req.query.limit as string, 10) : undefined,
+      offset: req.query.offset ? parseInt(req.query.offset as string, 10) : undefined,
+    }));
+  });
+  app.get("/api/admin/shop-orders/:id", requireAuth, (req, res) => {
+    const o = shop.getShopOrder(parseInt(String(req.params.id), 10));
+    if (!o) return res.status(404).json({ error: "Order not found" });
+    res.json(o);
+  });
+  app.patch("/api/admin/shop-orders/:id/status", requireAuth, async (req, res) => {
+    try {
+      const { status, note } = req.body || {};
+      if (!status) return res.status(400).json({ error: "status required" });
+      const by = ((req as any).user?.username) || "admin";
+      const o = shop.adminUpdateOrderStatus(parseInt(String(req.params.id), 10), status, note || null, by);
+      if (!o) return res.status(404).json({ error: "Order not found" });
+      if (status === "dispatched" && o.customerEmail) {
+        sendGenericEmail({
+          to: o.customerEmail,
+          subject: `Order Dispatched - ${o.orderNumber} - Narmada Mobility`,
+          html: `<div style="font-family:system-ui,sans-serif;max-width:520px;margin:0 auto;padding:20px;">
+            <h2 style="color:#001a4d;">Your order is on the way!</h2>
+            <p>Order <strong>${o.orderNumber}</strong> has been dispatched.</p>
+            ${o.dispatchedCarrier ? `<p>Carrier: <strong>${escapeHtml(o.dispatchedCarrier)}</strong></p>` : ""}
+            ${o.dispatchedDocket ? `<p>Docket / Tracking #: <strong>${escapeHtml(o.dispatchedDocket)}</strong></p>` : ""}
+            <p>Track at <a href="https://narmadamobility.com/#/customer/orders/${o.id}">narmadamobility.com</a></p>
+          </div>`,
+        }).catch((e: any) => console.error("[shop] dispatch email error:", e?.message));
+      }
+      res.json(o);
+    } catch (e: any) { res.status(400).json({ error: e.message }); }
+  });
+  app.patch("/api/admin/shop-orders/:id/dispatch", requireAuth, (req, res) => {
+    const { carrier, docket, dispatched_at, dispatchedAt } = req.body || {};
+    const o = shop.adminUpdateDispatch(parseInt(String(req.params.id), 10), carrier, docket, dispatched_at ?? dispatchedAt);
+    if (!o) return res.status(404).json({ error: "Order not found" });
+    res.json(o);
+  });
+
+  // ---- admin: web customers (TASK 5) ----
+  app.get("/api/admin/shop-customers", requireAuth, (req, res) => {
+    res.json(shop.adminListShopUsers({ q: req.query.q as string, sort: req.query.sort as string }));
+  });
+  app.get("/api/admin/shop-customers/:id", requireAuth, (req, res) => {
+    const u = shop.adminGetShopUser(parseInt(String(req.params.id), 10));
+    if (!u) return res.status(404).json({ error: "Customer not found" });
+    res.json(u);
+  });
+
+  // ---- admin: freight charges (TASK 6) ----
+  app.get("/api/admin/freight-charges", requireAuth, (req, res) => {
+    res.json(shop.adminListFreight({
+      q: req.query.q as string,
+      zeroOnly: req.query.zero_only === "1" || req.query.zero_only === "true",
+      limit: req.query.limit ? parseInt(req.query.limit as string, 10) : undefined,
+      offset: req.query.offset ? parseInt(req.query.offset as string, 10) : undefined,
+    }));
+  });
+  app.patch("/api/admin/freight-charges/:partNumber", requireAuth, (req, res) => {
+    const { freight_inr, freightInr } = req.body || {};
+    res.json(shop.adminUpsertFreight(decodeURIComponent(req.params.partNumber), Number(freight_inr ?? freightInr ?? 0)));
+  });
+  app.post("/api/admin/freight-charges/bulk", requireAuth, (req, res) => {
+    const { part_numbers, partNumbers, freight_inr, freightInr } = req.body || {};
+    const pns: string[] = part_numbers ?? partNumbers ?? [];
+    if (!Array.isArray(pns) || !pns.length) return res.status(400).json({ error: "part_numbers required" });
+    res.json(shop.adminBulkFreight(pns, Number(freight_inr ?? freightInr ?? 0)));
+  });
+  app.post("/api/admin/freight-charges/csv", requireAuth, freightCsvStore.single("file"), (req, res) => {
+    try {
+      const file = (req as any).file;
+      if (!file) return res.status(400).json({ error: "CSV file required" });
+      const text = fs2.readFileSync(file.path, "utf8");
+      const parsed = Papa.parse(text, { header: true, skipEmptyLines: true });
+      let upserted = 0;
+      for (const row of parsed.data as any[]) {
+        const pn = row.part_number || row.partNumber || row.Part || row.part;
+        const fr = row.freight_inr ?? row.freight ?? row.Freight;
+        if (pn) { shop.adminUpsertFreight(String(pn).trim(), Number(fr) || 0); upserted++; }
+      }
+      try { fs2.unlinkSync(file.path); } catch {}
+      res.json({ ok: true, upserted });
+    } catch (e: any) { res.status(400).json({ error: e.message }); }
+  });
+
+  // ---- duplicate PO + quotation (TASK 8) ----
+  app.post("/api/admin/purchase-orders/:id/duplicate", requireAuth, async (req, res) => {
+    try {
+      const dup = await v2.duplicatePurchaseOrderV2(parseInt(String(req.params.id), 10));
+      if (!dup) return res.status(404).json({ error: "PO not found" });
+      res.json(dup);
+    } catch (e: any) { res.status(400).json({ error: e.message }); }
+  });
+  app.post("/api/admin/quotations/:id/duplicate", requireAuth, async (req, res) => {
+    try {
+      const dup = await v2.duplicateQuotation(parseInt(String(req.params.id), 10));
+      if (!dup) return res.status(404).json({ error: "Quotation not found" });
+      res.json(dup);
+    } catch (e: any) { res.status(400).json({ error: e.message }); }
+  });
+}
+
+// R27.1 — local HTML escaper for order/dispatch emails.
+function escapeHtml(s: any): string {
+  return String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c] as string));
 }

@@ -31,6 +31,7 @@ const ROLE_PAGES: Record<AdminRole, Set<string>> = {
     "/admin/ads-meta", "/admin/ads-google", "/admin/integrations",
     "/admin/marketing/campaigns", "/admin/marketing/audiences", "/admin/marketing/templates", "/admin/marketing/custom-templates",
     "/admin/webhook-events",
+    "/admin/orders", "/admin/web-customers", "/admin/freight",
   ]),
   logistics: new Set(["/admin/consignments"]),
   accounts: new Set([
@@ -100,6 +101,9 @@ export function AdminLayout({ children, title }: { children: ReactNode; title: s
     { href: "/admin/parts", label: "Parts", icon: Package },
     { href: "/admin/purchase-orders", label: "Purchase Orders", icon: ShoppingCart },
     { href: "/admin/purchase-history", label: "Purchase History", icon: History },
+    { href: "/admin/orders", label: "Web Orders", icon: ShoppingCart },
+    { href: "/admin/web-customers", label: "Web Customers", icon: UserSquare },
+    { href: "/admin/freight", label: "Freight Charges", icon: Truck },
     { href: "/admin/bank", label: "Bank Accounts", icon: Landmark },
     { href: "/admin/companies", label: "Companies", icon: Building2 },
     { href: "/admin/vendors", label: "Vendors", icon: Factory },

@@ -1880,6 +1880,37 @@ export async function createPurchaseOrderV2(data: Partial<InsertPurchaseOrderV2>
 export async function updatePurchaseOrderV2(id: number, data: Partial<InsertPurchaseOrderV2>): Promise<PurchaseOrderV2 | undefined> {
   return db.update(purchaseOrdersV2).set({ ...data, updatedAt: Date.now() }).where(eq(purchaseOrdersV2.id, id)).returning().get();
 }
+
+// R27.1 TASK 8 — duplicate a PO: copy header (customer/company/notes/totals) + all line
+// items, allocate a fresh po_number, reset dates to NOW, status back to "draft". Does NOT
+// copy dispatch/docket/consignment/delhi fields (those belong to the original fulfilment).
+export async function duplicatePurchaseOrderV2(id: number): Promise<PurchaseOrderV2 | undefined> {
+  const src = sqlite.prepare(`SELECT * FROM purchase_orders_v2 WHERE id = ?`).get(id) as any;
+  if (!src) return undefined;
+  const items = sqlite.prepare(`SELECT * FROM po_items WHERE po_id = ?`).all(id) as any[];
+  const now = Date.now();
+  const dup = await createPurchaseOrderV2(
+    {
+      customerId: src.customer_id ?? undefined,
+      companyId: src.company_id ?? undefined,
+      quotationId: src.quotation_id ?? undefined,
+      status: "draft",
+      subtotal: src.subtotal ?? 0,
+      discount: src.discount ?? 0,
+      tax: src.tax ?? 0,
+      total: src.total ?? 0,
+      notes: src.notes ?? undefined,
+      poDate: now,
+    } as any,
+    items.map((it) => ({
+      description: it.description, partNumber: it.part_number, brand: it.brand,
+      qty: it.qty, unitPrice: it.unit_price, discountPct: it.discount_pct,
+      taxPct: it.tax_pct, lineTotal: it.line_total, vendorId: it.vendor_id,
+      purchaseCost: it.purchase_cost, vendorRate: it.vendor_rate, vendorName: it.vendor_name,
+    })) as any,
+  );
+  return dup;
+}
 export async function getPoItem(id: number): Promise<PoItem | undefined> {
   return db.select().from(poItems).where(eq(poItems.id, id)).get();
 }
@@ -3727,6 +3758,17 @@ export function listDelhiDispatchedForConsignment(opts: {
     const bundlesRow = sqlite.prepare(
       `SELECT COALESCE(SUM(bundles), 0) AS total FROM dispatches WHERE po_id = ?`
     ).get(po.id) as any;
+    // R27.1 TASK 0 — hydrate docket # / slip URL from the dispatch row when the PO-level
+    // docket fields are empty (Delhi often records the docket only on the dispatch).
+    const disp = sqlite.prepare(
+      `SELECT docket_no AS docketNo, courier_name AS courier, docket_photo_url AS docketPhotoUrl
+       FROM dispatches WHERE po_id = ? AND (docket_no IS NOT NULL OR docket_photo_url IS NOT NULL)
+       ORDER BY round_no ASC LIMIT 1`
+    ).get(po.id) as any;
+    const docketUrl =
+      docketUrlFromPath(po.docket_slip_path, opts.origin) ??
+      docketUrlFromPath(disp?.docketPhotoUrl, opts.origin);
+    const docketNumber = po.docket_number ?? disp?.docketNo ?? null;
     return {
       id: po.id, poNumber: po.po_number, customerId: po.customer_id,
       customerName: customer?.name ?? null, customerPhone: customer?.phone ?? null,
@@ -3735,8 +3777,9 @@ export function listDelhiDispatchedForConsignment(opts: {
       consignmentReceivedAt: po.consignment_received_at ?? null,
       itemCount: items.length, custTotal, costTotal,
       totalBundles: Number(bundlesRow?.total ?? 0) || 0,
-      docketUrl: docketUrlFromPath(po.docket_slip_path, opts.origin),
-      docketNumber: po.docket_number ?? null,
+      carrier: disp?.courier ?? null,
+      docketUrl,
+      docketNumber,
     };
   });
 }
@@ -3767,12 +3810,21 @@ export function getConsignmentDetail(poId: number, origin?: string | null): any 
     };
   });
   const dispatches = sqlite.prepare(
-    `SELECT docket_no AS docketNo, courier_name AS courier, bundles, dispatch_date AS dispatchDate
+    `SELECT docket_no AS docketNo, courier_name AS courier, bundles, dispatch_date AS dispatchDate, docket_photo_url AS docketPhotoUrl
      FROM dispatches WHERE po_id = ? ORDER BY round_no ASC`
   ).all(po.id) as any[];
   const totalBundles = dispatches.reduce((s, d) => s + (Number(d.bundles) || 0), 0);
   const carriers = Array.from(new Set(dispatches.map((d) => d.courier).filter(Boolean)));
   const dockets = dispatches.map((d) => d.docketNo).filter(Boolean);
+  // R27.1 TASK 0 — defensive docket hydration: many From-Delhi POs have their docket
+  // captured on the dispatch row (docket_no + docket_photo_url) but NOT mirrored onto
+  // the PO-level docket_number / docket_slip_path. Fall back to the dispatch values so
+  // the consignment portal shows the docket # and enables "View Docket".
+  const firstDocketDispatch = dispatches.find((d) => d.docketNo || d.docketPhotoUrl) || null;
+  const effDocketNumber = po.docket_number ?? firstDocketDispatch?.docketNo ?? null;
+  const effDocketUrl =
+    docketUrlFromPath(po.docket_slip_path, origin) ??
+    docketUrlFromPath(firstDocketDispatch?.docketPhotoUrl, origin);
   return {
     id: po.id,
     poNumber: po.po_number,
@@ -3785,14 +3837,14 @@ export function getConsignmentDetail(poId: number, origin?: string | null): any 
     dispatches,
     totalItems: items.length,
     totalBundles,
-    carrier: carriers.join(", ") || null,
+    carrier: carriers.join(", ") || po.docket_transport || null,
     dockets,
     // R26.2 — Delhi docket fields stored on the PO (transport name + docket no/date + slip).
-    docketTransport: po.docket_transport ?? null,
-    docketNumber: po.docket_number ?? null,
-    docketDate: po.docket_date ?? null,
+    docketTransport: po.docket_transport ?? firstDocketDispatch?.courier ?? null,
+    docketNumber: effDocketNumber,
+    docketDate: po.docket_date ?? firstDocketDispatch?.dispatchDate ?? null,
     docketSlipPath: po.docket_slip_path ?? null,
-    docketUrl: docketUrlFromPath(po.docket_slip_path, origin),
+    docketUrl: effDocketUrl,
   };
 }
 

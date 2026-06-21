@@ -27,6 +27,7 @@ interface FromDelhiDetail {
   origin: string; destination: string | null; status: string | null;
   itemCount: number; totalBundles: number; totalValue: number;
   items: FromDelhiItem[]; docketUrl: string | null; invoiceUrl: string | null; docketNumber: string | null;
+  docketTransport?: string | null; carrier?: string | null;
 }
 interface CustomerRow {
   id: number; name: string; phone: string | null; email: string | null;
@@ -338,6 +339,7 @@ function FromDelhiTab({ token }: { token: string | null }) {
             <Info label="Items" value={String(detail.itemCount)} />
             <Info label="Bundles" value={String(detail.totalBundles)} />
             <Info label="Docket #" value={detail.docketNumber || "—"} />
+            <Info label="Carrier" value={detail.docketTransport || detail.carrier || "—"} />
             <Info label="Total Value" value={inr(detail.totalValue)} />
           </dl>
           <div className="border rounded-lg overflow-x-auto">
@@ -364,7 +366,11 @@ function FromDelhiTab({ token }: { token: string | null }) {
             </table>
           </div>
           <div className="flex gap-2 mt-4">
-            {detail.docketUrl && <button onClick={() => openFile(detail.docketUrl)} className="px-3 py-1.5 border rounded text-xs font-semibold inline-flex items-center gap-1 text-blue-600" data-testid="btn-detail-docket"><FileText className="w-3 h-3" /> Download Docket</button>}
+            {detail.docketUrl ? (
+              <button onClick={() => openFile(detail.docketUrl)} className="px-3 py-1.5 border rounded text-xs font-semibold inline-flex items-center gap-1 text-blue-600" data-testid="btn-detail-docket"><FileText className="w-3 h-3" /> View Docket</button>
+            ) : (
+              <span title="No docket slip image uploaded by Delhi yet" className="px-3 py-1.5 border rounded text-xs font-semibold inline-flex items-center gap-1 text-muted-foreground opacity-50 cursor-not-allowed"><FileText className="w-3 h-3" /> View Docket</span>
+            )}
             {detail.invoiceUrl && <button onClick={() => openFile(detail.invoiceUrl)} className="px-3 py-1.5 border rounded text-xs font-semibold inline-flex items-center gap-1 text-blue-600" data-testid="btn-detail-invoice"><FileText className="w-3 h-3" /> Download Invoice</button>}
           </div>
         </Modal>

@@ -151,6 +151,21 @@ import ConsignmentLogin from "@/pages/roles/ConsignmentLogin";
 import ConsignmentDashboard from "@/pages/roles/ConsignmentDashboard";
 
 import { CustomerAuthProvider } from "@/lib/customer-auth";
+// R27.1 — e-commerce shopper auth + pages (distinct from the B2B /portal)
+import { ShopAuthProvider } from "@/lib/shop-auth";
+import CartPage from "@/pages/CartPage";
+import CheckoutPage from "@/pages/CheckoutPage";
+import ShopLogin from "@/pages/shop/ShopLogin";
+import ShopSignup from "@/pages/shop/ShopSignup";
+import ShopAccount from "@/pages/shop/ShopAccount";
+import ShopOrders from "@/pages/shop/ShopOrders";
+import ShopOrderDetail from "@/pages/shop/ShopOrderDetail";
+import ShopWishlist from "@/pages/shop/ShopWishlist";
+import OrderConfirmation from "@/pages/shop/OrderConfirmation";
+import AdminShopOrders from "@/pages/admin/AdminShopOrders";
+import AdminShopOrderDetail from "@/pages/admin/AdminShopOrderDetail";
+import AdminShopCustomers from "@/pages/admin/AdminShopCustomers";
+import AdminFreight from "@/pages/admin/AdminFreight";
 import CustomerLogin from "@/pages/portal/CustomerLogin";
 import CustomerDashboard from "@/pages/portal/CustomerDashboard";
 import CustomerLedger from "@/pages/portal/CustomerLedger";
@@ -204,6 +219,16 @@ function PublicRoutes() {
         <Route path="/work-with-us" component={WorkWithUsPage} />
         <Route path="/privacy" component={PrivacyPage} />
         <Route path="/disclaimer" component={DisclaimerPage} />
+        {/* R27.1 — e-commerce shopper pages (BEFORE catch-all /:slug) */}
+        <Route path="/cart" component={CartPage} />
+        <Route path="/checkout" component={CheckoutPage} />
+        <Route path="/order-confirmation/:id" component={OrderConfirmation} />
+        <Route path="/customer/login" component={ShopLogin} />
+        <Route path="/customer/signup" component={ShopSignup} />
+        <Route path="/customer/account" component={ShopAccount} />
+        <Route path="/customer/orders/:id" component={ShopOrderDetail} />
+        <Route path="/customer/orders" component={ShopOrders} />
+        <Route path="/customer/wishlist" component={ShopWishlist} />
         {/* Phase 3 — registered BEFORE catch-all /:slug */}
         <Route path="/blog" component={BlogList} />
         <Route path="/blog/:slug" component={BlogDetail} />
@@ -280,6 +305,13 @@ function AppRouter() {
         {/* Round 8 — new admin routes */}
         <Route path="/admin/parts" component={AdminParts} />
         <Route path="/admin/purchase-history" component={AdminPurchaseHistory} />
+        {/* R27.1 — e-commerce admin (orders, web customers, freight) */}
+        <Route path="/admin/shop-orders/:id" component={AdminShopOrderDetail} />
+        <Route path="/admin/shop-orders" component={AdminShopOrders} />
+        <Route path="/admin/orders/:id" component={AdminShopOrderDetail} />
+        <Route path="/admin/orders" component={AdminShopOrders} />
+        <Route path="/admin/web-customers" component={AdminShopCustomers} />
+        <Route path="/admin/freight" component={AdminFreight} />
         {/* R23.1 — owner Command Center */}
         <Route path="/admin/command-center" component={AdminCommandCenter} />
         {/* R24.4 — WhatsApp-web style Chats */}
@@ -445,12 +477,14 @@ function App() {
         <TooltipProvider>
           <AdminAuthProvider>
             <CustomerAuthProvider>
-              <TeamAuthProvider>
-                <Toaster />
-                <Router hook={useHashLocationNoQuery}>
-                  <AppRouter />
-                </Router>
-              </TeamAuthProvider>
+              <ShopAuthProvider>
+                <TeamAuthProvider>
+                  <Toaster />
+                  <Router hook={useHashLocationNoQuery}>
+                    <AppRouter />
+                  </Router>
+                </TeamAuthProvider>
+              </ShopAuthProvider>
             </CustomerAuthProvider>
           </AdminAuthProvider>
         </TooltipProvider>
