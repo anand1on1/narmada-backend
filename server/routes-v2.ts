@@ -6305,23 +6305,17 @@ function registerR8Routes(
         if (!verifyPassword(String(password), user.passwordHash)) return res.status(401).json({ error: "Invalid credentials" });
         const session = await v2.createDataTeamSession(user.id);
         await v2.touchDataTeamUserLogin(user.id);
+        // R27.11 #1 — every portal role auto-gets a staff row on login (idempotent,
+        // best-effort, never blocks login). Admins are skipped (no staff mirror).
+        if (user.role && user.role !== "admin") {
+          r27().then((s) => { try { s.ensureEmployeeForUser(user.id, user.role); } catch { /* best-effort */ } }).catch(() => {});
+        }
         const { passwordHash: _ph, ...safeUser } = user;
         res.json({ token: session.token, expiresAt: session.expiresAt, user: safeUser });
       } catch (e: any) { res.status(500).json({ error: e.message }); }
     };
   }
-  // R27.10 #1 — on sales login, ensure the rep has a staff row (idempotent).
-  const salesLogin = makeRoleLogin("sales");
-  app.post("/api/sales/login", async (req: Request, res: Response) => {
-    const origJson = res.json.bind(res);
-    (res as any).json = (body: any) => {
-      if (body?.user?.id && body?.user?.role === "sales") {
-        r27().then((s) => { try { s.ensureSalesEmployee(body.user.id); } catch { /* best-effort */ } }).catch(() => {});
-      }
-      return origJson(body);
-    };
-    return salesLogin(req, res);
-  });
+  app.post("/api/sales/login", makeRoleLogin("sales"));
   app.post("/api/finance/login", makeRoleLogin("finance"));
   app.post("/api/hr/login", makeRoleLogin("hr"));
   app.post("/api/consignment/login", makeRoleLogin("consignment"));
@@ -7749,11 +7743,31 @@ function registerR8Routes(
   });
   app.post("/api/finance/employees", acctAuth, async (req, res) => {
     try { if (!req.body?.name) return res.status(400).json({ error: "name required" }); const s = await r27(); res.json(s.createEmployee(req.body)); }
-    catch (e: any) { res.status(400).json({ error: e.message }); }
+    catch (e: any) {
+      if (e?.code === "DUP_LINK") return res.status(409).json({ error: e.message, employeeId: e.employeeId });
+      res.status(400).json({ error: e.message });
+    }
   });
   app.put("/api/finance/employees/:id", acctAuth, async (req: any, res) => {
     try { const s = await r27(); res.json(s.updateEmployee(parseInt(req.params.id as string, 10), req.body || {}, !!req.isAdminAcct)); }
     catch (e: any) { res.status(400).json({ error: e.message }); }
+  });
+  // R27.11 #2 — flat list of portal users for the admin link-to-user dropdown.
+  app.get("/api/admin/portal-users", requireAdminRole, async (_req, res) => {
+    try { const s = await r27(); res.json(s.listPortalUsers()); }
+    catch (e: any) { res.status(500).json({ error: e.message }); }
+  });
+  // R27.11 #2 — link an existing employee to a portal user (admin + finance via acctAuth).
+  app.patch("/api/finance/employees/:id/link", acctAuth, async (req: any, res) => {
+    try {
+      const { linked_user_id, linked_user_role } = req.body || {};
+      if (!linked_user_id || !linked_user_role) return res.status(400).json({ error: "linked_user_id and linked_user_role required" });
+      const s = await r27();
+      res.json(s.linkEmployeeToUser(parseInt(req.params.id as string, 10), Number(linked_user_id), String(linked_user_role)));
+    } catch (e: any) {
+      if (e?.code === "DUP_LINK") return res.status(409).json({ error: e.message, employeeId: e.employeeId });
+      res.status(400).json({ error: e.message });
+    }
   });
   // R27.7 #8 — staff document / photo upload. ?kind=photo|aadhar|pan|doc.
   const staffDocsDir = path.join(ctx.uploadsDir || "./uploads", "staff");

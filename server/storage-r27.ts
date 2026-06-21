@@ -1444,25 +1444,95 @@ export function syncSalesExpenseToAccounts(salesExpenseId: number, by?: number) 
 // advances can be issued against them and expenses can settle. Idempotent: links by
 // sales_user_id first, then by matching name, else creates a fresh Sales staff row.
 // Safe to call from login and from expense-submit; returns the employee id.
-export function ensureSalesEmployee(salesUserId: number): number | null {
-  if (!salesUserId) return null;
+// R27.11 #1 — every portal role lives in data_team_users keyed by `role`.
+// employees.role gets a friendly label for each.
+const R27_11_ROLE_LABEL: Record<string, string> = {
+  sales: "Sales",
+  finance: "Finance",
+  hr: "HR",
+  consignment: "Consignment",
+  store_incharge: "Store",
+  dispatch_incharge: "Dispatch",
+};
+
+// Generalized auto-staff: link (or create) an employee row for any portal user.
+// Link order: by generic link → by sales_user_id (back-compat) → by name → create.
+// Always keeps both the generic link columns and (for sales) sales_user_id set.
+export function ensureEmployeeForUser(userId: number, role: string): number | null {
+  if (!userId || !role) return null;
   try {
-    const existing = sqlite.prepare(`SELECT id FROM employees WHERE sales_user_id = ?`).get(salesUserId) as any;
-    if (existing) return existing.id;
-    const rep = sqlite.prepare(`SELECT id, name, username, email FROM data_team_users WHERE id = ?`).get(salesUserId) as any;
-    if (!rep) return null;
-    const nm = String(rep.name || rep.username || `Sales #${salesUserId}`).trim();
-    const byName = sqlite.prepare(`SELECT id FROM employees WHERE LOWER(TRIM(name)) = LOWER(TRIM(?)) LIMIT 1`).get(nm) as any;
-    if (byName) { sqlite.prepare(`UPDATE employees SET sales_user_id = ? WHERE id = ?`).run(salesUserId, byName.id); return byName.id; }
+    const byLink = sqlite.prepare(
+      `SELECT id FROM employees WHERE linked_user_id = ? AND linked_user_role = ?`,
+    ).get(userId, role) as any;
+    if (byLink) return byLink.id;
+
+    const u = sqlite.prepare(`SELECT id, name, username, email FROM data_team_users WHERE id = ?`).get(userId) as any;
+    if (!u) return null;
+    const label = R27_11_ROLE_LABEL[role] || role;
+    const nm = String(u.name || u.username || `${label} #${userId}`).trim();
+    const isSales = role === "sales";
+
+    // Back-compat: an R27.10 sales row may exist linked only via sales_user_id.
+    if (isSales) {
+      const bySales = sqlite.prepare(`SELECT id FROM employees WHERE sales_user_id = ?`).get(userId) as any;
+      if (bySales) {
+        sqlite.prepare(`UPDATE employees SET linked_user_id = ?, linked_user_role = 'sales' WHERE id = ?`).run(userId, bySales.id);
+        return bySales.id;
+      }
+    }
+
+    // Email then name match against an unlinked employee.
+    const byEmail = u.email
+      ? (sqlite.prepare(`SELECT id FROM employees WHERE email IS NOT NULL AND LOWER(TRIM(email)) = LOWER(TRIM(?)) AND linked_user_id IS NULL LIMIT 1`).get(u.email) as any)
+      : null;
+    const match = byEmail || (sqlite.prepare(`SELECT id FROM employees WHERE LOWER(TRIM(name)) = LOWER(TRIM(?)) AND linked_user_id IS NULL LIMIT 1`).get(nm) as any);
+    if (match) {
+      sqlite.prepare(`UPDATE employees SET linked_user_id = ?, linked_user_role = ?${isSales ? ", sales_user_id = ?" : ""} WHERE id = ?`)
+        .run(...(isSales ? [userId, role, userId, match.id] : [userId, role, match.id]));
+      return match.id;
+    }
+
     const info = sqlite.prepare(
-      `INSERT INTO employees (name, email, role, branch, active, sales_user_id, working_days_default, retention_pct, created_at)
-       VALUES (?, ?, 'Sales', 'Delhi', 1, ?, 26, 10, ?)`,
-    ).run(nm, rep.email ?? null, salesUserId, nowIso());
+      `INSERT INTO employees (name, email, role, branch, active, linked_user_id, linked_user_role, sales_user_id, working_days_default, retention_pct, created_at)
+       VALUES (?, ?, ?, 'Delhi', 1, ?, ?, ?, 26, 10, ?)`,
+    ).run(nm, u.email ?? null, label, userId, role, isSales ? userId : null, nowIso());
     return Number(info.lastInsertRowid);
   } catch (e: any) {
-    console.error("[R27.10 #1] ensureSalesEmployee failed:", e?.message || e);
+    console.error("[R27.11 #1] ensureEmployeeForUser failed:", e?.message || e);
     return null;
   }
+}
+
+// R27.10 callers stay working — sales is just one role now.
+export function ensureSalesEmployee(salesUserId: number): number | null {
+  return ensureEmployeeForUser(salesUserId, "sales");
+}
+
+// R27.11 #2 — flat list of every portal user for the admin link-to-user dropdown.
+export function listPortalUsers() {
+  const rows = sqlite.prepare(
+    `SELECT id AS user_id, role, COALESCE(name, username) AS name, email
+       FROM data_team_users
+      WHERE COALESCE(active,1) = 1 AND role IN ('sales','finance','hr','consignment','store_incharge','dispatch_incharge','data_team','admin')
+      ORDER BY role ASC, name ASC`,
+  ).all() as any[];
+  return rows.map((r) => ({ ...r, branch: "Delhi" }));
+}
+
+// R27.11 #2 — link an existing employee to a portal user (admin action).
+// Throws on a duplicate so the route can map it to 409.
+export function linkEmployeeToUser(employeeId: number, linkedUserId: number, linkedUserRole: string) {
+  const emp = sqlite.prepare(`SELECT id FROM employees WHERE id = ?`).get(employeeId) as any;
+  if (!emp) throw new Error("employee not found");
+  const u = sqlite.prepare(`SELECT id, role FROM data_team_users WHERE id = ?`).get(linkedUserId) as any;
+  if (!u) throw new Error("portal user not found");
+  if (String(u.role) !== String(linkedUserRole)) throw new Error("user role mismatch");
+  const dup = sqlite.prepare(
+    `SELECT id FROM employees WHERE linked_user_id = ? AND linked_user_role = ? AND id <> ?`,
+  ).get(linkedUserId, linkedUserRole, employeeId) as any;
+  if (dup) { const err: any = new Error(`User already linked to employee #${dup.id}`); err.code = "DUP_LINK"; err.employeeId = dup.id; throw err; }
+  sqlite.prepare(`UPDATE employees SET linked_user_id = ?, linked_user_role = ? WHERE id = ?`).run(linkedUserId, linkedUserRole, employeeId);
+  return sqlite.prepare(`SELECT * FROM employees WHERE id = ?`).get(employeeId);
 }
 
 // Employees (salary fields masked for finance role)
@@ -1512,6 +1582,15 @@ export function createEmployee(body: any) {
   for (const col of EMP_HR_COLS) {
     if (body[col] != null) {
       try { sqlite.prepare(`UPDATE employees SET ${col} = ? WHERE id = ?`).run(body[col], id); } catch { /* column missing */ }
+    }
+  }
+  // R27.11 #2 — optional link to a portal user at create time (validated + dup-checked).
+  if (body.linked_user_id != null && body.linked_user_role) {
+    try { linkEmployeeToUser(id, Number(body.linked_user_id), String(body.linked_user_role)); }
+    catch (e: any) {
+      // Roll back the half-created row so a dup link doesn't leave an orphan.
+      try { sqlite.prepare(`DELETE FROM employees WHERE id = ?`).run(id); } catch { /* ignore */ }
+      throw e;
     }
   }
   return sqlite.prepare(`SELECT * FROM employees WHERE id = ?`).get(id);

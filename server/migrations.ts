@@ -2914,3 +2914,89 @@ export function runR27_10Migrations() {
 
   console.log("[migrations] R27.10: complete");
 }
+
+// ── R27.11 ─────────────────────────────────────────────────────────────────
+// Generalize sales-rep auto-staff (R27.10) to ALL portal roles, and let admins
+// link an employee row to any existing portal user.
+//   • employees.linked_user_id / linked_user_role — generic FK to a row in
+//     data_team_users (the single table holding every portal user, keyed by
+//     its `role` column). sales_user_id (R27.10) is left intact and back-filled
+//     into the generic columns so nothing downstream breaks.
+//   • A partial unique index keeps one employee per (user,role) link.
+//   • Per-role backfill creates a staff row for any portal user lacking one;
+//     an email-match pass links pre-existing employees to their portal user.
+// All additive: new columns + new index only, no drops/renames.
+const R27_11_ROLES = ["sales", "finance", "hr", "consignment", "store_incharge", "dispatch_incharge"];
+// Human-readable employees.role for each portal role.
+const R27_11_ROLE_LABEL: Record<string, string> = {
+  sales: "Sales",
+  finance: "Finance",
+  hr: "HR",
+  consignment: "Consignment",
+  store_incharge: "Store",
+  dispatch_incharge: "Dispatch",
+};
+
+export function runR27_11Migrations() {
+  console.log("[migrations] R27.11: start");
+  const run = (desc: string, sql: string) => {
+    try { sqlite.exec(sql); console.log(`[migrations] R27.11: ${desc} ok`); }
+    catch (e: any) { console.log(`[migrations] R27.11: ${desc} skip (${e?.message || e})`); }
+  };
+  const addCol = (table: string, col: string, decl: string) => {
+    try { sqlite.exec(`ALTER TABLE ${table} ADD COLUMN ${col} ${decl}`); console.log(`[migrations] R27.11: ${table}.${col} added`); }
+    catch (e: any) { console.log(`[migrations] R27.11: ${table}.${col} skip (${e?.message || e})`); }
+  };
+
+  // Generic link columns (kept alongside R27.10's sales_user_id).
+  addCol("employees", "linked_user_id", "INTEGER");
+  addCol("employees", "linked_user_role", "TEXT");
+  run("uniq_employee_link", `CREATE UNIQUE INDEX IF NOT EXISTS uniq_employee_link ON employees(linked_user_id, linked_user_role) WHERE linked_user_id IS NOT NULL`);
+
+  // Carry R27.10 sales links into the generic columns (idempotent).
+  try {
+    const r = sqlite.prepare(
+      `UPDATE employees SET linked_user_id = sales_user_id, linked_user_role = 'sales'
+       WHERE sales_user_id IS NOT NULL AND linked_user_id IS NULL`,
+    ).run();
+    console.log(`[migrations] R27.11: carried sales_user_id → linked_user_id (rows=${r.changes})`);
+  } catch (e: any) {
+    console.log(`[migrations] R27.11: carry sales_user_id skip (${e?.message || e})`);
+  }
+
+  // Per-role backfill: create an employee for every portal user without a link.
+  const findByLink = sqlite.prepare(`SELECT id FROM employees WHERE linked_user_id = ? AND linked_user_role = ?`);
+  const findByEmail = sqlite.prepare(`SELECT id FROM employees WHERE email IS NOT NULL AND LOWER(TRIM(email)) = LOWER(TRIM(?)) AND linked_user_id IS NULL LIMIT 1`);
+  const findByName = sqlite.prepare(`SELECT id FROM employees WHERE LOWER(TRIM(name)) = LOWER(TRIM(?)) AND linked_user_id IS NULL LIMIT 1`);
+  const linkExisting = sqlite.prepare(`UPDATE employees SET linked_user_id = ?, linked_user_role = ? WHERE id = ?`);
+  const ins = sqlite.prepare(
+    `INSERT INTO employees (name, email, role, branch, active, linked_user_id, linked_user_role, working_days_default, retention_pct, created_at)
+     VALUES (?, ?, ?, 'Delhi', 1, ?, ?, 26, 10, ?)`,
+  );
+
+  for (const role of R27_11_ROLES) {
+    try {
+      const users = sqlite.prepare(
+        `SELECT id, name, username, email FROM data_team_users WHERE role = ? AND COALESCE(active,1) = 1`,
+      ).all(role) as any[];
+      const label = R27_11_ROLE_LABEL[role] || role;
+      let created = 0, linked = 0, skipped = 0;
+      for (const u of users) {
+        if (findByLink.get(u.id, role) as any) { skipped++; continue; }
+        const nm = String(u.name || u.username || `${label} #${u.id}`).trim();
+        // Prefer an email match, then a name match, then create fresh.
+        const byEmail = u.email ? (findByEmail.get(u.email) as any) : null;
+        if (byEmail) { linkExisting.run(u.id, role, byEmail.id); linked++; continue; }
+        const byName = findByName.get(nm) as any;
+        if (byName) { linkExisting.run(u.id, role, byName.id); linked++; continue; }
+        ins.run(nm, u.email ?? null, label, u.id, role, new Date().toISOString());
+        created++;
+      }
+      console.log(`[migrations] R27.11: backfill ${role} (created=${created}, linked=${linked}, skipped=${skipped})`);
+    } catch (e: any) {
+      console.log(`[migrations] R27.11: backfill ${role} skip (${e?.message || e})`);
+    }
+  }
+
+  console.log("[migrations] R27.11: complete");
+}

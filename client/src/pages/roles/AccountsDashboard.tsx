@@ -448,9 +448,24 @@ function EmployeesTab({ token, isAdmin }: { token: string | null; isAdmin: boole
   const [open, setOpen] = useState(false);
   const blank = { name: "", contact: "", email: "", role: "", branch: "Delhi", pan: "", aadhar: "", bank_account: "", ifsc: "", joined_at: "", gross_salary: "", per_day_rate: "", retention_pct: "10", working_days_default: "26" };
   const [form, setForm] = useState<any>(blank);
+  // R27.11 #2 — admin can link the new employee to an existing portal user.
+  const [linkMode, setLinkMode] = useState<"blank" | "link">("blank");
+  const [linkUserId, setLinkUserId] = useState("");
+  const [portalUsers, setPortalUsers] = useState<any[]>([]);
+  const [linkFor, setLinkFor] = useState<any | null>(null);
   async function load() { const r = await f(token, `/api/finance/employees${debounced ? `?q=${encodeURIComponent(debounced)}` : ""}`); if (r.ok) setRows(await r.json()); }
   useEffect(() => { const id = setTimeout(() => setDebounced(search.trim()), 250); return () => clearTimeout(id); }, [search]);
   useEffect(() => { if (token) load(); }, [token, debounced]); // eslint-disable-line
+  // R27.11 #2 — load portal users for the link dropdown (admin only).
+  useEffect(() => {
+    if (!token || !isAdmin) return;
+    f(token, "/api/admin/portal-users").then(async (r) => { if (r.ok) setPortalUsers(await r.json().catch(() => [])); });
+  }, [token, isAdmin]); // eslint-disable-line
+  function pickPortalUser(uid: string) {
+    setLinkUserId(uid);
+    const u = portalUsers.find((p) => String(p.user_id) === String(uid));
+    if (u) setForm((prev: any) => ({ ...prev, name: u.name || prev.name, email: u.email || prev.email, role: u.role || prev.role, branch: u.branch || prev.branch }));
+  }
   async function add() {
     if (!form.name.trim()) return;
     const body: any = {
@@ -460,8 +475,13 @@ function EmployeesTab({ token, isAdmin }: { token: string | null; isAdmin: boole
     };
     if (isAdmin && form.gross_salary) body.gross_salary = Number(form.gross_salary);
     if (isAdmin && form.per_day_rate) body.per_day_rate = Number(form.per_day_rate);
+    if (isAdmin && linkMode === "link" && linkUserId) {
+      const u = portalUsers.find((p) => String(p.user_id) === String(linkUserId));
+      if (u) { body.linked_user_id = u.user_id; body.linked_user_role = u.role; }
+    }
     const r = await f(token, "/api/finance/employees", { method: "POST", body: JSON.stringify(body) });
-    if (r.ok) { setForm(blank); setOpen(false); load(); }
+    if (r.ok) { setForm(blank); setLinkMode("blank"); setLinkUserId(""); setOpen(false); load(); }
+    else { const e = await r.json().catch(() => ({})); alert(e.error || "Could not save employee"); }
   }
   async function toggleActive(emp: any) {
     const r = await f(token, `/api/finance/employees/${emp.id}`, { method: "PUT", body: JSON.stringify({ active: !emp.active }) });
@@ -509,13 +529,28 @@ function EmployeesTab({ token, isAdmin }: { token: string | null; isAdmin: boole
           <div><label className="text-xs text-muted-foreground">Retention %</label><input type="number" value={form.retention_pct} onChange={(e) => setForm({ ...form, retention_pct: e.target.value })} className={inp} /></div>
           {isAdmin && <div><label className="text-xs text-muted-foreground">Gross salary (₹)</label><input type="number" value={form.gross_salary} onChange={(e) => setForm({ ...form, gross_salary: e.target.value })} className={inp} /></div>}
           {isAdmin && <div><label className="text-xs text-muted-foreground">Per-day (₹)</label><input type="number" value={form.per_day_rate} onChange={(e) => setForm({ ...form, per_day_rate: e.target.value })} className={inp} /></div>}
+          {isAdmin && (
+            <div className="sm:col-span-3 border-t pt-3 mt-1">
+              <label className="text-xs font-semibold text-muted-foreground">Link to existing portal user (optional)</label>
+              <div className="flex gap-4 items-center mt-1 mb-2 text-sm">
+                <label className="flex items-center gap-1.5"><input type="radio" name="linkmode" checked={linkMode === "blank"} onChange={() => { setLinkMode("blank"); setLinkUserId(""); }} /> Create blank</label>
+                <label className="flex items-center gap-1.5"><input type="radio" name="linkmode" checked={linkMode === "link"} onChange={() => setLinkMode("link")} /> Link to user</label>
+              </div>
+              {linkMode === "link" && (
+                <select value={linkUserId} onChange={(e) => pickPortalUser(e.target.value)} className={inp} data-testid="link-user-select">
+                  <option value="">— select a portal user —</option>
+                  {portalUsers.map((u) => <option key={`${u.user_id}-${u.role}`} value={u.user_id}>{u.name} ({u.role})</option>)}
+                </select>
+              )}
+            </div>
+          )}
           <div className="sm:col-span-3"><button onClick={add} className="px-4 py-2 rounded-lg bg-accent text-accent-foreground text-sm font-semibold">Save Employee</button></div>
         </div>
       )}
       <div className="bg-card border rounded-xl overflow-x-auto">
         {rows.length === 0 ? <div className="p-8 text-center text-muted-foreground">No employees{debounced ? " match your search." : "."}</div> : (
           <table className="w-full text-sm">
-            <thead className="bg-muted/50 text-left"><tr><th className="p-3">Name</th><th className="p-3">Role</th><th className="p-3">Branch</th><th className="p-3">Phone</th><th className="p-3">Gross</th><th className="p-3 text-right">Open Adv.</th><th className="p-3">Active</th><th className="p-3"></th></tr></thead>
+            <thead className="bg-muted/50 text-left"><tr><th className="p-3">Name</th><th className="p-3">Role</th><th className="p-3">Branch</th><th className="p-3">Phone</th><th className="p-3">Linked account</th><th className="p-3">Gross</th><th className="p-3 text-right">Open Adv.</th><th className="p-3">Active</th><th className="p-3"></th></tr></thead>
             <tbody className="divide-y">
               {rows.map((r) => (
                 <tr key={r.id} className="hover:bg-muted/30" data-testid={`employee-row-${r.id}`}>
@@ -523,12 +558,14 @@ function EmployeesTab({ token, isAdmin }: { token: string | null; isAdmin: boole
                   <td className="p-3 text-xs">{r.role || "—"}</td>
                   <td className="p-3 text-xs">{r.branch || "—"}</td>
                   <td className="p-3 text-xs">{r.contact || "—"}</td>
+                  <td className="p-3 text-xs">{r.linked_user_id ? <span className="text-emerald-700 font-semibold">{r.linked_user_role || "linked"}</span> : <span className="text-muted-foreground">Not linked</span>}</td>
                   <td className="p-3">{r.gross_salary != null ? `₹${Number(r.gross_salary).toLocaleString("en-IN")}` : (isAdmin ? "—" : "•••")}</td>
                   <td className="p-3 text-right text-xs">{balances[r.id] ? <span className="font-semibold text-emerald-700">₹{balances[r.id].toLocaleString("en-IN")}</span> : <span className="text-muted-foreground">—</span>}</td>
                   <td className="p-3">{r.active ? <span className="text-emerald-600 text-xs font-semibold">Active</span> : <span className="text-muted-foreground text-xs">Inactive</span>}</td>
                   <td className="p-3 whitespace-nowrap">
                     <button onClick={() => setAdvanceFor(r)} data-testid={`employee-advance-${r.id}`} className="text-accent text-xs font-semibold hover:underline mr-3">Issue Advance</button>
                     {isAdmin && <button onClick={() => setSalaryFor(r)} data-testid={`employee-salary-${r.id}`} className="text-accent text-xs font-semibold hover:underline mr-3">Salary</button>}
+                    {isAdmin && !r.linked_user_id && <button onClick={() => setLinkFor(r)} data-testid={`employee-link-${r.id}`} className="text-accent text-xs font-semibold hover:underline mr-3">Link user</button>}
                     <button onClick={() => toggleActive(r)} className="text-accent text-xs font-semibold hover:underline">{r.active ? "Deactivate" : "Activate"}</button>
                   </td>
                 </tr>
@@ -539,6 +576,39 @@ function EmployeesTab({ token, isAdmin }: { token: string | null; isAdmin: boole
       </div>
       {isAdmin && salaryFor && <SalaryEntryPanel token={token} emp={salaryFor} onClose={() => { setSalaryFor(null); load(); }} />}
       {advanceFor && <IssueAdvancePanel token={token} emp={advanceFor} onClose={() => { setAdvanceFor(null); load(); }} />}
+      {isAdmin && linkFor && <LinkUserPanel token={token} emp={linkFor} users={portalUsers} onClose={() => { setLinkFor(null); load(); }} />}
+    </div>
+  );
+}
+
+// R27.11 #2 — link an already-created employee to a portal user.
+function LinkUserPanel({ token, emp, users, onClose }: { token: string | null; emp: any; users: any[]; onClose: () => void }) {
+  const f = useF();
+  const [uid, setUid] = useState("");
+  const [busy, setBusy] = useState(false);
+  async function save() {
+    if (!uid) return;
+    const u = users.find((p) => String(p.user_id) === String(uid));
+    if (!u) return;
+    setBusy(true);
+    const r = await f(token, `/api/finance/employees/${emp.id}/link`, { method: "PATCH", body: JSON.stringify({ linked_user_id: u.user_id, linked_user_role: u.role }) });
+    setBusy(false);
+    if (r.ok) onClose();
+    else { const e = await r.json().catch(() => ({})); alert(e.error || "Could not link user"); }
+  }
+  return (
+    <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50" onClick={onClose}>
+      <div className="bg-card rounded-xl p-5 w-full max-w-md" onClick={(e) => e.stopPropagation()}>
+        <h3 className="font-semibold mb-3">Link <span className="text-accent">{emp.name}</span> to a portal user</h3>
+        <select value={uid} onChange={(e) => setUid(e.target.value)} className="block px-3 py-1.5 rounded-lg border bg-background text-sm w-full mb-4" data-testid="link-existing-select">
+          <option value="">— select a portal user —</option>
+          {users.map((u) => <option key={`${u.user_id}-${u.role}`} value={u.user_id}>{u.name} ({u.role})</option>)}
+        </select>
+        <div className="flex justify-end gap-2">
+          <button onClick={onClose} className="px-3 py-1.5 rounded-lg border text-sm">Cancel</button>
+          <button onClick={save} disabled={busy || !uid} className="px-4 py-1.5 rounded-lg bg-accent text-accent-foreground text-sm font-semibold disabled:opacity-50">Link</button>
+        </div>
+      </div>
     </div>
   );
 }
