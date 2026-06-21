@@ -821,26 +821,96 @@ export function listSalesExpensesAdmin(opts: { status?: string; userId?: number;
   if (opts.from) { conds.push("e.expense_date >= ?"); params.push(opts.from); }
   if (opts.to) { conds.push("e.expense_date <= ?"); params.push(opts.to); }
   const where = conds.length ? `WHERE ${conds.join(" AND ")}` : "";
+  // R27.10 #4/#6 — also surface amount-edit count + last-edit detail (history icon)
+  // and carry proof_url through so admin/finance see the attached slip.
   return sqlite.prepare(
-    `SELECT e.*, u.name AS salesName, u.username AS salesUsername
+    `SELECT e.*, u.name AS salesName, u.username AS salesUsername,
+       (SELECT COUNT(*) FROM sales_expense_amount_history h WHERE h.sales_expense_id = e.id) AS editCount,
+       (SELECT h2.old_amount FROM sales_expense_amount_history h2 WHERE h2.sales_expense_id = e.id ORDER BY h2.id ASC LIMIT 1) AS firstAmount,
+       (SELECT h3.changed_by FROM sales_expense_amount_history h3 WHERE h3.sales_expense_id = e.id ORDER BY h3.id DESC LIMIT 1) AS lastEditedBy,
+       (SELECT h4.changed_at FROM sales_expense_amount_history h4 WHERE h4.sales_expense_id = e.id ORDER BY h4.id DESC LIMIT 1) AS lastEditedAt
      FROM sales_expenses e LEFT JOIN data_team_users u ON u.id = e.sales_user_id
      ${where} ORDER BY e.id DESC`,
   ).all(...params).map((r: any) => ({ ...r, fields: safeParse(r.fields_json) }));
 }
 
-export function approveSalesExpense(id: number, approverId?: number, note?: string) {
-  sqlite.prepare(`UPDATE sales_expenses SET approval_status = 'approved', approver_id = ?, approval_note = ?, approved_at = ?, status = 'approved' WHERE id = ?`)
-    .run(approverId ?? null, note ?? null, nowIso(), id);
-  // R27.6 #7 — on approval, mirror into the unified expenses table so it shows in
-  // the accounts dashboard. Idempotent + best-effort (never block the approval).
-  try { syncSalesExpenseToAccounts(id, approverId); } catch (e: any) { console.error("[R27.6] sales-expense sync failed:", e?.message || e); }
+// R27.10 #5 — tiered approval. Amount ≤ TIER_THRESHOLD: either admin or finance
+// approves in one step (→ 'approved'). Amount > threshold: admin must approve first
+// (→ 'admin_approved'), then finance finalizes (→ 'approved'). Finance can't finalize
+// a >threshold expense still 'pending'.
+export const SALES_APPROVAL_TIER_THRESHOLD = 1000;
+type ApproverRole = "admin" | "finance";
+
+export function approveSalesExpense(id: number, approverId?: number, note?: string, role: ApproverRole = "admin") {
+  const se = sqlite.prepare(`SELECT * FROM sales_expenses WHERE id = ?`).get(id) as any;
+  if (!se) throw new Error("sales expense not found");
+  const curState = String(se.approval_status ?? se.status ?? "pending").trim().toLowerCase();
+  if (curState === "approved") throw new Error("Expense already approved");
+  if (curState === "rejected") throw new Error("Expense already rejected");
+  const amount = Number(se.amount) || 0;
+  let nextState: "approved" | "admin_approved";
+  if (amount <= SALES_APPROVAL_TIER_THRESHOLD) {
+    nextState = "approved"; // single-step for small amounts, either role
+  } else if (role === "admin") {
+    nextState = curState === "admin_approved" ? "admin_approved" : "admin_approved";
+  } else {
+    // finance finalizing a high-value expense — only allowed after admin stage
+    if (curState !== "admin_approved") {
+      const err: any = new Error("Awaiting admin approval first");
+      err.status = 400;
+      throw err;
+    }
+    nextState = "approved";
+  }
+  if (nextState === "approved") {
+    sqlite.prepare(`UPDATE sales_expenses SET approval_status = 'approved', approver_id = ?, approval_note = ?, approved_at = ?, status = 'approved' WHERE id = ?`)
+      .run(approverId ?? null, note ?? null, nowIso(), id);
+    // R27.6 #7 — on full approval, mirror into the unified expenses table. Idempotent +
+    // best-effort (never block the approval); settlement errors surface on manual sync.
+    try { syncSalesExpenseToAccounts(id, approverId); } catch (e: any) { console.error("[R27.10] sales-expense sync failed:", e?.message || e); }
+  } else {
+    sqlite.prepare(`UPDATE sales_expenses SET approval_status = 'admin_approved', approver_id = ?, approval_note = ?, status = 'admin_approved' WHERE id = ?`)
+      .run(approverId ?? null, note ?? null, id);
+  }
   return sqlite.prepare(`SELECT * FROM sales_expenses WHERE id = ?`).get(id);
 }
 
 export function rejectSalesExpense(id: number, approverId?: number, note?: string) {
+  const se = sqlite.prepare(`SELECT approval_status, status FROM sales_expenses WHERE id = ?`).get(id) as any;
+  if (!se) throw new Error("sales expense not found");
+  const cur = String(se.approval_status ?? se.status ?? "pending").trim().toLowerCase();
+  if (cur === "approved") throw new Error("Cannot reject an approved expense");
   sqlite.prepare(`UPDATE sales_expenses SET approval_status = 'rejected', approver_id = ?, approval_note = ?, rejected_at = ?, status = 'rejected' WHERE id = ?`)
     .run(approverId ?? null, note ?? null, nowIso(), id);
   return sqlite.prepare(`SELECT * FROM sales_expenses WHERE id = ?`).get(id);
+}
+
+// R27.10 #4 — edit a sales-expense amount BEFORE it is approved (admin or finance).
+// Records the change in sales_expense_amount_history. Refuses approved/synced rows.
+export function editSalesExpenseAmount(id: number, newAmount: number, changedBy: string, changedByRole: string) {
+  const se = sqlite.prepare(`SELECT * FROM sales_expenses WHERE id = ?`).get(id) as any;
+  if (!se) throw new Error("sales expense not found");
+  const cur = String(se.approval_status ?? se.status ?? "pending").trim().toLowerCase();
+  if (cur === "approved" || cur === "rejected") {
+    const err: any = new Error("Cannot edit approved expense");
+    err.status = 400;
+    throw err;
+  }
+  const amt = Number(newAmount);
+  if (!Number.isFinite(amt) || amt <= 0) throw new Error("amount must be greater than 0");
+  const oldAmount = Number(se.amount) || 0;
+  const tx = sqlite.transaction(() => {
+    sqlite.prepare(`UPDATE sales_expenses SET amount = ? WHERE id = ?`).run(amt, id);
+    sqlite.prepare(
+      `INSERT INTO sales_expense_amount_history (sales_expense_id, old_amount, new_amount, changed_by, changed_by_role, changed_at)
+       VALUES (?, ?, ?, ?, ?, ?)`,
+    ).run(id, oldAmount, amt, changedBy || null, changedByRole || null, nowIso());
+  });
+  tx();
+  return sqlite.prepare(`SELECT * FROM sales_expenses WHERE id = ?`).get(id);
+}
+export function getSalesExpenseAmountHistory(id: number) {
+  return sqlite.prepare(`SELECT * FROM sales_expense_amount_history WHERE sales_expense_id = ? ORDER BY id DESC`).all(id);
 }
 
 // ===========================================================================
@@ -1283,7 +1353,10 @@ export function createAdvanceExpense(body: { advance_id: number; amount: number;
 // either `status` or `approval_status` carrying the value, any case) and creates the
 // unified-expenses ledger row for any that are missing one. Returns real counts so the
 // finance user sees "Synced N (M already synced of T approved)" instead of a bare 0.
-export function syncAllApprovedSalesExpenses(by?: number): { synced: number; alreadySynced: number; totalApproved: number; totalRows: number; breakdown: Record<string, number> } {
+export function syncAllApprovedSalesExpenses(by?: number): {
+  synced: number; alreadySynced: number; totalApproved: number; totalRows: number;
+  breakdown: Record<string, number>; errors: Array<{ salesExpenseId: number; repName: string; reason: string }>;
+} {
   // R27.9 #1 — the approved-state normalization: prefer approval_status, fall back
   // to status, both trimmed/empty-tolerant and lowered, default 'pending'.
   const STATE_EXPR = `LOWER(TRIM(COALESCE(NULLIF(TRIM(approval_status),''), NULLIF(TRIM(status),''), 'pending')))`;
@@ -1304,17 +1377,24 @@ export function syncAllApprovedSalesExpenses(by?: number): { synced: number; alr
     ).all() as any[];
   } catch { approved = []; }
   let synced = 0, alreadySynced = 0;
+  const errors: Array<{ salesExpenseId: number; repName: string; reason: string }> = [];
   for (const row of approved) {
     try {
       const r: any = syncSalesExpenseToAccounts(Number(row.id), by);
       if (r?.skipped === "already synced") alreadySynced++;
+      else if (r?.error) errors.push({ salesExpenseId: Number(row.id), repName: r.repName || "Sales rep", reason: r.error });
       else if (r?.id) synced++;
-    } catch { /* skip bad row */ }
+    } catch (e: any) {
+      errors.push({ salesExpenseId: Number(row.id), repName: "Sales rep", reason: e?.message || "sync failed" });
+    }
   }
-  console.log(`[R27.9 #1] sync-sales: ${totalRows} rows, breakdown=${JSON.stringify(breakdown)}, approved=${approved.length}, synced=${synced}, alreadySynced=${alreadySynced}`);
-  return { synced, alreadySynced, totalApproved: approved.length, totalRows, breakdown };
+  console.log(`[R27.10 #2] sync-sales: ${totalRows} rows, breakdown=${JSON.stringify(breakdown)}, approved=${approved.length}, synced=${synced}, alreadySynced=${alreadySynced}, errors=${errors.length}`);
+  return { synced, alreadySynced, totalApproved: approved.length, totalRows, breakdown, errors };
 }
 
+// R27.10 #2 — settle an approved sales expense against the rep's outstanding cash
+// advance. Returns {id} on success, {skipped:'already synced'} if mirrored already,
+// or {error, repName} (NOT synced) when there is no advance / insufficient balance.
 export function syncSalesExpenseToAccounts(salesExpenseId: number, by?: number) {
   const se = sqlite.prepare(`SELECT * FROM sales_expenses WHERE id = ?`).get(salesExpenseId) as any;
   if (!se) throw new Error("sales expense not found");
@@ -1325,13 +1405,64 @@ export function syncSalesExpenseToAccounts(salesExpenseId: number, by?: number) 
   if (a1 !== "approved" && a2 !== "approved") return { skipped: "not approved" };
   const existing = sqlite.prepare(`SELECT id FROM expenses WHERE sales_expense_id = ?`).get(salesExpenseId);
   if (existing) return { skipped: "already synced", id: (existing as any).id };
+
+  const rep = sqlite.prepare(`SELECT name, username FROM data_team_users WHERE id = ?`).get(se.sales_user_id) as any;
+  const repName = String(rep?.name || rep?.username || `Sales #${se.sales_user_id}`);
+  const amount = Number(se.amount) || 0;
   const desc = [se.expense_type, se.notes].filter(Boolean).join(" — ") || "Sales expense";
   const receipt = se.proof_url ?? null;
-  const info = sqlite.prepare(
-    `INSERT INTO expenses (expense_type, amount, payment_mode, description, proof_url, attachment_url, expense_date, sales_expense_id, source, source_id, created_by, created_at)
-     VALUES ('direct', ?, 'sales_reimbursement', ?, ?, ?, ?, ?, 'sales', ?, ?, ?)`,
-  ).run(Number(se.amount) || 0, desc, receipt, receipt, se.expense_date, salesExpenseId, salesExpenseId, by ?? null, nowIso());
-  return { id: Number(info.lastInsertRowid) };
+
+  // Bridge rep → staff row, then find an open advance with balance to draw from.
+  const staffId = ensureSalesEmployee(se.sales_user_id);
+  if (!staffId) return { error: "no staff record for rep", repName };
+  const adv = sqlite.prepare(
+    `SELECT * FROM expense_advances WHERE staff_id = ? AND status = 'open' AND balance > 0 ORDER BY id ASC LIMIT 1`,
+  ).get(staffId) as any;
+  if (!adv) return { error: "no advance issued", repName };
+  if (Number(adv.balance) + 0.001 < amount) {
+    return { error: `insufficient advance (₹${Number(adv.balance)} available, ₹${amount} needed)`, repName };
+  }
+
+  // Settle: create an 'advance'-type expense linked to the advance + sales expense,
+  // decrement the advance balance, settle it when it hits zero, post the ledger.
+  const tx = sqlite.transaction(() => {
+    const info = sqlite.prepare(
+      `INSERT INTO expenses (expense_type, advance_id, staff_id, branch_id, amount, payment_mode, description, proof_url, attachment_url, expense_date, sales_expense_id, source, source_id, created_by, created_at)
+       VALUES ('advance', ?, ?, ?, ?, 'advance', ?, ?, ?, ?, ?, 'sales', ?, ?, ?)`,
+    ).run(adv.id, staffId, adv.branch_id ?? null, amount, desc, receipt, receipt, se.expense_date, salesExpenseId, salesExpenseId, by ?? null, nowIso());
+    const newBalance = Math.round((Number(adv.balance) - amount) * 100) / 100;
+    const settled = newBalance <= 0.001;
+    sqlite.prepare(`UPDATE expense_advances SET balance = ?, status = ? WHERE id = ?`).run(Math.max(0, newBalance), settled ? "settled" : "open", adv.id);
+    addPersonLedger(staffId, "advance_expense", -amount, Number(info.lastInsertRowid), "expenses", desc);
+    return Number(info.lastInsertRowid);
+  });
+  const expenseId = tx();
+  return { id: expenseId, advanceId: adv.id, repName };
+}
+
+// R27.10 #1 — bridge a sales rep (data_team_users) to a staff row (employees) so
+// advances can be issued against them and expenses can settle. Idempotent: links by
+// sales_user_id first, then by matching name, else creates a fresh Sales staff row.
+// Safe to call from login and from expense-submit; returns the employee id.
+export function ensureSalesEmployee(salesUserId: number): number | null {
+  if (!salesUserId) return null;
+  try {
+    const existing = sqlite.prepare(`SELECT id FROM employees WHERE sales_user_id = ?`).get(salesUserId) as any;
+    if (existing) return existing.id;
+    const rep = sqlite.prepare(`SELECT id, name, username, email FROM data_team_users WHERE id = ?`).get(salesUserId) as any;
+    if (!rep) return null;
+    const nm = String(rep.name || rep.username || `Sales #${salesUserId}`).trim();
+    const byName = sqlite.prepare(`SELECT id FROM employees WHERE LOWER(TRIM(name)) = LOWER(TRIM(?)) LIMIT 1`).get(nm) as any;
+    if (byName) { sqlite.prepare(`UPDATE employees SET sales_user_id = ? WHERE id = ?`).run(salesUserId, byName.id); return byName.id; }
+    const info = sqlite.prepare(
+      `INSERT INTO employees (name, email, role, branch, active, sales_user_id, working_days_default, retention_pct, created_at)
+       VALUES (?, ?, 'Sales', 'Delhi', 1, ?, 26, 10, ?)`,
+    ).run(nm, rep.email ?? null, salesUserId, nowIso());
+    return Number(info.lastInsertRowid);
+  } catch (e: any) {
+    console.error("[R27.10 #1] ensureSalesEmployee failed:", e?.message || e);
+    return null;
+  }
 }
 
 // Employees (salary fields masked for finance role)

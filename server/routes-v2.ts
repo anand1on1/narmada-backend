@@ -6310,7 +6310,18 @@ function registerR8Routes(
       } catch (e: any) { res.status(500).json({ error: e.message }); }
     };
   }
-  app.post("/api/sales/login", makeRoleLogin("sales"));
+  // R27.10 #1 — on sales login, ensure the rep has a staff row (idempotent).
+  const salesLogin = makeRoleLogin("sales");
+  app.post("/api/sales/login", async (req: Request, res: Response) => {
+    const origJson = res.json.bind(res);
+    (res as any).json = (body: any) => {
+      if (body?.user?.id && body?.user?.role === "sales") {
+        r27().then((s) => { try { s.ensureSalesEmployee(body.user.id); } catch { /* best-effort */ } }).catch(() => {});
+      }
+      return origJson(body);
+    };
+    return salesLogin(req, res);
+  });
   app.post("/api/finance/login", makeRoleLogin("finance"));
   app.post("/api/hr/login", makeRoleLogin("hr"));
   app.post("/api/consignment/login", makeRoleLogin("consignment"));
@@ -7102,6 +7113,9 @@ function registerR8Routes(
         const host = req.get("host") || "narmada-backend.onrender.com";
         proofUrl = `${proto}://${host}/uploads/expenses/${req.file.filename}`;
       }
+      // R27.10 #1 — guarantee a staff row exists for this rep so finance can issue
+      // an advance and the approved expense can settle against it.
+      try { const s = await r27(); s.ensureSalesEmployee(u.id); } catch { /* best-effort */ }
       res.json(v2.createSalesExpense({
         salesUserId: u.id, expenseType, expenseDate, amount, fields, proofUrl, notes: req.body?.notes,
       }));
@@ -7470,20 +7484,56 @@ function registerR8Routes(
   });
 
   // ---- R27.2-6 Sales-expense approval (admin Expenses tab) ----
-  app.get("/api/admin/sales-expenses", requireAuth, async (req, res) => {
+  // R27.10 #4/#5/#7 — these endpoints now accept admin token OR finance token
+  // (acctAuth sets req.isAdminAcct so we know which role is acting), powering both
+  // the admin Operations queue and the finance approval mirror.
+  app.get("/api/admin/sales-expenses", acctAuth, async (req, res) => {
     try {
       const s = await r27();
       res.json(s.listSalesExpensesAdmin({ status: req.query.status as string | undefined, userId: req.query.user_id ? parseInt(req.query.user_id as string, 10) : undefined, from: req.query.from as string | undefined, to: req.query.to as string | undefined }));
     } catch (e: any) { res.status(500).json({ error: e.message }); }
   });
-  app.post("/api/admin/sales-expenses/:id/approve", requireAuth, async (req: any, res) => {
-    try { const s = await r27(); res.json(s.approveSalesExpense(parseInt(req.params.id as string, 10), undefined, req.body?.note)); }
+  // Parallel finance alias (same data) so the finance portal has a role-native path.
+  app.get("/api/finance/sales-expenses", acctAuth, async (req, res) => {
+    try {
+      const s = await r27();
+      res.json(s.listSalesExpensesAdmin({ status: req.query.status as string | undefined, userId: req.query.user_id ? parseInt(req.query.user_id as string, 10) : undefined, from: req.query.from as string | undefined, to: req.query.to as string | undefined }));
+    } catch (e: any) { res.status(500).json({ error: e.message }); }
+  });
+  const approveSalesHandler = async (req: any, res: any) => {
+    try {
+      const s = await r27();
+      const role = req.isAdminAcct ? "admin" : "finance";
+      const approverId = req.user?.id ?? req.teamUser?.id;
+      res.json(s.approveSalesExpense(parseInt(req.params.id as string, 10), approverId, req.body?.note, role));
+    } catch (e: any) { res.status(e?.status || 500).json({ error: e.message }); }
+  };
+  const rejectSalesHandler = async (req: any, res: any) => {
+    try { const s = await r27(); res.json(s.rejectSalesExpense(parseInt(req.params.id as string, 10), req.user?.id ?? req.teamUser?.id, req.body?.note)); }
+    catch (e: any) { res.status(e?.status || 500).json({ error: e.message }); }
+  };
+  // R27.10 #4 — edit the amount of a still-pending expense; logs to history.
+  const editAmountHandler = async (req: any, res: any) => {
+    try {
+      const amount = Number(req.body?.amount);
+      if (!(amount > 0)) return res.status(400).json({ error: "amount must be greater than 0" });
+      const s = await r27();
+      const role = req.isAdminAcct ? "admin" : "finance";
+      const who = req.user?.username || req.teamUser?.username || role;
+      res.json(s.editSalesExpenseAmount(parseInt(req.params.id as string, 10), amount, who, role));
+    } catch (e: any) { res.status(e?.status || 500).json({ error: e.message }); }
+  };
+  app.post("/api/admin/sales-expenses/:id/approve", acctAuth, approveSalesHandler);
+  app.post("/api/admin/sales-expenses/:id/reject", acctAuth, rejectSalesHandler);
+  app.patch("/api/admin/sales-expenses/:id", acctAuth, editAmountHandler);
+  app.get("/api/admin/sales-expenses/:id/amount-history", acctAuth, async (req, res) => {
+    try { const s = await r27(); res.json(s.getSalesExpenseAmountHistory(parseInt(req.params.id as string, 10))); }
     catch (e: any) { res.status(500).json({ error: e.message }); }
   });
-  app.post("/api/admin/sales-expenses/:id/reject", requireAuth, async (req: any, res) => {
-    try { const s = await r27(); res.json(s.rejectSalesExpense(parseInt(req.params.id as string, 10), undefined, req.body?.note)); }
-    catch (e: any) { res.status(500).json({ error: e.message }); }
-  });
+  // Finance-native aliases for the approval mirror.
+  app.post("/api/finance/sales-expenses/:id/approve", acctAuth, approveSalesHandler);
+  app.post("/api/finance/sales-expenses/:id/reject", acctAuth, rejectSalesHandler);
+  app.patch("/api/finance/sales-expenses/:id", acctAuth, editAmountHandler);
 
   // ============================================================================
   // R27.3 — Accounts dashboard (finance role; admin sees salary numbers, finance masked)
@@ -7568,8 +7618,15 @@ function registerR8Routes(
     res.json(s.listExpenseAdvances({ staffId: req.query.staff_id ? parseInt(req.query.staff_id as string, 10) : undefined, status: req.query.status as string | undefined }));
   });
   app.post("/api/finance/expense-advances", acctAuth, async (req: any, res) => {
-    try { const s = await r27(); res.json(s.createExpenseAdvance(req.body || {}, req.teamUser?.id)); }
-    catch (e: any) { res.status(400).json({ error: e.message }); }
+    try {
+      const s = await r27();
+      const b = req.body || {};
+      // R27.10 #3 — the Issue Advance UI sends {employee_id, amount, purpose, notes};
+      // map employee_id→staff_id and fold notes into purpose.
+      const staff_id = b.staff_id ?? b.employee_id;
+      const purpose = [b.purpose, b.notes].filter(Boolean).join(" — ") || undefined;
+      res.json(s.createExpenseAdvance({ staff_id, amount: b.amount, purpose, branch_id: b.branch_id }, req.user?.id ?? req.teamUser?.id));
+    } catch (e: any) { res.status(400).json({ error: e.message }); }
   });
   app.post("/api/finance/expense-advances/:id/return", acctAuth, async (req: any, res) => {
     try { const s = await r27(); res.json(s.returnAdvanceCash(parseInt(req.params.id as string, 10), req.teamUser?.id)); }

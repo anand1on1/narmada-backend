@@ -2851,3 +2851,66 @@ export function runR27_9Migrations() {
 
   console.log("[migrations] R27.9: complete");
 }
+
+// R27.10 — sales-rep expense ecosystem. Additive only:
+//  • sales_expense_amount_history — audit trail for pre-approval amount edits (#4)
+//  • sales_user_id column on employees — links an auto-created staff row back to its
+//    sales rep so the bridge is idempotent (#1)
+//  • one-time backfill: every active sales user without a matching employee row gets
+//    one (role='Sales'), so advances/sync have a staff_id to settle against (#1)
+//  • the status column already tolerates the new 'admin_approved' value (TEXT, #5) —
+//    no rename, existing pending/approved/rejected untouched.
+export function runR27_10Migrations() {
+  console.log("[migrations] R27.10: start");
+  const run = (desc: string, sql: string) => {
+    try { sqlite.exec(sql); console.log(`[migrations] R27.10: ${desc} ok`); }
+    catch (e: any) { console.log(`[migrations] R27.10: ${desc} skip (${e?.message || e})`); }
+  };
+  const addCol = (table: string, col: string, decl: string) => {
+    try { sqlite.exec(`ALTER TABLE ${table} ADD COLUMN ${col} ${decl}`); console.log(`[migrations] R27.10: ${table}.${col} added`); }
+    catch (e: any) { console.log(`[migrations] R27.10: ${table}.${col} skip (${e?.message || e})`); }
+  };
+
+  run("sales_expense_amount_history", `
+    CREATE TABLE IF NOT EXISTS sales_expense_amount_history (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      sales_expense_id INTEGER NOT NULL,
+      old_amount REAL,
+      new_amount REAL,
+      changed_by TEXT,
+      changed_by_role TEXT,
+      changed_at TEXT DEFAULT CURRENT_TIMESTAMP
+    );`);
+  run("idx_sales_expense_amount_history", `CREATE INDEX IF NOT EXISTS idx_sales_expense_amount_history ON sales_expense_amount_history(sales_expense_id, id DESC);`);
+
+  // Bridge column: which sales rep this employee row mirrors (NULL for real staff).
+  addCol("employees", "sales_user_id", "INTEGER");
+
+  // One-time backfill: create a staff row for each sales rep that lacks one.
+  try {
+    const reps = sqlite.prepare(
+      `SELECT id, name, username, email FROM data_team_users WHERE role = 'sales' AND COALESCE(active,1) = 1`,
+    ).all() as any[];
+    const findByLink = sqlite.prepare(`SELECT id FROM employees WHERE sales_user_id = ?`);
+    const findByName = sqlite.prepare(`SELECT id FROM employees WHERE LOWER(TRIM(name)) = LOWER(TRIM(?)) LIMIT 1`);
+    const ins = sqlite.prepare(
+      `INSERT INTO employees (name, email, role, branch, active, sales_user_id, working_days_default, retention_pct, created_at)
+       VALUES (?, ?, 'Sales', ?, 1, ?, 26, 10, ?)`,
+    );
+    const linkExisting = sqlite.prepare(`UPDATE employees SET sales_user_id = ? WHERE id = ?`);
+    let created = 0, linked = 0, skipped = 0;
+    for (const rep of reps) {
+      const nm = String(rep.name || rep.username || `Sales #${rep.id}`).trim();
+      if ((findByLink.get(rep.id) as any)) { skipped++; continue; }
+      const byName = findByName.get(nm) as any;
+      if (byName) { linkExisting.run(rep.id, byName.id); linked++; continue; }
+      ins.run(nm, rep.email ?? null, "Delhi", rep.id, new Date().toISOString());
+      created++;
+    }
+    console.log(`[migrations] R27.10: sales→employee backfill (created=${created}, linked=${linked}, skipped=${skipped})`);
+  } catch (e: any) {
+    console.log(`[migrations] R27.10: sales→employee backfill skip (${e?.message || e})`);
+  }
+
+  console.log("[migrations] R27.10: complete");
+}

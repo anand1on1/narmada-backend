@@ -211,7 +211,7 @@ function ExpensesTab({ token }: { token: string | null }) {
     if (h.ok) setHeaders(await h.json());
   }
   useEffect(() => { if (token) load(); }, [token]); // eslint-disable-line
-  function flash(m: string) { setMsg(m); setTimeout(() => setMsg(null), 3000); }
+  function flash(m: string, ms = 3000) { setMsg(m); setTimeout(() => setMsg(null), ms); }
 
   async function addDirect() {
     if (!direct.amount) return;
@@ -248,13 +248,19 @@ function ExpensesTab({ token }: { token: string | null }) {
       const breakdown = j.breakdown && typeof j.breakdown === "object"
         ? Object.entries(j.breakdown).map(([k, v]) => `${v} ${k}`).join(", ")
         : "";
-      flash(synced > 0
+      // R27.10 #2 — surface per-expense settlement failures (no advance issued /
+      // insufficient advance) so the user knows WHY an approved expense didn't sync.
+      const errors: Array<{ salesExpenseId?: number; repName?: string; reason?: string }> = Array.isArray(j.errors) ? j.errors : [];
+      const errSuffix = errors.length
+        ? ` ${errors.length} could not settle: ` + errors.map((e) => `${e.repName || `#${e.salesExpenseId}`} (${e.reason || "error"})`).join("; ") + "."
+        : "";
+      flash((synced > 0
         ? `Synced ${synced} new sales expense(s). ${already} already in ledger (of ${total} approved).`
         : total > 0
           ? `All ${total} approved sales expense(s) already synced — nothing new.`
           : totalRows > 0
             ? `No APPROVED sales expenses to sync. ${totalRows} total — states: ${breakdown}. Approve them first in Admin → Sales Expenses.`
-            : `No sales expenses exist yet.`);
+            : `No sales expenses exist yet.`) + errSuffix, errors.length ? 9000 : 3000);
       load();
     } else flash("Failed");
   }
@@ -463,6 +469,22 @@ function EmployeesTab({ token, isAdmin }: { token: string | null; isAdmin: boole
   }
   // R27.9 #2 — admin-only salary entry + history, gated behind /api/admin/* (x-admin-token).
   const [salaryFor, setSalaryFor] = useState<any | null>(null);
+  // R27.10 #3 — per-row Issue Advance (finance + admin).
+  const [advanceFor, setAdvanceFor] = useState<any | null>(null);
+  const [balances, setBalances] = useState<Record<number, number>>({});
+  useEffect(() => {
+    if (!token) return;
+    f(token, "/api/finance/expense-advances?status=open").then(async (r) => {
+      if (!r.ok) return;
+      const adv = await r.json().catch(() => []);
+      const map: Record<number, number> = {};
+      for (const a of adv as any[]) {
+        const sid = Number(a.staff_id);
+        if (sid) map[sid] = (map[sid] || 0) + Number(a.balance || 0);
+      }
+      setBalances(map);
+    });
+  }, [token, rows]); // eslint-disable-line
   const inp = "block px-3 py-1.5 rounded-lg border bg-background text-sm w-full";
   return (
     <div>
@@ -493,7 +515,7 @@ function EmployeesTab({ token, isAdmin }: { token: string | null; isAdmin: boole
       <div className="bg-card border rounded-xl overflow-x-auto">
         {rows.length === 0 ? <div className="p-8 text-center text-muted-foreground">No employees{debounced ? " match your search." : "."}</div> : (
           <table className="w-full text-sm">
-            <thead className="bg-muted/50 text-left"><tr><th className="p-3">Name</th><th className="p-3">Role</th><th className="p-3">Branch</th><th className="p-3">Phone</th><th className="p-3">Gross</th><th className="p-3">Active</th><th className="p-3"></th></tr></thead>
+            <thead className="bg-muted/50 text-left"><tr><th className="p-3">Name</th><th className="p-3">Role</th><th className="p-3">Branch</th><th className="p-3">Phone</th><th className="p-3">Gross</th><th className="p-3 text-right">Open Adv.</th><th className="p-3">Active</th><th className="p-3"></th></tr></thead>
             <tbody className="divide-y">
               {rows.map((r) => (
                 <tr key={r.id} className="hover:bg-muted/30" data-testid={`employee-row-${r.id}`}>
@@ -502,8 +524,10 @@ function EmployeesTab({ token, isAdmin }: { token: string | null; isAdmin: boole
                   <td className="p-3 text-xs">{r.branch || "—"}</td>
                   <td className="p-3 text-xs">{r.contact || "—"}</td>
                   <td className="p-3">{r.gross_salary != null ? `₹${Number(r.gross_salary).toLocaleString("en-IN")}` : (isAdmin ? "—" : "•••")}</td>
+                  <td className="p-3 text-right text-xs">{balances[r.id] ? <span className="font-semibold text-emerald-700">₹{balances[r.id].toLocaleString("en-IN")}</span> : <span className="text-muted-foreground">—</span>}</td>
                   <td className="p-3">{r.active ? <span className="text-emerald-600 text-xs font-semibold">Active</span> : <span className="text-muted-foreground text-xs">Inactive</span>}</td>
                   <td className="p-3 whitespace-nowrap">
+                    <button onClick={() => setAdvanceFor(r)} data-testid={`employee-advance-${r.id}`} className="text-accent text-xs font-semibold hover:underline mr-3">Issue Advance</button>
                     {isAdmin && <button onClick={() => setSalaryFor(r)} data-testid={`employee-salary-${r.id}`} className="text-accent text-xs font-semibold hover:underline mr-3">Salary</button>}
                     <button onClick={() => toggleActive(r)} className="text-accent text-xs font-semibold hover:underline">{r.active ? "Deactivate" : "Activate"}</button>
                   </td>
@@ -514,6 +538,52 @@ function EmployeesTab({ token, isAdmin }: { token: string | null; isAdmin: boole
         )}
       </div>
       {isAdmin && salaryFor && <SalaryEntryPanel token={token} emp={salaryFor} onClose={() => { setSalaryFor(null); load(); }} />}
+      {advanceFor && <IssueAdvancePanel token={token} emp={advanceFor} onClose={() => { setAdvanceFor(null); load(); }} />}
+    </div>
+  );
+}
+
+// R27.10 #3 — per-employee Issue Advance modal (finance + admin). POSTs to
+// /api/finance/expense-advances which now accepts employee_id (normalized to
+// staff_id server-side). On success the parent reloads, refreshing balances.
+function IssueAdvancePanel({ token, emp, onClose }: { token: string | null; emp: any; onClose: () => void }) {
+  const f = useF();
+  const today = new Date().toISOString().slice(0, 10);
+  const [amount, setAmount] = useState("");
+  const [purpose, setPurpose] = useState("Sales expenses");
+  const [notes, setNotes] = useState("");
+  const [date, setDate] = useState(today);
+  const [msg, setMsg] = useState<string | null>(null);
+  const [saving, setSaving] = useState(false);
+  async function save() {
+    const amt = Number(amount);
+    if (!(amt > 0)) { setMsg("Enter a valid amount."); return; }
+    setSaving(true);
+    const r = await f(token, "/api/finance/expense-advances", {
+      method: "POST",
+      body: JSON.stringify({ employee_id: emp.id, amount: amt, purpose, notes, branch_id: emp.branch || "Delhi", issued_at: date }),
+    });
+    const j = await r.json().catch(() => ({}));
+    setSaving(false);
+    if (r.ok) { onClose(); } else { setMsg(j.error || "Failed to issue advance."); }
+  }
+  const inp = "block px-3 py-1.5 rounded-lg border bg-background text-sm w-full";
+  return (
+    <div className="fixed inset-0 bg-black/40 flex items-start justify-center z-50 p-4 overflow-y-auto" onClick={onClose}>
+      <div className="bg-card border rounded-xl p-5 w-full max-w-md mt-16" onClick={(e) => e.stopPropagation()}>
+        <div className="flex items-center justify-between mb-3">
+          <h3 className="font-bold text-lg">Issue Advance — {emp.name}</h3>
+          <button onClick={onClose} className="text-muted-foreground hover:text-foreground text-sm">Close</button>
+        </div>
+        <div className="grid grid-cols-1 gap-3">
+          <div><label className="text-xs text-muted-foreground">Amount (₹) *</label><input type="number" value={amount} onChange={(e) => setAmount(e.target.value)} className={inp} data-testid="issue-advance-amount" /></div>
+          <div><label className="text-xs text-muted-foreground">Purpose</label><input value={purpose} onChange={(e) => setPurpose(e.target.value)} className={inp} /></div>
+          <div><label className="text-xs text-muted-foreground">Notes</label><input value={notes} onChange={(e) => setNotes(e.target.value)} className={inp} /></div>
+          <div><label className="text-xs text-muted-foreground">Date</label><input type="date" value={date} onChange={(e) => setDate(e.target.value)} className={inp} /></div>
+        </div>
+        <button onClick={save} disabled={saving} data-testid="issue-advance-save" className="mt-4 px-4 py-2 rounded-lg bg-accent text-accent-foreground text-sm font-semibold disabled:opacity-60">{saving ? "Issuing…" : "Issue Advance"}</button>
+        {msg && <p className="text-sm mt-2 text-rose-600">{msg}</p>}
+      </div>
     </div>
   );
 }

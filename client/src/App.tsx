@@ -146,6 +146,7 @@ import SalesLogin from "@/pages/roles/SalesLogin";
 import SalesDashboard from "@/pages/roles/SalesDashboard";
 import FinanceLogin from "@/pages/roles/FinanceLogin";
 import FinanceDashboard from "@/pages/roles/FinanceDashboard";
+import FinanceApprovalsPage from "@/pages/roles/FinanceApprovalsPage";
 import HRLogin from "@/pages/roles/HRLogin";
 import HRDashboard from "@/pages/roles/HRDashboard";
 import ConsignmentLogin from "@/pages/roles/ConsignmentLogin";
@@ -449,6 +450,7 @@ function AppRouter() {
             <Route path="/finance" component={FinanceLogin} />
             <Route path="/finance/login" component={FinanceLogin} />
             <Route path="/finance/dashboard" component={FinanceDashboard} />
+            <Route path="/finance/approvals" component={FinanceApprovalsPage} />
             <Route path="/finance/accounts" component={AccountsDashboard} />
             <Route component={NotFound} />
           </Switch>
