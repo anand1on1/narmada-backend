@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { useLocation } from "wouter";
 import { AdminLayout } from "./AdminLayout";
 import { adminFetch, useAdminAuth } from "@/lib/admin-auth";
-import { Trash2, Plus, ExternalLink } from "lucide-react";
+import { Trash2, Plus, ExternalLink, Copy } from "lucide-react";
 
 // R26.5 (A3) — repointed to the v2 quotations table (Data Team is source of truth).
 // GET /api/admin/quotations returns { quotations, total, pages }.
@@ -50,6 +50,20 @@ export default function AdminQuotes() {
       const r = await adminFetch(token, `/api/admin/quotations/${id}`, { method: "DELETE" });
       if (!r.ok) { alert((await r.json()).error || "Failed"); return; }
       load();
+    } finally { setBusy(false); }
+  }
+  // R27.1a BUG 9 — duplicate a quotation (server resets date to today). Open the copy
+  // in the Team portal where line items are editable.
+  async function duplicate(id: number) {
+    if (!token) return;
+    setBusy(true);
+    try {
+      const r = await adminFetch(token, `/api/admin/quotations/${id}/duplicate`, { method: "POST" });
+      const j = await r.json().catch(() => ({}));
+      if (!r.ok) { alert(j.error || "Duplicate failed"); return; }
+      const newId = j.id ?? j.quotation?.id ?? j.quote?.id;
+      if (newId) window.location.hash = `#/team/quotations/${newId}`;
+      else load();
     } finally { setBusy(false); }
   }
 
@@ -117,6 +131,7 @@ export default function AdminQuotes() {
                     >
                       <ExternalLink className="w-3 h-3" /> Open / PDF
                     </a>
+                    <button onClick={() => duplicate(q.id)} disabled={busy} className="inline-flex items-center p-2 hover:bg-muted rounded mr-1" title="Duplicate quotation" data-testid={`button-duplicate-${q.id}`}><Copy className="w-4 h-4" /></button>
                     <select value={q.status} disabled={busy} onChange={(e) => setStatus(q.id, e.target.value)} className="text-xs border rounded px-2 py-1 bg-background mr-1" data-testid={`select-status-${q.id}`}>
                       {STATUSES.map((s) => <option key={s} value={s}>{s}</option>)}
                     </select>

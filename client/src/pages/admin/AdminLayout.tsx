@@ -9,7 +9,7 @@ import {
   UserSquare, Wallet, CreditCard, FileQuestion, FileSpreadsheet, ShoppingCart, Landmark,
   Building2, UserCog, ScrollText, ClipboardList, Bell,
   Factory, Search, Target, Megaphone, CheckSquare, Sparkles, Facebook, History,
-  Gauge, Radar, Link2, Bug,
+  Gauge, Radar, Link2, Bug, ShoppingBag,
 } from "lucide-react";
 
 // Session A V2: 4-role sidebar matrix.
@@ -98,10 +98,11 @@ export function AdminLayout({ children, title }: { children: ReactNode; title: s
     { href: "/admin/payments", label: "Payments", icon: CreditCard },
     { href: "/admin/rfqs", label: "RFQs", icon: FileQuestion },
     { href: "/admin/quotes", label: "Quotes", icon: FileSpreadsheet },
+    // R27.1a — Web Orders moved up to sit between Quotes and Purchase Orders.
+    { href: "/admin/orders", label: "Web Orders", icon: ShoppingBag },
     { href: "/admin/parts", label: "Parts", icon: Package },
     { href: "/admin/purchase-orders", label: "Purchase Orders", icon: ShoppingCart },
     { href: "/admin/purchase-history", label: "Purchase History", icon: History },
-    { href: "/admin/orders", label: "Web Orders", icon: ShoppingCart },
     { href: "/admin/web-customers", label: "Web Customers", icon: UserSquare },
     { href: "/admin/freight", label: "Freight Charges", icon: Truck },
     { href: "/admin/bank", label: "Bank Accounts", icon: Landmark },

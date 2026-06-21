@@ -157,6 +157,7 @@ import CartPage from "@/pages/CartPage";
 import CheckoutPage from "@/pages/CheckoutPage";
 import ShopLogin from "@/pages/shop/ShopLogin";
 import ShopSignup from "@/pages/shop/ShopSignup";
+import ShopVerify from "@/pages/shop/ShopVerify";
 import ShopAccount from "@/pages/shop/ShopAccount";
 import ShopOrders from "@/pages/shop/ShopOrders";
 import ShopOrderDetail from "@/pages/shop/ShopOrderDetail";
@@ -165,6 +166,7 @@ import OrderConfirmation from "@/pages/shop/OrderConfirmation";
 import AdminShopOrders from "@/pages/admin/AdminShopOrders";
 import AdminShopOrderDetail from "@/pages/admin/AdminShopOrderDetail";
 import AdminShopCustomers from "@/pages/admin/AdminShopCustomers";
+import AdminShopCustomerDetail from "@/pages/admin/AdminShopCustomerDetail";
 import AdminFreight from "@/pages/admin/AdminFreight";
 import CustomerLogin from "@/pages/portal/CustomerLogin";
 import CustomerDashboard from "@/pages/portal/CustomerDashboard";
@@ -225,6 +227,7 @@ function PublicRoutes() {
         <Route path="/order-confirmation/:id" component={OrderConfirmation} />
         <Route path="/customer/login" component={ShopLogin} />
         <Route path="/customer/signup" component={ShopSignup} />
+        <Route path="/customer/verify" component={ShopVerify} />
         <Route path="/customer/account" component={ShopAccount} />
         <Route path="/customer/orders/:id" component={ShopOrderDetail} />
         <Route path="/customer/orders" component={ShopOrders} />
@@ -310,6 +313,8 @@ function AppRouter() {
         <Route path="/admin/shop-orders" component={AdminShopOrders} />
         <Route path="/admin/orders/:id" component={AdminShopOrderDetail} />
         <Route path="/admin/orders" component={AdminShopOrders} />
+        <Route path="/admin/web-customers/:id" component={AdminShopCustomerDetail} />
+        <Route path="/admin/customer-users/:id" component={AdminShopCustomerDetail} />
         <Route path="/admin/web-customers" component={AdminShopCustomers} />
         <Route path="/admin/freight" component={AdminFreight} />
         {/* R23.1 — owner Command Center */}

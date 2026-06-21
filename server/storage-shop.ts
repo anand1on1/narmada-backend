@@ -26,31 +26,102 @@ function publicUser(row: any) {
   return {
     id: rest.id, email: rest.email, fullName: rest.full_name,
     phone: rest.phone, createdAt: rest.created_at, lastLoginAt: rest.last_login_at,
+    emailVerified: rest.email_verified == null ? 1 : Number(rest.email_verified),
   };
 }
 
+// R27.1a BUG 2 — OTP helpers. 6-digit numeric code, bcrypt-style scrypt hash reusing
+// the same salt:hash format as passwords, 10-minute expiry.
+function genOtp(): string {
+  return String(Math.floor(100000 + Math.random() * 900000));
+}
+const OTP_TTL_MS = 10 * 60 * 1000;
+const RESEND_WINDOW_MS = 60 * 60 * 1000; // 1 hour
+const RESEND_MAX = 3;
+
 // ---- auth ----
+// R27.1a BUG 2 — signup no longer auto-issues a session. It creates the account with
+// email_verified=0, generates an OTP, and returns the user + the plaintext otp so the
+// caller (route) can email it. Login stays blocked until the OTP is verified.
 export function createShopUser(email: string, password: string, fullName?: string, phone?: string) {
   const norm = String(email).trim().toLowerCase();
   const existing = sqlite.prepare(`SELECT id FROM shop_users WHERE email = ?`).get(norm);
   if (existing) throw new Error("An account with this email already exists");
+  const otp = genOtp();
+  const expiresAt = new Date(Date.now() + OTP_TTL_MS).toISOString();
+  const sentAt = new Date().toISOString();
   const info = sqlite.prepare(
-    `INSERT INTO shop_users (email, password_hash, full_name, phone) VALUES (?, ?, ?, ?)`
-  ).run(norm, hashPw(password), fullName || null, phone || null);
-  return getShopUserById(Number(info.lastInsertRowid));
+    `INSERT INTO shop_users (email, password_hash, full_name, phone, email_verified, verify_otp, verify_otp_expires_at, verify_otp_sent_at)
+     VALUES (?, ?, ?, ?, 0, ?, ?, ?)`
+  ).run(norm, hashPw(password), fullName || null, phone || null, hashPw(otp), expiresAt, sentAt);
+  const user = getShopUserById(Number(info.lastInsertRowid));
+  return { user, otp };
 }
 
 export function getShopUserById(id: number) {
   return publicUser(sqlite.prepare(`SELECT * FROM shop_users WHERE id = ?`).get(id));
 }
 
-export function loginShopUser(email: string, password: string) {
+// Returns either { token, user } on success, { error: "verify_required", email } if the
+// account exists but is unverified, or null on bad credentials.
+export function loginShopUser(email: string, password: string):
+  | { token: string; user: any }
+  | { error: "verify_required"; email: string }
+  | null {
   const norm = String(email).trim().toLowerCase();
   const row = sqlite.prepare(`SELECT * FROM shop_users WHERE email = ?`).get(norm) as any;
   if (!row || !verifyPw(password, row.password_hash)) return null;
+  if (Number(row.email_verified) !== 1) return { error: "verify_required", email: norm };
   sqlite.prepare(`UPDATE shop_users SET last_login_at = CURRENT_TIMESTAMP WHERE id = ?`).run(row.id);
   const token = createShopSession(row.id);
   return { token, user: publicUser(row) };
+}
+
+// R27.1a BUG 2 — verify the signup OTP. On match within expiry: mark verified, clear otp
+// fields, issue a session (auto-login). Returns { token, user } or throws a friendly error.
+export function verifyShopOtp(email: string, otp: string) {
+  const norm = String(email).trim().toLowerCase();
+  const row = sqlite.prepare(`SELECT * FROM shop_users WHERE email = ?`).get(norm) as any;
+  if (!row) throw new Error("Account not found");
+  if (Number(row.email_verified) === 1) {
+    // Already verified — just log them in so a double-submit isn't a dead end.
+    const token = createShopSession(row.id);
+    return { token, user: publicUser(row) };
+  }
+  if (!row.verify_otp) throw new Error("No verification code on file. Please resend.");
+  if (row.verify_otp_expires_at && new Date(row.verify_otp_expires_at).getTime() < Date.now()) {
+    throw new Error("Code expired. Please resend a new code.");
+  }
+  if (!verifyPw(String(otp).trim(), row.verify_otp)) throw new Error("Incorrect code. Please try again.");
+  sqlite.prepare(
+    `UPDATE shop_users SET email_verified = 1, verify_otp = NULL, verify_otp_expires_at = NULL, last_login_at = CURRENT_TIMESTAMP WHERE id = ?`
+  ).run(row.id);
+  const token = createShopSession(row.id);
+  return { token, user: getShopUserById(row.id) };
+}
+
+// R27.1a BUG 2 — regenerate + return a fresh OTP for an unverified account. Rate-limited to
+// RESEND_MAX sends per RESEND_WINDOW. Returns { otp } so the route can email it.
+export function resendShopOtp(email: string): { otp: string } {
+  const norm = String(email).trim().toLowerCase();
+  const row = sqlite.prepare(`SELECT * FROM shop_users WHERE email = ?`).get(norm) as any;
+  if (!row) throw new Error("Account not found");
+  if (Number(row.email_verified) === 1) throw new Error("This account is already verified. Please sign in.");
+  // Crude rate limit: count sends in the last hour using sent_at. We only track the last
+  // send timestamp, so enforce a minimum gap of (window / max) between resends.
+  if (row.verify_otp_sent_at) {
+    const since = Date.now() - new Date(row.verify_otp_sent_at).getTime();
+    if (since < RESEND_WINDOW_MS / RESEND_MAX) {
+      throw new Error("Please wait a few minutes before requesting another code.");
+    }
+  }
+  const otp = genOtp();
+  const expiresAt = new Date(Date.now() + OTP_TTL_MS).toISOString();
+  const sentAt = new Date().toISOString();
+  sqlite.prepare(
+    `UPDATE shop_users SET verify_otp = ?, verify_otp_expires_at = ?, verify_otp_sent_at = ? WHERE id = ?`
+  ).run(hashPw(otp), expiresAt, sentAt, row.id);
+  return { otp };
 }
 
 export function createShopSession(shopUserId: number): string {
@@ -339,7 +410,7 @@ export function adminListShopUsers(opts: { q?: string; sort?: string }) {
 export function adminGetShopUser(id: number) {
   const u = getShopUserById(id);
   if (!u) return null;
-  return { ...u, orders: listOrdersForUser(id), addresses: listAddresses(id) };
+  return { ...u, orders: listOrdersForUser(id), addresses: listAddresses(id), wishlist: listWishlist(id) };
 }
 
 // ---- freight admin ----

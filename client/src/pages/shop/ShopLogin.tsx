@@ -16,6 +16,12 @@ export default function ShopLogin() {
   const [err, setErr] = useState("");
   const [busy, setBusy] = useState(false);
 
+  // R27.1a BUG 3 — support redirect-back after login via ?next=checkout (hash routing).
+  const nextParam = (() => {
+    try { return new URLSearchParams(window.location.hash.split("?")[1] || "").get("next"); } catch { return null; }
+  })();
+  const destFor = (next: string | null) => (next === "checkout" ? "/checkout" : "/customer/account");
+
   const submit = async (e: React.FormEvent) => {
     e.preventDefault();
     setErr(""); setBusy(true);
@@ -25,9 +31,14 @@ export default function ShopLogin() {
         body: JSON.stringify({ email, password }),
       });
       const j = await r.json();
+      // R27.1a BUG 2 — unverified accounts are blocked (403); route to OTP verify screen.
+      if (r.status === 403 && j.error === "verify_required") {
+        navigate(`/customer/verify?email=${encodeURIComponent(j.email || email)}${nextParam ? `&next=${encodeURIComponent(nextParam)}` : ""}`);
+        return;
+      }
       if (!r.ok) throw new Error(j.error || "Login failed");
       setAuth(j.token, j.user);
-      navigate("/customer/account");
+      navigate(destFor(nextParam));
     } catch (e: any) { setErr(e.message); } finally { setBusy(false); }
   };
 

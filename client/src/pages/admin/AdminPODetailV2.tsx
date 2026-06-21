@@ -1,8 +1,9 @@
 import { useRoute, Link } from "wouter";
 import { AdminLayout } from "./AdminLayout";
 import { adminFetch, useAdminAuth } from "@/lib/admin-auth";
-import { useQuery } from "@tanstack/react-query";
-import { ArrowLeft, ExternalLink, Truck, Package, CreditCard } from "lucide-react";
+import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
+import { ArrowLeft, ExternalLink, Truck, Package, CreditCard, CheckCircle2 } from "lucide-react";
+import { useToast } from "@/hooks/use-toast";
 
 // R26.6a (5) — dedicated admin PO detail page. Reads GET /api/admin/purchase-orders-v2/:id
 // which returns { po, customer, vendor, lines, dispatches, payments }.
@@ -20,6 +21,8 @@ const fmtDate = (v: any) => (v ? new Date(Number(v) || v).toLocaleDateString("en
 
 export default function AdminPODetailV2() {
   const { token } = useAdminAuth();
+  const qc = useQueryClient();
+  const { toast } = useToast();
   const [, params] = useRoute("/admin/purchase-orders-v2/:id");
   const id = params?.id ? parseInt(params.id, 10) : NaN;
 
@@ -35,6 +38,25 @@ export default function AdminPODetailV2() {
 
   const po = data?.po;
   const poNo = po?.customerPoNumber || po?.customer_po_number || po?.poNumber || po?.po_number || (po ? `#${po.id}` : "");
+
+  // R27.1a BUG 6 — Process PO: split confirmed lines (status -> processed). Enabled for
+  // statuses that can still be processed; refreshes the detail + list on success.
+  const status = String(po?.status || "").toLowerCase();
+  const canProcess = ["sent", "accepted", "draft", "partial", "open"].includes(status);
+  const processMut = useMutation({
+    mutationFn: async () => {
+      const r = await adminFetch(token, `/api/admin/purchase-orders/${id}/mark-processed`, { method: "POST" });
+      const j = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(j.error || "Process failed");
+      return j;
+    },
+    onSuccess: (res: any) => {
+      toast({ title: "PO processed", description: res?.pending_po ? `Confirmed lines processed; ${res.pending_po.moved_count} pending line(s) moved to ${res.pending_po.po_number}.` : "Confirmed lines processed." });
+      qc.invalidateQueries({ queryKey: ["admin-po-v2-detail", id] });
+      qc.invalidateQueries({ queryKey: ["admin-pos-v2"] });
+    },
+    onError: (e: any) => toast({ title: "Could not process PO", description: e.message, variant: "destructive" }),
+  });
 
   return (
     <AdminLayout title="Purchase Order">
@@ -66,6 +88,18 @@ export default function AdminPODetailV2() {
               </div>
               <div className="flex items-center gap-2">
                 <span className="inline-block px-3 py-1 rounded-full bg-indigo-500/15 text-indigo-700 text-xs font-bold uppercase tracking-wider">{po.status || "—"}</span>
+                {status === "processed" ? (
+                  <span className="inline-flex items-center gap-1 px-3 py-2 text-xs font-semibold rounded-lg bg-green-500/15 text-green-700"><CheckCircle2 className="w-3 h-3" /> Processed</span>
+                ) : (
+                  <button
+                    onClick={() => processMut.mutate()}
+                    disabled={!canProcess || processMut.isPending}
+                    className="inline-flex items-center gap-1 px-3 py-2 text-xs font-semibold rounded-lg bg-indigo-600 text-white hover:bg-indigo-700 disabled:opacity-50 disabled:cursor-not-allowed"
+                    data-testid="button-process-po"
+                  >
+                    <CheckCircle2 className="w-3 h-3" /> {processMut.isPending ? "Processing…" : "Process PO"}
+                  </button>
+                )}
                 <a href={`/#/team/po/${po.id}`} className="inline-flex items-center gap-1 px-3 py-2 text-xs font-semibold border rounded-lg hover:bg-muted">
                   <ExternalLink className="w-3 h-3" /> Open in Team portal
                 </a>

@@ -5,11 +5,9 @@ import { Card } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { apiUrl } from "@/lib/queryClient";
-import { useShopAuth } from "@/lib/shop-auth";
 import { SeoHead } from "@/components/SeoHead";
 
 export default function ShopSignup() {
-  const { setAuth } = useShopAuth();
   const [, navigate] = useLocation();
   const [fullName, setFullName] = useState("");
   const [email, setEmail] = useState("");
@@ -28,8 +26,8 @@ export default function ShopSignup() {
       });
       const j = await r.json();
       if (!r.ok) throw new Error(j.error || "Signup failed");
-      setAuth(j.token, j.user);
-      navigate("/customer/account");
+      // R27.1a BUG 2 — signup no longer auto-logs in. Go verify the emailed OTP.
+      navigate(`/customer/verify?email=${encodeURIComponent(j.email || email)}`);
     } catch (e: any) { setErr(e.message); } finally { setBusy(false); }
   };
 

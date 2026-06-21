@@ -1747,7 +1747,7 @@ export async function listPurchaseOrdersV2(opts: { status?: string; customerId?:
   return conds.length ? base.where(and(...conds)).orderBy(desc(purchaseOrdersV2.createdAt)).all() : base.orderBy(desc(purchaseOrdersV2.createdAt)).all();
 }
 // R10 — list with live customer/cost totals + customer name for the team PO list.
-export async function listPurchaseOrdersV2WithTotals(opts: { status?: string; customerId?: number; q?: string } = {}): Promise<Array<PurchaseOrderV2 & { customerName: string | null; companyName: string | null; companyLogoUrl: string | null; custTotal: number; costTotal: number }>> {
+export async function listPurchaseOrdersV2WithTotals(opts: { status?: string; customerId?: number; q?: string; from?: string; to?: string } = {}): Promise<Array<PurchaseOrderV2 & { customerName: string | null; companyName: string | null; companyLogoUrl: string | null; custTotal: number; costTotal: number }>> {
   const rows = await listPurchaseOrdersV2(opts);
   const mapped = rows.map((po) => {
     const items = db.select().from(poItems).where(eq(poItems.poId, po.id)).all();
@@ -1779,8 +1779,20 @@ export async function listPurchaseOrdersV2WithTotals(opts: { status?: string; cu
         return haystack.some((s) => String(s).toLowerCase().includes(q));
       })
     : mapped;
+  // R27.1a BUG 7 — date-range filter on the effective PO date (po_date when set, else
+  // created_at). from/to are YYYY-MM-DD; to is inclusive of the whole day.
+  const fromMs = opts.from ? new Date(opts.from + "T00:00:00").getTime() : null;
+  const toMs = opts.to ? new Date(opts.to + "T23:59:59.999").getTime() : null;
+  const dated = (fromMs != null || toMs != null)
+    ? filtered.filter((po: any) => {
+        const ts = Number(po.poDate ?? po.createdAt ?? 0);
+        if (fromMs != null && ts < fromMs) return false;
+        if (toMs != null && ts > toMs) return false;
+        return true;
+      })
+    : filtered;
   // Strip the line items we only needed for searching back off the list payload.
-  return filtered.map(({ items: _items, ...rest }: any) => rest);
+  return dated.map(({ items: _items, ...rest }: any) => rest);
 }
 // R13: has this quotation already been converted to a PO? Used to lock the quotation's
 // ordered-company once it's downstream of a PO.

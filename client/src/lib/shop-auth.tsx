@@ -45,12 +45,15 @@ export function ShopAuthProvider({ children }: { children: ReactNode }) {
     memToken = t;
     safeSet(K_TOKEN, t);
     setToken(t); setUser(u); setReady(true);
+    // R27.1a BUG 3 — notify any non-context listeners (and other tabs sync via storage).
+    try { window.dispatchEvent(new Event("shop:auth-changed")); } catch {}
   }, []);
 
   const clear = useCallback(() => {
     memToken = null;
     safeSet(K_TOKEN, null);
     setToken(null); setUser(null); setReady(true);
+    try { window.dispatchEvent(new Event("shop:auth-changed")); } catch {}
   }, []);
 
   const refresh = useCallback(async () => {
@@ -75,6 +78,24 @@ export function ShopAuthProvider({ children }: { children: ReactNode }) {
     })();
     return () => { mounted = false; };
   }, [token, clear]);
+
+  // R27.1a BUG 3 — keep auth state in sync if the token changes in another tab
+  // (storage event) or via the custom event we dispatch on login/verify/logout.
+  useEffect(() => {
+    const sync = () => {
+      const t = safeGet(K_TOKEN);
+      memToken = t;
+      setToken(t);
+      if (!t) { setUser(null); setReady(true); }
+    };
+    const onStorage = (e: StorageEvent) => { if (e.key === K_TOKEN) sync(); };
+    window.addEventListener("storage", onStorage);
+    window.addEventListener("shop:auth-changed", sync);
+    return () => {
+      window.removeEventListener("storage", onStorage);
+      window.removeEventListener("shop:auth-changed", sync);
+    };
+  }, []);
 
   return <Ctx.Provider value={{ token, user, ready, setAuth, clear, refresh }}>{children}</Ctx.Provider>;
 }

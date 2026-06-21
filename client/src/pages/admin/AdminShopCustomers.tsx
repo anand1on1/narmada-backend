@@ -1,10 +1,12 @@
 import { useEffect, useState } from "react";
+import { useLocation } from "wouter";
 import { AdminLayout } from "./AdminLayout";
 import { adminFetch, useAdminAuth } from "@/lib/admin-auth";
 import { formatINR } from "@/lib/utils-app";
 
 export default function AdminShopCustomers() {
   const { token } = useAdminAuth();
+  const [, navigate] = useLocation();
   const [rows, setRows] = useState<any[]>([]);
   const [q, setQ] = useState("");
   const [sort, setSort] = useState("recent");
@@ -42,7 +44,7 @@ export default function AdminShopCustomers() {
             </thead>
             <tbody className="divide-y">
               {rows.map((u) => (
-                <tr key={u.id} className="hover:bg-muted/30" data-testid={`customer-row-${u.id}`}>
+                <tr key={u.id} onClick={() => navigate(`/admin/web-customers/${u.id}`)} className="hover:bg-muted/30 cursor-pointer" data-testid={`customer-row-${u.id}`}>
                   <td className="p-3 font-medium">{u.fullName || "—"}</td>
                   <td className="p-3">{u.email}</td>
                   <td className="p-3">{u.phone || "—"}</td>

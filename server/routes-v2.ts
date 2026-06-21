@@ -6239,6 +6239,8 @@ function registerR8Routes(
         status: req.query.status as string | undefined,
         customerId: req.query.customer_id ? parseInt(req.query.customer_id as string, 10) : undefined,
         q: req.query.q as string | undefined,
+        from: req.query.from as string | undefined,
+        to: req.query.to as string | undefined,
       });
       const summary = await v2.getDispatchSummaryForPOs(rows.map((r: any) => r.id));
       res.json(rows.map((r: any) => {
@@ -6274,6 +6276,20 @@ function registerR8Routes(
       rawSqlite.prepare(`UPDATE purchase_orders_v2 SET deleted_at = ?, updated_at = ? WHERE id = ?`).run(Date.now(), Date.now(), parseInt(req.params.id as string, 10));
       res.json({ ok: true });
     } catch (e: any) { res.status(500).json({ error: e.message }); }
+  });
+  // R27.1a BUG 6 — admin "Process PO" action. Splits confirmed lines (status -> processed)
+  // from unconfirmed (moved to a new pending PO). Mirrors the data-team /process route but
+  // gated on admin auth so the PO Dashboard button works.
+  app.post("/api/admin/purchase-orders/:id/mark-processed", requireAuth, async (req, res) => {
+    try {
+      const id = parseInt(req.params.id as string, 10);
+      const result = v2.processPurchaseOrder(id);
+      res.json(result);
+    } catch (e: any) {
+      const msg = e?.message || "Process failed";
+      const code = /No confirmed lines|not found/i.test(msg) ? 400 : 500;
+      res.status(code).json({ error: msg });
+    }
   });
 
   // ==================== R26.6a (10). OAUTH STATUS / DISCONNECT ====================
@@ -7102,15 +7118,68 @@ function registerR8Routes(
     } catch (e: any) { res.status(500).json({ error: e.message }); }
   });
 
-  // ---- shop auth (TASK 2) ----
+  // ---- shop auth (TASK 2 / R27.1a BUG 2 — strict email-OTP verification) ----
+  // R27.1a BUG 2 — signup creates an UNVERIFIED account, emails a 6-digit OTP, and does
+  // NOT issue a token. Client redirects to /#/customer/verify?email=... to complete.
+  function sendShopOtpEmail(to: string, otp: string) {
+    sendGenericEmail({
+      to,
+      subject: "Your Narmada verification code",
+      html: `<div style="font-family:system-ui,-apple-system,sans-serif;max-width:480px;margin:0 auto;">
+        <div style="background:#001a4d;color:#fff;padding:18px;border-radius:8px 8px 0 0;"><h2 style="margin:0;">Verify your email</h2></div>
+        <div style="border:1px solid #e5e7eb;border-top:none;padding:24px;border-radius:0 0 8px 8px;text-align:center;">
+          <p style="margin:0 0 12px;">Your Narmada verification code is:</p>
+          <p style="font-size:32px;font-weight:800;letter-spacing:6px;margin:8px 0;color:#001a4d;">${escapeHtml(otp)}</p>
+          <p style="color:#888;font-size:13px;margin-top:12px;">This code expires in 10 minutes. If you didn't request it, ignore this email.</p>
+        </div></div>`,
+      text: `Your Narmada verification code is: ${otp} (expires in 10 minutes).`,
+      event: "shop_signup_otp",
+    }).catch((e: any) => console.error("[email] order_signup_otp failed:", e?.message || e));
+  }
+
+  function sendShopWelcomeEmail(to: string, name?: string) {
+    sendGenericEmail({
+      to,
+      subject: "Welcome to Narmada Mobility",
+      html: `<div style="font-family:system-ui,-apple-system,sans-serif;max-width:480px;margin:0 auto;">
+        <div style="background:#001a4d;color:#fff;padding:18px;border-radius:8px 8px 0 0;"><h2 style="margin:0;">Welcome${name ? ", " + escapeHtml(name) : ""}!</h2></div>
+        <div style="border:1px solid #e5e7eb;border-top:none;padding:24px;border-radius:0 0 8px 8px;">
+          <p>Your Narmada Mobility account is verified and ready. You can now shop genuine spare parts, save addresses, and track your orders.</p>
+          <p style="margin-top:14px;"><a href="https://narmadamobility.com/#/products" style="background:#001a4d;color:#fff;padding:10px 18px;border-radius:6px;text-decoration:none;">Start shopping</a></p>
+        </div></div>`,
+      text: `Welcome to Narmada Mobility${name ? ", " + name : ""}! Your account is verified and ready.`,
+      event: "shop_welcome",
+    }).catch((e: any) => console.error("[email] shop_welcome failed:", e?.message || e));
+  }
+
   app.post("/api/shop/signup", async (req, res) => {
     try {
       const { email, password, full_name, fullName, phone } = req.body || {};
       if (!email || !password) return res.status(400).json({ error: "Email and password required" });
       if (String(password).length < 6) return res.status(400).json({ error: "Password must be at least 6 characters" });
-      const user = shop.createShopUser(email, password, full_name ?? fullName, phone);
-      const login = shop.loginShopUser(email, password);
-      res.json({ token: login!.token, user });
+      const { user, otp } = shop.createShopUser(email, password, full_name ?? fullName, phone);
+      sendShopOtpEmail((user as any).email, otp);
+      res.json({ verify_required: true, email: (user as any).email });
+    } catch (e: any) { res.status(400).json({ error: e.message }); }
+  });
+
+  app.post("/api/shop/verify-otp", async (req, res) => {
+    try {
+      const { email, otp } = req.body || {};
+      if (!email || !otp) return res.status(400).json({ error: "Email and code required" });
+      const result = shop.verifyShopOtp(email, otp);
+      sendShopWelcomeEmail((result.user as any).email, (result.user as any).fullName);
+      res.json(result);
+    } catch (e: any) { res.status(400).json({ error: e.message }); }
+  });
+
+  app.post("/api/shop/resend-otp", async (req, res) => {
+    try {
+      const { email } = req.body || {};
+      if (!email) return res.status(400).json({ error: "Email required" });
+      const { otp } = shop.resendShopOtp(email);
+      sendShopOtpEmail(String(email).trim().toLowerCase(), otp);
+      res.json({ ok: true });
     } catch (e: any) { res.status(400).json({ error: e.message }); }
   });
 
@@ -7120,6 +7189,11 @@ function registerR8Routes(
       if (!email || !password) return res.status(400).json({ error: "Email and password required" });
       const result = shop.loginShopUser(email, password);
       if (!result) return res.status(401).json({ error: "Invalid email or password" });
+      if ("error" in result && result.error === "verify_required") {
+        // Re-send a fresh OTP so the user lands on the verify screen with a valid code.
+        try { const { otp } = shop.resendShopOtp(result.email); sendShopOtpEmail(result.email, otp); } catch {}
+        return res.status(403).json({ error: "verify_required", email: result.email });
+      }
       res.json(result);
     } catch (e: any) { res.status(500).json({ error: e.message }); }
   });
@@ -7237,8 +7311,10 @@ function registerR8Routes(
               <p style="margin-top:14px;"><strong>Ship to:</strong><br/>${escapeHtml(s.fullName || "")}, ${escapeHtml(s.phone || "")}<br/>${escapeHtml(s.line1 || "")}${s.line2 ? ", " + escapeHtml(s.line2) : ""}<br/>${escapeHtml(s.city || "")}, ${escapeHtml(s.state || "")} - ${escapeHtml(s.pincode || "")}</p>
               <p style="margin-top:14px;">Track your order at <a href="https://narmadamobility.com/#/customer/orders/${order!.id}">narmadamobility.com</a></p>
             </div></div>`,
-        }).catch((e: any) => console.error("[shop] order email error:", e?.message));
-      } catch (e: any) { console.error("[shop] order email build error:", e?.message); }
+          text: `Your order ${order!.orderNumber} has been placed. Total ₹${Number(order!.totalInr).toLocaleString("en-IN")} (Cash on Delivery).`,
+          event: "shop_order_confirm",
+        }).catch((e: any) => console.error("[email] order_confirm failed:", e?.message));
+      } catch (e: any) { console.error("[email] order_confirm build error:", e?.message); }
 
       // Auto-PO into procurement (fire-and-forget; failure must NOT fail the order).
       try {
@@ -7285,18 +7361,32 @@ function registerR8Routes(
       const by = ((req as any).user?.username) || "admin";
       const o = shop.adminUpdateOrderStatus(parseInt(String(req.params.id), 10), status, note || null, by);
       if (!o) return res.status(404).json({ error: "Order not found" });
-      if (status === "dispatched" && o.customerEmail) {
-        sendGenericEmail({
-          to: o.customerEmail,
-          subject: `Order Dispatched - ${o.orderNumber} - Narmada Mobility`,
-          html: `<div style="font-family:system-ui,sans-serif;max-width:520px;margin:0 auto;padding:20px;">
-            <h2 style="color:#001a4d;">Your order is on the way!</h2>
-            <p>Order <strong>${o.orderNumber}</strong> has been dispatched.</p>
-            ${o.dispatchedCarrier ? `<p>Carrier: <strong>${escapeHtml(o.dispatchedCarrier)}</strong></p>` : ""}
-            ${o.dispatchedDocket ? `<p>Docket / Tracking #: <strong>${escapeHtml(o.dispatchedDocket)}</strong></p>` : ""}
-            <p>Track at <a href="https://narmadamobility.com/#/customer/orders/${o.id}">narmadamobility.com</a></p>
-          </div>`,
-        }).catch((e: any) => console.error("[shop] dispatch email error:", e?.message));
+      // R27.1a BUG 1 — order status update emails for confirmed/packed/dispatched/delivered.
+      if (o.customerEmail) {
+        const COPY: Record<string, { subject: string; heading: string; body: string }> = {
+          confirmed: { subject: "Order Confirmed", heading: "Your order is confirmed", body: "We've confirmed your order and started preparing it." },
+          packed: { subject: "Order Packed", heading: "Your order is packed", body: "Your order has been packed and is ready for dispatch." },
+          dispatched: { subject: "Order Dispatched", heading: "Your order is on the way!", body: "Your order has been dispatched." },
+          delivered: { subject: "Order Delivered", heading: "Your order has been delivered", body: "Your order has been delivered. Thank you for shopping with Narmada Mobility!" },
+        };
+        const c = COPY[String(status)];
+        if (c) {
+          const tracking = (status === "dispatched")
+            ? `${o.dispatchedCarrier ? `<p>Carrier: <strong>${escapeHtml(o.dispatchedCarrier)}</strong></p>` : ""}${o.dispatchedDocket ? `<p>Docket / Tracking #: <strong>${escapeHtml(o.dispatchedDocket)}</strong></p>` : ""}`
+            : "";
+          sendGenericEmail({
+            to: o.customerEmail,
+            subject: `${c.subject} - ${o.orderNumber} - Narmada Mobility`,
+            html: `<div style="font-family:system-ui,sans-serif;max-width:520px;margin:0 auto;padding:20px;">
+              <h2 style="color:#001a4d;">${c.heading}</h2>
+              <p>Order <strong>${escapeHtml(o.orderNumber)}</strong> — ${c.body}</p>
+              ${tracking}
+              <p>Track at <a href="https://narmadamobility.com/#/customer/orders/${o.id}">narmadamobility.com</a></p>
+            </div>`,
+            text: `${c.heading}. Order ${o.orderNumber}: ${c.body}`,
+            event: `shop_order_${status}`,
+          }).catch((e: any) => console.error(`[email] shop_order_${status} failed:`, e?.message));
+        }
       }
       res.json(o);
     } catch (e: any) { res.status(400).json({ error: e.message }); }

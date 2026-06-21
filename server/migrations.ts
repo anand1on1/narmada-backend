@@ -2200,3 +2200,35 @@ export function runR27_1Migrations() {
 
   console.log("[migrations] R27.1: complete");
 }
+
+// R27.1a — bugfix sweep. Additive only: email-OTP verification columns on shop_users.
+// Each ALTER is wrapped in its own try/catch so a duplicate-column error on re-run is
+// logged and skipped (idempotent). No tables are dropped or renamed.
+export function runR27_1aMigrations() {
+  console.log("[migrations] R27.1a: start");
+  const addCol = (table: string, col: string, type: string) => {
+    try {
+      sqlite.exec(`ALTER TABLE ${table} ADD COLUMN ${col} ${type};`);
+      console.log(`[migrations] R27.1a: ${table}.${col} added`);
+    } catch (e: any) {
+      // duplicate column on re-run is expected and safe
+      console.log(`[migrations] R27.1a: ${table}.${col} skip (${e?.message || e})`);
+    }
+  };
+  // BUG 2 — email OTP verification flow (strict: login blocked until verified).
+  addCol("shop_users", "email_verified", "INTEGER DEFAULT 0");
+  addCol("shop_users", "verify_otp", "TEXT");
+  addCol("shop_users", "verify_otp_expires_at", "TEXT");
+  addCol("shop_users", "verify_otp_sent_at", "TEXT");
+  // Existing accounts created before R27.1a are grandfathered as verified so the new
+  // strict login gate doesn't lock out users who signed up during R27.1.
+  try {
+    const info = sqlite.prepare(
+      `UPDATE shop_users SET email_verified = 1 WHERE email_verified IS NULL OR email_verified = 0`,
+    ).run();
+    console.log(`[migrations] R27.1a: grandfathered ${info.changes} pre-existing shop_users as verified`);
+  } catch (e: any) {
+    console.error("[migrations] R27.1a: grandfather update failed:", e?.message || e);
+  }
+  console.log("[migrations] R27.1a: complete");
+}

@@ -26,9 +26,10 @@ export default function CheckoutPage() {
 
   const subtotal = cartSubtotalInr();
 
-  // Redirect to login if not authenticated (after ready).
+  // Redirect to login if not authenticated (after ready). R27.1a BUG 3 — pass
+  // ?next=checkout so login/verify returns the shopper straight back to checkout.
   useEffect(() => {
-    if (ready && !user) navigate("/customer/login");
+    if (ready && !user) navigate("/customer/login?next=checkout");
   }, [ready, user, navigate]);
 
   // Empty cart guard.
