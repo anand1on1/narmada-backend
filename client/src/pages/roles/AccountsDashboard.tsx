@@ -3,7 +3,7 @@ import RolePortalShell from "./RolePortalShell";
 import { FinanceAuth } from "@/lib/role-auth";
 import { Calculator } from "lucide-react";
 
-type Tab = "cash" | "headers" | "current" | "advances" | "employees" | "ledger" | "attendance" | "salary";
+type Tab = "cash" | "headers" | "expenses" | "current" | "advances" | "employees" | "ledger" | "attendance" | "salary";
 
 const BRANCHES = ["Delhi", "Patna"];
 
@@ -17,12 +17,13 @@ export function AccountsBody() {
   return (
     <>
       <div className="flex flex-wrap gap-2 mb-5">
-        {([["cash", "Cash in Hand"], ["headers", "Expense Headers"], ["current", "Current Expenses"], ["advances", "Advances"], ["employees", "Employees"], ["ledger", "Person Ledger"], ["attendance", "Attendance"], ["salary", "Salary"]] as [Tab, string][]).map(([k, label]) => (
+        {([["cash", "Cash in Hand"], ["headers", "Expense Headers"], ["expenses", "Expenses"], ["current", "Current Expenses"], ["advances", "Advances"], ["employees", "Employees"], ["ledger", "Person Ledger"], ["attendance", "Attendance"], ["salary", "Salary"]] as [Tab, string][]).map(([k, label]) => (
           <button key={k} onClick={() => setTab(k)} data-testid={`accounts-tab-${k}`} className={`px-3 py-1.5 rounded-lg text-sm font-semibold ${tab === k ? "bg-accent text-accent-foreground" : "border hover:bg-muted"}`}>{label}</button>
         ))}
       </div>
       {tab === "cash" && <CashTab token={token} />}
       {tab === "headers" && <HeadersTab token={token} />}
+      {tab === "expenses" && <ExpensesTab token={token} />}
       {tab === "current" && <CurrentTab token={token} isAdmin={isAdmin} />}
       {tab === "advances" && <AdvancesTab token={token} />}
       {tab === "employees" && <EmployeesTab token={token} isAdmin={isAdmin} />}
@@ -117,6 +118,125 @@ function HeadersTab({ token }: { token: string | null }) {
           </table>
         )}
       </div>
+    </div>
+  );
+}
+
+// R27.6 #6/#7 — unified Expenses: ADVANCE flow (issue cash → settle expenses →
+// auto-settle at 0 / Return Cash) + DIRECT flow (post straight w/ payment mode).
+// Approved sales-team expenses appear here too (synced server-side, #7).
+const PAYMENT_MODES = ["cash", "upi", "bank", "card", "cheque"];
+function ExpensesTab({ token }: { token: string | null }) {
+  const [mode, setMode] = useState<"direct" | "advance">("direct");
+  const [expenses, setExpenses] = useState<any[]>([]);
+  const [advances, setAdvances] = useState<any[]>([]);
+  const [emps, setEmps] = useState<any[]>([]);
+  const [headers, setHeaders] = useState<any[]>([]);
+  const [msg, setMsg] = useState<string | null>(null);
+  const today = new Date().toISOString().slice(0, 10);
+  const [direct, setDirect] = useState({ amount: "", payment_mode: "cash", expense_header_id: "", branch_id: "Delhi", description: "", expense_date: today });
+  const [advForm, setAdvForm] = useState({ staff_id: "", amount: "", purpose: "", branch_id: "Delhi" });
+  const [settle, setSettle] = useState({ advance_id: "", amount: "", expense_header_id: "", description: "", expense_date: today });
+
+  async function load() {
+    const [x, a, e, h] = await Promise.all([
+      f(token, "/api/finance/expenses"), f(token, "/api/finance/expense-advances?status=open"),
+      f(token, "/api/finance/employees"), f(token, "/api/finance/expense-headers"),
+    ]);
+    if (x.ok) setExpenses(await x.json());
+    if (a.ok) setAdvances(await a.json());
+    if (e.ok) setEmps(await e.json());
+    if (h.ok) setHeaders(await h.json());
+  }
+  useEffect(() => { if (token) load(); }, [token]); // eslint-disable-line
+  function flash(m: string) { setMsg(m); setTimeout(() => setMsg(null), 3000); }
+
+  async function addDirect() {
+    if (!direct.amount) return;
+    const r = await f(token, "/api/finance/expenses/direct", { method: "POST", body: JSON.stringify({ ...direct, amount: Number(direct.amount), expense_header_id: direct.expense_header_id ? Number(direct.expense_header_id) : undefined }) });
+    if (r.ok) { setDirect({ ...direct, amount: "", description: "" }); flash("Direct expense posted."); load(); }
+    else flash((await r.json().catch(() => ({}))).error || "Failed");
+  }
+  async function issueAdvance() {
+    if (!advForm.staff_id || !advForm.amount) return;
+    const r = await f(token, "/api/finance/expense-advances", { method: "POST", body: JSON.stringify({ staff_id: Number(advForm.staff_id), amount: Number(advForm.amount), purpose: advForm.purpose, branch_id: advForm.branch_id }) });
+    if (r.ok) { setAdvForm({ ...advForm, amount: "", purpose: "" }); flash("Advance issued."); load(); }
+    else flash((await r.json().catch(() => ({}))).error || "Failed");
+  }
+  async function settleExpense() {
+    if (!settle.advance_id || !settle.amount) return;
+    const r = await f(token, "/api/finance/expenses/advance", { method: "POST", body: JSON.stringify({ advance_id: Number(settle.advance_id), amount: Number(settle.amount), expense_header_id: settle.expense_header_id ? Number(settle.expense_header_id) : undefined, description: settle.description, expense_date: settle.expense_date }) });
+    const j = await r.json().catch(() => ({}));
+    if (r.ok) { setSettle({ ...settle, amount: "", description: "" }); flash(j.advanceStatus === "settled" ? "Expense settled — advance fully settled." : `Expense settled. Balance ₹${j.advanceBalance}.`); load(); }
+    else flash(j.error || "Failed");
+  }
+  async function returnCash(id: number) {
+    if (!confirm("Return remaining advance cash and settle this advance?")) return;
+    const r = await f(token, `/api/finance/expense-advances/${id}/return`, { method: "POST" });
+    if (r.ok) { flash("Cash returned, advance settled."); load(); } else flash("Failed");
+  }
+  async function syncSales() {
+    const r = await f(token, "/api/finance/expenses/sync-sales", { method: "POST" });
+    const j = await r.json().catch(() => ({}));
+    if (r.ok) { flash(`Synced ${j.synced || 0} approved sales expense(s).`); load(); } else flash("Failed");
+  }
+
+  return (
+    <div>
+      {msg && <div className="mb-3 text-sm bg-emerald-50 border border-emerald-200 text-emerald-800 rounded-lg px-3 py-2">{msg}</div>}
+      <div className="flex gap-2 mb-4 items-center flex-wrap">
+        <button onClick={() => setMode("direct")} data-testid="expense-mode-direct" className={`px-3 py-1.5 rounded-lg text-sm font-semibold ${mode === "direct" ? "bg-accent text-accent-foreground" : "border hover:bg-muted"}`}>Direct Expense</button>
+        <button onClick={() => setMode("advance")} data-testid="expense-mode-advance" className={`px-3 py-1.5 rounded-lg text-sm font-semibold ${mode === "advance" ? "bg-accent text-accent-foreground" : "border hover:bg-muted"}`}>Advance Expense</button>
+        <button onClick={syncSales} data-testid="expense-sync-sales" className="ml-auto px-3 py-1.5 rounded-lg border text-sm font-semibold hover:bg-muted">Sync Sales Expenses</button>
+      </div>
+
+      {mode === "direct" ? (
+        <div className="flex gap-2 mb-5 bg-card border rounded-xl p-4 items-end flex-wrap">
+          <div><label className="text-xs text-muted-foreground">Amount (₹)</label><input type="number" value={direct.amount} onChange={(e) => setDirect({ ...direct, amount: e.target.value })} className="block px-3 py-1.5 rounded-lg border bg-background text-sm w-32" data-testid="direct-amount" /></div>
+          <div><label className="text-xs text-muted-foreground">Payment mode</label><select value={direct.payment_mode} onChange={(e) => setDirect({ ...direct, payment_mode: e.target.value })} className="block px-3 py-1.5 rounded-lg border bg-background text-sm w-28">{PAYMENT_MODES.map((p) => <option key={p} value={p}>{p}</option>)}</select></div>
+          <div><label className="text-xs text-muted-foreground">Header</label><select value={direct.expense_header_id} onChange={(e) => setDirect({ ...direct, expense_header_id: e.target.value })} className="block px-3 py-1.5 rounded-lg border bg-background text-sm w-40"><option value="">—</option>{headers.map((h) => <option key={h.id} value={h.id}>{h.name}</option>)}</select></div>
+          <div><label className="text-xs text-muted-foreground">Branch</label><select value={direct.branch_id} onChange={(e) => setDirect({ ...direct, branch_id: e.target.value })} className="block px-3 py-1.5 rounded-lg border bg-background text-sm w-28">{BRANCHES.map((b) => <option key={b} value={b}>{b}</option>)}</select></div>
+          <div><label className="text-xs text-muted-foreground">Description</label><input value={direct.description} onChange={(e) => setDirect({ ...direct, description: e.target.value })} className="block px-3 py-1.5 rounded-lg border bg-background text-sm w-44" /></div>
+          <div><label className="text-xs text-muted-foreground">Date</label><input type="date" value={direct.expense_date} onChange={(e) => setDirect({ ...direct, expense_date: e.target.value })} className="block px-3 py-1.5 rounded-lg border bg-background text-sm" /></div>
+          <button onClick={addDirect} className="px-3 py-1.5 rounded-lg bg-accent text-accent-foreground text-sm font-semibold" data-testid="direct-submit">Post Direct</button>
+        </div>
+      ) : (
+        <div className="space-y-4 mb-5">
+          <div className="bg-card border rounded-xl p-4">
+            <h4 className="text-sm font-bold mb-3">1 · Issue advance (staff receives cash first)</h4>
+            <div className="flex gap-2 items-end flex-wrap">
+              <div><label className="text-xs text-muted-foreground">Staff</label><select value={advForm.staff_id} onChange={(e) => setAdvForm({ ...advForm, staff_id: e.target.value })} className="block px-3 py-1.5 rounded-lg border bg-background text-sm w-44"><option value="">Select…</option>{emps.map((e) => <option key={e.id} value={e.id}>{e.name}</option>)}</select></div>
+              <div><label className="text-xs text-muted-foreground">Amount (₹)</label><input type="number" value={advForm.amount} onChange={(e) => setAdvForm({ ...advForm, amount: e.target.value })} className="block px-3 py-1.5 rounded-lg border bg-background text-sm w-32" data-testid="advance-amount" /></div>
+              <div><label className="text-xs text-muted-foreground">Branch</label><select value={advForm.branch_id} onChange={(e) => setAdvForm({ ...advForm, branch_id: e.target.value })} className="block px-3 py-1.5 rounded-lg border bg-background text-sm w-28">{BRANCHES.map((b) => <option key={b} value={b}>{b}</option>)}</select></div>
+              <div><label className="text-xs text-muted-foreground">Purpose</label><input value={advForm.purpose} onChange={(e) => setAdvForm({ ...advForm, purpose: e.target.value })} className="block px-3 py-1.5 rounded-lg border bg-background text-sm w-44" /></div>
+              <button onClick={issueAdvance} className="px-3 py-1.5 rounded-lg bg-accent text-accent-foreground text-sm font-semibold" data-testid="advance-submit">Issue Advance</button>
+            </div>
+          </div>
+          <div className="bg-card border rounded-xl p-4">
+            <h4 className="text-sm font-bold mb-3">2 · Settle expense from an open advance</h4>
+            <div className="flex gap-2 items-end flex-wrap">
+              <div><label className="text-xs text-muted-foreground">Advance</label><select value={settle.advance_id} onChange={(e) => setSettle({ ...settle, advance_id: e.target.value })} className="block px-3 py-1.5 rounded-lg border bg-background text-sm w-56" data-testid="settle-advance"><option value="">Select…</option>{advances.map((a) => <option key={a.id} value={a.id}>{a.staffName || a.staff_id} · bal ₹{a.balance}</option>)}</select></div>
+              <div><label className="text-xs text-muted-foreground">Amount (₹)</label><input type="number" value={settle.amount} onChange={(e) => setSettle({ ...settle, amount: e.target.value })} className="block px-3 py-1.5 rounded-lg border bg-background text-sm w-32" data-testid="settle-amount" /></div>
+              <div><label className="text-xs text-muted-foreground">Header</label><select value={settle.expense_header_id} onChange={(e) => setSettle({ ...settle, expense_header_id: e.target.value })} className="block px-3 py-1.5 rounded-lg border bg-background text-sm w-40"><option value="">—</option>{headers.map((h) => <option key={h.id} value={h.id}>{h.name}</option>)}</select></div>
+              <div><label className="text-xs text-muted-foreground">Description</label><input value={settle.description} onChange={(e) => setSettle({ ...settle, description: e.target.value })} className="block px-3 py-1.5 rounded-lg border bg-background text-sm w-40" /></div>
+              <button onClick={settleExpense} className="px-3 py-1.5 rounded-lg bg-accent text-accent-foreground text-sm font-semibold" data-testid="settle-submit">Settle</button>
+            </div>
+            <div className="mt-4">
+              <div className="text-xs text-muted-foreground mb-2">Open advances (auto-settle when balance hits ₹0)</div>
+              <Table cols={["Staff", "Issued", "Balance", "Status", ""]} rows={advances.map((a) => [
+                a.staffName || a.staff_id, `₹${Number(a.amount).toLocaleString("en-IN")}`, `₹${Number(a.balance).toLocaleString("en-IN")}`, a.status,
+                <button key={a.id} onClick={() => returnCash(a.id)} className="text-accent text-xs font-semibold hover:underline" data-testid={`return-cash-${a.id}`}>Return Cash</button>,
+              ])} />
+            </div>
+          </div>
+        </div>
+      )}
+
+      <h4 className="text-sm font-bold mb-2">All expenses</h4>
+      <Table cols={["Date", "Type", "Header", "Staff", "Mode", "Amount", "Description"]} rows={expenses.map((x) => [
+        x.expense_date, x.source === "sales_expense" ? "sales" : x.expense_type, x.headerName || "—", x.staffName || "—",
+        x.payment_mode || "—", `₹${Number(x.amount).toLocaleString("en-IN")}`, x.description || "—",
+      ])} />
     </div>
   );
 }

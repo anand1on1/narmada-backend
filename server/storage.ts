@@ -623,6 +623,8 @@ export class DatabaseStorage implements IStorage {
   }
   async getProduct(id: number) { return db.select().from(products).where(eq(products.id, id)).get(); }
   async getProductBySlug(slug: string) { return db.select().from(products).where(eq(products.slug, slug)).get(); }
+  // R27.6 #5 — resolve a product by its part number (for part-number-first URLs).
+  async getProductByPartNumber(partNumber: string) { return db.select().from(products).where(eq(products.partNumber, partNumber)).get(); }
   async createProduct(p: InsertProduct) {
     return db.insert(products).values({ ...p, createdAt: Date.now() }).returning().get();
   }

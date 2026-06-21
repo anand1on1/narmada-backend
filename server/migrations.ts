@@ -2597,3 +2597,70 @@ export function runR27_5Migrations() {
 
   console.log("[migrations] R27.5: complete");
 }
+
+// ============================================================================
+// R27.6 #6 — Expense rebuild: unified `expenses` table (advance + direct) and
+// `expense_advances` (staff cash advance with balance tracking + auto-settle).
+// ADDITIVE only — leaves the legacy advance_expenses/current_expenses tables in
+// place so prior-round finance UI keeps working.
+// ============================================================================
+export function runR27_6Migrations() {
+  console.log("[migrations] R27.6: start");
+  const run = (desc: string, sql: string) => {
+    try { sqlite.exec(sql); console.log(`[migrations] R27.6: ${desc} ok`); }
+    catch (e: any) { console.log(`[migrations] R27.6: ${desc} skip (${e?.message || e})`); }
+  };
+  const addCol = (table: string, col: string, decl: string) => {
+    try { sqlite.exec(`ALTER TABLE ${table} ADD COLUMN ${col} ${decl}`); console.log(`[migrations] R27.6: ${table}.${col} added`); }
+    catch (e: any) { console.log(`[migrations] R27.6: ${table}.${col} skip (${e?.message || e})`); }
+  };
+
+  // Cash advance issued to a staff member; balance decremented as expenses settle.
+  // status: open | settled. Auto-settles when balance reaches 0. Return Cash also
+  // settles by crediting the remaining balance back.
+  run("expense_advances", `
+    CREATE TABLE IF NOT EXISTS expense_advances (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      staff_id INTEGER NOT NULL,
+      branch_id TEXT,
+      amount REAL NOT NULL,
+      balance REAL NOT NULL,
+      purpose TEXT,
+      issued_at TEXT DEFAULT CURRENT_TIMESTAMP,
+      status TEXT NOT NULL DEFAULT 'open',
+      created_by INTEGER
+    );`);
+  run("idx_expense_advances_staff", `CREATE INDEX IF NOT EXISTS idx_expense_advances_staff ON expense_advances(staff_id);`);
+  run("idx_expense_advances_status", `CREATE INDEX IF NOT EXISTS idx_expense_advances_status ON expense_advances(status);`);
+
+  // Unified expense ledger. expense_type: 'advance' (settled from an advance) or
+  // 'direct' (entered straight by accounts). advance_id links advance expenses to
+  // their funding advance. payment_mode for direct expenses (cash/upi/bank/...).
+  // sales_expense_id links a synced approved sales expense (R27.6 #7).
+  run("expenses", `
+    CREATE TABLE IF NOT EXISTS expenses (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      expense_type TEXT NOT NULL DEFAULT 'direct',
+      advance_id INTEGER,
+      staff_id INTEGER,
+      branch_id TEXT,
+      expense_header_id INTEGER,
+      amount REAL NOT NULL,
+      payment_mode TEXT,
+      description TEXT,
+      proof_url TEXT,
+      expense_date TEXT NOT NULL,
+      sales_expense_id INTEGER,
+      created_by INTEGER,
+      created_at TEXT DEFAULT CURRENT_TIMESTAMP
+    );`);
+  run("idx_expenses_type", `CREATE INDEX IF NOT EXISTS idx_expenses_type ON expenses(expense_type);`);
+  run("idx_expenses_advance", `CREATE INDEX IF NOT EXISTS idx_expenses_advance ON expenses(advance_id);`);
+  run("idx_expenses_date", `CREATE INDEX IF NOT EXISTS idx_expenses_date ON expenses(expense_date);`);
+  run("idx_expenses_sales", `CREATE UNIQUE INDEX IF NOT EXISTS idx_expenses_sales ON expenses(sales_expense_id) WHERE sales_expense_id IS NOT NULL;`);
+
+  // person_ledger may predate some columns; ensure they exist (idempotent).
+  addCol("person_ledger", "branch", "TEXT");
+
+  console.log("[migrations] R27.6: complete");
+}

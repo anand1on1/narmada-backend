@@ -26,7 +26,13 @@ app.use((req, res, next) => {
     res.setHeader("Access-Control-Allow-Methods", "GET,POST,PUT,PATCH,DELETE,OPTIONS");
     res.setHeader(
       "Access-Control-Allow-Headers",
-      "Content-Type, Authorization, X-Requested-With, x-admin-token, x-customer-token, x-team-token, x-sales-token, x-finance-token, x-hr-token, x-consignment-token",
+      // R27.6 #1/#4 — shop checkout and the store dashboard send x-shop-token /
+      // x-store-token / x-dispatch-token. They were missing here, so the
+      // cross-origin (GoDaddy→Render) preflight rejected POST /api/shop/orders
+      // and GET /api/store/* — surfacing as "couldn't reach the server" and an
+      // empty store dashboard. Keep this list in sync with every x-*-token the
+      // server reads.
+      "Content-Type, Authorization, X-Requested-With, x-admin-token, x-customer-token, x-team-token, x-sales-token, x-finance-token, x-hr-token, x-consignment-token, x-shop-token, x-store-token, x-dispatch-token",
     );
   }
   if (req.method === "OPTIONS") {
@@ -99,7 +105,7 @@ app.use((req, res, next) => {
   // ---- R4.4→R7: ensure additive tables + seed defaults on boot ----
   console.log("[boot] step: pre-migrations");
   try {
-    const { runR4toR7Migrations, runR8Migrations, runR9Migrations, runR10Migrations, runR11Migrations, runR11_1Migrations, runR12Migrations, runR13Migrations, runR13_4Migrations, runR18Migrations, runR20Migrations, runR21Migrations, runR22Migrations, runR23Migrations, runR24Migrations, runR25Migrations, runR26Migrations, runR26_2Migrations, runR26_2bMigrations, runR26_2fCleanup, runR26_2gBackfill, runR26_2hBackfill, runR26_3Migrations, runR26_4Migrations, runR26_4bMigrations, runR26_5Migrations, runR26_6aMigrations, runR26_6bMigrations, runR26_6cMigrations, runR26_6dMigrations, runR26_6eMigrations, runR26_6gMigrations, runR26_6iMigrations, runR26_6jMigrations, runR26_6kMigrations, runR26_6lMigrations, runR27_0Migrations, runR27_1Migrations, runR27_1aMigrations, runR27_2Migrations, runR27_3Migrations, runR27_4Migrations, runR27_5Migrations } = await import("./migrations");
+    const { runR4toR7Migrations, runR8Migrations, runR9Migrations, runR10Migrations, runR11Migrations, runR11_1Migrations, runR12Migrations, runR13Migrations, runR13_4Migrations, runR18Migrations, runR20Migrations, runR21Migrations, runR22Migrations, runR23Migrations, runR24Migrations, runR25Migrations, runR26Migrations, runR26_2Migrations, runR26_2bMigrations, runR26_2fCleanup, runR26_2gBackfill, runR26_2hBackfill, runR26_3Migrations, runR26_4Migrations, runR26_4bMigrations, runR26_5Migrations, runR26_6aMigrations, runR26_6bMigrations, runR26_6cMigrations, runR26_6dMigrations, runR26_6eMigrations, runR26_6gMigrations, runR26_6iMigrations, runR26_6jMigrations, runR26_6kMigrations, runR26_6lMigrations, runR27_0Migrations, runR27_1Migrations, runR27_1aMigrations, runR27_2Migrations, runR27_3Migrations, runR27_4Migrations, runR27_5Migrations, runR27_6Migrations } = await import("./migrations");
     runR4toR7Migrations();
     console.log("[boot] step: post-R4-R7 migrations");
     runR8Migrations();
@@ -186,6 +192,8 @@ app.use((req, res, next) => {
     console.log("[boot] step: post-R27.4 migrations");
     runR27_5Migrations();
     console.log("[boot] step: post-R27.5 migrations");
+    runR27_6Migrations();
+    console.log("[boot] step: post-R27.6 migrations");
     const { seedR5Defaults } = await import("./seed-r5");
     await seedR5Defaults();
     console.log("[boot] step: post-seed");
@@ -294,6 +302,14 @@ app.use((req, res, next) => {
     startMarketingScheduler();
   } catch (e: any) {
     log(`[marketing] Failed to start scheduler: ${e?.message}`);
+  }
+
+  // ---- R27.6 #2: Start live FX refresh (open.er-api.com, every 6h) ----
+  try {
+    const { startFxAutoRefresh } = await import("./fx-service");
+    startFxAutoRefresh();
+  } catch (e: any) {
+    log(`[fx] Failed to start auto-refresh: ${e?.message}`);
   }
 
   // ---- Session C: Nightly parts_master TATA sync placeholder ----

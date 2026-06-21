@@ -6,7 +6,7 @@ import { Heart, Trash2, ArrowLeft, ShoppingCart } from "lucide-react";
 import { useShopAuth, shopFetch } from "@/lib/shop-auth";
 import { formatPrice } from "@/lib/currency";
 import { addToCart } from "@/lib/cart";
-import { parseJsonArray } from "@/lib/utils-app";
+import { parseJsonArray, productHref } from "@/lib/utils-app";
 import { SeoHead } from "@/components/SeoHead";
 import { useToast } from "@/hooks/use-toast";
 
@@ -57,7 +57,7 @@ export default function ShopWishlist() {
                   {parseJsonArray(w.imageUrls)[0] && <img src={parseJsonArray(w.imageUrls)[0]} alt={w.name} className="h-full w-full object-cover" />}
                 </div>
                 <div className="flex-1 min-w-0">
-                  <Link href={w.slug ? `/product/${w.slug}` : "#"}><a className="font-semibold truncate hover:text-[hsl(212_95%_50%)]">{w.name || w.partNumber}</a></Link>
+                  <Link href={w.slug ? productHref({ slug: w.slug, partNumber: w.partNumber }) : "#"}><a className="font-semibold truncate hover:text-[hsl(212_95%_50%)]">{w.name || w.partNumber}</a></Link>
                   {w.partNumber && <div className="text-xs text-muted-foreground font-mono">Part #{w.partNumber}</div>}
                   {w.priceInr != null && <div className="text-sm text-muted-foreground">{formatPrice(w.priceInr)}</div>}
                 </div>

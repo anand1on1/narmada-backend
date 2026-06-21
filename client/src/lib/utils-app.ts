@@ -8,12 +8,14 @@ export function fromSlug(s: string): string {
   return s.replace(/-/g, " ").replace(/\b\w/g, (m) => m.toUpperCase());
 }
 
-// R27.0 — product detail href. Appends the part number as a second path segment
-// (URL-encoded) so the part number is visible/bookmarkable in the address bar and
-// indexable for SEO. Falls back to the plain slug route when no part number exists.
+// R27.6 #5 — product detail href with the PART NUMBER FIRST so it is unmistakably
+// present in the URL (the user reported URLs that were slug-only). Format:
+//   /product/{partNumber}/{slug}   — e.g. /product/BR-9988/cartridge-oil-filter
+// The page still loads the product by slug (last segment); the server also falls
+// back to part-number lookup. Slug-only fallback when no part number exists.
 export function productHref(product: { slug: string; partNumber?: string | null }): string {
   return product.partNumber
-    ? `/product/${product.slug}/${encodeURIComponent(product.partNumber)}`
+    ? `/product/${encodeURIComponent(product.partNumber)}/${product.slug}`
     : `/product/${product.slug}`;
 }
 

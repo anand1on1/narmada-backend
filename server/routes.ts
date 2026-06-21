@@ -88,14 +88,14 @@ function buildSitemapUrls(allProducts: Awaited<ReturnType<typeof storage.listPro
   for (const b of BRAND_SLUGS) {
     for (const c of COUNTRIES) add(`/${b}-spare-parts-${toSlug(c)}`, "0.7");
   }
-  // R27.4 BUG-5 — include the part number in the product URL slug so each product
-  // page is reachable (and indexable) by its part number. Falls back to slug-only
-  // when no part number is present.
+  // R27.6 #5 — product URLs are part-number-FIRST and hash-routed so the part
+  // number is unmistakably present and the link actually resolves in the SPA:
+  //   /#/product/{partNumber}/{slug}   (falls back to /#/product/{slug})
   for (const p of allProducts) {
     if (!p.active) continue;
     const pn = (p as any).partNumber || (p as any).part_number;
-    if (pn) add(`/product/${p.slug}/${encodeURIComponent(String(pn))}`, "0.6");
-    else add(`/product/${p.slug}`, "0.6");
+    if (pn) add(`/#/product/${encodeURIComponent(String(pn))}/${p.slug}`, "0.6");
+    else add(`/#/product/${p.slug}`, "0.6");
   }
   return urls;
 }
@@ -189,9 +189,17 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
   });
 
   // -------- PUBLIC: settings (USD/INR) --------
+  // R27.6 #2 — serve the LIVE rate (open.er-api.com, ~94.4), not the stale static
+  // setting. getUsdInr() serves a 1h cache and refreshes from the provider on miss.
   app.get("/api/settings/fx", async (_req, res) => {
-    const rate = (await storage.getSetting("usd_inr_rate")) || "83.5";
-    res.json({ usdInr: parseFloat(rate) });
+    try {
+      const { getUsdInr } = await import("./fx-service");
+      const { usdInr, source } = await getUsdInr();
+      res.json({ usdInr, source });
+    } catch {
+      const rate = (await storage.getSetting("usd_inr_rate")) || "94.4";
+      res.json({ usdInr: parseFloat(rate), source: "setting" });
+    }
   });
 
   // -------- PUBLIC: meta (whatsapp, email) --------
@@ -216,7 +224,13 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
     res.json(list);
   });
   app.get("/api/products/:slug", async (req, res) => {
-    const p = await storage.getProductBySlug(req.params.slug);
+    // R27.6 #5 — resolve by slug first; fall back to part number so the new
+    // part-number-first URLs (/product/{partNumber}/{slug}) still load even if a
+    // client only has the part number.
+    let p = await storage.getProductBySlug(req.params.slug);
+    if ((!p || !p.active) && (storage as any).getProductByPartNumber) {
+      try { p = await (storage as any).getProductByPartNumber(req.params.slug); } catch { /* ignore */ }
+    }
     if (!p || !p.active) return res.status(404).json({ error: "Not found" });
     res.json(p);
   });

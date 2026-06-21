@@ -2682,9 +2682,13 @@ export function registerV2Routes(app: Express, ctx: V2Context) {
 
   app.get("/sitemap.xml", async (_req, res) => {
     try {
+      // R27.6 #5 — regen writes the REAL sitemap (every active product, part-number
+      // first, hash-routed) to public-runtime/sitemap.xml; serve that file, not a stub.
       await ctx.regenSitemap();
+      const file = path.join(process.cwd(), "public-runtime", "sitemap.xml");
+      const xml = fs.readFileSync(file, "utf-8");
       res.setHeader("Content-Type", "application/xml");
-      res.send(`<?xml version="1.0" encoding="UTF-8"?><urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9"><url><loc>${process.env.APP_URL || "https://narmadamobility.com"}/</loc></url></urlset>`);
+      res.send(xml);
     } catch (e: any) { res.status(500).json({ error: e.message }); }
   });
 
@@ -7388,6 +7392,49 @@ function registerR8Routes(
   // Person ledger
   app.get("/api/finance/person-ledger/:personId", acctAuth, async (req, res) => {
     const s = await r27(); res.json(s.getPersonLedger(parseInt(req.params.personId as string, 10)));
+  });
+
+  // ---- R27.6 #6/#7 — unified expenses (advance + direct) + advances ----
+  app.get("/api/finance/expense-advances", acctAuth, async (req, res) => {
+    const s = await r27();
+    res.json(s.listExpenseAdvances({ staffId: req.query.staff_id ? parseInt(req.query.staff_id as string, 10) : undefined, status: req.query.status as string | undefined }));
+  });
+  app.post("/api/finance/expense-advances", acctAuth, async (req: any, res) => {
+    try { const s = await r27(); res.json(s.createExpenseAdvance(req.body || {}, req.teamUser?.id)); }
+    catch (e: any) { res.status(400).json({ error: e.message }); }
+  });
+  app.post("/api/finance/expense-advances/:id/return", acctAuth, async (req: any, res) => {
+    try { const s = await r27(); res.json(s.returnAdvanceCash(parseInt(req.params.id as string, 10), req.teamUser?.id)); }
+    catch (e: any) { res.status(400).json({ error: e.message }); }
+  });
+
+  app.get("/api/finance/expenses", acctAuth, async (req, res) => {
+    const s = await r27();
+    res.json(s.listExpenses({
+      from: req.query.from as string | undefined, to: req.query.to as string | undefined,
+      type: req.query.type as string | undefined, branch: req.query.branch as string | undefined,
+      advanceId: req.query.advance_id ? parseInt(req.query.advance_id as string, 10) : undefined,
+    }));
+  });
+  // Direct expense (no advance).
+  app.post("/api/finance/expenses/direct", acctAuth, async (req: any, res) => {
+    try { const s = await r27(); res.json(s.createDirectExpense(req.body || {}, req.teamUser?.id)); }
+    catch (e: any) { res.status(400).json({ error: e.message }); }
+  });
+  // Advance settlement expense (decrements advance balance, auto-settles at 0).
+  app.post("/api/finance/expenses/advance", acctAuth, async (req: any, res) => {
+    try { const s = await r27(); res.json(s.createAdvanceExpense(req.body || {}, req.teamUser?.id)); }
+    catch (e: any) { res.status(400).json({ error: e.message }); }
+  });
+  // Manual backfill: sync ALL approved sales expenses into the accounts ledger.
+  app.post("/api/finance/expenses/sync-sales", acctAuth, async (req: any, res) => {
+    try {
+      const s = await r27();
+      const pending = s.listExpenses({ includeSales: true }).filter((r: any) => r.source === "sales_expense");
+      let synced = 0;
+      for (const p of pending) { const r = s.syncSalesExpenseToAccounts(p.sales_expense_id, req.teamUser?.id); if (r && (r as any).id) synced++; }
+      res.json({ synced });
+    } catch (e: any) { res.status(400).json({ error: e.message }); }
   });
 
   // Employees (salary masked unless admin)

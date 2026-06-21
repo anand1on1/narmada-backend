@@ -225,7 +225,9 @@ function PublicRoutes() {
       <Switch>
         <Route path="/" component={HomePage} />
         <Route path="/products" component={ProductsPage} />
-        <Route path="/product/:slug/:partNumber" component={ProductDetailPage} />
+        {/* R27.6 #5 — two-segment route covers the new part-number-first
+            /product/:partNumber/:slug and the legacy /product/:slug/:partNumber. */}
+        <Route path="/product/:seg1/:seg2" component={ProductDetailPage} />
         <Route path="/product/:slug" component={ProductDetailPage} />
         <Route path="/category/:slug" component={CategoryPage} />
         <Route path="/contact" component={ContactPage} />

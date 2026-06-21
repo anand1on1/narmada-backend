@@ -241,11 +241,56 @@ export function listTransfers(opts: { status?: string } = {}) {
   const conds: string[] = []; const params: any[] = [];
   if (opts.status) { conds.push("t.status = ?"); params.push(opts.status); }
   const where = conds.length ? `WHERE ${conds.join(" AND ")}` : "";
-  return sqlite.prepare(
+  const transfers = sqlite.prepare(
     `SELECT t.*, po.po_number AS poNumber, po.customer_id AS customerId
      FROM branch_transfers t LEFT JOIN purchase_orders_v2 po ON po.id = t.po_id
      ${where} ORDER BY t.id DESC`,
-  ).all(...params);
+  ).all(...params) as any[];
+  transfers.forEach((t) => { t.source = "branch_transfer"; });
+
+  // R27.6 #4 — the store dashboard was empty because real Delhi→Patna movement
+  // is recorded as a `consignment` (origin/destination), NOT as a branch_transfer
+  // (which is only written on the Delhi PO-dispatch path the user rarely uses).
+  // Surface every Patna-bound consignment from the last 4 days so the store sees
+  // its incoming material. Case-insensitive on destination; excludes terminal
+  // states. These are read-only context rows (negative id, has_po=false) so the
+  // existing receive flow (which needs a parent PO) stays untouched.
+  let consignmentRows: any[] = [];
+  try {
+    const cutoffMs = Date.now() - 4 * 24 * 60 * 60 * 1000;
+    consignmentRows = (sqlite.prepare(
+      `SELECT id, docket_number, carrier, origin, destination, status,
+              dispatch_date, eta_date, bundles_count, invoice_number
+       FROM consignments
+       WHERE LOWER(TRIM(destination)) = 'patna'
+         AND LOWER(TRIM(COALESCE(status,''))) NOT IN ('received','delivered','cancelled')
+       ORDER BY dispatch_date DESC`,
+    ).all() as any[])
+      .filter((c) => {
+        const d = Number(c.dispatch_date);
+        // dispatch_date is stored as epoch-ms in this DB; keep last 4 days.
+        return !d || d >= cutoffMs;
+      })
+      .map((c) => ({
+        id: -c.id, // negative id namespace so it never collides with a transfer id
+        source: "consignment",
+        consignment_id: c.id,
+        po_id: null,
+        poNumber: c.docket_number || null,
+        from_branch: c.origin || "Delhi",
+        to_branch: c.destination || "Patna",
+        carrier: c.carrier || null,
+        bundles: c.bundles_count ?? null,
+        invoice_number: c.invoice_number || null,
+        status: c.status || "in_transit",
+        dispatched_at: c.dispatch_date ? new Date(Number(c.dispatch_date)).toISOString() : null,
+        received_at: null,
+        notes: c.carrier ? `Consignment via ${c.carrier}` : null,
+      }));
+    if (opts.status) consignmentRows = consignmentRows.filter((c) => c.status === opts.status);
+  } catch { /* consignments table missing — ignore */ }
+
+  return [...transfers, ...consignmentRows];
 }
 
 export function getTransferDetail(id: number) {
@@ -490,6 +535,9 @@ export function listSalesExpensesAdmin(opts: { status?: string; userId?: number;
 export function approveSalesExpense(id: number, approverId?: number, note?: string) {
   sqlite.prepare(`UPDATE sales_expenses SET approval_status = 'approved', approver_id = ?, approval_note = ?, approved_at = ?, status = 'approved' WHERE id = ?`)
     .run(approverId ?? null, note ?? null, nowIso(), id);
+  // R27.6 #7 — on approval, mirror into the unified expenses table so it shows in
+  // the accounts dashboard. Idempotent + best-effort (never block the approval).
+  try { syncSalesExpenseToAccounts(id, approverId); } catch (e: any) { console.error("[R27.6] sales-expense sync failed:", e?.message || e); }
   return sqlite.prepare(`SELECT * FROM sales_expenses WHERE id = ?`).get(id);
 }
 
@@ -619,6 +667,143 @@ export function getPersonLedger(personId: number) {
   let running = 0;
   const withBalance = rows.map((r) => { running += Number(r.amount) || 0; return { ...r, balance: running }; });
   return { rows: withBalance, balance: running };
+}
+
+// ===========================================================================
+// R27.6 #6 — Unified expense model: ADVANCE flow (staff gets cash first, expenses
+// settle against the balance, auto-settle at 0, Return Cash) + DIRECT flow
+// (accounts enters straight, payment_mode, posts to person/cash ledger).
+// Reads also UNION approved sales_expenses so #7 syncs into the same dashboard.
+// ===========================================================================
+
+// ---- Expense advances ----
+export function listExpenseAdvances(opts: { staffId?: number; status?: string } = {}) {
+  const conds: string[] = []; const params: any[] = [];
+  if (opts.staffId) { conds.push("a.staff_id = ?"); params.push(opts.staffId); }
+  if (opts.status && opts.status !== "all") { conds.push("a.status = ?"); params.push(opts.status); }
+  const where = conds.length ? `WHERE ${conds.join(" AND ")}` : "";
+  return sqlite.prepare(
+    `SELECT a.*, e.name AS staffName,
+       (SELECT COALESCE(SUM(x.amount),0) FROM expenses x WHERE x.advance_id = a.id) AS settledAmount
+     FROM expense_advances a LEFT JOIN employees e ON e.id = a.staff_id ${where} ORDER BY a.id DESC`,
+  ).all(...params);
+}
+
+export function createExpenseAdvance(body: { staff_id: number; amount: number; purpose?: string; branch_id?: string }, by?: number) {
+  const amount = Number(body.amount) || 0;
+  if (!body.staff_id) throw new Error("staff_id required");
+  if (amount <= 0) throw new Error("amount must be > 0");
+  const info = sqlite.prepare(
+    `INSERT INTO expense_advances (staff_id, branch_id, amount, balance, purpose, issued_at, status, created_by) VALUES (?, ?, ?, ?, ?, ?, 'open', ?)`,
+  ).run(body.staff_id, body.branch_id ?? null, amount, amount, body.purpose ?? null, nowIso(), by ?? null);
+  const id = Number(info.lastInsertRowid);
+  // Ledger: staff now holds company cash → debit (negative balance to company).
+  addPersonLedger(body.staff_id, "advance_issued", amount, id, "expense_advances", body.purpose);
+  return sqlite.prepare(`SELECT * FROM expense_advances WHERE id = ?`).get(id);
+}
+
+// Return unspent cash: settles the advance by zeroing its balance and crediting
+// the returned amount back on the staff ledger.
+export function returnAdvanceCash(advanceId: number, by?: number) {
+  const adv = sqlite.prepare(`SELECT * FROM expense_advances WHERE id = ?`).get(advanceId) as any;
+  if (!adv) throw new Error("advance not found");
+  const remaining = Number(adv.balance) || 0;
+  if (remaining <= 0) { sqlite.prepare(`UPDATE expense_advances SET status='settled' WHERE id=?`).run(advanceId); return sqlite.prepare(`SELECT * FROM expense_advances WHERE id=?`).get(advanceId); }
+  sqlite.prepare(`UPDATE expense_advances SET balance=0, status='settled' WHERE id=?`).run(advanceId);
+  addPersonLedger(adv.staff_id, "advance_returned", -remaining, advanceId, "expense_advances", "Return Cash");
+  return sqlite.prepare(`SELECT * FROM expense_advances WHERE id=?`).get(advanceId);
+}
+
+// ---- Expenses (advance settlement + direct) ----
+export function listExpenses(opts: { from?: string; to?: string; type?: string; advanceId?: number; branch?: string; includeSales?: boolean } = {}) {
+  const conds: string[] = []; const params: any[] = [];
+  if (opts.type && opts.type !== "all") { conds.push("x.expense_type = ?"); params.push(opts.type); }
+  if (opts.advanceId) { conds.push("x.advance_id = ?"); params.push(opts.advanceId); }
+  if (opts.from) { conds.push("x.expense_date >= ?"); params.push(opts.from); }
+  if (opts.to) { conds.push("x.expense_date <= ?"); params.push(opts.to); }
+  if (opts.branch && opts.branch !== "all") { conds.push("LOWER(TRIM(COALESCE(x.branch_id,''))) = LOWER(TRIM(?))"); params.push(opts.branch); }
+  const where = conds.length ? `WHERE ${conds.join(" AND ")}` : "";
+  const rows = sqlite.prepare(
+    `SELECT x.*, h.name AS headerName, e.name AS staffName
+     FROM expenses x
+     LEFT JOIN expense_headers h ON h.id = x.expense_header_id
+     LEFT JOIN employees e ON e.id = x.staff_id
+     ${where} ORDER BY x.expense_date DESC, x.id DESC`,
+  ).all(...params) as any[];
+
+  // R27.6 #7 — also surface approved sales expenses that have NOT already been
+  // synced into the expenses table (defensive: synced ones carry sales_expense_id).
+  if (opts.includeSales !== false) {
+    try {
+      const salesRows = sqlite.prepare(
+        `SELECT se.id, se.amount, se.expense_type AS category, se.expense_date, se.description, se.proof_url, u.name AS staffName
+         FROM sales_expenses se LEFT JOIN data_team_users u ON u.id = se.sales_user_id
+         WHERE COALESCE(se.approval_status,'pending') = 'approved'
+           AND se.id NOT IN (SELECT sales_expense_id FROM expenses WHERE sales_expense_id IS NOT NULL)
+         ORDER BY se.id DESC`,
+      ).all() as any[];
+      for (const s of salesRows) {
+        rows.push({
+          id: -100000 - Number(s.id), expense_type: "direct", advance_id: null, staff_id: null,
+          branch_id: null, expense_header_id: null, amount: Number(s.amount) || 0,
+          payment_mode: "sales_reimbursement", description: s.description || s.category || "Sales expense",
+          proof_url: s.proof_url || null, expense_date: s.expense_date, sales_expense_id: Number(s.id),
+          headerName: s.category || "Sales", staffName: s.staffName || "Sales rep", source: "sales_expense",
+        });
+      }
+    } catch { /* sales_expenses may not exist in older DBs */ }
+  }
+  rows.sort((a, b) => String(b.expense_date || "").localeCompare(String(a.expense_date || "")));
+  return rows;
+}
+
+// Create a DIRECT expense (no advance). Posts to person ledger if staff tagged.
+export function createDirectExpense(body: { amount: number; expense_header_id?: number; payment_mode?: string; description?: string; proof_url?: string; expense_date: string; branch_id?: string; staff_id?: number }, by?: number) {
+  const amount = Number(body.amount) || 0;
+  if (amount <= 0) throw new Error("amount must be > 0");
+  if (!body.expense_date) throw new Error("expense_date required");
+  const info = sqlite.prepare(
+    `INSERT INTO expenses (expense_type, advance_id, staff_id, branch_id, expense_header_id, amount, payment_mode, description, proof_url, expense_date, created_by, created_at)
+     VALUES ('direct', NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+  ).run(body.staff_id ?? null, body.branch_id ?? null, body.expense_header_id ?? null, amount, body.payment_mode ?? "cash", body.description ?? null, body.proof_url ?? null, body.expense_date, by ?? null, nowIso());
+  return sqlite.prepare(`SELECT * FROM expenses WHERE id = ?`).get(Number(info.lastInsertRowid));
+}
+
+// Settle an expense AGAINST an advance. Decrements the advance balance and
+// auto-settles the advance when the balance hits 0.
+export function createAdvanceExpense(body: { advance_id: number; amount: number; expense_header_id?: number; description?: string; proof_url?: string; expense_date: string }, by?: number) {
+  const amount = Number(body.amount) || 0;
+  if (amount <= 0) throw new Error("amount must be > 0");
+  const adv = sqlite.prepare(`SELECT * FROM expense_advances WHERE id = ?`).get(body.advance_id) as any;
+  if (!adv) throw new Error("advance not found");
+  if (adv.status === "settled") throw new Error("advance already settled");
+  if (amount > Number(adv.balance) + 0.001) throw new Error(`amount exceeds advance balance (₹${adv.balance})`);
+  const info = sqlite.prepare(
+    `INSERT INTO expenses (expense_type, advance_id, staff_id, branch_id, expense_header_id, amount, payment_mode, description, proof_url, expense_date, created_by, created_at)
+     VALUES ('advance', ?, ?, ?, ?, ?, 'advance', ?, ?, ?, ?, ?)`,
+  ).run(body.advance_id, adv.staff_id, adv.branch_id ?? null, body.expense_header_id ?? null, amount, body.description ?? null, body.proof_url ?? null, body.expense_date, by ?? null, nowIso());
+  const newBalance = Math.round((Number(adv.balance) - amount) * 100) / 100;
+  const settled = newBalance <= 0.001;
+  sqlite.prepare(`UPDATE expense_advances SET balance = ?, status = ? WHERE id = ?`).run(Math.max(0, newBalance), settled ? "settled" : "open", body.advance_id);
+  // Ledger: expense consumes part of the held advance → credit back to staff.
+  addPersonLedger(adv.staff_id, "advance_expense", -amount, Number(info.lastInsertRowid), "expenses", body.description);
+  return { expense: sqlite.prepare(`SELECT * FROM expenses WHERE id = ?`).get(Number(info.lastInsertRowid)), advanceBalance: Math.max(0, newBalance), advanceStatus: settled ? "settled" : "open" };
+}
+
+// R27.6 #7 — sync a single approved sales expense into the expenses table as a
+// direct expense (idempotent via unique sales_expense_id index).
+export function syncSalesExpenseToAccounts(salesExpenseId: number, by?: number) {
+  const se = sqlite.prepare(`SELECT * FROM sales_expenses WHERE id = ?`).get(salesExpenseId) as any;
+  if (!se) throw new Error("sales expense not found");
+  if (String(se.approval_status || "pending") !== "approved") return { skipped: "not approved" };
+  const existing = sqlite.prepare(`SELECT id FROM expenses WHERE sales_expense_id = ?`).get(salesExpenseId);
+  if (existing) return { skipped: "already synced", id: (existing as any).id };
+  const desc = [se.expense_type, se.notes].filter(Boolean).join(" — ") || "Sales expense";
+  const info = sqlite.prepare(
+    `INSERT INTO expenses (expense_type, amount, payment_mode, description, proof_url, expense_date, sales_expense_id, created_by, created_at)
+     VALUES ('direct', ?, 'sales_reimbursement', ?, ?, ?, ?, ?, ?)`,
+  ).run(Number(se.amount) || 0, desc, se.proof_url ?? null, se.expense_date, salesExpenseId, by ?? null, nowIso());
+  return { id: Number(info.lastInsertRowid) };
 }
 
 // Employees (salary fields masked for finance role)

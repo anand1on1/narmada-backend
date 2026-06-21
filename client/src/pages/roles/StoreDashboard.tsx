@@ -3,7 +3,7 @@ import RolePortalShell from "./RolePortalShell";
 import { StoreAuth } from "@/lib/role-auth";
 import { Warehouse, PackageCheck, Boxes } from "lucide-react";
 
-interface Transfer { id: number; po_id: number | null; poNumber?: string | null; status: string; dispatched_at?: string | null; received_at?: string | null; notes?: string | null; }
+interface Transfer { id: number; po_id: number | null; poNumber?: string | null; status: string; dispatched_at?: string | null; received_at?: string | null; notes?: string | null; source?: string; from_branch?: string | null; to_branch?: string | null; carrier?: string | null; }
 interface ExpectedItem { partNumber: string | null; name: string | null; expectedQty: number; rate: number | null; }
 
 export default function StoreDashboard() {
@@ -70,17 +70,27 @@ export default function StoreDashboard() {
         <div className="bg-card border rounded-xl overflow-hidden">
           {transfers.length === 0 ? <div className="p-10 text-center text-muted-foreground">No transfers from Delhi yet.</div> : (
             <table className="w-full text-sm">
-              <thead className="bg-muted/50 text-left"><tr><th className="p-3">Transfer #</th><th className="p-3">PO</th><th className="p-3">Status</th><th className="p-3">Dispatched</th><th className="p-3"></th></tr></thead>
+              <thead className="bg-muted/50 text-left"><tr><th className="p-3">Ref #</th><th className="p-3">Route / PO</th><th className="p-3">Status</th><th className="p-3">Dispatched</th><th className="p-3"></th></tr></thead>
               <tbody className="divide-y">
-                {transfers.map((t) => (
+                {transfers.map((t) => {
+                  const isConsignment = t.source === "consignment" || t.id < 0;
+                  return (
                   <tr key={t.id} className="hover:bg-muted/30">
-                    <td className="p-3 font-mono">#{t.id}</td>
-                    <td className="p-3">{t.poNumber || t.po_id || "—"}</td>
+                    <td className="p-3 font-mono">{isConsignment ? (t.poNumber || `CN-${-t.id}`) : `#${t.id}`}</td>
+                    <td className="p-3">
+                      {isConsignment
+                        ? <span className="text-xs text-muted-foreground">{(t.from_branch || "Delhi")} → {(t.to_branch || "Patna")}{t.carrier ? ` · ${t.carrier}` : ""}</span>
+                        : (t.poNumber || t.po_id || "—")}
+                    </td>
                     <td className="p-3"><span className={`text-xs font-bold rounded px-2 py-1 ${t.status === "received" ? "bg-emerald-600 text-white" : t.status === "partial_received" ? "bg-amber-500/15 text-amber-700" : "bg-blue-500/15 text-blue-700"}`}>{t.status}</span></td>
                     <td className="p-3 text-xs text-muted-foreground">{t.dispatched_at ? new Date(t.dispatched_at).toLocaleDateString("en-IN") : "—"}</td>
-                    <td className="p-3"><button onClick={() => openDetail(t.id)} className="px-2 py-1 rounded bg-accent text-accent-foreground text-xs font-semibold inline-flex items-center gap-1"><PackageCheck className="w-3.5 h-3.5" /> Mark Received</button></td>
+                    <td className="p-3">{isConsignment
+                      ? <span className="text-xs text-muted-foreground italic">In transit (consignment)</span>
+                      : <button onClick={() => openDetail(t.id)} className="px-2 py-1 rounded bg-accent text-accent-foreground text-xs font-semibold inline-flex items-center gap-1"><PackageCheck className="w-3.5 h-3.5" /> Mark Received</button>}
+                    </td>
                   </tr>
-                ))}
+                  );
+                })}
               </tbody>
             </table>
           )}

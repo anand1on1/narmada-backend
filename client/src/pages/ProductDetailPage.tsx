@@ -17,16 +17,23 @@ import { formatPrice, getCurrency } from "@/lib/currency";
 import { useToast } from "@/hooks/use-toast";
 
 export default function ProductDetailPage() {
-  // Match both /product/:slug and the SEO-friendly /product/:slug/:partNumber.
-  // The part number in the URL is purely for bookmarkability/SEO — the product is
-  // still loaded by slug, so either route resolves to the same page.
-  const [, params2] = useRoute<{ slug: string; partNumber: string }>("/product/:slug/:partNumber");
+  // R27.6 #5 — URLs are now part-number-first: /product/:partNumber/:slug. We still
+  // support the legacy /product/:slug/:partNumber order, so resolve against BOTH
+  // segments (the server /api/products/:key resolves by slug OR part number).
+  const [, params2] = useRoute<{ seg1: string; seg2: string }>("/product/:seg1/:seg2");
   const [, params1] = useRoute<{ slug: string }>("/product/:slug");
-  const slug = params2?.slug || params1?.slug;
+  // Prefer the second segment (slug in the new format); fall back to the first.
+  const lookupKey = params2?.seg2 || params2?.seg1 || params1?.slug;
+  const altKey = params2?.seg1;
   const { data: product, isLoading } = useQuery<Product>({
-    queryKey: [`/api/products/${slug}`],
-    queryFn: async () => { const r = await fetch(apiUrl(`/api/products/${slug}`)); if (!r.ok) throw new Error("Not found"); return r.json(); },
-    enabled: !!slug,
+    queryKey: [`/api/products/${lookupKey}`, altKey],
+    queryFn: async () => {
+      let r = await fetch(apiUrl(`/api/products/${encodeURIComponent(lookupKey || "")}`));
+      if (!r.ok && altKey && altKey !== lookupKey) r = await fetch(apiUrl(`/api/products/${encodeURIComponent(altKey)}`));
+      if (!r.ok) throw new Error("Not found");
+      return r.json();
+    },
+    enabled: !!lookupKey,
   });
   const { data: fx } = useQuery<{ usdInr: number }>({ queryKey: ["/api/settings/fx"] });
   const usdInr = fx?.usdInr || 83.5;
