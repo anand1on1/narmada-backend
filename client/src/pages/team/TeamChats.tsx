@@ -6,7 +6,7 @@
 import { useEffect, useState, useCallback, useRef } from "react";
 import { TeamLayout } from "./TeamLayout";
 import { useTeamAuth, teamFetch } from "@/lib/team-auth";
-import { Send, Search } from "lucide-react";
+import { Send, Search, Paperclip, X, FileText } from "lucide-react";
 
 type Conv = {
   vendorId: number | null;
@@ -18,7 +18,20 @@ type Conv = {
   unreadCount: number;
   messageCount: number;
 };
-type Msg = { id: number; direction: string; body: string; created_at: number; status: string | null };
+type Msg = { id: number; direction: string; body: string; created_at: number; status: string | null; attachment_url?: string | null; attachment_type?: string | null };
+
+// R27.4 BUG-16 — render an image inline or a downloadable file chip.
+function Attachment({ url, type }: { url: string; type?: string | null }) {
+  const isImg = (type || "").startsWith("image") || /\.(png|jpe?g|gif|webp)$/i.test(url);
+  if (isImg) {
+    return <a href={url} target="_blank" rel="noreferrer"><img src={url} alt="attachment" className="rounded-lg max-w-[220px] max-h-[220px] object-cover mb-1" /></a>;
+  }
+  return (
+    <a href={url} target="_blank" rel="noreferrer" className="inline-flex items-center gap-1.5 text-xs underline mb-1">
+      <FileText className="w-3.5 h-3.5" /> View attachment
+    </a>
+  );
+}
 
 const timeShort = (ms: number) => {
   if (!ms) return "";
@@ -35,7 +48,10 @@ export default function TeamChats() {
   const [q, setQ] = useState("");
   const [filter, setFilter] = useState<"all" | "unread">("all");
   const [sending, setSending] = useState(false);
+  const [attach, setAttach] = useState<{ url: string; type: string; name: string } | null>(null);
+  const [uploading, setUploading] = useState(false);
   const bottomRef = useRef<HTMLDivElement | null>(null);
+  const fileRef = useRef<HTMLInputElement | null>(null);
 
   const loadConvs = useCallback(async () => {
     try {
@@ -66,14 +82,40 @@ export default function TeamChats() {
 
   useEffect(() => { bottomRef.current?.scrollIntoView({ behavior: "smooth" }); }, [thread]);
 
+  const onPickFile = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    setUploading(true);
+    try {
+      const dataUrl: string = await new Promise((resolve, reject) => {
+        const fr = new FileReader();
+        fr.onload = () => resolve(String(fr.result));
+        fr.onerror = reject;
+        fr.readAsDataURL(file);
+      });
+      const res = await teamFetch(token, "/api/team/upload-file", {
+        method: "POST", body: JSON.stringify({ dataUrl, filename: file.name }),
+      });
+      if (res.ok) { const j = await res.json(); setAttach({ url: j.url, type: file.type, name: file.name }); }
+    } finally {
+      setUploading(false);
+      if (fileRef.current) fileRef.current.value = "";
+    }
+  };
+
   const send = async () => {
-    if (!active?.vendorId || !text.trim() || sending) return;
+    if (!active?.vendorId || sending) return;
+    if (!text.trim() && !attach) return;
     setSending(true);
     try {
       const res = await teamFetch(token, `/api/team/chats/${active.vendorId}/send`, {
-        method: "POST", body: JSON.stringify({ message: text.trim() }),
+        method: "POST", body: JSON.stringify({
+          message: text.trim(),
+          attachment_url: attach?.url || undefined,
+          attachment_type: attach?.type || undefined,
+        }),
       });
-      if (res.ok) { setText(""); await loadThread(active.vendorId); await loadConvs(); }
+      if (res.ok) { setText(""); setAttach(null); await loadThread(active.vendorId); await loadConvs(); }
     } finally { setSending(false); }
   };
 
@@ -154,26 +196,42 @@ export default function TeamChats() {
                   <div key={m.id} className={"flex " + (m.direction === "out" ? "justify-end" : "justify-start")}>
                     <div className={"max-w-[70%] rounded-lg px-3 py-2 text-sm shadow-sm " +
                       (m.direction === "out" ? "bg-emerald-100 dark:bg-emerald-900" : "bg-card border")}>
-                      <div className="whitespace-pre-wrap break-words">{m.body}</div>
+                      {m.attachment_url && <Attachment url={m.attachment_url} type={m.attachment_type} />}
+                      {m.body && <div className="whitespace-pre-wrap break-words">{m.body}</div>}
                       <div className="text-[10px] text-muted-foreground text-right mt-1">{timeShort(m.created_at)}{m.status ? ` · ${m.status}` : ""}</div>
                     </div>
                   </div>
                 ))}
                 <div ref={bottomRef} />
               </div>
-              <div className="p-3 border-t bg-card flex gap-2">
-                <input
-                  value={text} onChange={(e) => setText(e.target.value)}
-                  onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); } }}
-                  placeholder="Type a message…"
-                  className="flex-1 px-3 py-2 text-sm rounded-lg border bg-background"
-                  data-testid="input-chat-message"
-                />
-                <button onClick={send} disabled={sending || !text.trim()}
-                  className="px-4 py-2 rounded-lg bg-emerald-600 text-white disabled:opacity-50 flex items-center gap-1"
-                  data-testid="button-chat-send">
-                  <Send className="w-4 h-4" /> Send
-                </button>
+              <div className="p-3 border-t bg-card">
+                {attach && (
+                  <div className="mb-2 inline-flex items-center gap-2 text-xs bg-slate-100 dark:bg-slate-900 rounded-lg px-2 py-1" data-testid="chat-attach-preview">
+                    <Paperclip className="w-3.5 h-3.5" />
+                    <span className="truncate max-w-[180px]">{attach.name}</span>
+                    <button onClick={() => setAttach(null)} className="text-rose-600" data-testid="chat-attach-clear"><X className="w-3.5 h-3.5" /></button>
+                  </div>
+                )}
+                <div className="flex gap-2">
+                  <input ref={fileRef} type="file" accept="image/*,application/pdf" className="hidden" onChange={onPickFile} data-testid="input-chat-file" />
+                  <button onClick={() => fileRef.current?.click()} disabled={uploading}
+                    className="px-3 py-2 rounded-lg border disabled:opacity-50 flex items-center" title="Attach image or PDF"
+                    data-testid="button-chat-attach">
+                    <Paperclip className="w-4 h-4" />
+                  </button>
+                  <input
+                    value={text} onChange={(e) => setText(e.target.value)}
+                    onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); } }}
+                    placeholder={uploading ? "Uploading…" : "Type a message…"}
+                    className="flex-1 px-3 py-2 text-sm rounded-lg border bg-background"
+                    data-testid="input-chat-message"
+                  />
+                  <button onClick={send} disabled={sending || (!text.trim() && !attach)}
+                    className="px-4 py-2 rounded-lg bg-emerald-600 text-white disabled:opacity-50 flex items-center gap-1"
+                    data-testid="button-chat-send">
+                    <Send className="w-4 h-4" /> Send
+                  </button>
+                </div>
               </div>
             </>
           )}

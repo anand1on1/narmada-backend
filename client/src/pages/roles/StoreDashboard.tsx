@@ -23,7 +23,13 @@ export default function StoreDashboard() {
     const r = await StoreAuth.roleFetch(token, "/api/store/stock");
     if (r.ok) setStock(await r.json());
   }
-  useEffect(() => { if (token) { loadTransfers(); loadStock(); } }, [token]); // eslint-disable-line
+  // R27.4 BUG-9 — poll every 20s so Delhi→Patna transfers appear without a manual reload.
+  useEffect(() => {
+    if (!token) return;
+    loadTransfers(); loadStock();
+    const id = setInterval(() => { loadTransfers(); loadStock(); }, 20000);
+    return () => clearInterval(id);
+  }, [token]); // eslint-disable-line
 
   async function openDetail(id: number) {
     const r = await StoreAuth.roleFetch(token, `/api/store/transfers/${id}`);

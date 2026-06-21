@@ -1,8 +1,9 @@
 import { useRoute, Link } from "wouter";
+import { useState } from "react";
 import { AdminLayout } from "./AdminLayout";
 import { adminFetch, useAdminAuth } from "@/lib/admin-auth";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { ArrowLeft, ExternalLink, Truck, Package, CreditCard, CheckCircle2 } from "lucide-react";
+import { ArrowLeft, ExternalLink, Truck, Package, CreditCard, CheckCircle2, FileText, Upload } from "lucide-react";
 import { useToast } from "@/hooks/use-toast";
 
 // R26.6a (5) — dedicated admin PO detail page. Reads GET /api/admin/purchase-orders-v2/:id
@@ -237,9 +238,186 @@ export default function AdminPODetailV2() {
               </table>
             )}
           </Section>
+
+          {/* R27.4 BUG-6 + BUG-14 — Delhi invoice: item-level selection + PDF upload */}
+          <DelhiInvoiceSection poId={id} lines={data.lines} token={token} />
         </div>
       )}
     </AdminLayout>
+  );
+}
+
+// R27.4 BUG-6 (item-level invoice selection) + BUG-14 (invoice PDF upload widget).
+function DelhiInvoiceSection({ poId, lines, token }: { poId: number; lines: any[]; token: string | null }) {
+  const qc = useQueryClient();
+  const { toast } = useToast();
+  const [selected, setSelected] = useState<Set<number>>(new Set());
+  const [invoiceNumber, setInvoiceNumber] = useState("");
+  const [invoiceDate, setInvoiceDate] = useState("");
+  const [pdfUrl, setPdfUrl] = useState("");
+  const [uploading, setUploading] = useState(false);
+
+  const { data: invoices } = useQuery<any[]>({
+    queryKey: ["admin-po-invoices", poId],
+    queryFn: async () => {
+      const r = await adminFetch(token, `/api/admin/purchase-orders/${poId}/invoices`);
+      if (!r.ok) return [];
+      return r.json();
+    },
+    enabled: !!token && !Number.isNaN(poId),
+  });
+
+  const toggle = (lineId: number) => {
+    setSelected((prev) => {
+      const next = new Set(prev);
+      if (next.has(lineId)) next.delete(lineId); else next.add(lineId);
+      return next;
+    });
+  };
+  const allIds = lines.map((l: any) => l.id).filter((x: any) => x != null);
+  const allSelected = allIds.length > 0 && allIds.every((idv: number) => selected.has(idv));
+  const toggleAll = () => setSelected(allSelected ? new Set() : new Set(allIds));
+
+  const uploadPdf = async (file: File) => {
+    setUploading(true);
+    try {
+      const dataUrl: string = await new Promise((resolve, reject) => {
+        const fr = new FileReader();
+        fr.onload = () => resolve(String(fr.result));
+        fr.onerror = reject;
+        fr.readAsDataURL(file);
+      });
+      const r = await adminFetch(token, `/api/admin/upload-file`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ dataUrl, filename: file.name }),
+      });
+      const j = await r.json();
+      if (!r.ok) throw new Error(j.error || "Upload failed");
+      setPdfUrl(j.url || j.path);
+      toast({ title: "Invoice PDF uploaded" });
+    } catch (e: any) {
+      toast({ title: "Upload failed", description: e.message, variant: "destructive" });
+    } finally { setUploading(false); }
+  };
+
+  const createMut = useMutation({
+    mutationFn: async () => {
+      const body: any = {};
+      if (selected.size > 0) body.item_ids = Array.from(selected);
+      if (invoiceNumber.trim()) body.invoice_number = invoiceNumber.trim();
+      if (invoiceDate) body.invoice_date = invoiceDate;
+      if (pdfUrl) body.invoice_pdf_url = pdfUrl;
+      const r = await adminFetch(token, `/api/admin/purchase-orders/${poId}/delhi-invoice`, {
+        method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
+      });
+      const j = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(j.error || "Failed to create invoice");
+      return j;
+    },
+    onSuccess: () => {
+      toast({ title: "Delhi invoice created", description: selected.size > 0 ? `${selected.size} item(s) invoiced.` : "All items invoiced." });
+      setSelected(new Set()); setInvoiceNumber(""); setInvoiceDate(""); setPdfUrl("");
+      qc.invalidateQueries({ queryKey: ["admin-po-invoices", poId] });
+    },
+    onError: (e: any) => toast({ title: "Could not create invoice", description: e.message, variant: "destructive" }),
+  });
+
+  return (
+    <Section title="Delhi Invoice" icon={FileText}>
+      <div className="p-4 space-y-4">
+        {lines.length === 0 ? (
+          <Empty>No line items to invoice.</Empty>
+        ) : (
+          <>
+            <div className="text-xs text-muted-foreground">Select the line items this invoice covers (leave all unchecked to invoice everything).</div>
+            <table className="w-full text-sm border rounded-lg overflow-hidden">
+              <thead>
+                <tr className="bg-muted/50 text-left">
+                  <th className="px-3 py-2 w-10"><input type="checkbox" checked={allSelected} onChange={toggleAll} data-testid="invoice-select-all" /></th>
+                  <th className="px-3 py-2 font-semibold">Part #</th>
+                  <th className="px-3 py-2 font-semibold">Description</th>
+                  <th className="px-3 py-2 font-semibold text-right">Qty</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y">
+                {lines.map((l: any, i: number) => (
+                  <tr key={l.id ?? i}>
+                    <td className="px-3 py-2">
+                      <input type="checkbox" checked={selected.has(l.id)} onChange={() => toggle(l.id)} disabled={l.id == null} data-testid={`invoice-item-${l.id}`} />
+                    </td>
+                    <td className="px-3 py-2 font-mono text-xs">{l.partNumber || l.part_number || "—"}</td>
+                    <td className="px-3 py-2 text-xs">{l.description || l.name || "—"}</td>
+                    <td className="px-3 py-2 text-right">{Number(l.qty ?? l.quantity ?? 0)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+              <div>
+                <label className="text-xs font-semibold text-muted-foreground">Invoice Number</label>
+                <input value={invoiceNumber} onChange={(e) => setInvoiceNumber(e.target.value)} className="w-full border rounded-lg px-3 py-2 text-sm" placeholder="INV-…" data-testid="invoice-number" />
+              </div>
+              <div>
+                <label className="text-xs font-semibold text-muted-foreground">Invoice Date</label>
+                <input type="date" value={invoiceDate} onChange={(e) => setInvoiceDate(e.target.value)} className="w-full border rounded-lg px-3 py-2 text-sm" data-testid="invoice-date" />
+              </div>
+              <div>
+                <label className="text-xs font-semibold text-muted-foreground">Invoice PDF</label>
+                <label className="flex items-center gap-2 border rounded-lg px-3 py-2 text-sm cursor-pointer hover:bg-muted">
+                  <Upload className="w-4 h-4" /> {uploading ? "Uploading…" : pdfUrl ? "Replace PDF" : "Upload PDF"}
+                  <input type="file" accept="application/pdf,image/*" className="hidden" data-testid="invoice-pdf-upload"
+                    onChange={(e) => { const f = e.target.files?.[0]; if (f) uploadPdf(f); }} />
+                </label>
+                {pdfUrl && <a href={pdfUrl} target="_blank" rel="noreferrer" className="text-xs text-blue-600 hover:underline inline-flex items-center gap-1 mt-1"><ExternalLink className="w-3 h-3" /> View uploaded</a>}
+              </div>
+            </div>
+
+            <button
+              onClick={() => createMut.mutate()}
+              disabled={createMut.isPending}
+              className="inline-flex items-center gap-1 px-4 py-2 text-sm font-semibold rounded-lg bg-indigo-600 text-white hover:bg-indigo-700 disabled:opacity-50"
+              data-testid="button-create-delhi-invoice"
+            >
+              <FileText className="w-4 h-4" /> {createMut.isPending ? "Creating…" : "Create Delhi Invoice"}
+            </button>
+          </>
+        )}
+
+        {invoices && invoices.length > 0 && (
+          <div className="mt-2">
+            <div className="text-xs uppercase font-bold text-muted-foreground mb-2">Existing Invoices</div>
+            <table className="w-full text-sm border rounded-lg overflow-hidden">
+              <thead>
+                <tr className="bg-muted/50 text-left">
+                  <th className="px-3 py-2 font-semibold">Kind</th>
+                  <th className="px-3 py-2 font-semibold">Number</th>
+                  <th className="px-3 py-2 font-semibold">Items</th>
+                  <th className="px-3 py-2 font-semibold text-right">Total</th>
+                  <th className="px-3 py-2 font-semibold">PDF</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y">
+                {invoices.map((iv: any) => {
+                  let itemCount = "all";
+                  try { const ids = iv.item_ids_json ? JSON.parse(iv.item_ids_json) : null; if (Array.isArray(ids)) itemCount = String(ids.length); } catch {}
+                  return (
+                    <tr key={iv.id}>
+                      <td className="px-3 py-2 text-xs">{iv.kind}</td>
+                      <td className="px-3 py-2 text-xs">{iv.invoice_number || "—"}</td>
+                      <td className="px-3 py-2 text-xs">{itemCount}</td>
+                      <td className="px-3 py-2 text-right">{inr(iv.total)}</td>
+                      <td className="px-3 py-2 text-xs">{iv.invoice_pdf_url ? <a href={iv.invoice_pdf_url} target="_blank" rel="noreferrer" className="text-blue-600 hover:underline inline-flex items-center gap-1"><ExternalLink className="w-3 h-3" /> View</a> : "—"}</td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
+    </Section>
   );
 }
 

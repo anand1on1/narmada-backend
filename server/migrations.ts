@@ -2474,3 +2474,32 @@ export function runR27_3Migrations() {
     );`);
   console.log("[migrations] R27.3: complete");
 }
+
+// ============================================================================
+// R27.4 — bug-fix round. Additive only. Each statement wrapped in its own
+// try/catch with [migrations] R27.4 markers.
+// ============================================================================
+export function runR27_4Migrations() {
+  console.log("[migrations] R27.4: start");
+  const run = (desc: string, sql: string) => {
+    try { sqlite.exec(sql); console.log(`[migrations] R27.4: ${desc} ok`); }
+    catch (e: any) { console.error(`[migrations] R27.4: ${desc} skip (${e?.message || e})`); }
+  };
+  const addCol = (table: string, col: string, type: string) => {
+    try { sqlite.exec(`ALTER TABLE ${table} ADD COLUMN ${col} ${type};`); console.log(`[migrations] R27.4: ${table}.${col} added`); }
+    catch (e: any) { console.error(`[migrations] R27.4: ${table}.${col} skip (${e?.message || e})`); }
+  };
+
+  // BUG-16 — chat attachments on the vendor/admin chat thread (image/pdf/video URL + type).
+  addCol("vendor_rfq_messages", "attachment_url", "TEXT");
+  addCol("vendor_rfq_messages", "attachment_type", "TEXT");
+
+  // BUG-6 — record which PO line items a delhi invoice covered (selective invoicing).
+  addCol("po_invoice_copies", "item_ids_json", "TEXT");
+
+  // BUG-11 — ensure the auto-product markup setting row exists (default 20%). Idempotent.
+  run("seed auto_product_markup_pct", `
+    INSERT OR IGNORE INTO shop_settings (key, value) VALUES ('auto_product_markup_pct', '20');`);
+
+  console.log("[migrations] R27.4: complete");
+}

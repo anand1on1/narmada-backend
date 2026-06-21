@@ -3,7 +3,7 @@ import { useEffect, useState } from "react";
 import { Logo } from "./Logo";
 import { Button } from "@/components/ui/button";
 import { Sheet, SheetContent, SheetTrigger } from "@/components/ui/sheet";
-import { Menu, Phone, Mail, MapPin, MessageCircle, ChevronDown, Globe, ArrowUpRight, MapPinned, ShoppingCart, User } from "lucide-react";
+import { Menu, Phone, Mail, MapPin, MessageCircle, ChevronDown, Globe, ArrowUpRight, MapPinned, ShoppingCart, User, Check } from "lucide-react";
 import { BRANDS, BRAND_WALL } from "@/data/brands";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 import { whatsappLink } from "@/lib/utils-app";
@@ -197,24 +197,35 @@ function CurrencyPicker() {
     loadFxRate().then(() => setRate(getUsdInr()));
     return subscribeCurrency(() => { setCur(getCurrency()); setRate(getUsdInr()); });
   }, []);
-  // R27.1b BUG-2 — prominent badge style with explicit symbol + code, larger touch
-  // target (h-10), and an "(at ₹X)" rate label when USD is active.
+  // R27.4 BUG-3 — redesigned as a prominent solid pill (flag + code + live rate +
+  // chevron), Amazon/Shopify style. Solid primary background, larger touch target,
+  // clear hover. The rate is always visible so shoppers know the conversion.
+  const flag = cur === "USD" ? "🇺🇸" : "🇮🇳";
+  const code = cur === "USD" ? "USD" : "INR";
+  const rateLabel = cur === "USD" ? `1 = ₹${rate.toFixed(2)}` : "₹ Indian Rupee";
   return (
     <DropdownMenu>
       <DropdownMenuTrigger
-        className="inline-flex items-center gap-1.5 h-10 px-3 rounded-md text-[13px] font-bold bg-[hsl(212_95%_50%)]/10 text-[hsl(212_95%_38%)] border border-[hsl(212_95%_50%)]/30 hover:bg-[hsl(212_95%_50%)]/20 transition-colors"
+        className="inline-flex items-center gap-2 h-10 pl-2.5 pr-2 rounded-full text-[13px] font-bold bg-[hsl(212_95%_50%)] text-white shadow-sm hover:bg-[hsl(212_95%_44%)] active:scale-[0.98] transition-all"
         data-testid="currency-picker"
         aria-label="Select currency"
       >
-        {cur === "USD" ? "$ USD" : "₹ INR"}
-        {cur === "USD" && (
-          <span className="text-[11px] font-medium text-[hsl(212_95%_38%)]/70">(at ₹{rate.toFixed(1)})</span>
-        )}
-        <ChevronDown className="h-3.5 w-3.5" />
+        <span className="text-base leading-none" aria-hidden>{flag}</span>
+        <span className="flex flex-col items-start leading-tight">
+          <span className="text-[13px] font-extrabold tracking-wide">{code}</span>
+          <span className="text-[10px] font-medium text-white/80 -mt-0.5">{rateLabel}</span>
+        </span>
+        <ChevronDown className="h-4 w-4 ml-0.5 opacity-90" />
       </DropdownMenuTrigger>
-      <DropdownMenuContent align="end" className="bg-[hsl(210_35%_98%)] border-[hsl(220_45%_20%)]/10 text-[hsl(220_60%_12%)] min-w-[140px]">
-        <DropdownMenuItem onClick={() => setCurrency("INR")} data-testid="currency-inr" className="font-medium">₹ INR — Indian Rupee</DropdownMenuItem>
-        <DropdownMenuItem onClick={() => setCurrency("USD")} data-testid="currency-usd" className="font-medium">$ USD — US Dollar</DropdownMenuItem>
+      <DropdownMenuContent align="end" className="bg-white border-[hsl(220_45%_20%)]/10 text-[hsl(220_60%_12%)] min-w-[180px]">
+        <DropdownMenuItem onClick={() => setCurrency("INR")} data-testid="currency-inr" className="font-medium gap-2">
+          <span aria-hidden>🇮🇳</span> ₹ INR — Indian Rupee
+          {cur === "INR" && <Check className="h-4 w-4 ml-auto text-[hsl(212_95%_50%)]" />}
+        </DropdownMenuItem>
+        <DropdownMenuItem onClick={() => setCurrency("USD")} data-testid="currency-usd" className="font-medium gap-2">
+          <span aria-hidden>🇺🇸</span> $ USD — US Dollar <span className="text-xs text-muted-foreground">(₹{rate.toFixed(2)})</span>
+          {cur === "USD" && <Check className="h-4 w-4 ml-auto text-[hsl(212_95%_50%)]" />}
+        </DropdownMenuItem>
       </DropdownMenuContent>
     </DropdownMenu>
   );

@@ -3340,17 +3340,20 @@ export function rfqMessageExistsByExternalId(externalId: string): boolean {
 export function addRfqMessageExternal(data: {
   vendorId?: number | null; vendorPhone?: string | null; direction: "out" | "in";
   body?: string | null; externalMessageId?: string | null; status?: string | null;
+  // R27.4 BUG-16 — optional attachment carried on the message (image/pdf URL).
+  attachmentUrl?: string | null; attachmentType?: string | null;
 }): any | null {
   if (data.externalMessageId && rfqMessageExistsByExternalId(data.externalMessageId)) return null;
   const now = Date.now();
   try {
     const info = sqlite.prepare(
-      `INSERT INTO vendor_rfq_messages (vendor_id, vendor_phone, direction, body, aisensy_msg_id, external_message_id, status, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+      `INSERT INTO vendor_rfq_messages (vendor_id, vendor_phone, direction, body, aisensy_msg_id, external_message_id, status, attachment_url, attachment_type, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
     ).run(
       data.vendorId ?? null, data.vendorPhone ?? null, data.direction,
       data.body ?? null, data.externalMessageId ?? null,
-      data.externalMessageId ?? null, data.status ?? null, now,
+      data.externalMessageId ?? null, data.status ?? null,
+      data.attachmentUrl ?? null, data.attachmentType ?? null, now,
     );
     return sqlite.prepare(`SELECT * FROM vendor_rfq_messages WHERE id = ?`).get(Number(info.lastInsertRowid));
   } catch (e: any) {
@@ -4174,8 +4177,10 @@ export function listChatConversations(): any[] {
 }
 
 export function listChatThread(vendorId: number): any[] {
+  // R27.4 BUG-16 — include attachment_url/attachment_type so the chat UI can render
+  // image/pdf bubbles. COALESCE keeps it null-safe on rows predating the migration.
   return sqlite.prepare(
-    `SELECT id, vendor_id, vendor_phone, direction, body, status, created_at
+    `SELECT id, vendor_id, vendor_phone, direction, body, status, attachment_url, attachment_type, created_at
      FROM vendor_rfq_messages WHERE vendor_id = ? ORDER BY created_at ASC, id ASC`
   ).all(vendorId) as any[];
 }

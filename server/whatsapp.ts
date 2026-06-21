@@ -693,6 +693,37 @@ export async function sendTextMessage(phone: string, text: string, eventKey = "f
   return { status };
 }
 
+// R27.4 BUG-16 — send a media (image/pdf/video) message via AiSensy's direct-message API.
+// Fire-and-forget like all other AiSensy calls. Only deliverable inside a 24h session
+// window (same limitation as free text). Logs the outcome (incl. failure reason) so the
+// chat-stats endpoint can surface why sends fail.
+export async function sendMediaMessage(phone: string, mediaUrl: string, caption = "", eventKey = "chat_media"): Promise<{ status: string }> {
+  const normalized = normalizePhone(phone);
+  if (!normalized) { logNotification("whatsapp", phone || "", eventKey, mediaUrl, "failed", "no phone"); return { status: "failed" }; }
+  if (!AISENSY_API_KEY || AISENSY_API_KEY === "skip") {
+    logNotification("whatsapp", normalized, eventKey, mediaUrl, "failed", "AISENSY_API_KEY not configured");
+    return { status: "failed" };
+  }
+  // Classify media type from the URL extension so AiSensy picks the right message type.
+  const lower = mediaUrl.toLowerCase();
+  const type = /\.(jpg|jpeg|png|gif|webp)(\?|$)/.test(lower) ? "image" : /\.(mp4|mov|webm)(\?|$)/.test(lower) ? "video" : "document";
+  try {
+    const res = await fetch("https://backend.aisensy.com/direct-apis/t1/messages", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "Authorization": `Bearer ${AISENSY_API_KEY}` },
+      body: JSON.stringify({ to: normalized, type, [type]: { link: mediaUrl, caption: caption || undefined } }),
+    });
+    const raw = await res.text().catch(() => "");
+    const status: "sent" | "failed" = res.ok ? "sent" : "failed";
+    logNotification("whatsapp", normalized, eventKey, `${type}: ${mediaUrl}`, status, res.ok ? undefined : raw.slice(0, 500), raw);
+    return { status };
+  } catch (e: any) {
+    console.error(`[whatsapp] sendMediaMessage failed for ${normalized}:`, e?.message);
+    logNotification("whatsapp", normalized, eventKey, mediaUrl, "failed", e?.message);
+    return { status: "failed" };
+  }
+}
+
 // R24.3 — marketing campaign send. Template name is env-configurable (the AiSensy campaign
 // must exist + be approved). templateParams default to [name] unless explicit vars passed.
 // Fire-and-forget at the caller; this resolves to a status string and never throws.

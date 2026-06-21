@@ -2,7 +2,7 @@ import { ReactNode, useEffect, useState } from "react";
 import { Link, useLocation } from "wouter";
 import { useTeamAuth, teamFetch } from "@/lib/team-auth";
 import { Logo } from "@/components/Logo";
-import { LayoutDashboard, FileText, FilePlus, Users, Package, LogOut, ShoppingCart, Send, Upload, X, Megaphone, MessageSquare, Store } from "lucide-react";
+import { LayoutDashboard, FileText, FilePlus, Users, Package, LogOut, ShoppingCart, Send, Upload, X, Megaphone, MessageSquare, Store, FileWarning } from "lucide-react";
 import { useQuery } from "@tanstack/react-query";
 
 const navItems = [
@@ -10,6 +10,7 @@ const navItems = [
   { href: "/team/quotations", label: "Quotations", icon: FileText },
   { href: "/team/quotations/new", label: "New Quotation", icon: FilePlus },
   { href: "/team/purchase-orders", label: "Purchase Orders", icon: ShoppingCart },
+  { href: "/team/deviations", label: "Deviations", icon: FileWarning },
   { href: "/team/po/upload", label: "Upload Customer PO", icon: Upload },
   { href: "/team/rfqs", label: "RFQs", icon: Send },
   { href: "/team/chats", label: "Chats", icon: MessageSquare },

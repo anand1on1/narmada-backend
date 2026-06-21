@@ -5453,6 +5453,42 @@ function registerR8Routes(
     } catch (e: any) { res.status(500).json({ error: e.message }); }
   });
 
+  // ---- R27.4 BUG-13 — Procurement (Data Team) Deviation tab mirror of the admin
+  // Operations → Deviations engine (R27.2 po_deviations). Same data, team token.
+  app.get("/api/team/deviations", requireDataTeam, async (req, res) => {
+    try {
+      const s = await r27();
+      res.json(s.listDeviations({
+        status: req.query.status as string | undefined,
+        from: req.query.from as string | undefined,
+        to: req.query.to as string | undefined,
+        poId: req.query.po_id ? parseInt(req.query.po_id as string, 10) : undefined,
+      }));
+    } catch (e: any) { res.status(500).json({ error: e.message }); }
+  });
+  app.post("/api/team/deviations/:id/resolve", requireDataTeam, async (req: any, res) => {
+    try { const s = await r27(); res.json(s.resolveDeviation(parseInt(req.params.id as string, 10), (req.teamUser?.username) || "team", req.body?.notes)); }
+    catch (e: any) { res.status(500).json({ error: e.message }); }
+  });
+  app.post("/api/team/deviations/:id/create-sub-po", requireDataTeam, async (req: any, res) => {
+    try { const s = await r27(); res.json(await s.createSubPoForDeviation(parseInt(req.params.id as string, 10), (req.teamUser?.username) || "team")); }
+    catch (e: any) { res.status(400).json({ error: e.message }); }
+  });
+  app.get("/api/team/deviations/export.xlsx", requireDataTeam, async (_req, res) => {
+    try {
+      const s = await r27();
+      const rows = s.deviationExportRows();
+      const XLSX = require("xlsx");
+      const ws = XLSX.utils.json_to_sheet(rows);
+      const wb = XLSX.utils.book_new();
+      XLSX.utils.book_append_sheet(wb, ws, "Deviations");
+      const buf = XLSX.write(wb, { type: "buffer", bookType: "xlsx" });
+      res.setHeader("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
+      res.setHeader("Content-Disposition", `attachment; filename="deviations.xlsx"`);
+      res.send(buf);
+    } catch (e: any) { res.status(500).json({ error: e.message }); }
+  });
+
   // ---- POST /api/delhi/po-items/bulk-mark-packed ---- ({ids:[]})
   app.post("/api/delhi/po-items/bulk-mark-packed", requireDelhi, async (req: any, res: any) => {
     try {
@@ -5498,6 +5534,23 @@ function registerR8Routes(
         entityType: "purchase_order", entityId: String(poId),
         afterJson: JSON.stringify({ carrier, docketNumber, bundles, isInternalTransfer, ...result }),
       });
+
+      // R27.4 BUG-9 — Delhi→Patna inter-branch transfer must surface on the Store
+      // Incharge dashboard. The production dispatch path (this endpoint) previously
+      // created NO branch_transfers row, so internal transfers never appeared in the
+      // Store portal. Open one here (idempotent) + auto-create draft products.
+      if (isInternalTransfer) {
+        try {
+          const r27 = await import("./storage-r27");
+          const existingTransfer = (r27.listTransfers() as any[]).find((t) => t.po_id === poId && t.status === "in_transit");
+          if (!existingTransfer) {
+            r27.createBranchTransfer({ poId, notes: `Inter-branch transfer on Delhi dispatch${docketNumber ? ` (docket ${docketNumber})` : ""}` });
+            console.log(`[R27.4] branch transfer opened for PO ${poId} (internal transfer dispatch)`);
+          }
+          const ap = r27.autoCreateProductsForPo(poId);
+          console.log(`[R27.4] auto-product on internal-transfer dispatch PO ${poId}: created=${ap.created} skipped=${ap.skipped}`);
+        } catch (e: any) { console.error("[R27.4] internal-transfer hook failed:", e?.message || e); }
+      }
 
       // R26.5 H/E3 — PO shipped: notify the customer's sales rep, and email the customer if present.
       try {
@@ -6094,11 +6147,17 @@ function registerR8Routes(
       const vendor = await v2.getVendor(vendorId);
       if (!vendor) return res.status(404).json({ error: "vendor not found" });
       const text = String(req.body?.message || "").trim();
-      if (!text) return res.status(400).json({ error: "message required" });
+      // R27.4 BUG-16 — allow an attachment-only message (image/pdf URL) with no text.
+      const attachmentUrl = req.body?.attachment_url ? String(req.body.attachment_url) : null;
+      const attachmentType = req.body?.attachment_type ? String(req.body.attachment_type) : null;
+      if (!text && !attachmentUrl) return res.status(400).json({ error: "message or attachment required" });
       const phone = vendor.whatsapp || vendor.phone;
       const wa = require("./whatsapp") as typeof import("./whatsapp");
-      if (phone) wa.sendTextMessage(phone, text, "admin_chat").catch(() => {});
-      const row = v2.addRfqMessageExternal({ vendorId, vendorPhone: phone || null, direction: "out", body: text, externalMessageId: null });
+      if (phone) {
+        if (attachmentUrl) wa.sendMediaMessage(phone, attachmentUrl, text, "admin_chat_media").catch(() => {});
+        else wa.sendTextMessage(phone, text, "admin_chat").catch(() => {});
+      }
+      const row = v2.addRfqMessageExternal({ vendorId, vendorPhone: phone || null, direction: "out", body: text, externalMessageId: null, attachmentUrl, attachmentType });
       res.json({ ok: true, message: row });
     } catch (e: any) { res.status(500).json({ error: e.message }); }
   });
@@ -6121,12 +6180,74 @@ function registerR8Routes(
       const vendor = await v2.getVendor(vendorId);
       if (!vendor) return res.status(404).json({ error: "vendor not found" });
       const text = String(req.body?.message || "").trim();
-      if (!text) return res.status(400).json({ error: "message required" });
+      // R27.4 BUG-16 — allow an attachment-only message (image/pdf URL) with no text.
+      const attachmentUrl = req.body?.attachment_url ? String(req.body.attachment_url) : null;
+      const attachmentType = req.body?.attachment_type ? String(req.body.attachment_type) : null;
+      if (!text && !attachmentUrl) return res.status(400).json({ error: "message or attachment required" });
       const phone = vendor.whatsapp || vendor.phone;
       const wa = require("./whatsapp") as typeof import("./whatsapp");
-      if (phone) wa.sendTextMessage(phone, text, "team_chat").catch(() => {});
-      const row = v2.addRfqMessageExternal({ vendorId, vendorPhone: phone || null, direction: "out", body: text, externalMessageId: null });
+      if (phone) {
+        if (attachmentUrl) wa.sendMediaMessage(phone, attachmentUrl, text, "team_chat_media").catch(() => {});
+        else wa.sendTextMessage(phone, text, "team_chat").catch(() => {});
+      }
+      const row = v2.addRfqMessageExternal({ vendorId, vendorPhone: phone || null, direction: "out", body: text, externalMessageId: null, attachmentUrl, attachmentType });
       res.json({ ok: true, message: row });
+    } catch (e: any) { res.status(500).json({ error: e.message }); }
+  });
+
+  // R27.4 BUG-16 — team-token file upload (PDF/image, base64 dataUrl) so the
+  // data-team Chats UI can attach files. Mirrors /api/admin/upload-file.
+  app.post("/api/team/upload-file", requireDataTeam, async (req: any, res: any) => {
+    try {
+      const { dataUrl, filename } = req.body || {};
+      if (!dataUrl) return res.status(400).json({ error: "Missing dataUrl" });
+      const m = /^data:([a-zA-Z0-9/+.\-]+);base64,(.*)$/.exec(String(dataUrl));
+      let mime = "application/octet-stream", b64 = String(dataUrl);
+      if (m) { mime = m[1]; b64 = m[2]; }
+      const allowed: Record<string, string> = {
+        "application/pdf": "pdf", "image/png": "png", "image/jpeg": "jpg",
+        "image/jpg": "jpg", "image/webp": "webp", "image/gif": "gif",
+      };
+      const ext = allowed[mime];
+      if (!ext) return res.status(415).json({ error: "Only PDF and image files are allowed" });
+      const buf = Buffer.from(b64, "base64");
+      if (buf.length > 15 * 1024 * 1024) return res.status(413).json({ error: "File too large (max 15MB)" });
+      const safe = String(filename || "file").replace(/[^a-z0-9_-]/gi, "_").slice(0, 40);
+      const id = `${Date.now()}-${randomBytes(4).toString("hex")}-${safe}.${ext}`;
+      fs.writeFileSync(path.join(ctx.uploadsDir, id), buf);
+      const proto = (req.headers['x-forwarded-proto'] as string) || req.protocol || 'https';
+      const host = req.get('host');
+      res.json({ url: `${proto}://${host}/uploads/${id}`, path: `/uploads/${id}` });
+    } catch (e: any) { res.status(500).json({ error: e.message }); }
+  });
+
+  // R27.4 BUG-16 — WhatsApp delivery health. The founder reported ~90% of chat
+  // messages failing; this aggregates notification_log so the failure REASONS are
+  // visible (AiSensy rejects templates/numbers — see error_msg). Read-only.
+  app.get("/api/admin/chat/stats", requireAuth, async (req: any, res: any) => {
+    try {
+      const { rawSqlite } = await import("./storage");
+      const days = Math.min(90, Math.max(1, parseInt(String(req.query.days || "7"), 10) || 7));
+      const since = Date.now() - days * 86400000;
+      const totals = rawSqlite.prepare(
+        `SELECT status, COUNT(*) c FROM notification_log
+         WHERE channel='whatsapp' AND sent_at >= ? GROUP BY status`
+      ).all(since) as Array<{ status: string; c: number }>;
+      const byReason = rawSqlite.prepare(
+        `SELECT COALESCE(NULLIF(TRIM(error_msg),''),'(no reason given)') reason, COUNT(*) c
+         FROM notification_log
+         WHERE channel='whatsapp' AND status='failed' AND sent_at >= ?
+         GROUP BY reason ORDER BY c DESC LIMIT 25`
+      ).all(since) as Array<{ reason: string; c: number }>;
+      const sent = totals.find((t) => t.status === "sent")?.c || 0;
+      const failed = totals.find((t) => t.status === "failed")?.c || 0;
+      const queued = totals.find((t) => t.status === "queued")?.c || 0;
+      const total = sent + failed + queued;
+      res.json({
+        days, total, sent, failed, queued,
+        failureRate: total ? Math.round((failed / total) * 1000) / 10 : 0,
+        byReason,
+      });
     } catch (e: any) { res.status(500).json({ error: e.message }); }
   });
 
@@ -6274,9 +6395,13 @@ function registerR8Routes(
         to: req.query.to as string | undefined,
       });
       const summary = await v2.getDispatchSummaryForPOs(rows.map((r: any) => r.id));
+      // R27.4 BUG-7 — per-PO open-deviation rollup so the admin list can show the Deviation column.
+      let devSummary: Record<number, { count: number }> = {};
+      try { const r27mod = await import("./storage-r27"); devSummary = r27mod.deviationSummaryForPOs(rows.map((r: any) => r.id)); } catch { /* deviation table may not exist on older DBs */ }
       res.json(rows.map((r: any) => {
         const s = summary[r.id];
-        return { ...r, dispatches: s?.dispatches || [], dispatchCarrier: s?.carrier || null, dispatchBundles: s?.bundles || 0, dispatchDockets: s?.docketNumbers || [] };
+        const dev = devSummary[r.id];
+        return { ...r, dispatches: s?.dispatches || [], dispatchCarrier: s?.carrier || null, dispatchBundles: s?.bundles || 0, dispatchDockets: s?.docketNumbers || [], hasDeviation: !!(dev && dev.count > 0), deviationCount: dev?.count || 0 };
       }));
     } catch (e: any) { res.status(500).json({ error: e.message }); }
   });
@@ -7105,6 +7230,17 @@ function registerR8Routes(
     try { const s = await r27(); res.json(s.listBranchStock("Patna", (req.query.status as string) || "in_stock")); }
     catch (e: any) { res.status(500).json({ error: e.message }); }
   });
+  // R27.4 BUG-8 — admin stock view (per-product per-branch; ?branch=Delhi|Patna&q=&status=).
+  app.get("/api/admin/stock", requireAuth, async (req, res) => {
+    try {
+      const s = await r27();
+      res.json(s.listBranchStockAdmin({
+        branch: (req.query.branch as string) || undefined,
+        q: (req.query.q as string) || undefined,
+        status: (req.query.status as string) || undefined,
+      }));
+    } catch (e: any) { res.status(500).json({ error: e.message }); }
+  });
 
   // ---- R27.2 Dispatch incharge: ready stock + handover ----
   app.get("/api/dispatch/ready", requireDispatch, async (_req, res) => {
@@ -7338,8 +7474,10 @@ function registerR8Routes(
       const s = await r27();
       const claude = require("./claude-service") as typeof import("./claude-service");
       let summary = ""; let data: any = null; let usedTool = "";
+      const live = claude.isClaudeConfigured();
+      console.log(`[R27.4 ai-bar] mode=${live ? "LIVE" : "DETERMINISTIC"} prompt=${JSON.stringify(prompt.slice(0, 120))}`);
 
-      if (claude.isClaudeConfigured()) {
+      if (live) {
         // Ask the LLM which single tool best answers the question (cheap routing, no write tools).
         const toolNames = Object.keys(tools);
         const routed = await claude.claudeJSON<{ tool: string }>(
@@ -7379,7 +7517,7 @@ function registerR8Routes(
       }
 
       s.aiBarLog((req.user && (req.user.id ?? null)) || null, prompt, summary, { tool: usedTool, data });
-      res.json({ summary, tool: usedTool, data, llm: claude.isClaudeConfigured() });
+      res.json({ summary, tool: usedTool, data, llm: live });
     } catch (e: any) { res.status(500).json({ error: e.message }); }
   });
 

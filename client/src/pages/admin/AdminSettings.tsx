@@ -10,6 +10,11 @@ export default function AdminSettings() {
   const [whatsapp, setWhatsapp] = useState("7909083806");
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
+  // R27.4 BUG-11 — auto-product markup % (applied to vendor cost when draft products
+  // are auto-created on Delhi dispatch). Stored separately via its own endpoint.
+  const [markupPct, setMarkupPct] = useState("20");
+  const [markupSaving, setMarkupSaving] = useState(false);
+  const [markupSaved, setMarkupSaved] = useState(false);
 
   useEffect(() => {
     if (!token) return;
@@ -19,8 +24,23 @@ export default function AdminSettings() {
       if (s.usd_inr_rate) setUsdInr(s.usd_inr_rate);
       if (s.site_email) setSiteEmail(s.site_email);
       if (s.whatsapp) setWhatsapp(s.whatsapp);
+      try {
+        const mr = await adminFetch(token, "/api/admin/settings/auto-product-markup");
+        if (mr.ok) { const m = await mr.json(); if (m.markup_pct != null) setMarkupPct(String(m.markup_pct)); }
+      } catch { /* ignore */ }
     })();
   }, [token]);
+
+  async function saveMarkup() {
+    if (!token) return;
+    setMarkupSaving(true); setMarkupSaved(false);
+    try {
+      const r = await adminFetch(token, "/api/admin/settings/auto-product-markup", {
+        method: "PUT", body: JSON.stringify({ markup_pct: Number(markupPct) }),
+      });
+      if (r.ok) { setMarkupSaved(true); setTimeout(() => setMarkupSaved(false), 3000); }
+    } finally { setMarkupSaving(false); }
+  }
 
   async function save() {
     if (!token) return;
@@ -80,6 +100,43 @@ export default function AdminSettings() {
           <p className="text-xs text-muted-foreground mt-2">
             Tip: check <a className="text-accent font-semibold" href="https://www.google.com/finance/quote/USD-INR" target="_blank" rel="noreferrer">Google Finance</a> for the latest spot rate.
           </p>
+        </section>
+
+        {/* R27.4 BUG-11 — Auto-product markup */}
+        <section className="p-6 bg-card border rounded-xl">
+          <h2 className="font-display text-lg font-bold mb-1">Auto-Product Markup</h2>
+          <p className="text-sm text-muted-foreground mb-5">
+            When a PO is dispatched from Delhi, draft products are auto-created from its parts.
+            This markup % is applied to the vendor cost to set the product price. Default 20%.
+          </p>
+          <div className="flex items-end gap-3">
+            <div className="flex-1 max-w-[200px]">
+              <label className="text-sm font-semibold mb-1.5 block">Markup %</label>
+              <input
+                type="number"
+                step="1"
+                min="0"
+                value={markupPct}
+                onChange={(e) => setMarkupPct(e.target.value)}
+                className="w-full px-4 py-2.5 border rounded-lg bg-background font-mono text-lg"
+                data-testid="input-markup-pct"
+              />
+            </div>
+            <button
+              onClick={saveMarkup}
+              disabled={markupSaving}
+              className="px-4 py-2.5 bg-accent text-accent-foreground rounded-lg font-bold inline-flex items-center gap-2 hover:bg-accent/90 disabled:opacity-60"
+              data-testid="button-save-markup"
+              type="button"
+            >
+              <Save className="w-4 h-4" /> {markupSaving ? "Saving…" : "Save Markup"}
+            </button>
+            {markupSaved && (
+              <span className="inline-flex items-center gap-1.5 text-sm text-emerald-600 font-semibold">
+                <CheckCircle2 className="w-4 h-4" /> Saved
+              </span>
+            )}
+          </div>
         </section>
 
         {/* Contact */}

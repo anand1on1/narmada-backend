@@ -50,14 +50,20 @@ const ROLE_LINKS: Array<{ label: string; hash: string }> = [
   { label: "Data Team", hash: "#/team/login" },
   { label: "Delhi", hash: "#/delhi/login" },
   { label: "Consignment", hash: "#/admin/consignments" },
+  { label: "Store", hash: "#/store/login" },        // R27.4 BUG-10
+  { label: "Dispatch", hash: "#/dispatch/login" },  // R27.4 BUG-10
+  { label: "Finance", hash: "#/finance/login" },    // R27.4 BUG-10
   { label: "Customer", hash: "#/portal" },
 ];
 // R26.6a (1) — portal entry cards surfaced on the Command Center.
+// R27.4 BUG-10 — add Store + Dispatch quick-login cards (Finance already present).
 const PORTAL_CARDS: Array<{ label: string; hash: string; testid: string }> = [
   { label: "Consignment Portal", hash: "#/consignment/login", testid: "consignment" },
   { label: "Sales Team Portal", hash: "#/sales/login", testid: "sales" },
   { label: "Finance Portal", hash: "#/finance/login", testid: "finance" },
   { label: "HR Portal", hash: "#/hr/login", testid: "hr" },
+  { label: "Store Portal", hash: "#/store/login", testid: "store" },
+  { label: "Dispatch Portal", hash: "#/dispatch/login", testid: "dispatch" },
 ];
 function RoleSwitcher() {
   const [open, setOpen] = useState(false);

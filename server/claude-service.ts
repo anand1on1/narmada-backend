@@ -8,8 +8,14 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import * as XLSX from "xlsx";
 
-const CLAUDE_API_KEY = process.env.CLAUDE_API_KEY || "";
+// R27.4 BUG-15 — accept ANTHROPIC_API_KEY as an alias so live mode turns on
+// whichever common env var the host sets. CLAUDE_API_KEY wins if both are set.
+const CLAUDE_API_KEY = process.env.CLAUDE_API_KEY || process.env.ANTHROPIC_API_KEY || "";
 const MODEL = "claude-sonnet-4-5"; // claude-sonnet-4 maps to this
+
+// R27.4 BUG-15 — log the AI mode once at module load so production logs make it
+// obvious whether the Supreme AI Bar / AI Fill run live or in deterministic mode.
+console.log(`[claude] AI mode: ${CLAUDE_API_KEY && CLAUDE_API_KEY !== "skip" ? "LIVE (LLM)" : "DETERMINISTIC (no API key)"}`);
 
 let _client: Anthropic | null = null;
 

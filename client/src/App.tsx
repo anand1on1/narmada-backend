@@ -174,6 +174,7 @@ import AdminShopOrderDetail from "@/pages/admin/AdminShopOrderDetail";
 import AdminShopCustomers from "@/pages/admin/AdminShopCustomers";
 import AdminShopCustomerDetail from "@/pages/admin/AdminShopCustomerDetail";
 import AdminFreight from "@/pages/admin/AdminFreight";
+import AdminStock from "@/pages/admin/AdminStock";
 // R27.3 — Supreme AI Bar
 import AdminAIBar from "@/pages/admin/AdminAIBar";
 // R27.2 — Operations (expense approvals + deviations)
@@ -203,6 +204,7 @@ import TeamSellers from "@/pages/team/TeamSellers";
 // Rounds 4.4–7 — team PO/RFQ pages
 import TeamPOs from "@/pages/team/TeamPOs";
 import TeamPODetail from "@/pages/team/TeamPODetail";
+import TeamDeviations from "@/pages/team/TeamDeviations"; // R27.4 BUG-13
 import TeamRFQs from "@/pages/team/TeamRFQs";
 import TeamRFQDetail from "@/pages/team/TeamRFQDetail";
 // Round 8 — new team pages
@@ -327,6 +329,7 @@ function AppRouter() {
         <Route path="/admin/customer-users/:id" component={AdminShopCustomerDetail} />
         <Route path="/admin/web-customers" component={AdminShopCustomers} />
         <Route path="/admin/freight" component={AdminFreight} />
+        <Route path="/admin/stock" component={AdminStock} />
         {/* R23.1 — owner Command Center */}
         <Route path="/admin/command-center" component={AdminCommandCenter} />
         {/* R27.3 — Supreme AI Bar */}
@@ -404,6 +407,7 @@ function AppRouter() {
         <Route path="/team/purchase-orders/:id/edit" component={PoEditRedirect} />
         <Route path="/team/purchase-orders/:id" component={TeamPODetail} />
         <Route path="/team/purchase-orders" component={TeamPOs} />
+        <Route path="/team/deviations" component={TeamDeviations} />
         <Route path="/team/rfqs/:id" component={TeamRFQDetail} />
         <Route path="/team/rfqs" component={TeamRFQs} />
         {/* R12 — seller chat hub */}

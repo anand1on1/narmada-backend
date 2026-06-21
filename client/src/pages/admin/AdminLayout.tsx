@@ -9,7 +9,7 @@ import {
   UserSquare, Wallet, CreditCard, FileQuestion, FileSpreadsheet, ShoppingCart, Landmark,
   Building2, UserCog, ScrollText, ClipboardList, Bell,
   Factory, Search, Target, Megaphone, CheckSquare, Sparkles, Facebook, History,
-  Gauge, Radar, Link2, Bug, ShoppingBag,
+  Gauge, Radar, Link2, Bug, ShoppingBag, Boxes,
 } from "lucide-react";
 
 // Session A V2: 4-role sidebar matrix.
@@ -31,7 +31,7 @@ const ROLE_PAGES: Record<AdminRole, Set<string>> = {
     "/admin/ads-meta", "/admin/ads-google", "/admin/integrations",
     "/admin/marketing/campaigns", "/admin/marketing/audiences", "/admin/marketing/templates", "/admin/marketing/custom-templates",
     "/admin/webhook-events",
-    "/admin/orders", "/admin/web-customers", "/admin/freight",
+    "/admin/orders", "/admin/web-customers", "/admin/freight", "/admin/stock",
   ]),
   logistics: new Set(["/admin/consignments"]),
   accounts: new Set([
@@ -104,6 +104,7 @@ export function AdminLayout({ children, title }: { children: ReactNode; title: s
     { href: "/admin/parts", label: "Parts", icon: Package },
     { href: "/admin/purchase-orders", label: "Purchase Orders", icon: ShoppingCart },
     { href: "/admin/purchase-history", label: "Purchase History", icon: History },
+    { href: "/admin/stock", label: "Stock", icon: Boxes },
     { href: "/admin/operations", label: "Operations", icon: ClipboardList },
     { href: "/admin/web-customers", label: "Web Customers", icon: UserSquare },
     { href: "/admin/freight", label: "Freight Charges", icon: Truck },

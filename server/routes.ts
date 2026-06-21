@@ -88,8 +88,14 @@ function buildSitemapUrls(allProducts: Awaited<ReturnType<typeof storage.listPro
   for (const b of BRAND_SLUGS) {
     for (const c of COUNTRIES) add(`/${b}-spare-parts-${toSlug(c)}`, "0.7");
   }
+  // R27.4 BUG-5 — include the part number in the product URL slug so each product
+  // page is reachable (and indexable) by its part number. Falls back to slug-only
+  // when no part number is present.
   for (const p of allProducts) {
-    if (p.active) add(`/product/${p.slug}`, "0.6");
+    if (!p.active) continue;
+    const pn = (p as any).partNumber || (p as any).part_number;
+    if (pn) add(`/product/${p.slug}/${encodeURIComponent(String(pn))}`, "0.6");
+    else add(`/product/${p.slug}`, "0.6");
   }
   return urls;
 }
@@ -279,6 +285,35 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
       const finalName = `${base}-${id}.${ext}`;
       fs.writeFileSync(path.join(UPLOADS_DIR, finalName), buf);
       // Return absolute URL so frontend on different domain (GoDaddy) can load images from Render
+      const proto = (req.headers['x-forwarded-proto'] as string) || req.protocol || 'https';
+      const host = req.get('host');
+      const absoluteUrl = `${proto}://${host}/uploads/${finalName}`;
+      res.json({ url: absoluteUrl, path: `/uploads/${finalName}` });
+    } catch (e: any) { res.status(500).json({ error: e.message }); }
+  });
+
+  // -------- FILE UPLOAD (admin) — accepts image or PDF as base64 data URL --------
+  // R27.4 BUG-14 — Delhi invoice PDF upload widget needs a PDF-capable upload path
+  // (the existing /api/admin/upload-image only accepts image/* data URLs).
+  app.post("/api/admin/upload-file", requireAdmin, async (req, res) => {
+    try {
+      const { dataUrl, filename } = req.body || {};
+      if (!dataUrl) return res.status(400).json({ error: "Missing dataUrl" });
+      const match = /^data:([a-zA-Z0-9/+.\-]+);base64,(.*)$/.exec(dataUrl);
+      let mime = "application/octet-stream", b64 = dataUrl;
+      if (match) { mime = match[1]; b64 = match[2]; }
+      const allowed: Record<string, string> = {
+        "application/pdf": "pdf", "image/png": "png", "image/jpeg": "jpg",
+        "image/jpg": "jpg", "image/webp": "webp", "image/gif": "gif",
+      };
+      const ext = allowed[mime];
+      if (!ext) return res.status(415).json({ error: "Only PDF and image files are allowed" });
+      const buf = Buffer.from(b64, "base64");
+      if (buf.length > 15 * 1024 * 1024) return res.status(413).json({ error: "File too large (max 15MB)" });
+      const fid = randomBytes(8).toString("hex");
+      const base = filename ? toSlug(filename.replace(/\.[^.]+$/, "")) : fid;
+      const finalName = `${base}-${fid}.${ext}`;
+      fs.writeFileSync(path.join(UPLOADS_DIR, finalName), buf);
       const proto = (req.headers['x-forwarded-proto'] as string) || req.protocol || 'https';
       const host = req.get('host');
       const absoluteUrl = `${proto}://${host}/uploads/${finalName}`;

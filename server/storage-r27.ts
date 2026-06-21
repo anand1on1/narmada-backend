@@ -11,8 +11,14 @@ const nowIso = () => new Date().toISOString();
 
 export interface InvoiceLine { part_number?: string; name?: string; qty?: number; unit_price?: number; total?: number; }
 
-function poLineItemsSnapshot(poId: number): InvoiceLine[] {
-  const items = sqlite.prepare(`SELECT part_number, description, qty, unit_price, line_total FROM po_items WHERE po_id = ?`).all(poId) as any[];
+function poLineItemsSnapshot(poId: number, itemIds?: number[]): InvoiceLine[] {
+  let items: any[];
+  if (Array.isArray(itemIds) && itemIds.length) {
+    const placeholders = itemIds.map(() => "?").join(",");
+    items = sqlite.prepare(`SELECT id, part_number, description, qty, unit_price, line_total FROM po_items WHERE po_id = ? AND id IN (${placeholders})`).all(poId, ...itemIds) as any[];
+  } else {
+    items = sqlite.prepare(`SELECT id, part_number, description, qty, unit_price, line_total FROM po_items WHERE po_id = ?`).all(poId) as any[];
+  }
   return items.map((it) => ({
     part_number: it.part_number || "",
     name: it.description || "",
@@ -69,15 +75,20 @@ export function updateInvoiceCopy(poId: number, body: { line_items?: InvoiceLine
 }
 
 // Delhi creates an invoice post-pack; compares to AI copy and auto-flags deviations.
-export function createDelhiInvoice(poId: number, body: { line_items?: InvoiceLine[]; invoice_number?: string; invoice_date?: string; invoice_pdf_url?: string }, createdBy?: string) {
+export function createDelhiInvoice(poId: number, body: { line_items?: InvoiceLine[]; item_ids?: number[]; invoice_number?: string; invoice_date?: string; invoice_pdf_url?: string }, createdBy?: string) {
+  // BUG-6 — item-level selection. When item_ids[] is provided, the invoice covers
+  // only the selected PO line items; otherwise it covers all (or the explicit lines).
+  const itemIds = Array.isArray(body.item_ids) && body.item_ids.length
+    ? body.item_ids.map((n) => Number(n)).filter((n) => Number.isFinite(n))
+    : undefined;
   const lines: InvoiceLine[] = Array.isArray(body.line_items) && body.line_items.length
     ? body.line_items
-    : poLineItemsSnapshot(poId);
+    : poLineItemsSnapshot(poId, itemIds);
   const { subtotal, tax, total } = sumLines(lines);
   const info = sqlite.prepare(
-    `INSERT INTO po_invoice_copies (po_id, kind, invoice_number, invoice_date, invoice_pdf_url, line_items_json, subtotal, tax, total, created_by, created_at)
-     VALUES (?, 'delhi_invoice', ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-  ).run(poId, body.invoice_number ?? null, body.invoice_date ?? null, body.invoice_pdf_url ?? null, JSON.stringify(lines), subtotal, tax, total, createdBy || null, nowIso());
+    `INSERT INTO po_invoice_copies (po_id, kind, invoice_number, invoice_date, invoice_pdf_url, line_items_json, item_ids_json, subtotal, tax, total, created_by, created_at)
+     VALUES (?, 'delhi_invoice', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+  ).run(poId, body.invoice_number ?? null, body.invoice_date ?? null, body.invoice_pdf_url ?? null, JSON.stringify(lines), itemIds ? JSON.stringify(itemIds) : null, subtotal, tax, total, createdBy || null, nowIso());
   const id = Number(info.lastInsertRowid);
   sqlite.prepare(`UPDATE purchase_orders_v2 SET delhi_invoice_id = ?, delhi_invoice_created_at = ? WHERE id = ?`).run(id, nowIso(), poId);
 
@@ -264,6 +275,25 @@ export function listBranchStock(branch = "Patna", status = "in_stock") {
     `SELECT s.*, p.name AS productName FROM branch_stock s LEFT JOIN products p ON p.id = s.product_id
      WHERE s.branch = ? AND s.status = ? ORDER BY s.id DESC`,
   ).all(branch, status);
+}
+
+// R27.4 BUG-8 — admin stock view: per-product per-branch stock with optional
+// branch filter + free-text search (part number or product name). Branch column
+// surfaces Delhi vs Patna; when no branch is given, both are returned.
+export function listBranchStockAdmin(opts: { branch?: string; q?: string; status?: string } = {}) {
+  const conds: string[] = []; const params: any[] = [];
+  if (opts.branch) { conds.push("s.branch = ?"); params.push(opts.branch); }
+  if (opts.status) { conds.push("s.status = ?"); params.push(opts.status); }
+  if (opts.q) {
+    const like = `%${opts.q}%`;
+    conds.push("(s.part_number LIKE ? OR p.name LIKE ?)");
+    params.push(like, like);
+  }
+  const where = conds.length ? `WHERE ${conds.join(" AND ")}` : "";
+  return sqlite.prepare(
+    `SELECT s.*, p.name AS productName FROM branch_stock s LEFT JOIN products p ON p.id = s.product_id
+     ${where} ORDER BY s.branch ASC, s.id DESC`,
+  ).all(...params);
 }
 
 export function dispatchReady(branch = "Patna") {

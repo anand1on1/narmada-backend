@@ -20,7 +20,9 @@ export default function ShopLogin() {
   const nextParam = (() => {
     try { return new URLSearchParams(window.location.hash.split("?")[1] || "").get("next"); } catch { return null; }
   })();
-  const destFor = (next: string | null) => (next === "checkout" ? "/checkout" : "/customer/account");
+  // R27.4 BUG-2 — after login land on the product page by default (user feedback:
+  // "it should redirect to product page"). ?next=checkout still routes to checkout.
+  const destFor = (next: string | null) => (next === "checkout" ? "/checkout" : "/products");
 
   const submit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -38,7 +40,12 @@ export default function ShopLogin() {
       }
       if (!r.ok) throw new Error(j.error || "Login failed");
       setAuth(j.token, j.user);
-      navigate(destFor(nextParam));
+      // R27.4 BUG-2 — explicit redirect. The wouter hash navigate occasionally did
+      // not take effect (the page "stayed on login"), so we also hard-set the hash
+      // as a guaranteed fallback. Both are idempotent.
+      const dest = destFor(nextParam);
+      navigate(dest);
+      try { if (!window.location.hash.startsWith(`#${dest}`)) window.location.hash = dest; } catch {}
     } catch (e: any) { setErr(e.message); } finally { setBusy(false); }
   };
 

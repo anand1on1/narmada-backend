@@ -5,16 +5,17 @@ import { Calculator } from "lucide-react";
 
 type Tab = "cash" | "headers" | "current" | "advances" | "employees" | "attendance" | "salary";
 
-export default function AccountsDashboard() {
+// R27.4 — extracted body so the Finance portal landing page (FinanceDashboard)
+// can render the full accounts dashboard, not just a placeholder.
+export function AccountsBody() {
   const { token, user } = FinanceAuth.useAuth();
   const isAdmin = user?.role === "admin";
   const [tab, setTab] = useState<Tab>("cash");
-
   return (
-    <RolePortalShell title="Accounts" accent="text-emerald-600" icon={Calculator} auth={FinanceAuth} loginPath="/finance/login">
+    <>
       <div className="flex flex-wrap gap-2 mb-5">
         {([["cash", "Cash in Hand"], ["headers", "Expense Headers"], ["current", "Current Expenses"], ["advances", "Advances"], ["employees", "Employees"], ["attendance", "Attendance"], ["salary", "Salary"]] as [Tab, string][]).map(([k, label]) => (
-          <button key={k} onClick={() => setTab(k)} className={`px-3 py-1.5 rounded-lg text-sm font-semibold ${tab === k ? "bg-accent text-accent-foreground" : "border hover:bg-muted"}`}>{label}</button>
+          <button key={k} onClick={() => setTab(k)} data-testid={`accounts-tab-${k}`} className={`px-3 py-1.5 rounded-lg text-sm font-semibold ${tab === k ? "bg-accent text-accent-foreground" : "border hover:bg-muted"}`}>{label}</button>
         ))}
       </div>
       {tab === "cash" && <CashTab token={token} />}
@@ -24,6 +25,14 @@ export default function AccountsDashboard() {
       {tab === "employees" && <EmployeesTab token={token} isAdmin={isAdmin} />}
       {tab === "attendance" && <AttendanceTab token={token} />}
       {tab === "salary" && <SalaryTab token={token} isAdmin={isAdmin} />}
+    </>
+  );
+}
+
+export default function AccountsDashboard() {
+  return (
+    <RolePortalShell title="Accounts" accent="text-emerald-600" icon={Calculator} auth={FinanceAuth} loginPath="/finance/login">
+      <AccountsBody />
     </RolePortalShell>
   );
 }
@@ -239,6 +248,14 @@ function SalaryTab({ token, isAdmin }: { token: string | null; isAdmin: boolean 
     const r = await f(token, "/api/finance/salary/finalize", { method: "POST", body: JSON.stringify({ employee_id: computed.employee_id, month }) });
     if (r.ok) { setMsg("Salary finalized."); setComputed(null); load(); setTimeout(() => setMsg(null), 3000); }
   }
+  // R27.4 — email a salary slip for a finalized run to a chosen address.
+  async function emailSlip(run: any) {
+    const to = prompt(`Email salary slip for ${run.employeeName || run.employee_id} (${run.month}) to:`);
+    if (!to) return;
+    const r = await f(token, "/api/finance/salary/email", { method: "POST", body: JSON.stringify({ employee_id: run.employee_id, month: run.month, to }) });
+    if (r.ok) { setMsg(`Salary slip emailed to ${to}.`); load(); setTimeout(() => setMsg(null), 3000); }
+    else setMsg("Failed to email slip.");
+  }
   return (
     <div>
       {msg && <div className="mb-3 text-sm bg-emerald-50 border border-emerald-200 text-emerald-800 rounded-lg px-3 py-2">{msg}</div>}
@@ -261,7 +278,27 @@ function SalaryTab({ token, isAdmin }: { token: string | null; isAdmin: boolean 
           <button onClick={finalize} className="mt-4 px-4 py-2 rounded-lg bg-emerald-600 text-white text-sm font-semibold">Finalize Salary</button>
         </div>
       )}
-      <Table cols={["Employee", "Month", "Working", "Gross", "Net", "Paid"]} rows={runs.map((r) => [r.employeeName || r.employee_id, r.month, r.working_days, `₹${r.gross}`, `₹${r.net_payable}`, r.paid_at ? "Yes" : "No"])} />
+      <div className="bg-card border rounded-xl overflow-x-auto">
+        {runs.length === 0 ? <div className="p-8 text-center text-muted-foreground">No salary runs.</div> : (
+          <table className="w-full text-sm">
+            <thead className="bg-muted/50 text-left"><tr><th className="p-3">Employee</th><th className="p-3">Month</th><th className="p-3">Working</th><th className="p-3">Gross</th><th className="p-3">Net</th><th className="p-3">Paid</th><th className="p-3">Emailed</th><th className="p-3"></th></tr></thead>
+            <tbody className="divide-y">
+              {runs.map((r) => (
+                <tr key={r.id} className="hover:bg-muted/30">
+                  <td className="p-3">{r.employeeName || r.employee_id}</td>
+                  <td className="p-3">{r.month}</td>
+                  <td className="p-3">{r.working_days}</td>
+                  <td className="p-3">₹{r.gross}</td>
+                  <td className="p-3">₹{r.net_payable}</td>
+                  <td className="p-3">{r.paid_at ? "Yes" : "No"}</td>
+                  <td className="p-3">{r.emailed_at ? "Yes" : "—"}</td>
+                  <td className="p-3"><button onClick={() => emailSlip(r)} data-testid={`salary-email-${r.id}`} className="text-accent text-xs font-semibold hover:underline">Email Slip</button></td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+      </div>
     </div>
   );
 }

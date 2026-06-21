@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { useLocation } from "wouter";
 import { AdminLayout } from "./AdminLayout";
 import { adminFetch, useAdminAuth } from "@/lib/admin-auth";
-import { Trash2, Eye, ExternalLink, Truck, Search, Copy } from "lucide-react";
+import { Trash2, Eye, ExternalLink, Truck, Search, Copy, X, Loader2, AlertTriangle } from "lucide-react";
 
 // R26.5 (A5) — repointed to the v2 purchase_orders_v2 table (Data Team source of truth).
 // GET /api/admin/purchase-orders-v2 returns camelCase Drizzle rows with live totals
@@ -23,6 +23,8 @@ interface PO {
   createdAt: number;
   dispatchCarrier?: string | null;
   dispatchDockets?: string[];
+  hasDeviation?: boolean;
+  deviationCount?: number;
 }
 
 const STATUSES = ["draft", "submitted", "confirmed", "dispatched", "completed", "cancelled"];
@@ -38,6 +40,8 @@ export default function AdminPOs() {
   // R27.1a BUG 7 — date-range filter (YYYY-MM-DD) sent to the server as from/to.
   const [fromDate, setFromDate] = useState("");
   const [toDate, setToDate] = useState("");
+  // R27.4 BUG-7 — view a PO's deviation summary in a modal.
+  const [deviationPo, setDeviationPo] = useState<PO | null>(null);
 
   // R27.0 — debounce the search box (250ms) so each keystroke doesn't refetch.
   useEffect(() => {
@@ -151,6 +155,7 @@ export default function AdminPOs() {
                 <th className="px-4 py-3 font-semibold text-right">Total</th>
                 <th className="px-4 py-3 font-semibold">Dispatch</th>
                 <th className="px-4 py-3 font-semibold">Status</th>
+                <th className="px-4 py-3 font-semibold">Deviation</th>
                 <th className="px-4 py-3"></th>
               </tr>
             </thead>
@@ -168,6 +173,15 @@ export default function AdminPOs() {
                     ) : (p.consignmentStatus || (p.isFullyDispatched ? "dispatched" : "—"))}
                   </td>
                   <td className="px-4 py-3">{badge(p.status)}</td>
+                  <td className="px-4 py-3 text-xs">
+                    {p.hasDeviation ? (
+                      <button onClick={() => setDeviationPo(p)} title="View deviation summary"
+                        className="inline-flex items-center gap-1 font-bold text-orange-700 hover:text-orange-900 rounded px-2 py-0.5 bg-orange-500/15"
+                        data-testid={`button-po-deviation-${p.id}`}>
+                        <AlertTriangle className="w-3.5 h-3.5" /> {p.deviationCount || "Y"}
+                      </button>
+                    ) : <span className="text-muted-foreground font-semibold">N</span>}
+                  </td>
                   <td className="px-4 py-3 text-right whitespace-nowrap">
                     <a
                       href={`/#/team/po/${p.id}`}
@@ -191,6 +205,71 @@ export default function AdminPOs() {
           </table>
         )}
       </div>
+
+      {deviationPo && (
+        <AdminDeviationModal token={token} poId={deviationPo.id} poNumber={poNo(deviationPo)} onClose={() => setDeviationPo(null)} />
+      )}
     </AdminLayout>
+  );
+}
+
+// R27.4 BUG-7 — admin-token deviation summary modal (reads /api/admin/deviations?po_id=).
+function AdminDeviationModal({ token, poId, poNumber, onClose }: { token: string | null; poId: number; poNumber: string; onClose: () => void }) {
+  const [rows, setRows] = useState<any[]>([]);
+  const [loading, setLoading] = useState(true);
+  useEffect(() => {
+    let alive = true;
+    (async () => {
+      if (!token) return;
+      setLoading(true);
+      try {
+        const r = await adminFetch(token, `/api/admin/deviations?po_id=${poId}`);
+        const j = r.ok ? await r.json() : [];
+        if (alive) setRows(Array.isArray(j) ? j : []);
+      } finally { if (alive) setLoading(false); }
+    })();
+    return () => { alive = false; };
+  }, [token, poId]);
+
+  return (
+    <div className="fixed inset-0 z-50 bg-black/40 flex items-center justify-center p-4" onClick={onClose}>
+      <div className="bg-card rounded-xl shadow-xl max-w-2xl w-full p-6" onClick={(e) => e.stopPropagation()}>
+        <div className="flex items-center justify-between mb-4">
+          <h3 className="text-lg font-bold">Deviation Summary — {poNumber}</h3>
+          <button onClick={onClose} className="text-muted-foreground hover:text-foreground"><X className="w-5 h-5" /></button>
+        </div>
+        {loading ? (
+          <div className="py-8 text-center text-muted-foreground inline-flex items-center gap-2 justify-center w-full"><Loader2 className="w-4 h-4 animate-spin" /> Loading…</div>
+        ) : rows.length === 0 ? (
+          <div className="py-8 text-center text-muted-foreground">No deviations recorded.</div>
+        ) : (
+          <div className="overflow-x-auto border rounded-lg">
+            <table className="w-full text-sm">
+              <thead><tr className="bg-muted/50 text-left">
+                <th className="px-3 py-2 font-semibold">Field</th>
+                <th className="px-3 py-2 font-semibold">Expected</th>
+                <th className="px-3 py-2 font-semibold">Actual</th>
+                <th className="px-3 py-2 font-semibold">Source</th>
+                <th className="px-3 py-2 font-semibold">When</th>
+                <th className="px-3 py-2 font-semibold">Status</th>
+              </tr></thead>
+              <tbody className="divide-y">{rows.map((d: any) => (
+                <tr key={d.id}>
+                  <td className="px-3 py-2">{d.field}</td>
+                  <td className="px-3 py-2">{d.expected ?? "—"}</td>
+                  <td className="px-3 py-2 font-semibold">{d.actual ?? "—"}</td>
+                  <td className="px-3 py-2 text-xs">{d.source || "—"}</td>
+                  <td className="px-3 py-2 text-xs text-muted-foreground">{d.detected_at ? new Date(d.detected_at).toLocaleString("en-IN") : "—"}</td>
+                  <td className="px-3 py-2 text-xs">{d.resolved_at ? <span className="text-emerald-700 font-semibold">Resolved</span> : <span className="text-orange-700 font-semibold">Open</span>}</td>
+                </tr>
+              ))}</tbody>
+            </table>
+          </div>
+        )}
+        <div className="flex justify-end mt-5">
+          <button onClick={onClose} className="px-4 py-2 rounded-lg text-sm font-semibold hover:bg-muted">Close</button>
+        </div>
+      </div>
+    </div>
   );
 }
