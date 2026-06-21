@@ -9,7 +9,7 @@ import {
   UserSquare, Wallet, CreditCard, FileQuestion, FileSpreadsheet, ShoppingCart, Landmark,
   Building2, UserCog, ScrollText, ClipboardList, Bell,
   Factory, Search, Target, Megaphone, CheckSquare, Sparkles, Facebook, History,
-  Gauge, Radar, Link2, Bug, ShoppingBag, Boxes, ChevronDown, ChevronRight,
+  Gauge, Radar, Link2, Bug, ShoppingBag, Boxes, ChevronDown, ChevronRight, Calculator,
 } from "lucide-react";
 
 // Session A V2: 4-role sidebar matrix.
@@ -32,13 +32,14 @@ const ROLE_PAGES: Record<AdminRole, Set<string>> = {
     "/admin/marketing/campaigns", "/admin/marketing/audiences", "/admin/marketing/templates", "/admin/marketing/custom-templates",
     "/admin/webhook-events",
     "/admin/orders", "/admin/web-customers", "/admin/freight", "/admin/stock",
+    "/admin/accounts",
   ]),
   logistics: new Set(["/admin/consignments"]),
   accounts: new Set([
     "/admin/dashboard", "/admin/consignments",
     "/admin/customers", "/admin/ledger", "/admin/payments",
     "/admin/rfqs", "/admin/quotes", "/admin/purchase-orders", "/admin/bank", "/admin/vendor-ledger",
-    "/admin/staff",
+    "/admin/staff", "/admin/accounts",
   ]),
   sales: new Set([
     "/admin/dashboard", "/admin/price-lists", "/admin/products", "/admin/contacts",
@@ -142,8 +143,10 @@ export function AdminLayout({ children, title }: { children: ReactNode; title: s
     { href: "/admin/bank", label: "Bank Accounts", icon: Landmark, group: "Finance" },
     { href: "/admin/companies", label: "Companies", icon: Building2, group: "Finance" },
 
+    { href: "/admin/accounts", label: "Accounts (Expenses)", icon: Calculator, group: "Accounts" },
+    { href: "/admin/staff", label: "Staff", icon: UserSquare, group: "Accounts" },
+
     { href: "/admin/team", label: "Team", icon: Users, group: "People" },
-    { href: "/admin/staff", label: "Staff", icon: UserSquare, group: "People" },
     { href: "/admin/users", label: "Create Users", icon: UserCog, group: "People" },
     { href: "/admin/tasks", label: "Tasks", icon: CheckSquare, group: "People" },
     { href: "/admin/tasks-legacy", label: "Tasks (Legacy)", icon: CheckSquare, group: "People" },
@@ -162,7 +165,7 @@ export function AdminLayout({ children, title }: { children: ReactNode; title: s
     { href: "/admin/notification-log", label: "Notification Log", icon: Bell, group: "System" },
     { href: "/admin/webhook-events", label: "Webhook Events", icon: Bug, group: "System" },
   ];
-  const GROUP_ORDER = ["Overview", "Sales", "Procurement", "Inventory", "Logistics", "Web Shop", "Finance", "People", "Marketing", "System"];
+  const GROUP_ORDER = ["Overview", "Sales", "Procurement", "Inventory", "Logistics", "Web Shop", "Finance", "Accounts", "People", "Marketing", "System"];
 
   // Default to admin if role is somehow missing (legacy sessions)
   const effectiveRole: AdminRole = role || "admin";

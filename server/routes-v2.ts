@@ -7380,6 +7380,77 @@ function registerR8Routes(
     } catch (e: any) { res.status(400).json({ error: e.message }); }
   });
 
+  // ==== R27.8 #10 — standalone Delhi/procurement invoice PDF upload ====
+  // Attaches an uploaded PDF to an existing po_invoice_copies row by id.
+  const invPdfDir = path.join(ctx.uploadsDir || "./uploads", "invoice-pdfs");
+  if (!fs.existsSync(invPdfDir)) fs.mkdirSync(invPdfDir, { recursive: true });
+  const multerInvoicePdf = multer({
+    storage: multer.diskStorage({
+      destination: (_req: any, _file: any, cb: any) => cb(null, invPdfDir),
+      filename: (_req: any, file: any, cb: any) => cb(null, `${Date.now()}-${file.originalname.replace(/[^a-zA-Z0-9._-]/g, "_")}`),
+    }),
+    limits: { fileSize: 10 * 1024 * 1024 },
+    fileFilter: (_req: any, file: any, cb: any) => {
+      if (file.mimetype === "application/pdf") cb(null, true);
+      else cb(new Error("Only PDF allowed"));
+    },
+  });
+  app.post("/api/admin/invoice/:id/upload-pdf", requireAdminRole, multerInvoicePdf.single("pdf"), async (req: any, res) => {
+    try {
+      const s = await r27();
+      const id = parseInt(req.params.id as string, 10);
+      if (!req.file) return res.status(400).json({ error: "PDF file required" });
+      const proto = (req.headers["x-forwarded-proto"] as string) || req.protocol;
+      const host = req.headers.host;
+      const pdfUrl = `${proto}://${host}/uploads/invoice-pdfs/${req.file.filename}`;
+      res.json(s.setInvoiceCopyPdf(id, pdfUrl));
+    } catch (e: any) { res.status(400).json({ error: e.message }); }
+  });
+
+  // ==== R27.8 #3 — Dispatch invoice flow (manual invoice no, company+client) ====
+  app.get("/api/dispatch/companies", requireDispatch, async (_req, res) => {
+    try { const s = await r27(); res.json(s.listDispatchCompanies()); } catch (e: any) { res.status(500).json({ error: e.message }); }
+  });
+  app.get("/api/dispatch/clients", requireDispatch, async (_req, res) => {
+    try { const s = await r27(); res.json(s.listDispatchClients()); } catch (e: any) { res.status(500).json({ error: e.message }); }
+  });
+  app.get("/api/dispatch/stock-items", requireDispatch, async (_req, res) => {
+    try { const s = await r27(); res.json(s.listDispatchStockItems()); } catch (e: any) { res.status(500).json({ error: e.message }); }
+  });
+  app.get("/api/dispatch/invoices", requireDispatch, async (req: any, res) => {
+    try { const s = await r27(); res.json(s.listDispatchInvoices({ status: req.query.status as string | undefined })); } catch (e: any) { res.status(500).json({ error: e.message }); }
+  });
+  app.post("/api/dispatch/invoices", requireDispatch, async (req: any, res) => {
+    try {
+      const s = await r27();
+      const r = s.createDispatchInvoice({
+        invoice_no: req.body?.invoice_no,
+        company_id: req.body?.company_id != null && req.body.company_id !== "" ? Number(req.body.company_id) : null,
+        client_id: req.body?.client_id != null && req.body.client_id !== "" ? Number(req.body.client_id) : null,
+        by: req.teamUser?.id,
+      });
+      res.json(r);
+    } catch (e: any) { res.status(400).json({ error: e.message }); }
+  });
+  app.get("/api/dispatch/invoices/:id", requireDispatch, async (req: any, res) => {
+    try { const s = await r27(); const d = s.getDispatchInvoiceDetail(parseInt(req.params.id as string, 10)); if (!d) return res.status(404).json({ error: "Not found" }); res.json(d); } catch (e: any) { res.status(500).json({ error: e.message }); }
+  });
+  app.post("/api/dispatch/invoices/:id/assign", requireDispatch, async (req: any, res) => {
+    try { const s = await r27(); res.json(s.assignDispatchItem(parseInt(req.params.id as string, 10), Number(req.body?.transfer_item_id))); } catch (e: any) { res.status(400).json({ error: e.message }); }
+  });
+  app.post("/api/dispatch/stock-items/:tid/remove", requireDispatch, async (req: any, res) => {
+    try { const s = await r27(); res.json(s.removeDispatchItem(parseInt(req.params.tid as string, 10))); } catch (e: any) { res.status(400).json({ error: e.message }); }
+  });
+  app.post("/api/dispatch/stock-items/:tid/tick", requireDispatch, async (req: any, res) => {
+    try { const s = await r27(); res.json(s.tickDispatchItem(parseInt(req.params.tid as string, 10), req.body?.ticked !== false)); } catch (e: any) { res.status(400).json({ error: e.message }); }
+  });
+  app.post("/api/dispatch/invoices/:id/process", requireDispatch, async (req: any, res) => {
+    try { const s = await r27(); res.json(s.markDispatchInvoiceProcessed(parseInt(req.params.id as string, 10))); } catch (e: any) { res.status(400).json({ error: e.message }); }
+  });
+  app.post("/api/dispatch/invoices/:id/unlock", requireDispatch, async (req: any, res) => {
+    try { const s = await r27(); res.json(s.unlockDispatchInvoice(parseInt(req.params.id as string, 10))); } catch (e: any) { res.status(400).json({ error: e.message }); }
+  });
+
   // ---- R27.2-5 Auto-product markup setting (admin) ----
   app.get("/api/admin/settings/auto-product-markup", requireAuth, async (_req, res) => {
     try {
@@ -7525,12 +7596,11 @@ function registerR8Routes(
   app.post("/api/finance/expenses/sync-sales", acctAuth, async (req: any, res) => {
     try {
       const s = await r27();
-      // listExpenses synthesizes negative-id rows for approved-but-unsynced sales
-      // expenses; only those need a real ledger row created.
-      const pending = s.listExpenses({ includeSales: true }).filter((r: any) => r.source === "sales" && r.sales_expense_id && r.id < 0);
-      let synced = 0;
-      for (const p of pending) { const r = s.syncSalesExpenseToAccounts(p.sales_expense_id, req.teamUser?.id); if (r && (r as any).id && !(r as any).skipped) synced++; }
-      res.json({ synced });
+      // R27.8 #1 — re-scan ALL approved sales expenses (not just synthetic rows) and
+      // create any missing ledger entries. Returns real counts so the user gets a
+      // meaningful message even when everything is already synced.
+      const r = s.syncAllApprovedSalesExpenses(req.teamUser?.id ?? req.user?.id);
+      res.json(r);
     } catch (e: any) { res.status(400).json({ error: e.message }); }
   });
 
@@ -7553,31 +7623,41 @@ function registerR8Routes(
   }
 
   // R27.7 #1 — accounts exports: cash received / staff-wise / day-wise.
+  // R27.8 #4 — full transaction detail (every row), honouring from/to.
   async function cashReceivedAoa(req: any) {
     const s = await r27();
-    const rows = s.reportCashReceived({ from: req.query.from as string | undefined, to: req.query.to as string | undefined, branch: req.query.branch as string | undefined });
-    const aoa: any[][] = [["Date", "Branch", "Source", "Amount", "Notes", "Reference"]];
+    const rows = s.reportCashReceivedDetail({ from: req.query.from as string | undefined, to: req.query.to as string | undefined, branch: req.query.branch as string | undefined });
+    const aoa: any[][] = [["ID", "Date", "Time", "Branch", "Amount", "Source", "Reference ID", "Reference Table", "Notes", "Recorded By", "Created At"]];
     let total = 0;
-    for (const r of rows) { aoa.push([r.date, r.branch, r.source, r.amount, r.notes || "", r.reference_id || ""]); total += Number(r.amount) || 0; }
-    aoa.push([], ["", "", "Total", total]);
+    for (const r of rows) {
+      aoa.push([r.id, r.date, r.time || "", r.branch, r.amount, r.source, r.reference_id || "", r.reference_table || "", r.notes || "", r.recordedBy || "", r.created_at || ""]);
+      total += Number(r.amount) || 0;
+    }
+    aoa.push([], ["", "", "", "", total, "Total"]);
     return aoa;
   }
   async function staffExpensesAoa(req: any) {
     const s = await r27();
-    const rows = s.reportStaffExpenses({ from: req.query.from as string | undefined, to: req.query.to as string | undefined });
-    const aoa: any[][] = [["Staff", "Advance Expenses", "Direct Expenses", "Total", "Items"]];
-    let gAdv = 0, gDir = 0, gTot = 0;
-    for (const r of rows) { aoa.push([r.staffName, r.advanceTotal, r.directTotal, r.total, r.items]); gAdv += r.advanceTotal; gDir += r.directTotal; gTot += r.total; }
-    aoa.push([], ["Grand Total", gAdv, gDir, gTot, ""]);
+    const rows = s.reportStaffExpensesDetail({ from: req.query.from as string | undefined, to: req.query.to as string | undefined });
+    const aoa: any[][] = [["ID", "Staff", "Role", "Branch", "Date", "Expense Type", "Header", "Amount", "Payment Mode", "Advance ID", "Description", "Attachment URL", "Approved By", "Created At"]];
+    let total = 0;
+    for (const r of rows) {
+      aoa.push([r.id, r.staffName || "Unassigned", r.role || "", r.branch || "", r.date, r.expenseType || "", r.header || "", r.amount, r.paymentMode || "", r.advanceId || "", r.description || "", r.attachmentUrl || "", r.approvedBy || "", r.created_at || ""]);
+      total += Number(r.amount) || 0;
+    }
+    aoa.push([], ["", "", "", "", "", "", "", total, "Total"]);
     return aoa;
   }
   async function dayExpensesAoa(req: any) {
     const s = await r27();
-    const rows = s.reportDayExpenses({ from: req.query.from as string | undefined, to: req.query.to as string | undefined });
-    const aoa: any[][] = [["Date", "Advance Expenses", "Direct Expenses", "Total", "Items"]];
-    let gTot = 0;
-    for (const r of rows) { aoa.push([r.date, r.advanceTotal, r.directTotal, r.total, r.items]); gTot += r.total; }
-    aoa.push([], ["Grand Total", "", "", gTot, ""]);
+    const rows = s.reportDayExpensesDetail({ from: req.query.from as string | undefined, to: req.query.to as string | undefined });
+    const aoa: any[][] = [["ID", "Date", "Staff", "Branch", "Header", "Sub-Category", "Amount", "Payment Mode", "Description", "Reference No", "Attachment URL", "Source", "Source ID", "Approved By", "Created At"]];
+    let total = 0;
+    for (const r of rows) {
+      aoa.push([r.id, r.date, r.staffName || "", r.branch || "", r.header || "", r.subCategory || "", r.amount, r.paymentMode || "", r.description || "", r.referenceNo || "", r.attachmentUrl || "", r.source || "", r.sourceId || "", r.approvedBy || "", r.created_at || ""]);
+      total += Number(r.amount) || 0;
+    }
+    aoa.push([], ["", "", "", "", "", "", total, "Total"]);
     return aoa;
   }
   app.get("/api/admin/accounts/cash-received.xlsx", acctAuth, async (req: any, res) => { try { sendXlsx(res, "cash-received", "Cash Received", await cashReceivedAoa(req)); } catch (e: any) { res.status(500).json({ error: e.message }); } });

@@ -91,6 +91,7 @@ import AdminBlog from "@/pages/admin/AdminBlog";
 import AdminPriceList from "@/pages/admin/AdminPriceList";
 import AdminConsignments from "@/pages/admin/AdminConsignments";
 import AdminTeam from "@/pages/admin/AdminTeam";
+import AdminAccounts from "@/pages/admin/AdminAccounts";
 import AdminCustomers from "@/pages/admin/AdminCustomers";
 import AdminLedger from "@/pages/admin/AdminLedger";
 import AdminPayments from "@/pages/admin/AdminPayments";
@@ -282,6 +283,9 @@ function AppRouter() {
         <Route path="/admin/price-lists" component={AdminPriceList} />
         <Route path="/admin/consignments" component={AdminConsignments} />
         <Route path="/admin/team" component={AdminTeam} />
+        {/* R27.8 #5 — Staff route was missing (sidebar link 404'd). #6 — admin Accounts mirror. */}
+        <Route path="/admin/staff" component={() => <AdminAccounts title="Staff" />} />
+        <Route path="/admin/accounts" component={() => <AdminAccounts title="Accounts" />} />
         <Route path="/admin/customers" component={AdminCustomers} />
         <Route path="/admin/ledger" component={AdminLedger} />
         <Route path="/admin/payments" component={AdminPayments} />

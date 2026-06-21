@@ -323,6 +323,23 @@ function DelhiInvoiceSection({ poId, lines, token }: { poId: number; lines: any[
     onError: (e: any) => toast({ title: "Could not create invoice", description: e.message, variant: "destructive" }),
   });
 
+  // R27.8 #10 — standalone PDF upload for an existing invoice row (multipart).
+  const [rowUploading, setRowUploading] = useState<number | null>(null);
+  const uploadRowPdf = async (invoiceId: number, file: File) => {
+    setRowUploading(invoiceId);
+    try {
+      const fd = new FormData();
+      fd.append("pdf", file);
+      const r = await adminFetch(token, `/api/admin/invoice/${invoiceId}/upload-pdf`, { method: "POST", body: fd });
+      const j = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(j.error || "Upload failed");
+      toast({ title: "Invoice PDF attached" });
+      qc.invalidateQueries({ queryKey: ["admin-po-invoices", poId] });
+    } catch (e: any) {
+      toast({ title: "Upload failed", description: e.message, variant: "destructive" });
+    } finally { setRowUploading(null); }
+  };
+
   return (
     <Section title="Delhi Invoice" icon={FileText}>
       <div className="p-4 space-y-4">
@@ -408,7 +425,16 @@ function DelhiInvoiceSection({ poId, lines, token }: { poId: number; lines: any[
                       <td className="px-3 py-2 text-xs">{iv.invoice_number || "—"}</td>
                       <td className="px-3 py-2 text-xs">{itemCount}</td>
                       <td className="px-3 py-2 text-right">{inr(iv.total)}</td>
-                      <td className="px-3 py-2 text-xs">{iv.invoice_pdf_url ? <a href={iv.invoice_pdf_url} target="_blank" rel="noreferrer" className="text-blue-600 hover:underline inline-flex items-center gap-1"><ExternalLink className="w-3 h-3" /> View</a> : "—"}</td>
+                      <td className="px-3 py-2 text-xs">
+                        <div className="flex items-center gap-2">
+                          {iv.invoice_pdf_url && <a href={iv.invoice_pdf_url} target="_blank" rel="noreferrer" className="text-blue-600 hover:underline inline-flex items-center gap-1"><ExternalLink className="w-3 h-3" /> View</a>}
+                          <label className="inline-flex items-center gap-1 border rounded px-2 py-1 cursor-pointer hover:bg-muted" data-testid={`row-upload-pdf-${iv.id}`}>
+                            <Upload className="w-3 h-3" /> {rowUploading === iv.id ? "Uploading…" : iv.invoice_pdf_url ? "Replace" : "Upload"}
+                            <input type="file" accept="application/pdf" className="hidden"
+                              onChange={(e) => { const f = e.target.files?.[0]; if (f) uploadRowPdf(iv.id, f); e.currentTarget.value = ""; }} />
+                          </label>
+                        </div>
+                      </td>
                     </tr>
                   );
                 })}

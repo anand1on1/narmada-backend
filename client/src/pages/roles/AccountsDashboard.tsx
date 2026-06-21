@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, createContext, useContext } from "react";
 import RolePortalShell from "./RolePortalShell";
 import { FinanceAuth } from "@/lib/role-auth";
 import { Calculator } from "lucide-react";
@@ -7,6 +7,13 @@ type Tab = "cash" | "headers" | "expenses" | "current" | "advances" | "employees
 
 const BRANCHES = ["Delhi", "Patna"];
 
+// R27.8 #5/#6 — the accounts dashboard was hard-wired to FinanceAuth.roleFetch.
+// To mirror it inside the admin panel (admin token), the fetcher is now injected
+// via context. Default is the finance roleFetch so the standalone portal is
+// unchanged; the admin wrapper supplies adminFetch instead.
+type Fetcher = (token: string | null, url: string, init?: RequestInit) => Promise<Response>;
+const FetchCtx = createContext<Fetcher>(FinanceAuth.roleFetch);
+
 // R27.4 — extracted body so the Finance portal landing page (FinanceDashboard)
 // can render the full accounts dashboard, not just a placeholder.
 // R27.5 #8 — fuller field sets per tab + a Person Ledger tab.
@@ -14,6 +21,25 @@ export function AccountsBody() {
   const { token, user } = FinanceAuth.useAuth();
   const isAdmin = user?.role === "admin";
   const [tab, setTab] = useState<Tab>("cash");
+  return (
+    <FetchCtx.Provider value={FinanceAuth.roleFetch}>
+      <AccountsTabs token={token} isAdmin={isAdmin} tab={tab} setTab={setTab} />
+    </FetchCtx.Provider>
+  );
+}
+
+// R27.8 #5/#6 — admin-panel mirror. Renders the exact same tabs but drives every
+// request through adminFetch (admin token => isAdminAcct=true => full salary).
+export function AccountsBodyAdmin({ token, adminFetch }: { token: string | null; adminFetch: Fetcher }) {
+  const [tab, setTab] = useState<Tab>("cash");
+  return (
+    <FetchCtx.Provider value={adminFetch}>
+      <AccountsTabs token={token} isAdmin tab={tab} setTab={setTab} />
+    </FetchCtx.Provider>
+  );
+}
+
+function AccountsTabs({ token, isAdmin, tab, setTab }: { token: string | null; isAdmin: boolean; tab: Tab; setTab: (t: Tab) => void }) {
   return (
     <>
       <div className="flex flex-wrap gap-2 mb-5">
@@ -42,11 +68,13 @@ export default function AccountsDashboard() {
   );
 }
 
-const f = FinanceAuth.roleFetch;
+// R27.8 #5/#6 — the active fetcher comes from context (finance roleFetch by
+// default, adminFetch inside the admin mirror). Every sub-component reads it.
+function useF(): Fetcher { return useContext(FetchCtx); }
 
 // R27.7 #1 — token-aware file download (the plain <a href> can't send the role
 // token header, so fetch as a blob and click a synthetic link).
-async function downloadFile(token: string | null, url: string, filename: string) {
+async function downloadFile(f: Fetcher, token: string | null, url: string, filename: string) {
   const r = await f(token, url);
   if (!r.ok) return;
   const blob = await r.blob();
@@ -60,6 +88,7 @@ async function downloadFile(token: string | null, url: string, filename: string)
 // (+), cash-paid direct expenses (−), advances issued (−) and returned (+). The
 // drill-down lists those movements chronologically per branch.
 function CashTab({ token }: { token: string | null }) {
+  const f = useF();
   const [balances, setBalances] = useState<{ branch: string; inflow: number; outflow: number; balance: number }[]>([]);
   const [moves, setMoves] = useState<any[]>([]);
   const [branch, setBranch] = useState("all");
@@ -107,8 +136,8 @@ function CashTab({ token }: { token: string | null }) {
         <input type="date" value={exFrom} onChange={(e) => setExFrom(e.target.value)} className="px-2 py-1.5 rounded-lg border bg-background text-sm" data-testid="cash-export-from" />
         <input type="date" value={exTo} onChange={(e) => setExTo(e.target.value)} className="px-2 py-1.5 rounded-lg border bg-background text-sm" data-testid="cash-export-to" />
         {(() => { const qs = `?${new URLSearchParams({ ...(exFrom ? { from: exFrom } : {}), ...(exTo ? { to: exTo } : {}), ...(branch !== "all" ? { branch } : {}) }).toString()}`; return (<>
-          <button onClick={() => downloadFile(token, `/api/admin/accounts/cash-received.xlsx${qs}`, "cash-received.xlsx")} className="px-3 py-1.5 rounded-lg border text-sm font-semibold hover:bg-muted" data-testid="cash-export-xlsx">Export xlsx</button>
-          <button onClick={() => downloadFile(token, `/api/admin/accounts/cash-received.csv${qs}`, "cash-received.csv")} className="px-3 py-1.5 rounded-lg border text-sm font-semibold hover:bg-muted" data-testid="cash-export-csv">Export csv</button>
+          <button onClick={() => downloadFile(f, token, `/api/admin/accounts/cash-received.xlsx${qs}`, "cash-received.xlsx")} className="px-3 py-1.5 rounded-lg border text-sm font-semibold hover:bg-muted" data-testid="cash-export-xlsx">Export xlsx</button>
+          <button onClick={() => downloadFile(f, token, `/api/admin/accounts/cash-received.csv${qs}`, "cash-received.csv")} className="px-3 py-1.5 rounded-lg border text-sm font-semibold hover:bg-muted" data-testid="cash-export-csv">Export csv</button>
         </>); })()}
       </div>
       <Table cols={["Date", "Branch", "Direction", "Source", "Amount", "Notes"]} rows={moves.map((r) => [r.created_at ? new Date(r.created_at).toLocaleString("en-IN") : "—", r.branch, r.direction === "in" ? "IN" : "OUT", SRC_LABEL[r.source] || r.source, `₹${Number(r.amount).toLocaleString("en-IN")}`, r.notes || "—"])} />
@@ -117,6 +146,7 @@ function CashTab({ token }: { token: string | null }) {
 }
 
 function HeadersTab({ token }: { token: string | null }) {
+  const f = useF();
   const [rows, setRows] = useState<any[]>([]);
   const [form, setForm] = useState({ name: "", gl_code: "", budget: "", parent_id: "" });
   async function load() { const r = await f(token, "/api/finance/expense-headers"); if (r.ok) setRows(await r.json()); }
@@ -157,6 +187,7 @@ function HeadersTab({ token }: { token: string | null }) {
 // Approved sales-team expenses appear here too (synced server-side, #7).
 const PAYMENT_MODES = ["cash", "upi", "bank", "card", "cheque"];
 function ExpensesTab({ token }: { token: string | null }) {
+  const f = useF();
   const [mode, setMode] = useState<"direct" | "advance">("direct");
   const [expenses, setExpenses] = useState<any[]>([]);
   const [advances, setAdvances] = useState<any[]>([]);
@@ -208,7 +239,15 @@ function ExpensesTab({ token }: { token: string | null }) {
   async function syncSales() {
     const r = await f(token, "/api/finance/expenses/sync-sales", { method: "POST" });
     const j = await r.json().catch(() => ({}));
-    if (r.ok) { flash(`Synced ${j.synced || 0} approved sales expense(s).`); load(); } else flash("Failed");
+    if (r.ok) {
+      const synced = j.synced || 0, already = j.alreadySynced || 0, total = j.totalApproved || 0;
+      flash(synced > 0
+        ? `Synced ${synced} new sales expense(s). ${already} already in ledger (of ${total} approved).`
+        : total > 0
+          ? `All ${total} approved sales expense(s) already synced — nothing new.`
+          : `No approved sales expenses to sync yet.`);
+      load();
+    } else flash("Failed");
   }
 
   return (
@@ -222,10 +261,10 @@ function ExpensesTab({ token }: { token: string | null }) {
       {/* R27.7 #1 — staff-wise & day-wise expense exports */}
       <div className="flex gap-2 mb-4 items-center flex-wrap text-sm">
         <span className="text-xs text-muted-foreground">Exports:</span>
-        <button onClick={() => downloadFile(token, "/api/admin/accounts/staff-expenses.xlsx", "staff-expenses.xlsx")} className="px-3 py-1.5 rounded-lg border font-semibold hover:bg-muted" data-testid="staff-export-xlsx">Staff-wise xlsx</button>
-        <button onClick={() => downloadFile(token, "/api/admin/accounts/staff-expenses.csv", "staff-expenses.csv")} className="px-3 py-1.5 rounded-lg border font-semibold hover:bg-muted" data-testid="staff-export-csv">Staff-wise csv</button>
-        <button onClick={() => downloadFile(token, "/api/admin/accounts/day-expenses.xlsx", "day-expenses.xlsx")} className="px-3 py-1.5 rounded-lg border font-semibold hover:bg-muted" data-testid="day-export-xlsx">Day-wise xlsx</button>
-        <button onClick={() => downloadFile(token, "/api/admin/accounts/day-expenses.csv", "day-expenses.csv")} className="px-3 py-1.5 rounded-lg border font-semibold hover:bg-muted" data-testid="day-export-csv">Day-wise csv</button>
+        <button onClick={() => downloadFile(f, token, "/api/admin/accounts/staff-expenses.xlsx", "staff-expenses.xlsx")} className="px-3 py-1.5 rounded-lg border font-semibold hover:bg-muted" data-testid="staff-export-xlsx">Staff-wise xlsx</button>
+        <button onClick={() => downloadFile(f, token, "/api/admin/accounts/staff-expenses.csv", "staff-expenses.csv")} className="px-3 py-1.5 rounded-lg border font-semibold hover:bg-muted" data-testid="staff-export-csv">Staff-wise csv</button>
+        <button onClick={() => downloadFile(f, token, "/api/admin/accounts/day-expenses.xlsx", "day-expenses.xlsx")} className="px-3 py-1.5 rounded-lg border font-semibold hover:bg-muted" data-testid="day-export-xlsx">Day-wise xlsx</button>
+        <button onClick={() => downloadFile(f, token, "/api/admin/accounts/day-expenses.csv", "day-expenses.csv")} className="px-3 py-1.5 rounded-lg border font-semibold hover:bg-muted" data-testid="day-export-csv">Day-wise csv</button>
       </div>
 
       {mode === "direct" ? (
@@ -280,6 +319,7 @@ function ExpensesTab({ token }: { token: string | null }) {
 }
 
 function CurrentTab({ token, isAdmin }: { token: string | null; isAdmin: boolean }) {
+  const f = useF();
   const [rows, setRows] = useState<any[]>([]);
   const [headers, setHeaders] = useState<any[]>([]);
   const [statusFilter, setStatusFilter] = useState("all");
@@ -334,6 +374,7 @@ function CurrentTab({ token, isAdmin }: { token: string | null; isAdmin: boolean
 }
 
 function AdvancesTab({ token }: { token: string | null }) {
+  const f = useF();
   const [rows, setRows] = useState<any[]>([]);
   const [emps, setEmps] = useState<any[]>([]);
   const [form, setForm] = useState({ employee_id: "", amount_given: "", purpose: "" });
@@ -385,6 +426,7 @@ function AdvancesTab({ token }: { token: string | null }) {
 }
 
 function EmployeesTab({ token, isAdmin }: { token: string | null; isAdmin: boolean }) {
+  const f = useF();
   const [rows, setRows] = useState<any[]>([]);
   const [search, setSearch] = useState("");
   const [debounced, setDebounced] = useState("");
@@ -463,6 +505,7 @@ function EmployeesTab({ token, isAdmin }: { token: string | null; isAdmin: boole
 
 // R27.5 #8 — Person Ledger: running debit/credit balance per employee.
 function LedgerTab({ token }: { token: string | null }) {
+  const f = useF();
   const [emps, setEmps] = useState<any[]>([]);
   const [empId, setEmpId] = useState("");
   const [data, setData] = useState<{ rows: any[]; balance: number }>({ rows: [], balance: 0 });
@@ -490,6 +533,7 @@ function LedgerTab({ token }: { token: string | null }) {
 }
 
 function AttendanceTab({ token }: { token: string | null }) {
+  const f = useF();
   const [rows, setRows] = useState<any[]>([]);
   const [emps, setEmps] = useState<any[]>([]);
   const [form, setForm] = useState({ employee_id: "", month: new Date().toISOString().slice(0, 7), absent_days: "0" });
@@ -518,6 +562,7 @@ function AttendanceTab({ token }: { token: string | null }) {
 }
 
 function SalaryTab({ token, isAdmin }: { token: string | null; isAdmin: boolean }) {
+  const f = useF();
   const [runs, setRuns] = useState<any[]>([]);
   const [emps, setEmps] = useState<any[]>([]);
   const [month, setMonth] = useState(new Date().toISOString().slice(0, 7));

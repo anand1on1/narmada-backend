@@ -136,6 +136,15 @@ export function listInvoices(poId: number) {
   return rows.map((r) => ({ ...r, line_items: safeParse(r.line_items_json) }));
 }
 
+// R27.8 #10 — standalone PDF upload for a procurement invoice copy. Attaches the
+// uploaded file URL to the existing po_invoice_copies row (Delhi invoice or AI copy).
+export function setInvoiceCopyPdf(id: number, pdfUrl: string) {
+  const row = sqlite.prepare(`SELECT id FROM po_invoice_copies WHERE id = ?`).get(id) as any;
+  if (!row) throw new Error("Invoice not found");
+  sqlite.prepare(`UPDATE po_invoice_copies SET invoice_pdf_url = ? WHERE id = ?`).run(pdfUrl, id);
+  return getInvoiceCopy(id);
+}
+
 // ===========================================================================
 // R27.2-4 — Deviation engine
 // ===========================================================================
@@ -418,6 +427,163 @@ export function finalizeTransferInvoice(id: number, fields: {
   return getTransferInvoice(id);
 }
 
+// ============================================================================
+// R27.8 #3 — Dispatch invoice flow (new dispatch_invoices + dispatch_invoice_items).
+// Invoice numbers are USER-ENTERED text (not auto-generated). The store
+// mark-received path no longer auto-creates these; dispatch creates them
+// explicitly and assigns received stock items to them.
+// ============================================================================
+
+// Companies dropdown (reuses the existing R5.1 companies table).
+export function listDispatchCompanies() {
+  try {
+    return sqlite.prepare(`SELECT id, name, code FROM companies WHERE COALESCE(is_active,1) = 1 ORDER BY name ASC`).all() as any[];
+  } catch { return []; }
+}
+
+// Clients dropdown (customers master).
+export function listDispatchClients() {
+  try {
+    return sqlite.prepare(`SELECT id, name FROM customers ORDER BY name ASC`).all() as any[];
+  } catch { return []; }
+}
+
+// Stock tab: every received transfer line item, with its current invoice assignment.
+export function listDispatchStockItems() {
+  // branch_received_items holds one row per received line. Join the parent transfer
+  // + PO + customer for context, and the dispatch_invoice_items row (if assigned)
+  // to surface the assignment + tick state. processed invoices drop out of the
+  // assignable pool but their items still show (read-only, marked processed).
+  const rows = sqlite.prepare(
+    `SELECT ri.id AS transfer_item_id, ri.transfer_id, ri.part_number AS partNo, ri.received_qty AS quantity,
+            t.po_id AS po_id, po.po_number AS poNumber, po.customer_po_number AS customerPoNumber,
+            c.name AS clientName,
+            dii.id AS dispatch_invoice_item_id, dii.dispatch_invoice_id AS dispatchInvoiceId,
+            dii.ticked_at AS tickedAt, di.invoice_no AS invoiceNo, di.status AS invoiceStatus
+     FROM branch_received_items ri
+     LEFT JOIN branch_transfers t ON t.id = ri.transfer_id
+     LEFT JOIN purchase_orders_v2 po ON po.id = t.po_id
+     LEFT JOIN customers c ON c.id = po.customer_id
+     LEFT JOIN dispatch_invoice_items dii ON dii.transfer_item_id = ri.id
+     LEFT JOIN dispatch_invoices di ON di.id = dii.dispatch_invoice_id
+     WHERE ri.received_qty > 0
+     ORDER BY ri.id DESC`,
+  ).all() as any[];
+  // Attach item name from po_items by part number (best-effort).
+  rows.forEach((r) => {
+    r.poNumber = r.poNumber || r.customerPoNumber || (r.po_id ? String(r.po_id) : null);
+    r.clientName = r.clientName || "Internal Transfer";
+    if (r.partNo && r.po_id) {
+      try {
+        const it = sqlite.prepare(`SELECT description AS name FROM po_items WHERE po_id = ? AND part_number = ? LIMIT 1`).get(r.po_id, r.partNo) as any;
+        r.itemName = it?.name || null;
+      } catch { r.itemName = null; }
+    } else r.itemName = null;
+  });
+  return rows;
+}
+
+export function createDispatchInvoice(opts: { invoice_no: string; company_id?: number | null; client_id?: number | null; by?: number | null }) {
+  const invoiceNo = String(opts.invoice_no || "").trim();
+  if (!invoiceNo) throw new Error("Invoice number is required");
+  const info = sqlite.prepare(
+    `INSERT INTO dispatch_invoices (invoice_no, company_id, client_id, status, created_by, created_at)
+     VALUES (?, ?, ?, 'pending', ?, ?)`,
+  ).run(invoiceNo, opts.company_id ?? null, opts.client_id ?? null, opts.by ?? null, nowIso());
+  return getDispatchInvoice(Number(info.lastInsertRowid));
+}
+
+export function getDispatchInvoice(id: number) {
+  return sqlite.prepare(
+    `SELECT di.*, co.name AS companyName, cu.name AS clientName,
+            (SELECT COUNT(*) FROM dispatch_invoice_items WHERE dispatch_invoice_id = di.id) AS itemsCount
+     FROM dispatch_invoices di
+     LEFT JOIN companies co ON co.id = di.company_id
+     LEFT JOIN customers cu ON cu.id = di.client_id
+     WHERE di.id = ?`,
+  ).get(id) as any;
+}
+
+export function listDispatchInvoices(opts: { status?: string } = {}) {
+  const conds: string[] = []; const params: any[] = [];
+  if (opts.status) { conds.push("di.status = ?"); params.push(opts.status); }
+  const where = conds.length ? `WHERE ${conds.join(" AND ")}` : "";
+  return sqlite.prepare(
+    `SELECT di.*, co.name AS companyName, cu.name AS clientName,
+            (SELECT COUNT(*) FROM dispatch_invoice_items WHERE dispatch_invoice_id = di.id) AS itemsCount
+     FROM dispatch_invoices di
+     LEFT JOIN companies co ON co.id = di.company_id
+     LEFT JOIN customers cu ON cu.id = di.client_id
+     ${where} ORDER BY di.id DESC`,
+  ).all(...params) as any[];
+}
+
+export function getDispatchInvoiceDetail(id: number) {
+  const inv = getDispatchInvoice(id);
+  if (!inv) return undefined;
+  const items = sqlite.prepare(`SELECT * FROM dispatch_invoice_items WHERE dispatch_invoice_id = ? ORDER BY id ASC`).all(id) as any[];
+  return { ...inv, items };
+}
+
+// Assign a received stock line to a pending invoice (snapshots its context columns).
+export function assignDispatchItem(invoiceId: number, transferItemId: number) {
+  const inv = getDispatchInvoice(invoiceId);
+  if (!inv) throw new Error("Invoice not found");
+  if (String(inv.status) !== "pending") throw new Error("Cannot assign to a processed invoice");
+  const ri = sqlite.prepare(
+    `SELECT ri.id, ri.part_number AS partNo, ri.received_qty AS quantity, t.po_id AS po_id,
+            po.po_number AS poNumber, po.customer_po_number AS customerPoNumber, c.name AS clientName
+     FROM branch_received_items ri
+     LEFT JOIN branch_transfers t ON t.id = ri.transfer_id
+     LEFT JOIN purchase_orders_v2 po ON po.id = t.po_id
+     LEFT JOIN customers c ON c.id = po.customer_id
+     WHERE ri.id = ?`,
+  ).get(transferItemId) as any;
+  if (!ri) throw new Error("Stock item not found");
+  // One assignment per stock line: clear any existing assignment first.
+  sqlite.prepare(`DELETE FROM dispatch_invoice_items WHERE transfer_item_id = ?`).run(transferItemId);
+  let itemName: string | null = null;
+  if (ri.partNo && ri.po_id) {
+    try { itemName = (sqlite.prepare(`SELECT description AS name FROM po_items WHERE po_id = ? AND part_number = ? LIMIT 1`).get(ri.po_id, ri.partNo) as any)?.name || null; } catch { /* ignore */ }
+  }
+  sqlite.prepare(
+    `INSERT INTO dispatch_invoice_items (dispatch_invoice_id, transfer_item_id, po_no, client_name, item_name, part_no, quantity, assigned, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?)`,
+  ).run(invoiceId, transferItemId, ri.poNumber || ri.customerPoNumber || (ri.po_id ? String(ri.po_id) : null), ri.clientName || "Internal Transfer", itemName, ri.partNo || null, ri.quantity ?? null, nowIso());
+  return getDispatchInvoiceDetail(invoiceId);
+}
+
+export function removeDispatchItem(transferItemId: number) {
+  sqlite.prepare(`DELETE FROM dispatch_invoice_items WHERE transfer_item_id = ?`).run(transferItemId);
+  return { ok: true };
+}
+
+export function tickDispatchItem(transferItemId: number, ticked: boolean) {
+  sqlite.prepare(`UPDATE dispatch_invoice_items SET ticked_at = ? WHERE transfer_item_id = ?`)
+    .run(ticked ? nowIso() : null, transferItemId);
+  return { ok: true };
+}
+
+export function markDispatchInvoiceProcessed(id: number) {
+  const inv = getDispatchInvoice(id);
+  if (!inv) throw new Error("Invoice not found");
+  if (Number(inv.itemsCount) < 1) throw new Error("Add at least one item before processing");
+  if (String(inv.status) === "processed") throw new Error("Invoice already processed");
+  sqlite.prepare(`UPDATE dispatch_invoices SET status = 'processed', processed_at = ? WHERE id = ?`).run(nowIso(), id);
+  return getDispatchInvoice(id);
+}
+
+// Same-day unlock: a processed invoice can be reopened within 24h of processing.
+export function unlockDispatchInvoice(id: number) {
+  const inv = getDispatchInvoice(id);
+  if (!inv) throw new Error("Invoice not found");
+  if (String(inv.status) !== "processed") throw new Error("Invoice is not processed");
+  const processedMs = inv.processed_at ? Date.parse(inv.processed_at) : 0;
+  if (!processedMs || (Date.now() - processedMs) > 24 * 60 * 60 * 1000) throw new Error("Unlock window (24h) has passed");
+  sqlite.prepare(`UPDATE dispatch_invoices SET status = 'pending', unlocked_at = ? WHERE id = ?`).run(nowIso(), id);
+  return getDispatchInvoice(id);
+}
+
 export function getTransferDetail(id: number) {
   const t = sqlite.prepare(
     `SELECT t.*, po.po_number AS poNumber FROM branch_transfers t LEFT JOIN purchase_orders_v2 po ON po.id = t.po_id WHERE t.id = ?`,
@@ -436,6 +602,8 @@ export function getTransferDetail(id: number) {
 export async function receiveTransfer(transferId: number, items: Array<{ part_number: string; product_id?: number; expected_qty: number; received_qty: number; rate?: number; reason?: string }>, receivedBy?: number) {
   const t = sqlite.prepare(`SELECT * FROM branch_transfers WHERE id = ?`).get(transferId) as any;
   if (!t) throw new Error("Transfer not found");
+  // R27.8 #2 — idempotency: reject a second receive on an already-received transfer.
+  if (String(t.status) === "received") throw new Error("Transfer already received");
   let anyShort = false;
   const tx = sqlite.transaction(() => {
     for (const it of items) {
@@ -462,8 +630,9 @@ export async function receiveTransfer(transferId: number, items: Array<{ part_nu
       .run(nowIso(), receivedBy ?? null, allReceived ? "received" : "partial_received", transferId);
   });
   tx();
-  // R27.7 #4 — on receive, open a pending transfer-invoice for dispatch to fill.
-  ensurePendingTransferInvoice({ transferId, source: "branch_transfer", sourceBranch: t.from_branch ?? "Delhi", destBranch: t.to_branch ?? "Patna", by: receivedBy });
+  // R27.8 #3 — store mark-received now ONLY updates transfer status. The R27.7
+  // auto-created pending transfer_invoice is removed; dispatch invoices are created
+  // explicitly via the new dispatch_invoices flow. (transfer_invoices kept as legacy.)
   // Create one sub-PO for the whole transfer if there was any shortfall (R27.2-4 link).
   if (anyShort && t.po_id) {
     try {
@@ -955,6 +1124,70 @@ export function reportDayExpenses(opts: { from?: string; to?: string } = {}) {
   } catch { return []; }
 }
 
+// ============================================================================
+// R27.8 #4 — full-detail export rows (every transaction, not a rollup). Each
+// helper honours from/to. These back the accounts cash/staff/day exports.
+// ============================================================================
+
+// Every cash receipt (and any inbound cash movement) with full context.
+export function reportCashReceivedDetail(opts: { from?: string; to?: string; branch?: string } = {}) {
+  const conds = ["cm.direction = 'in'"]; const params: any[] = [];
+  if (opts.branch && opts.branch !== "all") { conds.push("cm.branch = ?"); params.push(normalizeBranch(opts.branch)); }
+  if (opts.from) { conds.push("date(cm.created_at) >= date(?)"); params.push(opts.from); }
+  if (opts.to) { conds.push("date(cm.created_at) <= date(?)"); params.push(opts.to); }
+  try {
+    return sqlite.prepare(
+      `SELECT cm.id, date(cm.created_at) AS date, time(cm.created_at) AS time, cm.branch, cm.amount, cm.source,
+              cm.reference_id, cm.reference_table, cm.notes, e.name AS recordedBy, cm.created_at
+       FROM cash_movements cm LEFT JOIN employees e ON e.id = cm.created_by
+       WHERE ${conds.join(" AND ")} ORDER BY cm.created_at ASC`,
+    ).all(...params) as any[];
+  } catch { return []; }
+}
+
+// Every staff expense (advance + direct) line with full context.
+export function reportStaffExpensesDetail(opts: { from?: string; to?: string } = {}) {
+  const conds: string[] = []; const params: any[] = [];
+  if (opts.from) { conds.push("x.expense_date >= ?"); params.push(opts.from); }
+  if (opts.to) { conds.push("x.expense_date <= ?"); params.push(opts.to); }
+  const where = conds.length ? `WHERE ${conds.join(" AND ")}` : "";
+  try {
+    return sqlite.prepare(
+      `SELECT x.id, e.name AS staffName, e.role AS role, COALESCE(x.branch_id, e.branch) AS branch,
+              x.expense_date AS date, x.expense_type AS expenseType, h.name AS header, x.amount,
+              x.payment_mode AS paymentMode, x.advance_id AS advanceId, x.description,
+              COALESCE(x.attachment_url, x.proof_url) AS attachmentUrl, ab.name AS approvedBy,
+              x.created_at
+       FROM expenses x
+       LEFT JOIN employees e ON e.id = x.staff_id
+       LEFT JOIN expense_headers h ON h.id = x.expense_header_id
+       LEFT JOIN employees ab ON ab.id = x.created_by
+       ${where} ORDER BY x.expense_date ASC, x.id ASC`,
+    ).all(...params) as any[];
+  } catch { return []; }
+}
+
+// Every expense line, day-ordered, with full context (day-wise complete detail).
+export function reportDayExpensesDetail(opts: { from?: string; to?: string } = {}) {
+  const conds: string[] = []; const params: any[] = [];
+  if (opts.from) { conds.push("x.expense_date >= ?"); params.push(opts.from); }
+  if (opts.to) { conds.push("x.expense_date <= ?"); params.push(opts.to); }
+  const where = conds.length ? `WHERE ${conds.join(" AND ")}` : "";
+  try {
+    return sqlite.prepare(
+      `SELECT x.id, x.expense_date AS date, e.name AS staffName, COALESCE(x.branch_id, e.branch) AS branch,
+              h.name AS header, x.expense_type AS subCategory, x.amount, x.payment_mode AS paymentMode,
+              x.description, x.advance_id AS referenceNo, COALESCE(x.attachment_url, x.proof_url) AS attachmentUrl,
+              x.source, x.source_id AS sourceId, ab.name AS approvedBy, x.created_at
+       FROM expenses x
+       LEFT JOIN employees e ON e.id = x.staff_id
+       LEFT JOIN expense_headers h ON h.id = x.expense_header_id
+       LEFT JOIN employees ab ON ab.id = x.created_by
+       ${where} ORDER BY x.expense_date ASC, x.id ASC`,
+    ).all(...params) as any[];
+  } catch { return []; }
+}
+
 // ---- Expenses (advance settlement + direct) ----
 export function listExpenses(opts: { from?: string; to?: string; type?: string; advanceId?: number; branch?: string; includeSales?: boolean } = {}) {
   const conds: string[] = []; const params: any[] = [];
@@ -1042,11 +1275,38 @@ export function createAdvanceExpense(body: { advance_id: number; amount: number;
 
 // R27.6 #7 — sync a single approved sales expense into the expenses table as a
 // direct expense (idempotent via unique sales_expense_id index).
+// R27.8 #1 — re-runnable bulk sync. Scans EVERY approved sales expense (tolerant of
+// either `status` or `approval_status` carrying the value, any case) and creates the
+// unified-expenses ledger row for any that are missing one. Returns real counts so the
+// finance user sees "Synced N (M already synced of T approved)" instead of a bare 0.
+export function syncAllApprovedSalesExpenses(by?: number): { synced: number; alreadySynced: number; totalApproved: number } {
+  let approved: any[] = [];
+  try {
+    approved = sqlite.prepare(
+      `SELECT id FROM sales_expenses
+       WHERE LOWER(TRIM(COALESCE(NULLIF(TRIM(approval_status),''), NULLIF(TRIM(status),''), 'pending'))) = 'approved'
+       ORDER BY id ASC`,
+    ).all() as any[];
+  } catch { approved = []; }
+  let synced = 0, alreadySynced = 0;
+  for (const row of approved) {
+    try {
+      const r: any = syncSalesExpenseToAccounts(Number(row.id), by);
+      if (r?.skipped === "already synced") alreadySynced++;
+      else if (r?.id) synced++;
+    } catch { /* skip bad row */ }
+  }
+  return { synced, alreadySynced, totalApproved: approved.length };
+}
+
 export function syncSalesExpenseToAccounts(salesExpenseId: number, by?: number) {
   const se = sqlite.prepare(`SELECT * FROM sales_expenses WHERE id = ?`).get(salesExpenseId) as any;
   if (!se) throw new Error("sales expense not found");
-  const approval = String(se.approval_status ?? se.status ?? "pending").trim().toLowerCase();
-  if (approval !== "approved") return { skipped: "not approved" };
+  // Empty strings must fall through to the other column, so COALESCE alone is wrong
+  // (it picks '' over a populated `status`). Treat either column carrying 'approved'.
+  const a1 = String(se.approval_status ?? "").trim().toLowerCase();
+  const a2 = String(se.status ?? "").trim().toLowerCase();
+  if (a1 !== "approved" && a2 !== "approved") return { skipped: "not approved" };
   const existing = sqlite.prepare(`SELECT id FROM expenses WHERE sales_expense_id = ?`).get(salesExpenseId);
   if (existing) return { skipped: "already synced", id: (existing as any).id };
   const desc = [se.expense_type, se.notes].filter(Boolean).join(" — ") || "Sales expense";

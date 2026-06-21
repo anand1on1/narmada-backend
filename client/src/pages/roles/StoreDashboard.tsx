@@ -102,7 +102,9 @@ export default function StoreDashboard() {
                     <td className="p-3 text-xs text-muted-foreground">{t.dispatched_at ? new Date(t.dispatched_at).toLocaleDateString("en-IN") : "—"}</td>
                     <td className="p-3">{isConsignment
                       ? <span className="text-xs text-muted-foreground italic">In transit (consignment)</span>
-                      : <button onClick={() => openDetail(t.id)} className="px-2 py-1 rounded bg-accent text-accent-foreground text-xs font-semibold inline-flex items-center gap-1"><PackageCheck className="w-3.5 h-3.5" /> Mark Received</button>}
+                      : t.status === "received"
+                        ? <span className="text-xs font-semibold text-emerald-700 inline-flex items-center gap-1"><PackageCheck className="w-3.5 h-3.5" /> Received</span>
+                        : <button onClick={() => openDetail(t.id)} className="px-2 py-1 rounded bg-accent text-accent-foreground text-xs font-semibold inline-flex items-center gap-1"><PackageCheck className="w-3.5 h-3.5" /> Mark Received</button>}
                     </td>
                   </tr>
                   );

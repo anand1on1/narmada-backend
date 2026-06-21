@@ -460,7 +460,27 @@ export function adminListFreight(opts: { q?: string; zeroOnly?: boolean; limit?:
             f.city AS city, f.source AS source, f.destination AS destination, f.mode AS mode, p.name AS productName
      FROM products p LEFT JOIN freight_charges f ON f.part_number = p.part_number
      ${where} ORDER BY p.name ASC, p.part_number ASC LIMIT ? OFFSET ?`
-  ).all(...params, limit, offset);
+  ).all(...params, limit, offset) as any[];
+  // R27.8 #7 — also surface freight rows that have NO matching product (e.g. the
+  // seeded default routes), so the list is never empty even on a fresh DB with no
+  // products. These are unioned in only when not filtering by part/product search.
+  if (offset === 0) {
+    const orphanConds: string[] = ["p.part_number IS NULL"];
+    const orphanParams: any[] = [];
+    if (opts.q) {
+      orphanConds.push("(f.part_number LIKE ? OR f.city LIKE ? OR f.source LIKE ? OR f.destination LIKE ? OR f.mode LIKE ?)");
+      const like = `%${opts.q}%`;
+      orphanParams.push(like, like, like, like, like);
+    }
+    if (opts.zeroOnly) orphanConds.push("COALESCE(f.freight_inr, 0) = 0");
+    const orphans = sqlite.prepare(
+      `SELECT f.id, f.part_number AS partNumber, COALESCE(f.freight_inr, 0) AS freightInr, f.updated_at AS updatedAt,
+              f.city AS city, f.source AS source, f.destination AS destination, f.mode AS mode, NULL AS productName
+       FROM freight_charges f LEFT JOIN products p ON p.part_number = f.part_number
+       WHERE ${orphanConds.join(" AND ")} ORDER BY f.part_number ASC LIMIT ?`
+    ).all(...orphanParams, limit) as any[];
+    if (orphans.length) { rows.push(...orphans); return { total: total + orphans.length, limit, offset, rows }; }
+  }
   return { total, limit, offset, rows };
 }
 

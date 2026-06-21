@@ -2750,3 +2750,80 @@ export function runR27_7Migrations() {
 
   console.log("[migrations] R27.7: complete");
 }
+
+// ============================================================================
+// R27.8 — dispatch invoice rebuild (dispatch_invoices + items, user-entered
+// invoice no), default freight seed, NARMADA company seeds. Additive only.
+// ============================================================================
+export function runR27_8Migrations() {
+  console.log("[migrations] R27.8: start");
+  const run = (desc: string, sql: string) => {
+    try { sqlite.exec(sql); console.log(`[migrations] R27.8: ${desc} ok`); }
+    catch (e: any) { console.log(`[migrations] R27.8: ${desc} skip (${e?.message || e})`); }
+  };
+
+  // --- #3 dispatch invoices (manual invoice no, company + client, pending/processed) ---
+  run("dispatch_invoices", `
+    CREATE TABLE IF NOT EXISTS dispatch_invoices (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      invoice_no TEXT NOT NULL,
+      company_id INTEGER,
+      client_id INTEGER,
+      status TEXT NOT NULL DEFAULT 'pending',  -- 'pending' | 'processed'
+      processed_at TEXT,
+      unlocked_at TEXT,
+      created_by INTEGER,
+      created_at TEXT DEFAULT CURRENT_TIMESTAMP
+    );`);
+  run("idx_dispatch_invoices_status", `CREATE INDEX IF NOT EXISTS idx_dispatch_invoices_status ON dispatch_invoices(status);`);
+
+  run("dispatch_invoice_items", `
+    CREATE TABLE IF NOT EXISTS dispatch_invoice_items (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      dispatch_invoice_id INTEGER NOT NULL,
+      transfer_item_id INTEGER,
+      po_no TEXT,
+      client_name TEXT,
+      item_name TEXT,
+      part_no TEXT,
+      quantity REAL,
+      assigned INTEGER NOT NULL DEFAULT 1,
+      ticked_at TEXT,
+      created_at TEXT DEFAULT CURRENT_TIMESTAMP
+    );`);
+  run("idx_dispatch_invoice_items_inv", `CREATE INDEX IF NOT EXISTS idx_dispatch_invoice_items_inv ON dispatch_invoice_items(dispatch_invoice_id);`);
+  run("idx_dispatch_invoice_items_ti", `CREATE INDEX IF NOT EXISTS idx_dispatch_invoice_items_ti ON dispatch_invoice_items(transfer_item_id);`);
+
+  // --- #3 seed the two billing companies (reuse existing companies table) ---
+  const seedCompany = (code: string, name: string) => {
+    try {
+      const ex = sqlite.prepare(`SELECT id FROM companies WHERE code = ? OR name = ?`).get(code, name) as any;
+      if (!ex) {
+        sqlite.prepare(`INSERT INTO companies (code, name, is_active, created_at, updated_at) VALUES (?, ?, 1, ?, ?)`)
+          .run(code, name, Date.now(), Date.now());
+        console.log(`[migrations] R27.8: seeded company ${name}`);
+      }
+    } catch (e: any) { console.log(`[migrations] R27.8: seed company ${name} skip (${e?.message || e})`); }
+  };
+  seedCompany("NARMADA_MOTORS", "NARMADA MOTORS");
+  seedCompany("NARMADA_MOBILITY", "NARMADA MOBILITY");
+
+  // --- #7 seed ~5 default freight routes so the list is never empty on a fresh DB ---
+  try {
+    const cnt = (sqlite.prepare(`SELECT COUNT(*) c FROM freight_charges`).get() as any).c;
+    if (cnt === 0) {
+      const defaults: Array<[string, number, string, string]> = [
+        ["FREIGHT-DELHI", 0, "Delhi", "Patna"],
+        ["FREIGHT-MUMBAI", 0, "Mumbai", "Patna"],
+        ["FREIGHT-KOLKATA", 0, "Kolkata", "Patna"],
+        ["FREIGHT-BANGALORE", 0, "Bangalore", "Patna"],
+        ["FREIGHT-CHENNAI", 0, "Chennai", "Patna"],
+      ];
+      const ins = sqlite.prepare(`INSERT OR IGNORE INTO freight_charges (part_number, freight_inr, source, destination, mode, updated_at) VALUES (?, ?, ?, ?, 'Road', CURRENT_TIMESTAMP)`);
+      for (const [pn, fr, src, dst] of defaults) ins.run(pn, fr, src, dst);
+      console.log(`[migrations] R27.8: seeded ${defaults.length} default freight routes`);
+    }
+  } catch (e: any) { console.log(`[migrations] R27.8: freight seed skip (${e?.message || e})`); }
+
+  console.log("[migrations] R27.8: complete");
+}
