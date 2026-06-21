@@ -242,11 +242,42 @@ export function listTransfers(opts: { status?: string } = {}) {
   if (opts.status) { conds.push("t.status = ?"); params.push(opts.status); }
   const where = conds.length ? `WHERE ${conds.join(" AND ")}` : "";
   const transfers = sqlite.prepare(
-    `SELECT t.*, po.po_number AS poNumber, po.customer_id AS customerId
-     FROM branch_transfers t LEFT JOIN purchase_orders_v2 po ON po.id = t.po_id
+    `SELECT t.*, po.po_number AS poNumber, po.customer_id AS customerId,
+            po.customer_po_number AS customerPoNumber, c.name AS clientName
+     FROM branch_transfers t
+     LEFT JOIN purchase_orders_v2 po ON po.id = t.po_id
+     LEFT JOIN customers c ON c.id = po.customer_id
      ${where} ORDER BY t.id DESC`,
   ).all(...params) as any[];
-  transfers.forEach((t) => { t.source = "branch_transfer"; });
+  // R27.7 #6 — attach a short item summary (part numbers + names) and the linked
+  // transfer-invoice number (#4) so the store/dispatch lists can show real context
+  // instead of just quantities.
+  const itemSummary = (poId: number | null) => {
+    if (!poId) return { items: "Internal Transfer", parts: "" };
+    try {
+      const rows = sqlite.prepare(`SELECT part_number AS pn, description AS name, qty FROM po_items WHERE po_id = ?`).all(poId) as any[];
+      if (!rows.length) return { items: "Internal Transfer", parts: "" };
+      return {
+        items: rows.map((r) => `${r.name || r.pn}${r.qty ? ` ×${r.qty}` : ""}`).join(", "),
+        parts: rows.map((r) => r.pn).filter(Boolean).join(", "),
+      };
+    } catch { return { items: "", parts: "" }; }
+  };
+  const invoiceNo = (transferId: number, src: string) => {
+    try {
+      const r = sqlite.prepare(`SELECT invoice_no FROM transfer_invoices WHERE transfer_id = ? AND transfer_source = ? ORDER BY id DESC LIMIT 1`).get(transferId, src) as any;
+      return r?.invoice_no || null;
+    } catch { return null; }
+  };
+  transfers.forEach((t) => {
+    t.source = "branch_transfer";
+    const sum = itemSummary(t.po_id);
+    t.itemSummary = sum.items;
+    t.partNumbers = sum.parts;
+    t.clientName = t.clientName || (t.po_id ? "—" : "Internal Transfer");
+    t.poNumber = t.poNumber || t.customerPoNumber || null;
+    t.transferInvoiceNo = invoiceNo(t.id, "branch_transfer");
+  });
 
   // R27.6 #4 — the store dashboard was empty because real Delhi→Patna movement
   // is recorded as a `consignment` (origin/destination), NOT as a branch_transfer
@@ -277,11 +308,15 @@ export function listTransfers(opts: { status?: string } = {}) {
         consignment_id: c.id,
         po_id: null,
         poNumber: c.docket_number || null,
+        clientName: "Internal Transfer",
+        itemSummary: c.carrier ? `Consignment via ${c.carrier}` : "Consignment",
+        partNumbers: "",
         from_branch: c.origin || "Delhi",
         to_branch: c.destination || "Patna",
         carrier: c.carrier || null,
         bundles: c.bundles_count ?? null,
         invoice_number: c.invoice_number || null,
+        transferInvoiceNo: invoiceNo(c.id, "consignment"),
         status: c.status || "in_transit",
         dispatched_at: c.dispatch_date ? new Date(Number(c.dispatch_date)).toISOString() : null,
         received_at: null,
@@ -291,6 +326,96 @@ export function listTransfers(opts: { status?: string } = {}) {
   } catch { /* consignments table missing — ignore */ }
 
   return [...transfers, ...consignmentRows];
+}
+
+// R27.7 #4 — Transfer-invoice rule. When the store marks a transfer received we
+// auto-create a PENDING transfer_invoices row (no invoice number yet). Dispatch
+// later fills transport/freight/eway/remarks/PDF and "invoices" it, which assigns
+// the running number NM/TRF-INV/26/0001 and flips status to 'invoiced'.
+export function ensurePendingTransferInvoice(opts: {
+  transferId: number; source: string; sourceBranch?: string | null; destBranch?: string | null; by?: number | null;
+}): number | null {
+  try {
+    const existing = sqlite.prepare(
+      `SELECT id FROM transfer_invoices WHERE transfer_id = ? AND transfer_source = ? ORDER BY id DESC LIMIT 1`,
+    ).get(opts.transferId, opts.source) as any;
+    if (existing) return Number(existing.id);
+    const info = sqlite.prepare(
+      `INSERT INTO transfer_invoices (transfer_id, transfer_source, source_branch, dest_branch, status, created_at, created_by)
+       VALUES (?, ?, ?, ?, 'pending', ?, ?)`,
+    ).run(opts.transferId, opts.source, opts.sourceBranch ?? "Delhi", opts.destBranch ?? "Patna", nowIso(), opts.by ?? null);
+    return Number(info.lastInsertRowid);
+  } catch (e: any) { console.error("[r27.7 #4] ensurePendingTransferInvoice:", e?.message || e); return null; }
+}
+
+// Running number: NM/TRF-INV/<FY-yy>/<0001>. FY rolls over on April 1 (Indian FY).
+function nextTransferInvoiceNo(): string {
+  const now = new Date();
+  const fyStartYear = now.getMonth() + 1 >= 4 ? now.getFullYear() : now.getFullYear() - 1;
+  const yy = String((fyStartYear + 1) % 100).padStart(2, "0"); // e.g. FY2025-26 -> "26"
+  const prefix = `NM/TRF-INV/${yy}/`;
+  const last = sqlite.prepare(
+    `SELECT invoice_no FROM transfer_invoices WHERE invoice_no LIKE ? ORDER BY id DESC LIMIT 1`,
+  ).get(prefix + "%") as any;
+  let seq = 1;
+  if (last?.invoice_no) {
+    const m = String(last.invoice_no).match(/(\d+)$/);
+    if (m) seq = parseInt(m[1], 10) + 1;
+  }
+  return prefix + String(seq).padStart(4, "0");
+}
+
+export function listTransferInvoices(opts: { status?: string } = {}) {
+  const conds: string[] = []; const params: any[] = [];
+  if (opts.status) { conds.push("ti.status = ?"); params.push(opts.status); }
+  const where = conds.length ? `WHERE ${conds.join(" AND ")}` : "";
+  const rows = sqlite.prepare(
+    `SELECT ti.*, t.po_id AS po_id, po.po_number AS poNumber, po.customer_po_number AS customerPoNumber,
+            c.name AS clientName
+     FROM transfer_invoices ti
+     LEFT JOIN branch_transfers t ON t.id = ti.transfer_id AND ti.transfer_source = 'branch_transfer'
+     LEFT JOIN purchase_orders_v2 po ON po.id = t.po_id
+     LEFT JOIN customers c ON c.id = po.customer_id
+     ${where} ORDER BY ti.id DESC`,
+  ).all(...params) as any[];
+  rows.forEach((r) => {
+    r.clientName = r.clientName || (r.po_id ? "—" : "Internal Transfer");
+    r.poNumber = r.poNumber || r.customerPoNumber || null;
+  });
+  return rows;
+}
+
+export function getTransferInvoice(id: number) {
+  return sqlite.prepare(`SELECT * FROM transfer_invoices WHERE id = ?`).get(id) as any;
+}
+
+// Dispatch fills the transfer-invoice details and finalizes it. Assigns the running
+// invoice number on first finalize and flips status to 'invoiced'.
+export function finalizeTransferInvoice(id: number, fields: {
+  transport_vendor?: string | null; vehicle_no?: string | null; freight_charge?: number | null;
+  eway_bill_no?: string | null; remarks?: string | null; pdf_url?: string | null;
+}, by?: number | null) {
+  const inv = getTransferInvoice(id);
+  if (!inv) throw new Error("Transfer invoice not found");
+  const invoiceNo = inv.invoice_no || nextTransferInvoiceNo();
+  sqlite.prepare(
+    `UPDATE transfer_invoices SET invoice_no = ?, transport_vendor = ?, vehicle_no = ?, freight_charge = ?,
+        eway_bill_no = ?, remarks = ?, pdf_url = COALESCE(?, pdf_url), status = 'invoiced',
+        invoiced_at = ?, created_by = COALESCE(created_by, ?)
+     WHERE id = ?`,
+  ).run(
+    invoiceNo,
+    fields.transport_vendor ?? inv.transport_vendor ?? null,
+    fields.vehicle_no ?? inv.vehicle_no ?? null,
+    fields.freight_charge != null ? Number(fields.freight_charge) : (inv.freight_charge ?? null),
+    fields.eway_bill_no ?? inv.eway_bill_no ?? null,
+    fields.remarks ?? inv.remarks ?? null,
+    fields.pdf_url ?? null,
+    nowIso(),
+    by ?? null,
+    id,
+  );
+  return getTransferInvoice(id);
 }
 
 export function getTransferDetail(id: number) {
@@ -337,6 +462,8 @@ export async function receiveTransfer(transferId: number, items: Array<{ part_nu
       .run(nowIso(), receivedBy ?? null, allReceived ? "received" : "partial_received", transferId);
   });
   tx();
+  // R27.7 #4 — on receive, open a pending transfer-invoice for dispatch to fill.
+  ensurePendingTransferInvoice({ transferId, source: "branch_transfer", sourceBranch: t.from_branch ?? "Delhi", destBranch: t.to_branch ?? "Patna", by: receivedBy });
   // Create one sub-PO for the whole transfer if there was any shortfall (R27.2-4 link).
   if (anyShort && t.po_id) {
     try {
@@ -699,6 +826,8 @@ export function createExpenseAdvance(body: { staff_id: number; amount: number; p
   const id = Number(info.lastInsertRowid);
   // Ledger: staff now holds company cash → debit (negative balance to company).
   addPersonLedger(body.staff_id, "advance_issued", amount, id, "expense_advances", body.purpose);
+  // R27.7 #2 — issuing a cash advance leaves the branch till.
+  addCashMovement({ branch: body.branch_id, direction: "out", amount, source: "advance_issue", reference_id: id, reference_table: "expense_advances", notes: body.purpose ?? null, by });
   return sqlite.prepare(`SELECT * FROM expense_advances WHERE id = ?`).get(id);
 }
 
@@ -711,7 +840,119 @@ export function returnAdvanceCash(advanceId: number, by?: number) {
   if (remaining <= 0) { sqlite.prepare(`UPDATE expense_advances SET status='settled' WHERE id=?`).run(advanceId); return sqlite.prepare(`SELECT * FROM expense_advances WHERE id=?`).get(advanceId); }
   sqlite.prepare(`UPDATE expense_advances SET balance=0, status='settled' WHERE id=?`).run(advanceId);
   addPersonLedger(adv.staff_id, "advance_returned", -remaining, advanceId, "expense_advances", "Return Cash");
+  // R27.7 #2 — returned cash comes back into the branch till.
+  addCashMovement({ branch: adv.branch_id, direction: "in", amount: remaining, source: "advance_return", reference_id: advanceId, reference_table: "expense_advances", notes: "Return Cash", by });
   return sqlite.prepare(`SELECT * FROM expense_advances WHERE id=?`).get(advanceId);
+}
+
+// ---- R27.7 #2: cash ledger (per-branch till) ----
+// A single row per real cash movement. Balance per branch = SUM(in) - SUM(out).
+// We deliberately do NOT backfill historical null-payment_mode expenses, so only
+// movements recorded from R27.7 onward count toward the till balance.
+function normalizeBranch(b?: string | null): string {
+  const s = String(b ?? "").trim();
+  return s ? s : "unassigned";
+}
+export function addCashMovement(m: {
+  branch?: string | null; direction: "in" | "out"; amount: number;
+  source: string; reference_id?: number | null; reference_table?: string | null;
+  notes?: string | null; by?: number | null;
+}) {
+  const amount = Number(m.amount) || 0;
+  if (amount <= 0) return null;
+  try {
+    const info = sqlite.prepare(
+      `INSERT INTO cash_movements (branch, direction, amount, source, reference_id, reference_table, notes, created_by, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    ).run(normalizeBranch(m.branch), m.direction, amount, m.source, m.reference_id ?? null, m.reference_table ?? null, m.notes ?? null, m.by ?? null, nowIso());
+    return Number(info.lastInsertRowid);
+  } catch (e: any) {
+    console.error("[R27.7] addCashMovement failed:", e?.message || e);
+    return null;
+  }
+}
+
+// Per-branch running balance plus the overall total.
+export function getCashBalances(): { branch: string; inflow: number; outflow: number; balance: number }[] {
+  try {
+    const rows = sqlite.prepare(
+      `SELECT branch,
+         COALESCE(SUM(CASE WHEN direction='in'  THEN amount ELSE 0 END),0) AS inflow,
+         COALESCE(SUM(CASE WHEN direction='out' THEN amount ELSE 0 END),0) AS outflow
+       FROM cash_movements GROUP BY branch ORDER BY branch`,
+    ).all() as any[];
+    return rows.map((r) => ({ branch: r.branch, inflow: Number(r.inflow) || 0, outflow: Number(r.outflow) || 0, balance: (Number(r.inflow) || 0) - (Number(r.outflow) || 0) }));
+  } catch { return []; }
+}
+
+// Record a cash receipt / collection / sale → money INTO the branch till.
+export function recordCashReceipt(body: { branch?: string; amount: number; source?: string; notes?: string }, by?: number) {
+  const amount = Number(body.amount) || 0;
+  if (amount <= 0) throw new Error("amount must be > 0");
+  const id = addCashMovement({ branch: body.branch, direction: "in", amount, source: body.source || "cash_receipt", notes: body.notes ?? null, by });
+  return { id, branch: normalizeBranch(body.branch), amount };
+}
+
+// Chronological drill-down, optionally filtered by branch.
+export function listCashMovements(opts: { branch?: string; from?: string; to?: string } = {}) {
+  const conds: string[] = []; const params: any[] = [];
+  if (opts.branch && opts.branch !== "all") { conds.push("branch = ?"); params.push(normalizeBranch(opts.branch)); }
+  if (opts.from) { conds.push("date(created_at) >= date(?)"); params.push(opts.from); }
+  if (opts.to) { conds.push("date(created_at) <= date(?)"); params.push(opts.to); }
+  const where = conds.length ? `WHERE ${conds.join(" AND ")}` : "";
+  try {
+    return sqlite.prepare(`SELECT * FROM cash_movements ${where} ORDER BY id ASC`).all(...params);
+  } catch { return []; }
+}
+
+// ---- R27.7 #1: accounts export aggregations ----
+// Cash received within a date range (the 'in' side of the till).
+export function reportCashReceived(opts: { from?: string; to?: string; branch?: string } = {}) {
+  const conds = ["direction = 'in'"]; const params: any[] = [];
+  if (opts.branch && opts.branch !== "all") { conds.push("branch = ?"); params.push(normalizeBranch(opts.branch)); }
+  if (opts.from) { conds.push("date(created_at) >= date(?)"); params.push(opts.from); }
+  if (opts.to) { conds.push("date(created_at) <= date(?)"); params.push(opts.to); }
+  try {
+    return sqlite.prepare(
+      `SELECT date(created_at) AS date, branch, source, amount, notes, reference_id FROM cash_movements WHERE ${conds.join(" AND ")} ORDER BY created_at ASC`,
+    ).all(...params) as any[];
+  } catch { return []; }
+}
+
+// Staff-wise expense rollup: per staff member, sum of advance settlements + direct
+// expenses, plus a grand total. Used by the staff-expenses export.
+export function reportStaffExpenses(opts: { from?: string; to?: string } = {}) {
+  const conds: string[] = []; const params: any[] = [];
+  if (opts.from) { conds.push("x.expense_date >= ?"); params.push(opts.from); }
+  if (opts.to) { conds.push("x.expense_date <= ?"); params.push(opts.to); }
+  const where = conds.length ? `WHERE ${conds.join(" AND ")}` : "";
+  try {
+    return sqlite.prepare(
+      `SELECT COALESCE(e.name, 'Unassigned') AS staffName, x.staff_id AS staffId,
+         COALESCE(SUM(CASE WHEN x.expense_type='advance' THEN x.amount ELSE 0 END),0) AS advanceTotal,
+         COALESCE(SUM(CASE WHEN x.expense_type='direct'  THEN x.amount ELSE 0 END),0) AS directTotal,
+         COALESCE(SUM(x.amount),0) AS total, COUNT(*) AS items
+       FROM expenses x LEFT JOIN employees e ON e.id = x.staff_id
+       ${where} GROUP BY x.staff_id, e.name ORDER BY total DESC`,
+    ).all(...params) as any[];
+  } catch { return []; }
+}
+
+// Day-wise complete expense rollup (every expense grouped by day).
+export function reportDayExpenses(opts: { from?: string; to?: string } = {}) {
+  const conds: string[] = []; const params: any[] = [];
+  if (opts.from) { conds.push("x.expense_date >= ?"); params.push(opts.from); }
+  if (opts.to) { conds.push("x.expense_date <= ?"); params.push(opts.to); }
+  const where = conds.length ? `WHERE ${conds.join(" AND ")}` : "";
+  try {
+    return sqlite.prepare(
+      `SELECT x.expense_date AS date,
+         COALESCE(SUM(CASE WHEN x.expense_type='advance' THEN x.amount ELSE 0 END),0) AS advanceTotal,
+         COALESCE(SUM(CASE WHEN x.expense_type='direct'  THEN x.amount ELSE 0 END),0) AS directTotal,
+         COALESCE(SUM(x.amount),0) AS total, COUNT(*) AS items
+       FROM expenses x ${where} GROUP BY x.expense_date ORDER BY x.expense_date DESC`,
+    ).all(...params) as any[];
+  } catch { return []; }
 }
 
 // ---- Expenses (advance settlement + direct) ----
@@ -735,10 +976,13 @@ export function listExpenses(opts: { from?: string; to?: string; type?: string; 
   // synced into the expenses table (defensive: synced ones carry sales_expense_id).
   if (opts.includeSales !== false) {
     try {
+      // R27.7 #3 — the prior query referenced se.description which does NOT exist
+      // (the column is `notes`), so the prepared statement threw and was swallowed
+      // by the catch → sync always saw 0 rows. Use the real columns.
       const salesRows = sqlite.prepare(
-        `SELECT se.id, se.amount, se.expense_type AS category, se.expense_date, se.description, se.proof_url, u.name AS staffName
+        `SELECT se.id, se.amount, se.expense_type AS category, se.expense_date, se.notes, se.proof_url, u.name AS staffName
          FROM sales_expenses se LEFT JOIN data_team_users u ON u.id = se.sales_user_id
-         WHERE COALESCE(se.approval_status,'pending') = 'approved'
+         WHERE LOWER(TRIM(COALESCE(se.approval_status, se.status, 'pending'))) = 'approved'
            AND se.id NOT IN (SELECT sales_expense_id FROM expenses WHERE sales_expense_id IS NOT NULL)
          ORDER BY se.id DESC`,
       ).all() as any[];
@@ -746,9 +990,10 @@ export function listExpenses(opts: { from?: string; to?: string; type?: string; 
         rows.push({
           id: -100000 - Number(s.id), expense_type: "direct", advance_id: null, staff_id: null,
           branch_id: null, expense_header_id: null, amount: Number(s.amount) || 0,
-          payment_mode: "sales_reimbursement", description: s.description || s.category || "Sales expense",
-          proof_url: s.proof_url || null, expense_date: s.expense_date, sales_expense_id: Number(s.id),
-          headerName: s.category || "Sales", staffName: s.staffName || "Sales rep", source: "sales_expense",
+          payment_mode: "sales_reimbursement", description: [s.category, s.notes].filter(Boolean).join(" — ") || "Sales expense",
+          proof_url: s.proof_url || null, attachment_url: s.proof_url || null, expense_date: s.expense_date,
+          sales_expense_id: Number(s.id), source: "sales", source_id: Number(s.id),
+          headerName: s.category || "Sales", staffName: s.staffName || "Sales rep",
         });
       }
     } catch { /* sales_expenses may not exist in older DBs */ }
@@ -766,7 +1011,12 @@ export function createDirectExpense(body: { amount: number; expense_header_id?: 
     `INSERT INTO expenses (expense_type, advance_id, staff_id, branch_id, expense_header_id, amount, payment_mode, description, proof_url, expense_date, created_by, created_at)
      VALUES ('direct', NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   ).run(body.staff_id ?? null, body.branch_id ?? null, body.expense_header_id ?? null, amount, body.payment_mode ?? "cash", body.description ?? null, body.proof_url ?? null, body.expense_date, by ?? null, nowIso());
-  return sqlite.prepare(`SELECT * FROM expenses WHERE id = ?`).get(Number(info.lastInsertRowid));
+  const id = Number(info.lastInsertRowid);
+  // R27.7 #2 — a cash-paid direct expense leaves the branch till.
+  if (String(body.payment_mode ?? "cash").toLowerCase() === "cash") {
+    addCashMovement({ branch: body.branch_id, direction: "out", amount, source: "direct_expense", reference_id: id, reference_table: "expenses", notes: body.description ?? null, by });
+  }
+  return sqlite.prepare(`SELECT * FROM expenses WHERE id = ?`).get(id);
 }
 
 // Settle an expense AGAINST an advance. Decrements the advance balance and
@@ -795,14 +1045,16 @@ export function createAdvanceExpense(body: { advance_id: number; amount: number;
 export function syncSalesExpenseToAccounts(salesExpenseId: number, by?: number) {
   const se = sqlite.prepare(`SELECT * FROM sales_expenses WHERE id = ?`).get(salesExpenseId) as any;
   if (!se) throw new Error("sales expense not found");
-  if (String(se.approval_status || "pending") !== "approved") return { skipped: "not approved" };
+  const approval = String(se.approval_status ?? se.status ?? "pending").trim().toLowerCase();
+  if (approval !== "approved") return { skipped: "not approved" };
   const existing = sqlite.prepare(`SELECT id FROM expenses WHERE sales_expense_id = ?`).get(salesExpenseId);
   if (existing) return { skipped: "already synced", id: (existing as any).id };
   const desc = [se.expense_type, se.notes].filter(Boolean).join(" — ") || "Sales expense";
+  const receipt = se.proof_url ?? null;
   const info = sqlite.prepare(
-    `INSERT INTO expenses (expense_type, amount, payment_mode, description, proof_url, expense_date, sales_expense_id, created_by, created_at)
-     VALUES ('direct', ?, 'sales_reimbursement', ?, ?, ?, ?, ?, ?)`,
-  ).run(Number(se.amount) || 0, desc, se.proof_url ?? null, se.expense_date, salesExpenseId, by ?? null, nowIso());
+    `INSERT INTO expenses (expense_type, amount, payment_mode, description, proof_url, attachment_url, expense_date, sales_expense_id, source, source_id, created_by, created_at)
+     VALUES ('direct', ?, 'sales_reimbursement', ?, ?, ?, ?, ?, 'sales', ?, ?, ?)`,
+  ).run(Number(se.amount) || 0, desc, receipt, receipt, se.expense_date, salesExpenseId, salesExpenseId, by ?? null, nowIso());
   return { id: Number(info.lastInsertRowid) };
 }
 
@@ -830,6 +1082,12 @@ export function getEmployee(id: number, maskSalary: boolean) {
   if (!r) return undefined;
   return maskSalary ? maskEmp(r) : r;
 }
+// R27.7 #8 — extended HR columns added by the R27.7 migration.
+const EMP_HR_COLS = [
+  "dob", "gender", "marital_status", "alt_contact", "family_contact_name",
+  "family_contact_phone", "family_relationship", "permanent_address", "current_address",
+  "reporting_manager", "bank_name", "photo_url", "aadhar_url", "pan_url", "notes",
+];
 export function createEmployee(body: any) {
   const info = sqlite.prepare(
     `INSERT INTO employees (name, contact, aadhar, image_url, role, branch, email, pan, bank_account, ifsc, gross_salary, working_days_default, per_day_rate, monthly_salary, retention_pct, joined_at, active, created_at)
@@ -842,7 +1100,14 @@ export function createEmployee(body: any) {
     body.per_day_rate ?? null, body.monthly_salary ?? null, body.retention_pct ?? 10,
     body.joined_at ?? null, nowIso(),
   );
-  return sqlite.prepare(`SELECT * FROM employees WHERE id = ?`).get(Number(info.lastInsertRowid));
+  const id = Number(info.lastInsertRowid);
+  // Apply the extended HR fields (best-effort; columns exist after R27.7 migration).
+  for (const col of EMP_HR_COLS) {
+    if (body[col] != null) {
+      try { sqlite.prepare(`UPDATE employees SET ${col} = ? WHERE id = ?`).run(body[col], id); } catch { /* column missing */ }
+    }
+  }
+  return sqlite.prepare(`SELECT * FROM employees WHERE id = ?`).get(id);
 }
 export function updateEmployee(id: number, body: any, allowSalary: boolean) {
   const fields: string[] = []; const params: any[] = [];
@@ -865,6 +1130,10 @@ export function updateEmployee(id: number, body: any, allowSalary: boolean) {
   if (allowSalary && body.per_day_rate != null) set("per_day_rate", body.per_day_rate);
   if (allowSalary && body.monthly_salary != null) set("monthly_salary", body.monthly_salary);
   if (allowSalary && body.gross_salary != null) set("gross_salary", body.gross_salary);
+  // R27.7 #8 — extended HR fields (non-salary; safe for finance too).
+  for (const col of EMP_HR_COLS) {
+    if (body[col] != null) set(col, body[col]);
+  }
   if (!fields.length) return getEmployee(id, false);
   params.push(id);
   sqlite.prepare(`UPDATE employees SET ${fields.join(", ")} WHERE id = ?`).run(...params);
@@ -882,6 +1151,42 @@ export function upsertAttendance(employeeId: number, month: string, absentDays: 
 export function listAttendance(month?: string) {
   if (month) return sqlite.prepare(`SELECT a.*, e.name AS employeeName FROM attendance a LEFT JOIN employees e ON e.id = a.employee_id WHERE a.month = ? ORDER BY e.name`).all(month);
   return sqlite.prepare(`SELECT a.*, e.name AS employeeName FROM attendance a LEFT JOIN employees e ON e.id = a.employee_id ORDER BY a.month DESC, e.name`).all();
+}
+
+// R27.7 #11 — per-day attendance calendar. attendance_days(employee_id, date, status).
+// Bulk-mark a set of dates for one employee, then roll the absent-day count up into
+// the existing monthly `attendance` table so salary math stays consistent.
+export function bulkMarkAttendance(employeeId: number, days: Array<{ date: string; status: string }>, by?: number) {
+  if (!employeeId || !Array.isArray(days)) throw new Error("employee_id and days required");
+  const tx = sqlite.transaction(() => {
+    for (const d of days) {
+      if (!d?.date) continue;
+      const status = String(d.status || "present").toLowerCase();
+      sqlite.prepare(
+        `INSERT INTO attendance_days (employee_id, date, status, marked_by, marked_at)
+         VALUES (?, ?, ?, ?, ?)
+         ON CONFLICT(employee_id, date) DO UPDATE SET status = excluded.status, marked_by = excluded.marked_by, marked_at = excluded.marked_at`,
+      ).run(employeeId, d.date, status, by ?? null, nowIso());
+    }
+  });
+  tx();
+  // Recompute absent counts per affected month and sync into the monthly table.
+  const months = Array.from(new Set(days.map((d) => String(d.date || "").slice(0, 7)).filter(Boolean)));
+  for (const month of months) {
+    const row = sqlite.prepare(
+      `SELECT COUNT(*) AS absent FROM attendance_days WHERE employee_id = ? AND substr(date,1,7) = ? AND LOWER(status) IN ('absent','leave','unpaid')`,
+    ).get(employeeId, month) as any;
+    upsertAttendance(employeeId, month, Number(row?.absent) || 0, by);
+  }
+  return listAttendanceDays(employeeId, months[0]);
+}
+export function listAttendanceDays(employeeId: number, month?: string) {
+  if (month) {
+    return sqlite.prepare(
+      `SELECT * FROM attendance_days WHERE employee_id = ? AND substr(date,1,7) = ? ORDER BY date ASC`,
+    ).all(employeeId, month) as any[];
+  }
+  return sqlite.prepare(`SELECT * FROM attendance_days WHERE employee_id = ? ORDER BY date ASC`).all(employeeId) as any[];
 }
 
 // Salary

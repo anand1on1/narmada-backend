@@ -439,24 +439,27 @@ export function adminGetShopUser(id: number) {
 
 // ---- freight admin ----
 export function adminListFreight(opts: { q?: string; zeroOnly?: boolean; limit?: number; offset?: number }) {
+  // R27.7 #9 — drive the list from PRODUCTS (LEFT JOIN freight_charges) so EVERY
+  // product shows by default, even when no freight row exists yet (freightInr 0).
+  // Previously the query started from freight_charges, so an empty freight table
+  // produced an empty list even though products existed.
   const conds: string[] = []; const params: any[] = [];
-  // R27.5 #4 — search across part number, product name, AND the new route columns
-  // (city / source / destination / mode) so "patna" or "by road" matches freight rows.
   if (opts.q) {
-    conds.push("(f.part_number LIKE ? OR p.name LIKE ? OR f.city LIKE ? OR f.source LIKE ? OR f.destination LIKE ? OR f.mode LIKE ?)");
+    conds.push("(p.part_number LIKE ? OR p.name LIKE ? OR f.city LIKE ? OR f.source LIKE ? OR f.destination LIKE ? OR f.mode LIKE ?)");
     const like = `%${opts.q}%`;
     params.push(like, like, like, like, like, like);
   }
-  if (opts.zeroOnly) conds.push("f.freight_inr = 0");
+  if (opts.zeroOnly) conds.push("COALESCE(f.freight_inr, 0) = 0");
+  conds.push("p.part_number IS NOT NULL AND TRIM(p.part_number) <> ''");
   const where = conds.length ? `WHERE ${conds.join(" AND ")}` : "";
-  const total = (sqlite.prepare(`SELECT COUNT(*) c FROM freight_charges f LEFT JOIN products p ON p.part_number = f.part_number ${where}`).get(...params) as any).c;
+  const total = (sqlite.prepare(`SELECT COUNT(*) c FROM products p LEFT JOIN freight_charges f ON f.part_number = p.part_number ${where}`).get(...params) as any).c;
   const limit = Math.min(500, Math.max(1, opts.limit || 100));
   const offset = Math.max(0, opts.offset || 0);
   const rows = sqlite.prepare(
-    `SELECT f.id, f.part_number AS partNumber, f.freight_inr AS freightInr, f.updated_at AS updatedAt,
+    `SELECT f.id, p.part_number AS partNumber, COALESCE(f.freight_inr, 0) AS freightInr, f.updated_at AS updatedAt,
             f.city AS city, f.source AS source, f.destination AS destination, f.mode AS mode, p.name AS productName
-     FROM freight_charges f LEFT JOIN products p ON p.part_number = f.part_number
-     ${where} ORDER BY f.id DESC LIMIT ? OFFSET ?`
+     FROM products p LEFT JOIN freight_charges f ON f.part_number = p.part_number
+     ${where} ORDER BY p.name ASC, p.part_number ASC LIMIT ? OFFSET ?`
   ).all(...params, limit, offset);
   return { total, limit, offset, rows };
 }

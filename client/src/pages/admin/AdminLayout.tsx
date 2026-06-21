@@ -27,7 +27,7 @@ const ROLE_PAGES: Record<AdminRole, Set<string>> = {
     "/admin/quoting-companies", "/admin/data-team", "/admin/audit-logs", "/admin/notification-log", "/admin/account-requests",
     "/admin/vendors", "/admin/vendor-ledger", "/admin/vendor-inbox", "/admin/market-radar", "/admin/companies",
     "/admin/ai-ledger", "/admin/leads", "/admin/leads-legacy", "/admin/targets", "/admin/announcements", "/admin/tasks", "/admin/tasks-legacy",
-    "/admin/users", "/admin/sales-targets", "/admin/attendance",
+    "/admin/users", "/admin/sales-targets", "/admin/attendance", "/admin/staff",
     "/admin/ads-meta", "/admin/ads-google", "/admin/integrations",
     "/admin/marketing/campaigns", "/admin/marketing/audiences", "/admin/marketing/templates", "/admin/marketing/custom-templates",
     "/admin/webhook-events",
@@ -38,6 +38,7 @@ const ROLE_PAGES: Record<AdminRole, Set<string>> = {
     "/admin/dashboard", "/admin/consignments",
     "/admin/customers", "/admin/ledger", "/admin/payments",
     "/admin/rfqs", "/admin/quotes", "/admin/purchase-orders", "/admin/bank", "/admin/vendor-ledger",
+    "/admin/staff",
   ]),
   sales: new Set([
     "/admin/dashboard", "/admin/price-lists", "/admin/products", "/admin/contacts",
@@ -142,6 +143,7 @@ export function AdminLayout({ children, title }: { children: ReactNode; title: s
     { href: "/admin/companies", label: "Companies", icon: Building2, group: "Finance" },
 
     { href: "/admin/team", label: "Team", icon: Users, group: "People" },
+    { href: "/admin/staff", label: "Staff", icon: UserSquare, group: "People" },
     { href: "/admin/users", label: "Create Users", icon: UserCog, group: "People" },
     { href: "/admin/tasks", label: "Tasks", icon: CheckSquare, group: "People" },
     { href: "/admin/tasks-legacy", label: "Tasks (Legacy)", icon: CheckSquare, group: "People" },

@@ -10,7 +10,7 @@ import { whatsappLink, buildBuyMessage, parseJsonArray, productHref } from "@/li
 import { BRANDS } from "@/data/brands";
 import { SeoHead } from "@/components/SeoHead";
 import NotFound from "@/pages/not-found";
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { useLocation } from "wouter";
 import { addToCart } from "@/lib/cart";
 import { formatPrice, getCurrency } from "@/lib/currency";
@@ -39,8 +39,18 @@ export default function ProductDetailPage() {
   const usdInr = fx?.usdInr || 83.5;
   const [activeImg, setActiveImg] = useState(0);
   const [qty, setQty] = useState(1);
-  const [, navigate] = useLocation();
+  const [location, navigate] = useLocation();
   const { toast } = useToast();
+
+  // R27.7 #10 — canonicalize legacy slug-only URLs to part-number-first. If we
+  // landed on /product/:slug (single segment) but the resolved product has a part
+  // number, rewrite the address bar to /product/:partNumber/:slug. `replace` keeps
+  // it out of history so Back still works.
+  useEffect(() => {
+    if (!product) return;
+    const want = productHref({ slug: product.slug, partNumber: product.partNumber });
+    if (location !== want && product.partNumber) navigate(want, { replace: true });
+  }, [product, location, navigate]);
 
   if (isLoading) return <div className="max-w-7xl mx-auto px-4 sm:px-6 py-20"><div className="h-96 bg-secondary animate-pulse rounded-lg" /></div>;
   if (!product) return <NotFound />;

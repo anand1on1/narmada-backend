@@ -44,44 +44,74 @@ export default function AccountsDashboard() {
 
 const f = FinanceAuth.roleFetch;
 
+// R27.7 #1 — token-aware file download (the plain <a href> can't send the role
+// token header, so fetch as a blob and click a synthetic link).
+async function downloadFile(token: string | null, url: string, filename: string) {
+  const r = await f(token, url);
+  if (!r.ok) return;
+  const blob = await r.blob();
+  const href = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = href; a.download = filename; document.body.appendChild(a); a.click();
+  a.remove(); URL.revokeObjectURL(href);
+}
+
+// R27.7 #2 — the till balance is now COMPUTED from cash_movements: cash receipts
+// (+), cash-paid direct expenses (−), advances issued (−) and returned (+). The
+// drill-down lists those movements chronologically per branch.
 function CashTab({ token }: { token: string | null }) {
-  const [data, setData] = useState<{ rows: any[]; balance: number; byBranch?: any[] }>({ rows: [], balance: 0 });
+  const [balances, setBalances] = useState<{ branch: string; inflow: number; outflow: number; balance: number }[]>([]);
+  const [moves, setMoves] = useState<any[]>([]);
   const [branch, setBranch] = useState("all");
-  const [form, setForm] = useState({ source: "", amount: "", reference: "", branch: "Delhi", direction: "in" });
-  async function load() { const r = await f(token, `/api/finance/cash${branch !== "all" ? `?branch=${branch}` : ""}`); if (r.ok) setData(await r.json()); }
-  useEffect(() => { if (token) load(); }, [token, branch]); // eslint-disable-line
-  async function add() {
-    if (!form.source || !form.amount) return;
-    const r = await f(token, "/api/finance/cash", { method: "POST", body: JSON.stringify({ source: form.source, amount: Number(form.amount), reference: form.reference, branch: form.branch, direction: form.direction }) });
-    if (r.ok) { setForm({ source: "", amount: "", reference: "", branch: form.branch, direction: "in" }); load(); }
+  const [form, setForm] = useState({ amount: "", notes: "", branch: "Delhi" });
+  const [exFrom, setExFrom] = useState("");
+  const [exTo, setExTo] = useState("");
+  async function load() {
+    const b = await f(token, "/api/finance/cash/balances"); if (b.ok) setBalances((await b.json()).branches || []);
+    const m = await f(token, `/api/finance/cash/movements${branch !== "all" ? `?branch=${branch}` : ""}`); if (m.ok) setMoves(await m.json());
   }
+  useEffect(() => { if (token) load(); }, [token, branch]); // eslint-disable-line
+  async function addReceipt() {
+    if (!form.amount) return;
+    const r = await f(token, "/api/finance/cash/receipt", { method: "POST", body: JSON.stringify({ branch: form.branch, amount: Number(form.amount), notes: form.notes }) });
+    if (r.ok) { setForm({ amount: "", notes: "", branch: form.branch }); load(); }
+  }
+  const total = balances.reduce((s, b) => s + (b.balance || 0), 0);
+  const SRC_LABEL: Record<string, string> = { cash_receipt: "Cash receipt", direct_expense: "Expense (cash)", advance_issue: "Advance issued", advance_return: "Advance returned", sale: "Cash sale" };
   return (
     <div>
       <div className="grid sm:grid-cols-3 gap-3 mb-4">
         <div className="bg-card border rounded-xl p-5 flex flex-col justify-between">
-          <span className="text-sm text-muted-foreground">{branch === "all" ? "Total cash balance" : `${branch} balance`}</span>
-          <span className="text-2xl font-bold text-emerald-600">₹{(data.balance || 0).toLocaleString("en-IN")}</span>
+          <span className="text-sm text-muted-foreground">Total cash in hand</span>
+          <span className="text-2xl font-bold text-emerald-600" data-testid="cash-total">₹{total.toLocaleString("en-IN")}</span>
         </div>
-        {(data.byBranch || []).map((b) => (
-          <div key={b.branch} className="bg-card border rounded-xl p-5 flex flex-col justify-between">
-            <span className="text-sm text-muted-foreground">{b.branch} register</span>
+        {balances.map((b) => (
+          <div key={b.branch} className="bg-card border rounded-xl p-5 flex flex-col justify-between" data-testid={`cash-branch-${b.branch}`}>
+            <span className="text-sm text-muted-foreground">{b.branch} till</span>
             <span className="text-xl font-bold">₹{(b.balance || 0).toLocaleString("en-IN")}</span>
+            <span className="text-xs text-muted-foreground mt-1">in ₹{b.inflow.toLocaleString("en-IN")} · out ₹{b.outflow.toLocaleString("en-IN")}</span>
           </div>
         ))}
       </div>
-      <div className="flex gap-2 mb-4 items-center">
+      <div className="flex gap-2 mb-4 bg-card border rounded-xl p-4 items-end flex-wrap">
+        <div className="font-semibold text-sm self-center mr-2">Record cash receipt</div>
+        <div><label className="text-xs text-muted-foreground">Branch</label><select value={form.branch} onChange={(e) => setForm({ ...form, branch: e.target.value })} className="block px-3 py-1.5 rounded-lg border bg-background text-sm w-28">{BRANCHES.map((b) => <option key={b} value={b}>{b}</option>)}</select></div>
+        <div><label className="text-xs text-muted-foreground">Amount (₹)</label><input type="number" value={form.amount} onChange={(e) => setForm({ ...form, amount: e.target.value })} className="block px-3 py-1.5 rounded-lg border bg-background text-sm w-32" data-testid="cash-receipt-amount" /></div>
+        <div><label className="text-xs text-muted-foreground">Notes</label><input value={form.notes} onChange={(e) => setForm({ ...form, notes: e.target.value })} className="block px-3 py-1.5 rounded-lg border bg-background text-sm w-48" placeholder="Collection / sale" /></div>
+        <button onClick={addReceipt} className="px-3 py-1.5 rounded-lg bg-accent text-accent-foreground text-sm font-semibold" data-testid="cash-receipt-add">Add Receipt</button>
+      </div>
+      <div className="flex gap-2 mb-4 items-center flex-wrap">
         <label className="text-xs text-muted-foreground">Filter branch</label>
         <select value={branch} onChange={(e) => setBranch(e.target.value)} className="px-2 py-1.5 rounded-lg border bg-background text-sm" data-testid="cash-branch-filter"><option value="all">All</option>{BRANCHES.map((b) => <option key={b} value={b}>{b}</option>)}</select>
+        <span className="mx-2 text-muted-foreground text-xs">Export cash received</span>
+        <input type="date" value={exFrom} onChange={(e) => setExFrom(e.target.value)} className="px-2 py-1.5 rounded-lg border bg-background text-sm" data-testid="cash-export-from" />
+        <input type="date" value={exTo} onChange={(e) => setExTo(e.target.value)} className="px-2 py-1.5 rounded-lg border bg-background text-sm" data-testid="cash-export-to" />
+        {(() => { const qs = `?${new URLSearchParams({ ...(exFrom ? { from: exFrom } : {}), ...(exTo ? { to: exTo } : {}), ...(branch !== "all" ? { branch } : {}) }).toString()}`; return (<>
+          <button onClick={() => downloadFile(token, `/api/admin/accounts/cash-received.xlsx${qs}`, "cash-received.xlsx")} className="px-3 py-1.5 rounded-lg border text-sm font-semibold hover:bg-muted" data-testid="cash-export-xlsx">Export xlsx</button>
+          <button onClick={() => downloadFile(token, `/api/admin/accounts/cash-received.csv${qs}`, "cash-received.csv")} className="px-3 py-1.5 rounded-lg border text-sm font-semibold hover:bg-muted" data-testid="cash-export-csv">Export csv</button>
+        </>); })()}
       </div>
-      <div className="flex gap-2 mb-4 bg-card border rounded-xl p-4 items-end flex-wrap">
-        <div><label className="text-xs text-muted-foreground">Branch</label><select value={form.branch} onChange={(e) => setForm({ ...form, branch: e.target.value })} className="block px-3 py-1.5 rounded-lg border bg-background text-sm w-28">{BRANCHES.map((b) => <option key={b} value={b}>{b}</option>)}</select></div>
-        <div><label className="text-xs text-muted-foreground">Type</label><select value={form.direction} onChange={(e) => setForm({ ...form, direction: e.target.value })} className="block px-3 py-1.5 rounded-lg border bg-background text-sm w-28"><option value="in">Cash In</option><option value="out">Cash Out</option></select></div>
-        <div><label className="text-xs text-muted-foreground">Source</label><input value={form.source} onChange={(e) => setForm({ ...form, source: e.target.value })} className="block px-3 py-1.5 rounded-lg border bg-background text-sm w-44" /></div>
-        <div><label className="text-xs text-muted-foreground">Amount (₹)</label><input type="number" value={form.amount} onChange={(e) => setForm({ ...form, amount: e.target.value })} className="block px-3 py-1.5 rounded-lg border bg-background text-sm w-32" /></div>
-        <div><label className="text-xs text-muted-foreground">Reference</label><input value={form.reference} onChange={(e) => setForm({ ...form, reference: e.target.value })} className="block px-3 py-1.5 rounded-lg border bg-background text-sm w-36" /></div>
-        <button onClick={add} className="px-3 py-1.5 rounded-lg bg-accent text-accent-foreground text-sm font-semibold">Add Entry</button>
-      </div>
-      <Table cols={["Branch", "Type", "Source", "Amount", "Reference", "Date"]} rows={data.rows.map((r) => [r.branch || "Delhi", r.direction || "in", r.source, `₹${Number(r.amount).toLocaleString("en-IN")}`, r.reference || "—", r.date ? new Date(r.date).toLocaleDateString("en-IN") : "—"])} />
+      <Table cols={["Date", "Branch", "Direction", "Source", "Amount", "Notes"]} rows={moves.map((r) => [r.created_at ? new Date(r.created_at).toLocaleString("en-IN") : "—", r.branch, r.direction === "in" ? "IN" : "OUT", SRC_LABEL[r.source] || r.source, `₹${Number(r.amount).toLocaleString("en-IN")}`, r.notes || "—"])} />
     </div>
   );
 }
@@ -188,6 +218,14 @@ function ExpensesTab({ token }: { token: string | null }) {
         <button onClick={() => setMode("direct")} data-testid="expense-mode-direct" className={`px-3 py-1.5 rounded-lg text-sm font-semibold ${mode === "direct" ? "bg-accent text-accent-foreground" : "border hover:bg-muted"}`}>Direct Expense</button>
         <button onClick={() => setMode("advance")} data-testid="expense-mode-advance" className={`px-3 py-1.5 rounded-lg text-sm font-semibold ${mode === "advance" ? "bg-accent text-accent-foreground" : "border hover:bg-muted"}`}>Advance Expense</button>
         <button onClick={syncSales} data-testid="expense-sync-sales" className="ml-auto px-3 py-1.5 rounded-lg border text-sm font-semibold hover:bg-muted">Sync Sales Expenses</button>
+      </div>
+      {/* R27.7 #1 — staff-wise & day-wise expense exports */}
+      <div className="flex gap-2 mb-4 items-center flex-wrap text-sm">
+        <span className="text-xs text-muted-foreground">Exports:</span>
+        <button onClick={() => downloadFile(token, "/api/admin/accounts/staff-expenses.xlsx", "staff-expenses.xlsx")} className="px-3 py-1.5 rounded-lg border font-semibold hover:bg-muted" data-testid="staff-export-xlsx">Staff-wise xlsx</button>
+        <button onClick={() => downloadFile(token, "/api/admin/accounts/staff-expenses.csv", "staff-expenses.csv")} className="px-3 py-1.5 rounded-lg border font-semibold hover:bg-muted" data-testid="staff-export-csv">Staff-wise csv</button>
+        <button onClick={() => downloadFile(token, "/api/admin/accounts/day-expenses.xlsx", "day-expenses.xlsx")} className="px-3 py-1.5 rounded-lg border font-semibold hover:bg-muted" data-testid="day-export-xlsx">Day-wise xlsx</button>
+        <button onClick={() => downloadFile(token, "/api/admin/accounts/day-expenses.csv", "day-expenses.csv")} className="px-3 py-1.5 rounded-lg border font-semibold hover:bg-muted" data-testid="day-export-csv">Day-wise csv</button>
       </div>
 
       {mode === "direct" ? (

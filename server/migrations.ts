@@ -2664,3 +2664,89 @@ export function runR27_6Migrations() {
 
   console.log("[migrations] R27.6: complete");
 }
+
+// ============================================================================
+// R27.7 — cash ledger (cash_movements), expense source/attachment columns,
+// transfer_invoices, expanded employees master, attendance status. Additive only.
+// ============================================================================
+export function runR27_7Migrations() {
+  console.log("[migrations] R27.7: start");
+  const run = (desc: string, sql: string) => {
+    try { sqlite.exec(sql); console.log(`[migrations] R27.7: ${desc} ok`); }
+    catch (e: any) { console.log(`[migrations] R27.7: ${desc} skip (${e?.message || e})`); }
+  };
+  const addCol = (table: string, col: string, decl: string) => {
+    try { sqlite.exec(`ALTER TABLE ${table} ADD COLUMN ${col} ${decl}`); console.log(`[migrations] R27.7: ${table}.${col} added`); }
+    catch (e: any) { console.log(`[migrations] R27.7: ${table}.${col} skip (${e?.message || e})`); }
+  };
+
+  // --- #3 expenses: generic source linkage + receipt attachment ---
+  addCol("expenses", "source", "TEXT");          // e.g. 'sales'
+  addCol("expenses", "source_id", "INTEGER");    // sales_expense.id
+  addCol("expenses", "attachment_url", "TEXT");   // receipt image/pdf
+
+  // --- #2 cash ledger: per-branch till movements ---
+  run("cash_movements", `
+    CREATE TABLE IF NOT EXISTS cash_movements (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      branch TEXT NOT NULL,
+      direction TEXT NOT NULL,           -- 'in' | 'out'
+      amount REAL NOT NULL,
+      source TEXT NOT NULL,              -- 'cash_receipt' | 'direct_expense' | 'advance_issue' | 'advance_return' | 'sale'
+      reference_id INTEGER,
+      reference_table TEXT,
+      notes TEXT,
+      created_by INTEGER,
+      created_at TEXT DEFAULT CURRENT_TIMESTAMP
+    );`);
+  run("idx_cash_movements_branch", `CREATE INDEX IF NOT EXISTS idx_cash_movements_branch ON cash_movements(branch);`);
+
+  // --- #4 transfer invoices (dispatch generates on store-received) ---
+  run("transfer_invoices", `
+    CREATE TABLE IF NOT EXISTS transfer_invoices (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      transfer_id INTEGER NOT NULL,
+      transfer_source TEXT,              -- 'branch_transfer' | 'consignment'
+      invoice_no TEXT,
+      source_branch TEXT,
+      dest_branch TEXT,
+      transport_vendor TEXT,
+      vehicle_no TEXT,
+      freight_charge REAL,
+      eway_bill_no TEXT,
+      remarks TEXT,
+      pdf_url TEXT,
+      status TEXT NOT NULL DEFAULT 'pending',  -- 'pending' | 'invoiced'
+      created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+      invoiced_at TEXT,
+      created_by INTEGER
+    );`);
+  run("idx_transfer_invoices_status", `CREATE INDEX IF NOT EXISTS idx_transfer_invoices_status ON transfer_invoices(status);`);
+  run("idx_transfer_invoices_transfer", `CREATE INDEX IF NOT EXISTS idx_transfer_invoices_transfer ON transfer_invoices(transfer_id, transfer_source);`);
+
+  // --- #8 employees master: full HR fields (all additive/nullable) ---
+  for (const [c, d] of [
+    ["dob", "TEXT"], ["gender", "TEXT"], ["marital_status", "TEXT"],
+    ["alt_contact", "TEXT"], ["family_contact_name", "TEXT"], ["family_contact_phone", "TEXT"],
+    ["family_relationship", "TEXT"], ["permanent_address", "TEXT"], ["current_address", "TEXT"],
+    ["reporting_manager", "TEXT"], ["bank_name", "TEXT"], ["photo_url", "TEXT"],
+    ["aadhar_url", "TEXT"], ["pan_url", "TEXT"], ["notes", "TEXT"],
+  ] as [string, string][]) addCol("employees", c, d);
+
+  // --- #11 attendance: per-day status rows (calendar/bulk-mark) ---
+  run("attendance_days", `
+    CREATE TABLE IF NOT EXISTS attendance_days (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      employee_id INTEGER NOT NULL,
+      date TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'present',  -- present|half|absent|leave
+      marked_by INTEGER,
+      marked_at TEXT DEFAULT CURRENT_TIMESTAMP,
+      UNIQUE(employee_id, date)
+    );`);
+
+  // --- #14 invoices: pdf attachment (procurement invoices table) ---
+  addCol("invoices", "pdf_url", "TEXT");
+
+  console.log("[migrations] R27.7: complete");
+}

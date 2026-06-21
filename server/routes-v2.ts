@@ -7224,6 +7224,36 @@ function registerR8Routes(
     try { const s = await r27(); res.json(s.listTransfers({ status: req.query.status as string | undefined })); }
     catch (e: any) { res.status(500).json({ error: e.message }); }
   });
+  // R27.7 #5 — store/dispatch transfer exports (xlsx + csv). Columns per spec:
+  // Date, Client, PO No, Item, Part No, Qty, Source Branch, Dest Branch, Status,
+  // Transfer Invoice No. Both store ("received" view) and dispatch ("sent" view)
+  // draw from listTransfers (branch_transfers + Patna-bound consignments).
+  async function transfersAoa(req: any) {
+    const s = await r27();
+    const rows = s.listTransfers({ status: req.query.status as string | undefined }) as any[];
+    const aoa: any[][] = [["Date", "Client Name", "PO No", "Item Name", "Part No", "Quantity", "Source Branch", "Dest Branch", "Status", "Transfer Invoice No"]];
+    for (const t of rows) {
+      const date = t.dispatched_at || t.received_at || t.created_at || "";
+      aoa.push([
+        date ? String(date).slice(0, 10) : "",
+        t.clientName || (t.po_id ? "—" : "Internal Transfer"),
+        t.poNumber || "",
+        t.itemSummary || "",
+        t.partNumbers || "",
+        t.bundles ?? "",
+        t.from_branch || "",
+        t.to_branch || "",
+        t.status || "",
+        t.transferInvoiceNo || "",
+      ]);
+    }
+    return aoa;
+  }
+  app.get("/api/store/received.xlsx", requireStore, async (req: any, res) => { try { sendXlsx(res, "store-received", "Received", await transfersAoa(req)); } catch (e: any) { res.status(500).json({ error: e.message }); } });
+  app.get("/api/store/received.csv", requireStore, async (req: any, res) => { try { sendCsv(res, "store-received", await transfersAoa(req)); } catch (e: any) { res.status(500).json({ error: e.message }); } });
+  app.get("/api/dispatch/sent.xlsx", requireDispatch, async (req: any, res) => { try { sendXlsx(res, "dispatch-sent", "Dispatched", await transfersAoa(req)); } catch (e: any) { res.status(500).json({ error: e.message }); } });
+  app.get("/api/dispatch/sent.csv", requireDispatch, async (req: any, res) => { try { sendCsv(res, "dispatch-sent", await transfersAoa(req)); } catch (e: any) { res.status(500).json({ error: e.message }); } });
+
   app.get("/api/store/transfers/:id", requireStore, async (req, res) => {
     try { const s = await r27(); const d = s.getTransferDetail(parseInt(req.params.id as string, 10)); if (!d) return res.status(404).json({ error: "Not found" }); res.json(d); }
     catch (e: any) { res.status(500).json({ error: e.message }); }
@@ -7282,6 +7312,71 @@ function registerR8Routes(
       const s = await r27();
       const stockIds = Array.isArray(req.body?.stock_ids) ? req.body.stock_ids.map((n: any) => parseInt(String(n), 10)) : [];
       res.json(s.dispatchHandover(stockIds, req.body?.customer_id ? parseInt(String(req.body.customer_id), 10) : undefined, req.body?.invoice_number));
+    } catch (e: any) { res.status(400).json({ error: e.message }); }
+  });
+
+  // ---- R27.7 #4 Dispatch transfer-invoice rule ----
+  // On store "Mark Received" the storage layer opens a PENDING transfer_invoices row.
+  // Dispatch lists those, fills transport/freight/eway/remarks/PDF, and finalizes —
+  // which assigns NM/TRF-INV/26/0001, flips status to 'invoiced', and emails admin.
+  const transferInvDir = path.join(ctx.uploadsDir || "./uploads", "transfer-invoices");
+  if (!fs.existsSync(transferInvDir)) fs.mkdirSync(transferInvDir, { recursive: true });
+  const multerTransferInv = multer({
+    storage: multer.diskStorage({
+      destination: (_req: any, _file: any, cb: any) => cb(null, transferInvDir),
+      filename: (_req: any, file: any, cb: any) => cb(null, `${Date.now()}-${file.originalname.replace(/[^a-zA-Z0-9._-]/g, "_")}`),
+    }),
+    limits: { fileSize: 10 * 1024 * 1024 },
+    fileFilter: (_req: any, file: any, cb: any) => {
+      if (file.mimetype === "application/pdf" || file.mimetype === "image/jpeg" || file.mimetype === "image/png") cb(null, true);
+      else cb(new Error("Only PDF/JPG/PNG allowed"));
+    },
+  });
+
+  app.get("/api/dispatch/transfer-invoices", requireDispatch, async (req: any, res) => {
+    try { const s = await r27(); res.json(s.listTransferInvoices({ status: req.query.status as string | undefined })); }
+    catch (e: any) { res.status(500).json({ error: e.message }); }
+  });
+  // Store can see its invoices too (for the invoice link/number in the received list).
+  app.get("/api/store/transfer-invoices", requireStore, async (req: any, res) => {
+    try { const s = await r27(); res.json(s.listTransferInvoices({ status: req.query.status as string | undefined })); }
+    catch (e: any) { res.status(500).json({ error: e.message }); }
+  });
+  app.post("/api/dispatch/transfer-invoices/:id/finalize", requireDispatch, multerTransferInv.single("pdf"), async (req: any, res) => {
+    try {
+      const s = await r27();
+      const id = parseInt(req.params.id as string, 10);
+      const proto = (req.headers["x-forwarded-proto"] as string) || req.protocol;
+      const host = req.headers.host;
+      const pdf_url = req.file ? `${proto}://${host}/uploads/transfer-invoices/${req.file.filename}` : (req.body?.pdf_url || null);
+      const inv = s.finalizeTransferInvoice(id, {
+        transport_vendor: req.body?.transport_vendor ?? null,
+        vehicle_no: req.body?.vehicle_no ?? null,
+        freight_charge: req.body?.freight_charge != null && req.body.freight_charge !== "" ? Number(req.body.freight_charge) : null,
+        eway_bill_no: req.body?.eway_bill_no ?? null,
+        remarks: req.body?.remarks ?? null,
+        pdf_url,
+      }, req.teamUser?.id);
+      // Email admin — fire-and-forget.
+      (async () => {
+        try {
+          const adminEmail = process.env.ADMIN_REMINDER_EMAIL || process.env.SALES_EMAIL || "sales@Narmadamobility.com";
+          const rows = `<tr><td>Invoice No</td><td>${inv.invoice_no}</td></tr>
+            <tr><td>Route</td><td>${inv.source_branch || "Delhi"} → ${inv.dest_branch || "Patna"}</td></tr>
+            <tr><td>Transport Vendor</td><td>${inv.transport_vendor || "—"}</td></tr>
+            <tr><td>Vehicle No</td><td>${inv.vehicle_no || "—"}</td></tr>
+            <tr><td>Freight</td><td>₹${inv.freight_charge ?? 0}</td></tr>
+            <tr><td>E-way Bill</td><td>${inv.eway_bill_no || "—"}</td></tr>
+            <tr><td>Remarks</td><td>${inv.remarks || "—"}</td></tr>`;
+          await sendGenericEmail({
+            to: adminEmail,
+            subject: `Transfer Invoice ${inv.invoice_no} created`,
+            html: `<p>A transfer invoice was finalized by Dispatch.</p><table border="1" cellpadding="6">${rows}</table>${inv.pdf_url ? `<p><a href="${inv.pdf_url}">View PDF</a></p>` : ""}`,
+            event: "transfer_invoice",
+          });
+        } catch (e: any) { console.error("[r27.7 #4] admin email:", e?.message || e); }
+      })();
+      res.json(inv);
     } catch (e: any) { res.status(400).json({ error: e.message }); }
   });
 
@@ -7430,11 +7525,80 @@ function registerR8Routes(
   app.post("/api/finance/expenses/sync-sales", acctAuth, async (req: any, res) => {
     try {
       const s = await r27();
-      const pending = s.listExpenses({ includeSales: true }).filter((r: any) => r.source === "sales_expense");
+      // listExpenses synthesizes negative-id rows for approved-but-unsynced sales
+      // expenses; only those need a real ledger row created.
+      const pending = s.listExpenses({ includeSales: true }).filter((r: any) => r.source === "sales" && r.sales_expense_id && r.id < 0);
       let synced = 0;
-      for (const p of pending) { const r = s.syncSalesExpenseToAccounts(p.sales_expense_id, req.teamUser?.id); if (r && (r as any).id) synced++; }
+      for (const p of pending) { const r = s.syncSalesExpenseToAccounts(p.sales_expense_id, req.teamUser?.id); if (r && (r as any).id && !(r as any).skipped) synced++; }
       res.json({ synced });
     } catch (e: any) { res.status(400).json({ error: e.message }); }
+  });
+
+  // R27.7 #1/#5 — small helpers to ship an AOA (array-of-arrays) as xlsx or csv.
+  function sendXlsx(res: Response, filename: string, sheetName: string, aoa: any[][]) {
+    const wb = XLSX.utils.book_new();
+    const ws = XLSX.utils.aoa_to_sheet(aoa);
+    XLSX.utils.book_append_sheet(wb, ws, sheetName.slice(0, 31));
+    const buffer = XLSX.write(wb, { type: "buffer", bookType: "xlsx" });
+    res.setHeader("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
+    res.setHeader("Content-Disposition", `attachment; filename="${filename}.xlsx"`);
+    res.send(buffer);
+  }
+  function sendCsv(res: Response, filename: string, aoa: any[][]) {
+    const esc = (v: any) => { const s = v == null ? "" : String(v); return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s; };
+    const csv = aoa.map((row) => row.map(esc).join(",")).join("\n");
+    res.setHeader("Content-Type", "text/csv; charset=utf-8");
+    res.setHeader("Content-Disposition", `attachment; filename="${filename}.csv"`);
+    res.send(csv);
+  }
+
+  // R27.7 #1 — accounts exports: cash received / staff-wise / day-wise.
+  async function cashReceivedAoa(req: any) {
+    const s = await r27();
+    const rows = s.reportCashReceived({ from: req.query.from as string | undefined, to: req.query.to as string | undefined, branch: req.query.branch as string | undefined });
+    const aoa: any[][] = [["Date", "Branch", "Source", "Amount", "Notes", "Reference"]];
+    let total = 0;
+    for (const r of rows) { aoa.push([r.date, r.branch, r.source, r.amount, r.notes || "", r.reference_id || ""]); total += Number(r.amount) || 0; }
+    aoa.push([], ["", "", "Total", total]);
+    return aoa;
+  }
+  async function staffExpensesAoa(req: any) {
+    const s = await r27();
+    const rows = s.reportStaffExpenses({ from: req.query.from as string | undefined, to: req.query.to as string | undefined });
+    const aoa: any[][] = [["Staff", "Advance Expenses", "Direct Expenses", "Total", "Items"]];
+    let gAdv = 0, gDir = 0, gTot = 0;
+    for (const r of rows) { aoa.push([r.staffName, r.advanceTotal, r.directTotal, r.total, r.items]); gAdv += r.advanceTotal; gDir += r.directTotal; gTot += r.total; }
+    aoa.push([], ["Grand Total", gAdv, gDir, gTot, ""]);
+    return aoa;
+  }
+  async function dayExpensesAoa(req: any) {
+    const s = await r27();
+    const rows = s.reportDayExpenses({ from: req.query.from as string | undefined, to: req.query.to as string | undefined });
+    const aoa: any[][] = [["Date", "Advance Expenses", "Direct Expenses", "Total", "Items"]];
+    let gTot = 0;
+    for (const r of rows) { aoa.push([r.date, r.advanceTotal, r.directTotal, r.total, r.items]); gTot += r.total; }
+    aoa.push([], ["Grand Total", "", "", gTot, ""]);
+    return aoa;
+  }
+  app.get("/api/admin/accounts/cash-received.xlsx", acctAuth, async (req: any, res) => { try { sendXlsx(res, "cash-received", "Cash Received", await cashReceivedAoa(req)); } catch (e: any) { res.status(500).json({ error: e.message }); } });
+  app.get("/api/admin/accounts/cash-received.csv", acctAuth, async (req: any, res) => { try { sendCsv(res, "cash-received", await cashReceivedAoa(req)); } catch (e: any) { res.status(500).json({ error: e.message }); } });
+  app.get("/api/admin/accounts/staff-expenses.xlsx", acctAuth, async (req: any, res) => { try { sendXlsx(res, "staff-expenses", "Staff Expenses", await staffExpensesAoa(req)); } catch (e: any) { res.status(500).json({ error: e.message }); } });
+  app.get("/api/admin/accounts/staff-expenses.csv", acctAuth, async (req: any, res) => { try { sendCsv(res, "staff-expenses", await staffExpensesAoa(req)); } catch (e: any) { res.status(500).json({ error: e.message }); } });
+  app.get("/api/admin/accounts/day-expenses.xlsx", acctAuth, async (req: any, res) => { try { sendXlsx(res, "day-expenses", "Day Expenses", await dayExpensesAoa(req)); } catch (e: any) { res.status(500).json({ error: e.message }); } });
+  app.get("/api/admin/accounts/day-expenses.csv", acctAuth, async (req: any, res) => { try { sendCsv(res, "day-expenses", await dayExpensesAoa(req)); } catch (e: any) { res.status(500).json({ error: e.message }); } });
+
+  // R27.7 #2 — cash ledger (per-branch till). Balance = SUM(in) - SUM(out).
+  app.get("/api/finance/cash/balances", acctAuth, async (_req, res) => {
+    try { const s = await r27(); res.json({ branches: s.getCashBalances() }); }
+    catch (e: any) { res.status(400).json({ error: e.message }); }
+  });
+  app.get("/api/finance/cash/movements", acctAuth, async (req: any, res) => {
+    try { const s = await r27(); res.json(s.listCashMovements({ branch: req.query.branch as string | undefined, from: req.query.from as string | undefined, to: req.query.to as string | undefined })); }
+    catch (e: any) { res.status(400).json({ error: e.message }); }
+  });
+  app.post("/api/finance/cash/receipt", acctAuth, async (req: any, res) => {
+    try { const s = await r27(); res.json(s.recordCashReceipt(req.body || {}, req.teamUser?.id ?? req.user?.id)); }
+    catch (e: any) { res.status(400).json({ error: e.message }); }
   });
 
   // Employees (salary masked unless admin)
@@ -7452,6 +7616,35 @@ function registerR8Routes(
     try { const s = await r27(); res.json(s.updateEmployee(parseInt(req.params.id as string, 10), req.body || {}, !!req.isAdminAcct)); }
     catch (e: any) { res.status(400).json({ error: e.message }); }
   });
+  // R27.7 #8 — staff document / photo upload. ?kind=photo|aadhar|pan|doc.
+  const staffDocsDir = path.join(ctx.uploadsDir || "./uploads", "staff");
+  if (!fs.existsSync(staffDocsDir)) fs.mkdirSync(staffDocsDir, { recursive: true });
+  const multerStaff = multer({
+    storage: multer.diskStorage({
+      destination: (_req: any, _file: any, cb: any) => cb(null, staffDocsDir),
+      filename: (_req: any, file: any, cb: any) => cb(null, `${Date.now()}-${file.originalname.replace(/[^a-zA-Z0-9._-]/g, "_")}`),
+    }),
+    limits: { fileSize: 10 * 1024 * 1024 },
+    fileFilter: (_req: any, file: any, cb: any) => {
+      if (file.mimetype === "application/pdf" || file.mimetype === "image/jpeg" || file.mimetype === "image/png") cb(null, true);
+      else cb(new Error("Only PDF/JPG/PNG allowed"));
+    },
+  });
+  app.post("/api/finance/employees/:id/upload", acctAuth, multerStaff.single("file"), async (req: any, res) => {
+    try {
+      if (!req.file) return res.status(400).json({ error: "file required" });
+      const id = parseInt(req.params.id as string, 10);
+      const kind = String(req.query.kind || req.body?.kind || "doc");
+      const proto = (req.headers["x-forwarded-proto"] as string) || req.protocol;
+      const host = req.headers.host;
+      const url = `${proto}://${host}/uploads/staff/${req.file.filename}`;
+      const colByKind: Record<string, string> = { photo: "photo_url", aadhar: "aadhar_url", pan: "pan_url", doc: "image_url" };
+      const col = colByKind[kind] || "image_url";
+      const s = await r27();
+      s.updateEmployee(id, { [col]: url }, false);
+      res.json({ ok: true, url, kind, column: col });
+    } catch (e: any) { res.status(400).json({ error: e.message }); }
+  });
 
   // Attendance
   app.get("/api/finance/attendance", acctAuth, async (req, res) => {
@@ -7462,6 +7655,21 @@ function registerR8Routes(
       const { employee_id, month, absent_days } = req.body || {};
       if (!employee_id || !month) return res.status(400).json({ error: "employee_id and month required" });
       const s = await r27(); res.json(s.upsertAttendance(parseInt(String(employee_id), 10), String(month), Number(absent_days) || 0, req.teamUser?.id));
+    } catch (e: any) { res.status(400).json({ error: e.message }); }
+  });
+  // R27.7 #11 — per-day attendance calendar (bulk mark + read).
+  app.get("/api/admin/accounts/attendance/days", acctAuth, async (req: any, res) => {
+    try {
+      const employeeId = parseInt(req.query.employee_id as string, 10);
+      if (!employeeId) return res.status(400).json({ error: "employee_id required" });
+      const s = await r27(); res.json(s.listAttendanceDays(employeeId, req.query.month as string | undefined));
+    } catch (e: any) { res.status(400).json({ error: e.message }); }
+  });
+  app.post("/api/admin/accounts/attendance/bulk", acctAuth, async (req: any, res) => {
+    try {
+      const { employee_id, days } = req.body || {};
+      if (!employee_id || !Array.isArray(days)) return res.status(400).json({ error: "employee_id and days[] required" });
+      const s = await r27(); res.json(s.bulkMarkAttendance(parseInt(String(employee_id), 10), days, req.teamUser?.id ?? req.user?.id));
     } catch (e: any) { res.status(400).json({ error: e.message }); }
   });
 
