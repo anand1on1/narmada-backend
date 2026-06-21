@@ -92,6 +92,25 @@ export function createDelhiInvoice(poId: number, body: { line_items?: InvoiceLin
   const id = Number(info.lastInsertRowid);
   sqlite.prepare(`UPDATE purchase_orders_v2 SET delhi_invoice_id = ?, delhi_invoice_created_at = ? WHERE id = ?`).run(id, nowIso(), poId);
 
+  // R27.5 #6 — procurement invoice received at Delhi adds stock at Delhi. Idempotent
+  // per invoice: only record movements the first time this invoice copy is created.
+  try {
+    for (const l of lines) {
+      const qty = Math.trunc(Number(l.qty) || 0);
+      if (qty <= 0) continue;
+      recordStockMovement({
+        branch: "Delhi",
+        partNumber: l.part_number || null,
+        delta: qty,
+        rate: Number(l.unit_price) || null,
+        reason: "procurement_invoice",
+        referenceId: id,
+        referenceTable: "po_invoice_copies",
+        notes: body.invoice_number ? `Invoice ${body.invoice_number}` : null,
+      });
+    }
+  } catch (e: any) { console.error("[R27.5 #6] Delhi stock-in on invoice failed:", e?.message || e); }
+
   // Compare against the AI client copy and flag deviations per mismatched line/field.
   const ai = sqlite.prepare(`SELECT line_items_json FROM po_invoice_copies WHERE po_id = ? AND kind = 'ai_client_copy'`).get(poId) as any;
   if (ai) {
@@ -202,11 +221,19 @@ export function deviationSummaryForPOs(poIds: number[]): Record<number, { count:
 // R27.2-2/3 — Branch transfers + stock (Delhi -> Patna), store + dispatch flows
 // ===========================================================================
 
-export function createBranchTransfer(opts: { poId?: number; consignmentId?: number; notes?: string }) {
+export function createBranchTransfer(opts: { poId?: number; consignmentId?: number; notes?: string; fromBranch?: string; toBranch?: string }) {
+  // R27.5 #5 — also persist normalized lowercase branch keys so the store query can
+  // match case-insensitively regardless of how the source branch name was cased.
+  const from = opts.fromBranch || "Delhi";
+  const to = opts.toBranch || "Patna";
   const info = sqlite.prepare(
-    `INSERT INTO branch_transfers (po_id, consignment_id, from_branch, to_branch, dispatched_at, status, notes, created_at)
-     VALUES (?, ?, 'Delhi', 'Patna', ?, 'in_transit', ?, ?)`,
-  ).run(opts.poId ?? null, opts.consignmentId ?? null, nowIso(), opts.notes ?? null, nowIso());
+    `INSERT INTO branch_transfers (po_id, consignment_id, from_branch, to_branch, from_branch_key, to_branch_key, dispatched_at, status, notes, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, 'in_transit', ?, ?)`,
+  ).run(
+    opts.poId ?? null, opts.consignmentId ?? null, from, to,
+    from.toLowerCase().trim(), to.toLowerCase().trim(),
+    nowIso(), opts.notes ?? null, nowIso(),
+  );
   return Number(info.lastInsertRowid);
 }
 
@@ -249,9 +276,14 @@ export async function receiveTransfer(transferId: number, items: Array<{ part_nu
       ).run(transferId, it.part_number || null, it.product_id ?? null, Number(it.expected_qty) || 0, Number(it.received_qty) || 0, dev, it.reason ?? (dev > 0 ? "short" : null), nowIso());
       if (Number(it.received_qty) > 0) {
         sqlite.prepare(
-          `INSERT INTO branch_stock (branch, product_id, part_number, po_id, qty, rate, received_at, status)
-           VALUES ('Patna', ?, ?, ?, ?, ?, ?, 'in_stock')`,
+          `INSERT INTO branch_stock (branch, branch_key, product_id, part_number, po_id, qty, rate, received_at, status)
+           VALUES ('Patna', 'patna', ?, ?, ?, ?, ?, ?, 'in_stock')`,
         ).run(it.product_id ?? null, it.part_number || null, t.po_id ?? null, Number(it.received_qty) || 0, it.rate ?? null, nowIso());
+        // R27.5 #6 — also log the inbound to the stock ledger (transfer received at Patna).
+        sqlite.prepare(
+          `INSERT INTO stock_movements (branch, branch_key, product_id, part_number, delta, reason, reference_id, reference_table, created_at)
+           VALUES ('Patna', 'patna', ?, ?, ?, 'transfer_received', ?, 'branch_transfers', ?)`,
+        ).run(it.product_id ?? null, it.part_number || null, Number(it.received_qty) || 0, transferId, nowIso());
       }
       if (dev > 0 && t.po_id) { anyShort = true; addDeviation(t.po_id, "qty", String(it.expected_qty), String(it.received_qty), "store", "store_receive", `Part ${it.part_number} short by ${dev}`); }
     }
@@ -270,6 +302,61 @@ export async function receiveTransfer(transferId: number, items: Array<{ part_nu
   return getTransferDetail(transferId);
 }
 
+// R27.5 #6 — single source of truth for stock changes. Adjusts branch_stock for the
+// given branch/part and writes an append-only stock_movements ledger row. Positive
+// delta = inbound (procurement / transfer receipt), negative = outbound (customer order).
+export function recordStockMovement(opts: {
+  branch: string;
+  productId?: number | null;
+  partNumber?: string | null;
+  delta: number;
+  reason: string;
+  referenceId?: number | null;
+  referenceTable?: string | null;
+  rate?: number | null;
+  notes?: string | null;
+}) {
+  const branch = (opts.branch || "Delhi").trim();
+  const branchKey = branch.toLowerCase();
+  const delta = Math.trunc(Number(opts.delta) || 0);
+  if (!delta) return;
+  const tx = sqlite.transaction(() => {
+    if (delta > 0) {
+      sqlite.prepare(
+        `INSERT INTO branch_stock (branch, branch_key, product_id, part_number, po_id, qty, rate, received_at, status)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'in_stock')`,
+      ).run(branch, branchKey, opts.productId ?? null, opts.partNumber ?? null, opts.referenceId ?? null, delta, opts.rate ?? null, nowIso());
+    } else {
+      // Deduct FIFO from in-stock rows at this branch matching the part.
+      let remaining = -delta;
+      const rows = sqlite.prepare(
+        `SELECT id, qty FROM branch_stock WHERE LOWER(TRIM(branch)) = ? AND status = 'in_stock'
+           AND (part_number = ? OR product_id = ?) AND qty > 0 ORDER BY id ASC`,
+      ).all(branchKey, opts.partNumber ?? null, opts.productId ?? null) as any[];
+      for (const row of rows) {
+        if (remaining <= 0) break;
+        const take = Math.min(remaining, row.qty);
+        sqlite.prepare(`UPDATE branch_stock SET qty = qty - ? WHERE id = ?`).run(take, row.id);
+        remaining -= take;
+      }
+    }
+    sqlite.prepare(
+      `INSERT INTO stock_movements (branch, branch_key, product_id, part_number, delta, reason, reference_id, reference_table, notes, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    ).run(branch, branchKey, opts.productId ?? null, opts.partNumber ?? null, delta, opts.reason, opts.referenceId ?? null, opts.referenceTable ?? null, opts.notes ?? null, nowIso());
+  });
+  tx();
+}
+
+export function listStockMovements(opts: { branch?: string; partNumber?: string; limit?: number } = {}) {
+  const conds: string[] = []; const params: any[] = [];
+  if (opts.branch) { conds.push("LOWER(TRIM(branch)) = ?"); params.push(opts.branch.toLowerCase().trim()); }
+  if (opts.partNumber) { conds.push("part_number = ?"); params.push(opts.partNumber); }
+  const where = conds.length ? `WHERE ${conds.join(" AND ")}` : "";
+  const limit = Math.min(1000, Math.max(1, opts.limit || 200));
+  return sqlite.prepare(`SELECT * FROM stock_movements ${where} ORDER BY id DESC LIMIT ?`).all(...params, limit);
+}
+
 export function listBranchStock(branch = "Patna", status = "in_stock") {
   return sqlite.prepare(
     `SELECT s.*, p.name AS productName FROM branch_stock s LEFT JOIN products p ON p.id = s.product_id
@@ -282,7 +369,8 @@ export function listBranchStock(branch = "Patna", status = "in_stock") {
 // surfaces Delhi vs Patna; when no branch is given, both are returned.
 export function listBranchStockAdmin(opts: { branch?: string; q?: string; status?: string } = {}) {
   const conds: string[] = []; const params: any[] = [];
-  if (opts.branch) { conds.push("s.branch = ?"); params.push(opts.branch); }
+  // R27.5 #6 — case-insensitive branch match (LOWER) so 'delhi'/'Delhi' both work.
+  if (opts.branch) { conds.push("LOWER(TRIM(s.branch)) = ?"); params.push(opts.branch.toLowerCase().trim()); }
   if (opts.status) { conds.push("s.status = ?"); params.push(opts.status); }
   if (opts.q) {
     const like = `%${opts.q}%`;
@@ -293,6 +381,25 @@ export function listBranchStockAdmin(opts: { branch?: string; q?: string; status
   return sqlite.prepare(
     `SELECT s.*, p.name AS productName FROM branch_stock s LEFT JOIN products p ON p.id = s.product_id
      ${where} ORDER BY s.branch ASC, s.id DESC`,
+  ).all(...params);
+}
+
+// R27.5 #6 — live aggregated stock: net qty per part per branch (sums all in-stock rows
+// after procurement / transfer / order movements). Powers the Stock page summary view.
+export function listBranchStockSummary(opts: { branch?: string; q?: string } = {}) {
+  const conds: string[] = ["s.status = 'in_stock'"]; const params: any[] = [];
+  if (opts.branch) { conds.push("LOWER(TRIM(s.branch)) = ?"); params.push(opts.branch.toLowerCase().trim()); }
+  if (opts.q) { const like = `%${opts.q}%`; conds.push("(s.part_number LIKE ? OR p.name LIKE ?)"); params.push(like, like); }
+  const where = `WHERE ${conds.join(" AND ")}`;
+  return sqlite.prepare(
+    `SELECT MIN(s.id) AS id, s.branch AS branch, s.part_number AS part_number,
+            MAX(s.product_id) AS product_id, MAX(p.name) AS productName,
+            SUM(s.qty) AS qty, AVG(s.rate) AS rate, MAX(s.received_at) AS received_at, 'in_stock' AS status
+     FROM branch_stock s LEFT JOIN products p ON p.id = s.product_id
+     ${where}
+     GROUP BY LOWER(TRIM(s.branch)), s.part_number
+     HAVING SUM(s.qty) <> 0
+     ORDER BY branch ASC, productName ASC`,
   ).all(...params);
 }
 
@@ -328,7 +435,7 @@ function slugify(s: string): string {
 // For each PO line item, create a draft (inactive) product if part_number not present.
 export function autoCreateProductsForPo(poId: number): { created: number; skipped: number } {
   const markup = getMarkupPct();
-  const items = sqlite.prepare(`SELECT part_number, description, brand, unit_price, purchase_cost FROM po_items WHERE po_id = ?`).all(poId) as any[];
+  const items = sqlite.prepare(`SELECT part_number, description, brand, unit_price, purchase_cost, vendor_id, vendor_name FROM po_items WHERE po_id = ?`).all(poId) as any[];
   let created = 0, skipped = 0;
   for (const it of items) {
     const pn = String(it.part_number || "").trim();
@@ -338,6 +445,16 @@ export function autoCreateProductsForPo(poId: number): { created: number; skippe
     const vendorPrice = Number(it.purchase_cost ?? it.unit_price) || 0;
     const sell = Math.round(vendorPrice * (1 + markup / 100));
     const name = String(it.description || pn).slice(0, 200);
+    // R27.5 #7 — populate brand so the public product page shows it. Priority:
+    // PO line item brand → seller (vendor) default brand (vendors.brands, first entry).
+    // Only falls back to "Genuine OEM" when nothing is available (never blank).
+    let brand = String(it.brand || "").trim();
+    if (!brand && it.vendor_id) {
+      const v = sqlite.prepare(`SELECT brands FROM vendors WHERE id = ?`).get(it.vendor_id) as any;
+      const raw = String(v?.brands || "").trim();
+      if (raw) brand = raw.split(/[,;|]/)[0].trim();
+    }
+    if (!brand) brand = "Genuine OEM";
     let slug = slugify(name + "-" + pn);
     // ensure unique slug
     if (sqlite.prepare(`SELECT id FROM products WHERE slug = ?`).get(slug)) slug = `${slug}-${Date.now()}`;
@@ -345,7 +462,7 @@ export function autoCreateProductsForPo(poId: number): { created: number; skippe
       sqlite.prepare(
         `INSERT INTO products (slug, name, brand, model, category, part_number, description, short_description, price_inr, stock_qty, image_urls, compatible_models, featured, active, created_at)
          VALUES (?, ?, ?, '', 'other', ?, ?, ?, ?, 0, '[]', '[]', 0, 0, ?)`,
-      ).run(slug, name, String(it.brand || "other"), pn, name, name, sell, Date.now());
+      ).run(slug, name, brand, pn, name, name, sell, Date.now());
       created++;
     } catch (e: any) { console.error("[r27.2] auto-product failed for", pn, e?.message || e); skipped++; }
   }
@@ -390,26 +507,41 @@ export function rejectSalesExpense(id: number, approverId?: number, note?: strin
 export function listExpenseHeaders() {
   return sqlite.prepare(`SELECT * FROM expense_headers ORDER BY name ASC`).all().map((r: any) => ({ ...r, fields: safeParse(r.fields_json) }));
 }
-export function createExpenseHeader(name: string, fields: any[]) {
-  const info = sqlite.prepare(`INSERT INTO expense_headers (name, fields_json, created_at) VALUES (?, ?, ?)`).run(name, JSON.stringify(fields || []), nowIso());
+export function createExpenseHeader(name: string, fields: any[], extra?: { gl_code?: string; budget?: number; parent_id?: number }) {
+  const info = sqlite.prepare(`INSERT INTO expense_headers (name, fields_json, gl_code, budget, parent_id, created_at) VALUES (?, ?, ?, ?, ?, ?)`)
+    .run(name, JSON.stringify(fields || []), extra?.gl_code ?? null, extra?.budget ?? null, extra?.parent_id ?? null, nowIso());
   return sqlite.prepare(`SELECT * FROM expense_headers WHERE id = ?`).get(Number(info.lastInsertRowid));
 }
-export function updateExpenseHeader(id: number, name?: string, fields?: any[]) {
-  sqlite.prepare(`UPDATE expense_headers SET name = COALESCE(?, name), fields_json = COALESCE(?, fields_json) WHERE id = ?`)
-    .run(name ?? null, fields ? JSON.stringify(fields) : null, id);
+export function updateExpenseHeader(id: number, name?: string, fields?: any[], extra?: { gl_code?: string; budget?: number; parent_id?: number }) {
+  sqlite.prepare(`UPDATE expense_headers SET name = COALESCE(?, name), fields_json = COALESCE(?, fields_json), gl_code = COALESCE(?, gl_code), budget = COALESCE(?, budget), parent_id = COALESCE(?, parent_id) WHERE id = ?`)
+    .run(name ?? null, fields ? JSON.stringify(fields) : null, extra?.gl_code ?? null, extra?.budget ?? null, extra?.parent_id ?? null, id);
   return sqlite.prepare(`SELECT * FROM expense_headers WHERE id = ?`).get(id);
 }
 export function deleteExpenseHeader(id: number) { sqlite.prepare(`DELETE FROM expense_headers WHERE id = ?`).run(id); return { ok: true }; }
 
-// Cash in hand
-export function listCash() {
-  const rows = sqlite.prepare(`SELECT * FROM cash_in_hand ORDER BY id DESC`).all() as any[];
-  const balance = sqlite.prepare(`SELECT COALESCE(SUM(amount),0) b FROM cash_in_hand`).get() as any;
-  return { rows, balance: balance.b };
+// Cash in hand — R27.5 #8: per-branch register. `direction` ('in'|'out') is stored
+// for display; the signed `amount` (negative for outflow) is the source of truth for
+// the running balance, so totals stay correct even on legacy rows with no direction.
+export function listCash(branch?: string) {
+  let rows: any[];
+  if (branch && branch !== "all") {
+    rows = sqlite.prepare(`SELECT * FROM cash_in_hand WHERE LOWER(TRIM(COALESCE(branch,'Delhi'))) = LOWER(TRIM(?)) ORDER BY id DESC`).all(branch) as any[];
+  } else {
+    rows = sqlite.prepare(`SELECT * FROM cash_in_hand ORDER BY id DESC`).all() as any[];
+  }
+  const balance = rows.reduce((s, r) => s + (Number(r.amount) || 0), 0);
+  // per-branch breakdown for the register header
+  const byBranch = sqlite.prepare(
+    `SELECT COALESCE(branch,'Delhi') branch, COALESCE(SUM(amount),0) balance FROM cash_in_hand GROUP BY COALESCE(branch,'Delhi')`,
+  ).all() as any[];
+  return { rows, balance, byBranch };
 }
-export function createCash(body: { source: string; amount: number; reference?: string; notes?: string; date?: string }, by?: number) {
-  const info = sqlite.prepare(`INSERT INTO cash_in_hand (source, amount, reference, date, notes, created_by) VALUES (?, ?, ?, ?, ?, ?)`)
-    .run(body.source, Number(body.amount) || 0, body.reference ?? null, body.date ?? nowIso(), body.notes ?? null, by ?? null);
+export function createCash(body: { source: string; amount: number; reference?: string; notes?: string; date?: string; branch?: string; direction?: string }, by?: number) {
+  const direction = body.direction === "out" ? "out" : "in";
+  // store a signed amount so SUM() gives the true balance regardless of direction
+  const signed = direction === "out" ? -Math.abs(Number(body.amount) || 0) : Math.abs(Number(body.amount) || 0);
+  const info = sqlite.prepare(`INSERT INTO cash_in_hand (source, amount, reference, date, notes, branch, direction, created_by) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`)
+    .run(body.source, signed, body.reference ?? null, body.date ?? nowIso(), body.notes ?? null, body.branch ?? "Delhi", direction, by ?? null);
   return sqlite.prepare(`SELECT * FROM cash_in_hand WHERE id = ?`).get(Number(info.lastInsertRowid));
 }
 
@@ -445,20 +577,36 @@ export function reconcileAdvance(advanceId: number, body: { expense_header_id?: 
 }
 
 // Current expenses
-export function listCurrentExpenses(opts: { from?: string; to?: string; headerId?: number } = {}) {
+export function listCurrentExpenses(opts: { from?: string; to?: string; headerId?: number; branch?: string; status?: string } = {}) {
   const conds: string[] = []; const params: any[] = [];
   if (opts.headerId) { conds.push("c.expense_header_id = ?"); params.push(opts.headerId); }
   if (opts.from) { conds.push("c.expense_date >= ?"); params.push(opts.from); }
   if (opts.to) { conds.push("c.expense_date <= ?"); params.push(opts.to); }
+  if (opts.branch && opts.branch !== "all") { conds.push("LOWER(TRIM(COALESCE(c.branch,''))) = LOWER(TRIM(?))"); params.push(opts.branch); }
+  if (opts.status && opts.status !== "all") { conds.push("COALESCE(c.approval_status,'approved') = ?"); params.push(opts.status); }
   const where = conds.length ? `WHERE ${conds.join(" AND ")}` : "";
   return sqlite.prepare(
     `SELECT c.*, h.name AS headerName FROM current_expenses c LEFT JOIN expense_headers h ON h.id = c.expense_header_id ${where} ORDER BY c.id DESC`,
   ).all(...params).map((r: any) => ({ ...r, fields_data: safeParse(r.fields_data_json) }));
 }
-export function createCurrentExpense(body: { expense_header_id: number; amount: number; fields_data?: any; proof_url?: string; expense_date: string }, by?: number) {
-  const info = sqlite.prepare(`INSERT INTO current_expenses (expense_header_id, amount, fields_data_json, proof_url, expense_date, created_by, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)`)
-    .run(body.expense_header_id, Number(body.amount) || 0, JSON.stringify(body.fields_data || {}), body.proof_url ?? null, body.expense_date, by ?? null, nowIso());
+export function createCurrentExpense(body: { expense_header_id: number; amount: number; fields_data?: any; proof_url?: string; expense_date: string; branch?: string }, by?: number) {
+  // R27.5 #8 — approval workflow: amounts at/under the configured limit auto-approve;
+  // larger ones land as 'pending' until an admin approves.
+  let limit = 5000;
+  try { const s = sqlite.prepare(`SELECT value FROM shop_settings WHERE key='expense_auto_approve_limit'`).get() as any; if (s?.value) limit = Number(s.value) || 5000; } catch {}
+  const amount = Number(body.amount) || 0;
+  const status = amount <= limit ? "approved" : "pending";
+  const info = sqlite.prepare(`INSERT INTO current_expenses (expense_header_id, amount, fields_data_json, proof_url, expense_date, branch, approval_status, approved_at, created_by, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+    .run(body.expense_header_id, amount, JSON.stringify(body.fields_data || {}), body.proof_url ?? null, body.expense_date, body.branch ?? null, status, status === "approved" ? nowIso() : null, by ?? null, nowIso());
   return sqlite.prepare(`SELECT * FROM current_expenses WHERE id = ?`).get(Number(info.lastInsertRowid));
+}
+export function approveCurrentExpense(id: number, by?: number) {
+  sqlite.prepare(`UPDATE current_expenses SET approval_status='approved', approved_by=?, approved_at=? WHERE id=?`).run(by ?? null, nowIso(), id);
+  return sqlite.prepare(`SELECT * FROM current_expenses WHERE id = ?`).get(id);
+}
+export function rejectCurrentExpense(id: number, by?: number) {
+  sqlite.prepare(`UPDATE current_expenses SET approval_status='rejected', approved_by=?, approved_at=? WHERE id=?`).run(by ?? null, nowIso(), id);
+  return sqlite.prepare(`SELECT * FROM current_expenses WHERE id = ?`).get(id);
 }
 
 // Person ledger
@@ -474,21 +622,41 @@ export function getPersonLedger(personId: number) {
 }
 
 // Employees (salary fields masked for finance role)
-export function listEmployees(maskSalary: boolean) {
-  const rows = sqlite.prepare(`SELECT * FROM employees ORDER BY active DESC, name ASC`).all() as any[];
+// R27.5 #8 — full master: role/branch/email/pan/bank_account/ifsc/gross_salary.
+// maskSalary blanks every pay-related figure so the finance role sees *** in the UI.
+function maskEmp(r: any) {
+  return { ...r, per_day_rate: null, monthly_salary: null, gross_salary: null };
+}
+export function listEmployees(maskSalary: boolean, search?: string) {
+  let rows: any[];
+  if (search && search.trim()) {
+    const q = `%${search.trim()}%`;
+    rows = sqlite.prepare(
+      `SELECT * FROM employees WHERE name LIKE ? OR contact LIKE ? OR email LIKE ? OR role LIKE ? OR branch LIKE ? ORDER BY active DESC, name ASC`,
+    ).all(q, q, q, q, q) as any[];
+  } else {
+    rows = sqlite.prepare(`SELECT * FROM employees ORDER BY active DESC, name ASC`).all() as any[];
+  }
   if (!maskSalary) return rows;
-  return rows.map((r) => ({ ...r, per_day_rate: null, monthly_salary: null }));
+  return rows.map(maskEmp);
 }
 export function getEmployee(id: number, maskSalary: boolean) {
   const r = sqlite.prepare(`SELECT * FROM employees WHERE id = ?`).get(id) as any;
   if (!r) return undefined;
-  return maskSalary ? { ...r, per_day_rate: null, monthly_salary: null } : r;
+  return maskSalary ? maskEmp(r) : r;
 }
 export function createEmployee(body: any) {
   const info = sqlite.prepare(
-    `INSERT INTO employees (name, contact, aadhar, image_url, per_day_rate, monthly_salary, retention_pct, joined_at, active, created_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?)`,
-  ).run(body.name, body.contact ?? null, body.aadhar ?? null, body.image_url ?? null, body.per_day_rate ?? null, body.monthly_salary ?? null, body.retention_pct ?? 10, body.joined_at ?? null, nowIso());
+    `INSERT INTO employees (name, contact, aadhar, image_url, role, branch, email, pan, bank_account, ifsc, gross_salary, working_days_default, per_day_rate, monthly_salary, retention_pct, joined_at, active, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?)`,
+  ).run(
+    body.name, body.contact ?? null, body.aadhar ?? null, body.image_url ?? null,
+    body.role ?? null, body.branch ?? null, body.email ?? null, body.pan ?? null,
+    body.bank_account ?? null, body.ifsc ?? null,
+    body.gross_salary ?? null, body.working_days_default ?? 26,
+    body.per_day_rate ?? null, body.monthly_salary ?? null, body.retention_pct ?? 10,
+    body.joined_at ?? null, nowIso(),
+  );
   return sqlite.prepare(`SELECT * FROM employees WHERE id = ?`).get(Number(info.lastInsertRowid));
 }
 export function updateEmployee(id: number, body: any, allowSalary: boolean) {
@@ -498,12 +666,20 @@ export function updateEmployee(id: number, body: any, allowSalary: boolean) {
   if (body.contact != null) set("contact", body.contact);
   if (body.aadhar != null) set("aadhar", body.aadhar);
   if (body.image_url != null) set("image_url", body.image_url);
+  if (body.role != null) set("role", body.role);
+  if (body.branch != null) set("branch", body.branch);
+  if (body.email != null) set("email", body.email);
+  if (body.pan != null) set("pan", body.pan);
+  if (body.bank_account != null) set("bank_account", body.bank_account);
+  if (body.ifsc != null) set("ifsc", body.ifsc);
+  if (body.working_days_default != null) set("working_days_default", body.working_days_default);
   if (body.retention_pct != null) set("retention_pct", body.retention_pct);
   if (body.joined_at != null) set("joined_at", body.joined_at);
   if (body.active != null) set("active", body.active ? 1 : 0);
   // Only admin may set salary numbers.
   if (allowSalary && body.per_day_rate != null) set("per_day_rate", body.per_day_rate);
   if (allowSalary && body.monthly_salary != null) set("monthly_salary", body.monthly_salary);
+  if (allowSalary && body.gross_salary != null) set("gross_salary", body.gross_salary);
   if (!fields.length) return getEmployee(id, false);
   params.push(id);
   sqlite.prepare(`UPDATE employees SET ${fields.join(", ")} WHERE id = ?`).run(...params);

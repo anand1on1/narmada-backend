@@ -50,7 +50,8 @@ export default function CheckoutPage() {
     })();
   }, [token]);
 
-  // Freight quote whenever cart changes.
+  // Freight quote whenever cart changes. R27.5 #3 — failure must be silent and
+  // fall back to ₹0 freight so the checkout never surfaces a raw "Failed to fetch".
   useEffect(() => {
     (async () => {
       if (items.length === 0) { setFreight(0); return; }
@@ -60,6 +61,7 @@ export default function CheckoutPage() {
           body: JSON.stringify({ items: items.map((it) => ({ part_number: it.partNumber, qty: it.qty || 1 })) }),
         });
         if (r.ok) { const j = await r.json(); setFreight(Number(j.freightInr) || 0); }
+        else setFreight(0);
       } catch { setFreight(0); }
     })();
   }, [items]);
@@ -81,21 +83,32 @@ export default function CheckoutPage() {
       if (selectedAddr === "new") {
         await shopFetch(token, "/api/shop/addresses", { method: "POST", body: JSON.stringify(form) }).catch(() => {});
       }
-      const r = await shopFetch(token, "/api/shop/orders", {
-        method: "POST",
-        body: JSON.stringify({
-          ship,
-          items: items.map((it) => ({
-            product_id: it.productId, part_number: it.partNumber, name: it.name,
-            image: it.image, unit_price: it.unitPriceInr, qty: it.qty || 1,
-          })),
-        }),
-      });
-      const j = await r.json();
-      if (!r.ok) throw new Error(j.error || "Order failed");
+      let r: Response;
+      try {
+        r = await shopFetch(token, "/api/shop/orders", {
+          method: "POST",
+          body: JSON.stringify({
+            ship,
+            items: items.map((it) => ({
+              product_id: it.productId, part_number: it.partNumber, name: it.name,
+              image: it.image, unit_price: it.unitPriceInr, qty: it.qty || 1,
+            })),
+          }),
+        });
+      } catch {
+        // R27.5 #3 — network/CORS failure surfaced as a friendly message instead of
+        // the raw browser "Failed to fetch" string the user reported on the screenshot.
+        throw new Error("We couldn't reach the server. Please check your connection and try again.");
+      }
+      let j: any = {};
+      try { j = await r.json(); } catch { j = {}; }
+      if (!r.ok) throw new Error(j.error || "Order failed. Please try again.");
       clearCart();
       navigate(`/order-confirmation/${j.id}`);
-    } catch (e: any) { setErr(e.message); } finally { setPlacing(false); }
+    } catch (e: any) {
+      const msg = String(e?.message || "");
+      setErr(/failed to fetch/i.test(msg) ? "We couldn't reach the server. Please check your connection and try again." : msg || "Something went wrong. Please try again.");
+    } finally { setPlacing(false); }
   };
 
   if (!ready) return <div className="max-w-4xl mx-auto px-4 py-20 text-center text-muted-foreground">Loading…</div>;

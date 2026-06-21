@@ -2503,3 +2503,97 @@ export function runR27_4Migrations() {
 
   console.log("[migrations] R27.4: complete");
 }
+
+// ============================================================================
+// R27.5 — user-testing bug-fix + feature round. Additive only. Each statement
+// wrapped in its own try/catch with [migrations] R27.5 markers. No drops/renames.
+// ============================================================================
+export function runR27_5Migrations() {
+  console.log("[migrations] R27.5: start");
+  const run = (desc: string, sql: string) => {
+    try { sqlite.exec(sql); console.log(`[migrations] R27.5: ${desc} ok`); }
+    catch (e: any) { console.error(`[migrations] R27.5: ${desc} skip (${e?.message || e})`); }
+  };
+  const addCol = (table: string, col: string, type: string) => {
+    try { sqlite.exec(`ALTER TABLE ${table} ADD COLUMN ${col} ${type};`); console.log(`[migrations] R27.5: ${table}.${col} added`); }
+    catch (e: any) { console.error(`[migrations] R27.5: ${table}.${col} skip (${e?.message || e})`); }
+  };
+
+  // #4 freight search — widen freight_charges with route/city/mode columns so the
+  // admin can search by destination/source/mode (not just part number). Additive.
+  addCol("freight_charges", "city", "TEXT");
+  addCol("freight_charges", "source", "TEXT");
+  addCol("freight_charges", "destination", "TEXT");
+  addCol("freight_charges", "mode", "TEXT");
+
+  // #5 store dashboard — normalized lowercase branch keys for case-insensitive
+  // matching between Delhi dispatch and Patna store queries.
+  addCol("branch_transfers", "to_branch_key", "TEXT");
+  addCol("branch_transfers", "from_branch_key", "TEXT");
+  run("backfill branch_transfers keys", `
+    UPDATE branch_transfers SET to_branch_key = LOWER(TRIM(to_branch)) WHERE to_branch_key IS NULL;
+    UPDATE branch_transfers SET from_branch_key = LOWER(TRIM(from_branch)) WHERE from_branch_key IS NULL;`);
+  addCol("branch_stock", "branch_key", "TEXT");
+  run("backfill branch_stock key", `
+    UPDATE branch_stock SET branch_key = LOWER(TRIM(branch)) WHERE branch_key IS NULL;`);
+
+  // #6 stock movements — append-only ledger of every +/- so the Stock page can show
+  // live per-branch numbers and trace procurement / transfer / order events.
+  run("stock_movements", `
+    CREATE TABLE IF NOT EXISTS stock_movements (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      branch TEXT NOT NULL,
+      branch_key TEXT,
+      product_id INTEGER,
+      part_number TEXT,
+      delta INTEGER NOT NULL,
+      reason TEXT NOT NULL,
+      reference_id INTEGER,
+      reference_table TEXT,
+      notes TEXT,
+      created_at TEXT DEFAULT CURRENT_TIMESTAMP
+    );`);
+
+  // #7 auto-product — make sure products has the part_number column the URL needs
+  // (older DBs may predate it). brand already exists.
+  addCol("products", "part_number", "TEXT");
+
+  // #8 accounts — full employee master fields.
+  addCol("employees", "role", "TEXT");
+  addCol("employees", "branch", "TEXT");
+  addCol("employees", "email", "TEXT");
+  addCol("employees", "pan", "TEXT");
+  addCol("employees", "bank_account", "TEXT");
+  addCol("employees", "ifsc", "TEXT");
+  addCol("employees", "gross_salary", "REAL");
+  addCol("employees", "working_days_default", "INTEGER DEFAULT 26");
+  // expense headers — GL code, budget, parent category.
+  addCol("expense_headers", "gl_code", "TEXT");
+  addCol("expense_headers", "budget", "REAL");
+  addCol("expense_headers", "parent_id", "INTEGER");
+  // cash — per-branch register with running balances.
+  addCol("cash_in_hand", "branch", "TEXT DEFAULT 'Delhi'");
+  addCol("cash_in_hand", "direction", "TEXT");
+  // current expenses — approval workflow + branch tag.
+  addCol("current_expenses", "branch", "TEXT");
+  addCol("current_expenses", "approval_status", "TEXT DEFAULT 'approved'");
+  addCol("current_expenses", "approved_by", "INTEGER");
+  addCol("current_expenses", "approved_at", "TEXT");
+  // daily attendance — one row per employee per day with a status.
+  run("attendance_daily", `
+    CREATE TABLE IF NOT EXISTS attendance_daily (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      employee_id INTEGER NOT NULL,
+      date TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'present',
+      notes TEXT,
+      marked_by INTEGER,
+      marked_at TEXT DEFAULT CURRENT_TIMESTAMP,
+      UNIQUE(employee_id, date)
+    );`);
+  // approval threshold setting (auto-approve under this amount).
+  run("seed expense_auto_approve_limit", `
+    INSERT OR IGNORE INTO shop_settings (key, value) VALUES ('expense_auto_approve_limit', '5000');`);
+
+  console.log("[migrations] R27.5: complete");
+}

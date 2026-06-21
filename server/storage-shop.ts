@@ -295,6 +295,30 @@ export function createShopOrder(input: ShopOrderInput) {
     insItem.run(orderId, r.productId || null, r.partNumber || null, r.name, r.image || null, r.unit, r.qty, r.total);
   }
   addStatusHistory(orderId, "placed", "Order placed by customer", "system");
+  // R27.5 #6 — customer order placed deducts stock at the fulfilling branch (Patna,
+  // the customer-facing warehouse). Inlined (not importing storage-r27) to avoid a
+  // module cycle. FIFO deduct from in-stock rows + append a stock_movements ledger row.
+  try {
+    for (const r of lineRows) {
+      const qty = Math.abs(Math.trunc(r.qty));
+      if (qty <= 0) continue;
+      let remaining = qty;
+      const rows = sqlite.prepare(
+        `SELECT id, qty FROM branch_stock WHERE LOWER(TRIM(branch)) = 'patna' AND status = 'in_stock'
+           AND (part_number = ? OR product_id = ?) AND qty > 0 ORDER BY id ASC`,
+      ).all(r.partNumber || null, r.productId || null) as any[];
+      for (const row of rows) {
+        if (remaining <= 0) break;
+        const take = Math.min(remaining, row.qty);
+        sqlite.prepare(`UPDATE branch_stock SET qty = qty - ? WHERE id = ?`).run(take, row.id);
+        remaining -= take;
+      }
+      sqlite.prepare(
+        `INSERT INTO stock_movements (branch, branch_key, product_id, part_number, delta, reason, reference_id, reference_table, notes, created_at)
+         VALUES ('Patna', 'patna', ?, ?, ?, 'customer_order', ?, 'shop_orders', ?, CURRENT_TIMESTAMP)`,
+      ).run(r.productId || null, r.partNumber || null, -qty, orderId, orderNumber);
+    }
+  } catch (e: any) { console.error("[R27.5 #6] stock deduction on order failed:", e?.message || e); }
   return getShopOrder(orderId);
 }
 
@@ -416,26 +440,41 @@ export function adminGetShopUser(id: number) {
 // ---- freight admin ----
 export function adminListFreight(opts: { q?: string; zeroOnly?: boolean; limit?: number; offset?: number }) {
   const conds: string[] = []; const params: any[] = [];
-  if (opts.q) { conds.push("(f.part_number LIKE ? OR p.name LIKE ?)"); const like = `%${opts.q}%`; params.push(like, like); }
+  // R27.5 #4 — search across part number, product name, AND the new route columns
+  // (city / source / destination / mode) so "patna" or "by road" matches freight rows.
+  if (opts.q) {
+    conds.push("(f.part_number LIKE ? OR p.name LIKE ? OR f.city LIKE ? OR f.source LIKE ? OR f.destination LIKE ? OR f.mode LIKE ?)");
+    const like = `%${opts.q}%`;
+    params.push(like, like, like, like, like, like);
+  }
   if (opts.zeroOnly) conds.push("f.freight_inr = 0");
   const where = conds.length ? `WHERE ${conds.join(" AND ")}` : "";
   const total = (sqlite.prepare(`SELECT COUNT(*) c FROM freight_charges f LEFT JOIN products p ON p.part_number = f.part_number ${where}`).get(...params) as any).c;
   const limit = Math.min(500, Math.max(1, opts.limit || 100));
   const offset = Math.max(0, opts.offset || 0);
   const rows = sqlite.prepare(
-    `SELECT f.id, f.part_number AS partNumber, f.freight_inr AS freightInr, f.updated_at AS updatedAt, p.name AS productName
+    `SELECT f.id, f.part_number AS partNumber, f.freight_inr AS freightInr, f.updated_at AS updatedAt,
+            f.city AS city, f.source AS source, f.destination AS destination, f.mode AS mode, p.name AS productName
      FROM freight_charges f LEFT JOIN products p ON p.part_number = f.part_number
      ${where} ORDER BY f.id DESC LIMIT ? OFFSET ?`
   ).all(...params, limit, offset);
   return { total, limit, offset, rows };
 }
 
-export function adminUpsertFreight(partNumber: string, freightInr: number) {
+export function adminUpsertFreight(partNumber: string, freightInr: number, route?: { city?: string; source?: string; destination?: string; mode?: string }) {
+  const r = route || {};
   sqlite.prepare(
-    `INSERT INTO freight_charges (part_number, freight_inr, updated_at) VALUES (?, ?, CURRENT_TIMESTAMP)
-     ON CONFLICT(part_number) DO UPDATE SET freight_inr = excluded.freight_inr, updated_at = CURRENT_TIMESTAMP`
-  ).run(partNumber, Number(freightInr) || 0);
-  return sqlite.prepare(`SELECT id, part_number AS partNumber, freight_inr AS freightInr FROM freight_charges WHERE part_number = ?`).get(partNumber);
+    `INSERT INTO freight_charges (part_number, freight_inr, city, source, destination, mode, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+     ON CONFLICT(part_number) DO UPDATE SET
+       freight_inr = excluded.freight_inr,
+       city = COALESCE(excluded.city, freight_charges.city),
+       source = COALESCE(excluded.source, freight_charges.source),
+       destination = COALESCE(excluded.destination, freight_charges.destination),
+       mode = COALESCE(excluded.mode, freight_charges.mode),
+       updated_at = CURRENT_TIMESTAMP`
+  ).run(partNumber, Number(freightInr) || 0, r.city ?? null, r.source ?? null, r.destination ?? null, r.mode ?? null);
+  return sqlite.prepare(`SELECT id, part_number AS partNumber, freight_inr AS freightInr, city, source, destination, mode FROM freight_charges WHERE part_number = ?`).get(partNumber);
 }
 
 export function adminBulkFreight(partNumbers: string[], freightInr: number) {

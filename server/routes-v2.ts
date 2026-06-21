@@ -5535,22 +5535,28 @@ function registerR8Routes(
         afterJson: JSON.stringify({ carrier, docketNumber, bundles, isInternalTransfer, ...result }),
       });
 
-      // R27.4 BUG-9 — Delhi→Patna inter-branch transfer must surface on the Store
-      // Incharge dashboard. The production dispatch path (this endpoint) previously
-      // created NO branch_transfers row, so internal transfers never appeared in the
-      // Store portal. Open one here (idempotent) + auto-create draft products.
-      if (isInternalTransfer) {
-        try {
-          const r27 = await import("./storage-r27");
-          const existingTransfer = (r27.listTransfers() as any[]).find((t) => t.po_id === poId && t.status === "in_transit");
-          if (!existingTransfer) {
-            r27.createBranchTransfer({ poId, notes: `Inter-branch transfer on Delhi dispatch${docketNumber ? ` (docket ${docketNumber})` : ""}` });
-            console.log(`[R27.4] branch transfer opened for PO ${poId} (internal transfer dispatch)`);
-          }
-          const ap = r27.autoCreateProductsForPo(poId);
-          console.log(`[R27.4] auto-product on internal-transfer dispatch PO ${poId}: created=${ap.created} skipped=${ap.skipped}`);
-        } catch (e: any) { console.error("[R27.4] internal-transfer hook failed:", e?.message || e); }
-      }
+      // R27.5 #5 — Delhi→Patna transfer must surface on the Store Incharge dashboard.
+      // R27.4 only opened a branch_transfers row when the dispatcher explicitly ticked
+      // "Inter-Branch Transfer", so a normal Delhi dispatch destined for Patna never
+      // appeared in the Store portal (the bug Piyush reported: PO dispatched from Delhi,
+      // store stayed empty). We now open the transfer row on EVERY Delhi dispatch
+      // (idempotent, keyed by po_id + in_transit) so the store always sees incoming
+      // consignments to receive. Branch keys are written lowercase for case-safe queries.
+      try {
+        const r27 = await import("./storage-r27");
+        const existingTransfer = (r27.listTransfers() as any[]).find((t) => t.po_id === poId && t.status === "in_transit");
+        if (!existingTransfer) {
+          r27.createBranchTransfer({
+            poId,
+            notes: isInternalTransfer
+              ? `Inter-branch transfer on Delhi dispatch${docketNumber ? ` (docket ${docketNumber})` : ""}`
+              : `Delhi dispatch${carrier ? ` via ${carrier}` : ""}${docketNumber ? ` (docket ${docketNumber})` : ""}`,
+          });
+          console.log(`[R27.5] branch transfer opened for PO ${poId} (Delhi dispatch, internal=${isInternalTransfer})`);
+        }
+        const ap = r27.autoCreateProductsForPo(poId);
+        console.log(`[R27.5] auto-product on Delhi dispatch PO ${poId}: created=${ap.created} skipped=${ap.skipped}`);
+      } catch (e: any) { console.error("[R27.5] Delhi dispatch transfer hook failed:", e?.message || e); }
 
       // R26.5 H/E3 — PO shipped: notify the customer's sales rep, and email the customer if present.
       try {
@@ -7241,6 +7247,26 @@ function registerR8Routes(
       }));
     } catch (e: any) { res.status(500).json({ error: e.message }); }
   });
+  // R27.5 #6 — live aggregated stock (net qty per part per branch) + movement ledger.
+  app.get("/api/admin/stock/summary", requireAuth, async (req, res) => {
+    try {
+      const s = await r27();
+      res.json(s.listBranchStockSummary({
+        branch: (req.query.branch as string) || undefined,
+        q: (req.query.q as string) || undefined,
+      }));
+    } catch (e: any) { res.status(500).json({ error: e.message }); }
+  });
+  app.get("/api/admin/stock/movements", requireAuth, async (req, res) => {
+    try {
+      const s = await r27();
+      res.json(s.listStockMovements({
+        branch: (req.query.branch as string) || undefined,
+        partNumber: (req.query.part_number as string) || undefined,
+        limit: req.query.limit ? parseInt(req.query.limit as string, 10) : undefined,
+      }));
+    } catch (e: any) { res.status(500).json({ error: e.message }); }
+  });
 
   // ---- R27.2 Dispatch incharge: ready stock + handover ----
   app.get("/api/dispatch/ready", requireDispatch, async (_req, res) => {
@@ -7307,11 +7333,11 @@ function registerR8Routes(
   // Expense headers
   app.get("/api/finance/expense-headers", acctAuth, async (_req, res) => { const s = await r27(); res.json(s.listExpenseHeaders()); });
   app.post("/api/finance/expense-headers", acctAuth, async (req, res) => {
-    try { if (!req.body?.name) return res.status(400).json({ error: "name required" }); const s = await r27(); res.json(s.createExpenseHeader(String(req.body.name), req.body.fields || [])); }
+    try { if (!req.body?.name) return res.status(400).json({ error: "name required" }); const s = await r27(); res.json(s.createExpenseHeader(String(req.body.name), req.body.fields || [], { gl_code: req.body.gl_code, budget: req.body.budget, parent_id: req.body.parent_id })); }
     catch (e: any) { res.status(400).json({ error: e.message }); }
   });
   app.put("/api/finance/expense-headers/:id", acctAuth, async (req, res) => {
-    try { const s = await r27(); res.json(s.updateExpenseHeader(parseInt(req.params.id as string, 10), req.body?.name, req.body?.fields)); }
+    try { const s = await r27(); res.json(s.updateExpenseHeader(parseInt(req.params.id as string, 10), req.body?.name, req.body?.fields, { gl_code: req.body?.gl_code, budget: req.body?.budget, parent_id: req.body?.parent_id })); }
     catch (e: any) { res.status(400).json({ error: e.message }); }
   });
   app.delete("/api/finance/expense-headers/:id", acctAuth, async (req, res) => {
@@ -7320,7 +7346,7 @@ function registerR8Routes(
   });
 
   // Cash in hand
-  app.get("/api/finance/cash", acctAuth, async (_req, res) => { const s = await r27(); res.json(s.listCash()); });
+  app.get("/api/finance/cash", acctAuth, async (req, res) => { const s = await r27(); res.json(s.listCash(req.query.branch as string | undefined)); });
   app.post("/api/finance/cash", acctAuth, async (req: any, res) => {
     try { if (!req.body?.source) return res.status(400).json({ error: "source required" }); const s = await r27(); res.json(s.createCash(req.body, req.teamUser?.id)); }
     catch (e: any) { res.status(400).json({ error: e.message }); }
@@ -7343,10 +7369,19 @@ function registerR8Routes(
   // Current expenses
   app.get("/api/finance/current-expenses", acctAuth, async (req, res) => {
     const s = await r27();
-    res.json(s.listCurrentExpenses({ from: req.query.from as string | undefined, to: req.query.to as string | undefined, headerId: req.query.header_id ? parseInt(req.query.header_id as string, 10) : undefined }));
+    res.json(s.listCurrentExpenses({ from: req.query.from as string | undefined, to: req.query.to as string | undefined, headerId: req.query.header_id ? parseInt(req.query.header_id as string, 10) : undefined, branch: req.query.branch as string | undefined, status: req.query.status as string | undefined }));
   });
   app.post("/api/finance/current-expenses", acctAuth, async (req: any, res) => {
     try { if (!req.body?.expense_header_id || !req.body?.expense_date) return res.status(400).json({ error: "expense_header_id and expense_date required" }); const s = await r27(); res.json(s.createCurrentExpense(req.body, req.teamUser?.id)); }
+    catch (e: any) { res.status(400).json({ error: e.message }); }
+  });
+  // R27.5 #8 — approve / reject pending current expenses (admin acct only)
+  app.post("/api/finance/current-expenses/:id/approve", acctAuth, async (req: any, res) => {
+    try { if (!req.isAdminAcct) return res.status(403).json({ error: "Admin role required to approve" }); const s = await r27(); res.json(s.approveCurrentExpense(parseInt(req.params.id as string, 10), req.teamUser?.id)); }
+    catch (e: any) { res.status(400).json({ error: e.message }); }
+  });
+  app.post("/api/finance/current-expenses/:id/reject", acctAuth, async (req: any, res) => {
+    try { if (!req.isAdminAcct) return res.status(403).json({ error: "Admin role required to reject" }); const s = await r27(); res.json(s.rejectCurrentExpense(parseInt(req.params.id as string, 10), req.teamUser?.id)); }
     catch (e: any) { res.status(400).json({ error: e.message }); }
   });
 
@@ -7357,7 +7392,7 @@ function registerR8Routes(
 
   // Employees (salary masked unless admin)
   app.get("/api/finance/employees", acctAuth, async (req: any, res) => {
-    const s = await r27(); res.json(s.listEmployees(!req.isAdminAcct));
+    const s = await r27(); res.json(s.listEmployees(!req.isAdminAcct, req.query.q as string | undefined));
   });
   app.get("/api/finance/employees/:id", acctAuth, async (req: any, res) => {
     const s = await r27(); const e = s.getEmployee(parseInt(req.params.id as string, 10), !req.isAdminAcct); if (!e) return res.status(404).json({ error: "Not found" }); res.json(e);
@@ -8022,8 +8057,12 @@ function registerR8Routes(
     }));
   });
   app.patch("/api/admin/freight-charges/:partNumber", requireAuth, (req, res) => {
-    const { freight_inr, freightInr } = req.body || {};
-    res.json(shop.adminUpsertFreight(decodeURIComponent(req.params.partNumber), Number(freight_inr ?? freightInr ?? 0)));
+    const { freight_inr, freightInr, city, source, destination, mode } = req.body || {};
+    res.json(shop.adminUpsertFreight(
+      decodeURIComponent(req.params.partNumber),
+      Number(freight_inr ?? freightInr ?? 0),
+      { city, source, destination, mode },
+    ));
   });
   app.post("/api/admin/freight-charges/bulk", requireAuth, (req, res) => {
     const { part_numbers, partNumbers, freight_inr, freightInr } = req.body || {};

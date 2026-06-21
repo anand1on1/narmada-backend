@@ -114,7 +114,12 @@ export default function ProductDetailPage() {
 
         <div>
           <div className="flex flex-wrap items-center gap-2 mb-3">
-            {brandInfo && <Badge style={{ backgroundColor: brandInfo.color }} className="text-[hsl(220_60%_12%)] hover:opacity-90" data-testid="badge-brand">{brandInfo.name}</Badge>}
+            {/* R27.5 #7 — always show the brand. Known brands keep their colored badge;
+                auto-products with a freeform / seller brand (not in the BRANDS map) now
+                render an outline badge instead of being hidden entirely. */}
+            {brandInfo
+              ? <Badge style={{ backgroundColor: brandInfo.color }} className="text-[hsl(220_60%_12%)] hover:opacity-90" data-testid="badge-brand">{brandInfo.name}</Badge>
+              : product.brand && <Badge variant="outline" data-testid="badge-brand">{product.brand}</Badge>}
             {product.model && <Badge variant="outline">{product.model}</Badge>}
             <Badge variant="outline">{product.category}</Badge>
             {(product.stockQty ?? 0) > 0 ? (

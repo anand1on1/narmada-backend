@@ -52,10 +52,13 @@ export function SiteLayout({ children }: { children: React.ReactNode }) {
 
       {/* Main nav */}
       <header className={`sticky top-0 z-40 transition-all border-b ${scrolled ? "bg-[hsl(210_30%_96%)]/92 backdrop-blur-xl border-[hsl(220_45%_20%)]/10 shadow-sm" : "bg-[hsl(210_30%_96%)]/75 backdrop-blur-md border-[hsl(220_45%_20%)]/8"}`}>
-        <div className="max-w-7xl mx-auto px-4 sm:px-6 h-[68px] flex items-center justify-between gap-4">
-          <Link href="/"><a className="flex items-center" data-testid="link-home-logo"><Logo /></a></Link>
+        <div className="max-w-7xl mx-auto px-4 sm:px-6 h-[68px] flex items-center justify-between gap-3">
+          {/* R27.5 #2 — logo constrained with shrink-0 + max-width so its wordmark can
+              no longer bleed into / overlap the nav. Nav lives in its own min-w-0
+              flex container and collapses to a hamburger below xl (1280px). */}
+          <Link href="/"><a className="flex items-center shrink-0 max-w-[230px] overflow-hidden" data-testid="link-home-logo"><Logo /></a></Link>
 
-          <nav className="hidden lg:flex items-center gap-0.5">
+          <nav className="hidden xl:flex items-center gap-0.5 min-w-0 flex-1 justify-center">
             {NAV.slice(0, 2).map((n) => <NavLink key={n.to} {...n} />)}
             <DropdownMenu>
               <DropdownMenuTrigger className="px-2.5 py-2 text-[13px] font-medium rounded-md text-[hsl(220_60%_12%)]/82 hover:text-[hsl(220_60%_12%)] hover:bg-[hsl(220_45%_20%)]/5 inline-flex items-center gap-1 transition-colors whitespace-nowrap" data-testid="menu-brands">
@@ -95,9 +98,9 @@ export function SiteLayout({ children }: { children: React.ReactNode }) {
             {NAV.slice(2).map((n) => <NavLink key={n.to} {...n} />)}
           </nav>
 
-          <div className="hidden md:flex items-center gap-2">
+          <div className="hidden md:flex items-center gap-2 shrink-0">
             <HeaderActions />
-            <Button asChild size="sm" className="bg-[hsl(212_95%_55%)] hover:bg-[hsl(212_95%_50%)] text-[hsl(220_60%_12%)] font-semibold rounded-md shadow-none" data-testid="btn-quote">
+            <Button asChild size="sm" className="hidden xl:inline-flex bg-[hsl(212_95%_55%)] hover:bg-[hsl(212_95%_50%)] text-[hsl(220_60%_12%)] font-semibold rounded-md shadow-none" data-testid="btn-quote">
               <Link href="/contact">Request a Quote</Link>
             </Button>
           </div>
@@ -110,7 +113,7 @@ export function SiteLayout({ children }: { children: React.ReactNode }) {
           {/* Mobile menu */}
           <Sheet open={open} onOpenChange={setOpen}>
             <SheetTrigger asChild>
-              <Button variant="ghost" size="icon" className="lg:hidden text-[hsl(220_60%_12%)]" data-testid="btn-mobile-menu"><Menu className="h-5 w-5" /></Button>
+              <Button variant="ghost" size="icon" className="xl:hidden text-[hsl(220_60%_12%)] shrink-0" data-testid="btn-mobile-menu"><Menu className="h-5 w-5" /></Button>
             </SheetTrigger>
             <SheetContent side="right" className="w-80 bg-[hsl(210_30%_96%)] text-[hsl(220_60%_12%)] border-[hsl(220_45%_20%)]/10">
               <div className="mt-6 flex flex-col gap-1">
@@ -197,33 +200,30 @@ function CurrencyPicker() {
     loadFxRate().then(() => setRate(getUsdInr()));
     return subscribeCurrency(() => { setCur(getCurrency()); setRate(getUsdInr()); });
   }, []);
-  // R27.4 BUG-3 — redesigned as a prominent solid pill (flag + code + live rate +
-  // chevron), Amazon/Shopify style. Solid primary background, larger touch target,
-  // clear hover. The rate is always visible so shoppers know the conversion.
+  // R27.5 #1 — reverted the oversized R27.4 pill back to a compact, unobtrusive
+  // inline dropdown (flag + code + chevron, ~64px). Visual weight now matches the
+  // cart icon. The live rate moved into the dropdown menu rather than inline.
   const flag = cur === "USD" ? "🇺🇸" : "🇮🇳";
   const code = cur === "USD" ? "USD" : "INR";
-  const rateLabel = cur === "USD" ? `1 = ₹${rate.toFixed(2)}` : "₹ Indian Rupee";
   return (
     <DropdownMenu>
       <DropdownMenuTrigger
-        className="inline-flex items-center gap-2 h-10 pl-2.5 pr-2 rounded-full text-[13px] font-bold bg-[hsl(212_95%_50%)] text-white shadow-sm hover:bg-[hsl(212_95%_44%)] active:scale-[0.98] transition-all"
+        className="inline-flex items-center gap-1 h-9 px-2 rounded-md text-[13px] font-medium text-[hsl(220_60%_12%)]/82 hover:text-[hsl(220_60%_12%)] hover:bg-[hsl(220_45%_20%)]/5 transition-colors"
         data-testid="currency-picker"
         aria-label="Select currency"
       >
-        <span className="text-base leading-none" aria-hidden>{flag}</span>
-        <span className="flex flex-col items-start leading-tight">
-          <span className="text-[13px] font-extrabold tracking-wide">{code}</span>
-          <span className="text-[10px] font-medium text-white/80 -mt-0.5">{rateLabel}</span>
-        </span>
-        <ChevronDown className="h-4 w-4 ml-0.5 opacity-90" />
+        <span className="text-sm leading-none" aria-hidden>{flag}</span>
+        <span className="font-semibold tracking-wide">{code}</span>
+        <ChevronDown className="h-3.5 w-3.5 opacity-70" />
       </DropdownMenuTrigger>
-      <DropdownMenuContent align="end" className="bg-white border-[hsl(220_45%_20%)]/10 text-[hsl(220_60%_12%)] min-w-[180px]">
+      <DropdownMenuContent align="end" className="bg-white border-[hsl(220_45%_20%)]/10 text-[hsl(220_60%_12%)] min-w-[200px]">
+        <div className="px-2 py-1.5 text-[10px] font-mono uppercase tracking-wider text-[hsl(220_60%_12%)]/45">Live rate · 1 USD = ₹{rate.toFixed(2)}</div>
         <DropdownMenuItem onClick={() => setCurrency("INR")} data-testid="currency-inr" className="font-medium gap-2">
           <span aria-hidden>🇮🇳</span> ₹ INR — Indian Rupee
           {cur === "INR" && <Check className="h-4 w-4 ml-auto text-[hsl(212_95%_50%)]" />}
         </DropdownMenuItem>
         <DropdownMenuItem onClick={() => setCurrency("USD")} data-testid="currency-usd" className="font-medium gap-2">
-          <span aria-hidden>🇺🇸</span> $ USD — US Dollar <span className="text-xs text-muted-foreground">(₹{rate.toFixed(2)})</span>
+          <span aria-hidden>🇺🇸</span> $ USD — US Dollar
           {cur === "USD" && <Check className="h-4 w-4 ml-auto text-[hsl(212_95%_50%)]" />}
         </DropdownMenuItem>
       </DropdownMenuContent>

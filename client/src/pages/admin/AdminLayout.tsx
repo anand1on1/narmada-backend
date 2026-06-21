@@ -9,7 +9,7 @@ import {
   UserSquare, Wallet, CreditCard, FileQuestion, FileSpreadsheet, ShoppingCart, Landmark,
   Building2, UserCog, ScrollText, ClipboardList, Bell,
   Factory, Search, Target, Megaphone, CheckSquare, Sparkles, Facebook, History,
-  Gauge, Radar, Link2, Bug, ShoppingBag, Boxes,
+  Gauge, Radar, Link2, Bug, ShoppingBag, Boxes, ChevronDown, ChevronRight,
 } from "lucide-react";
 
 // Session A V2: 4-role sidebar matrix.
@@ -56,6 +56,17 @@ export function AdminLayout({ children, title }: { children: ReactNode; title: s
   const { token, username, role, displayName, clear, ready } = useAdminAuth();
   const [location, navigate] = useLocation();
   const [unreadChats, setUnreadChats] = useState(0);
+  // R27.5 #9 — sidebar search + collapsible sections with localStorage-persisted state.
+  const [navSearch, setNavSearch] = useState("");
+  const [expanded, setExpanded] = useState<Record<string, boolean>>(() => {
+    try { const s = localStorage.getItem("adminNavExpanded"); if (s) return JSON.parse(s); } catch { /* ignore */ }
+    return { Overview: true, Sales: true };
+  });
+  const toggleGroup = (g: string) => setExpanded((prev) => {
+    const next = { ...prev, [g]: !prev[g] };
+    try { localStorage.setItem("adminNavExpanded", JSON.stringify(next)); } catch { /* ignore */ }
+    return next;
+  });
 
   useEffect(() => {
     // Only redirect once auth state is hydrated, otherwise we kick the user out during refresh
@@ -89,59 +100,67 @@ export function AdminLayout({ children, title }: { children: ReactNode; title: s
   }
   if (!token) return null;
 
+  // R27.5 #9 — each item now carries a `group` so the sidebar can render
+  // collapsible sections. Order within a group follows the array order.
   const allItems = [
-    { href: "/admin/command-center", label: "Command Center", icon: Gauge },
-    { href: "/admin/ai-bar", label: "AI Bar", icon: Sparkles },
-    { href: "/admin/dashboard", label: "Dashboard", icon: LayoutDashboard },
-    { href: "/admin/chats", label: "Chats", icon: MessageSquare, badge: unreadChats },
-    { href: "/admin/customers", label: "Customers", icon: UserSquare },
-    { href: "/admin/ledger", label: "Ledger", icon: Wallet },
-    { href: "/admin/payments", label: "Payments", icon: CreditCard },
-    { href: "/admin/rfqs", label: "RFQs", icon: FileQuestion },
-    { href: "/admin/quotes", label: "Quotes", icon: FileSpreadsheet },
-    // R27.1a — Web Orders moved up to sit between Quotes and Purchase Orders.
-    { href: "/admin/orders", label: "Web Orders", icon: ShoppingBag },
-    { href: "/admin/parts", label: "Parts", icon: Package },
-    { href: "/admin/purchase-orders", label: "Purchase Orders", icon: ShoppingCart },
-    { href: "/admin/purchase-history", label: "Purchase History", icon: History },
-    { href: "/admin/stock", label: "Stock", icon: Boxes },
-    { href: "/admin/operations", label: "Operations", icon: ClipboardList },
-    { href: "/admin/web-customers", label: "Web Customers", icon: UserSquare },
-    { href: "/admin/freight", label: "Freight Charges", icon: Truck },
-    { href: "/admin/bank", label: "Bank Accounts", icon: Landmark },
-    { href: "/admin/companies", label: "Companies", icon: Building2 },
-    { href: "/admin/vendors", label: "Vendors", icon: Factory },
-    { href: "/admin/vendor-ledger", label: "Vendor Ledger", icon: Wallet },
-    // R26.6a (6) — Vendor Inbox unlinked from the sidebar (page + endpoints preserved,
-    // still reachable at /#/admin/vendor-inbox). Removed nav item only.
-    { href: "/admin/market-radar", label: "Market Radar", icon: Radar },
-    { href: "/admin/leads", label: "Leads", icon: Target },
-    { href: "/admin/leads-legacy", label: "Leads (Legacy)", icon: Target },
-    { href: "/admin/ai-ledger", label: "AI Ledger", icon: Sparkles },
-    { href: "/admin/targets", label: "Targets", icon: Target },
-    { href: "/admin/announcements", label: "Announcements", icon: Megaphone },
-    { href: "/admin/tasks", label: "Tasks", icon: CheckSquare },
-    { href: "/admin/tasks-legacy", label: "Tasks (Legacy)", icon: CheckSquare },
-    { href: "/admin/users", label: "Create Users", icon: UserCog },
-    { href: "/admin/ads-meta", label: "Meta Ads", icon: Facebook },
-    { href: "/admin/ads-google", label: "Google Ads", icon: Search },
-    { href: "/admin/marketing/campaigns", label: "Marketing", icon: Megaphone },
-    { href: "/admin/integrations", label: "Integrations", icon: Link2 },
-    { href: "/admin/data-team", label: "Data Team", icon: UserCog },
-    { href: "/admin/account-requests", label: "Account Requests", icon: ClipboardList },
-    { href: "/admin/audit-logs", label: "Audit Log", icon: ScrollText },
-    { href: "/admin/notification-log", label: "Notification Log", icon: Bell },
-    { href: "/admin/products", label: "Products", icon: Package },
-    { href: "/admin/blog", label: "Blog", icon: FileText },
-    { href: "/admin/price-lists", label: "Price Lists", icon: Tag },
-    { href: "/admin/consignments", label: "Consignments", icon: Truck },
-    { href: "/admin/contacts", label: "Enquiries", icon: MessageSquare },
-    { href: "/admin/sitemap", label: "Sitemap & SEO", icon: Map },
-    { href: "/admin/team", label: "Team", icon: Users },
-    { href: "/admin/settings", label: "Settings", icon: Settings },
-    // R26.6i — Diagnostics
-    { href: "/admin/webhook-events", label: "Webhook Events", icon: Bug },
+    { href: "/admin/command-center", label: "Command Center", icon: Gauge, group: "Overview" },
+    { href: "/admin/ai-bar", label: "AI Bar", icon: Sparkles, group: "Overview" },
+    { href: "/admin/dashboard", label: "Dashboard", icon: LayoutDashboard, group: "Overview" },
+
+    { href: "/admin/customers", label: "Customers", icon: UserSquare, group: "Sales" },
+    { href: "/admin/leads", label: "Leads", icon: Target, group: "Sales" },
+    { href: "/admin/leads-legacy", label: "Leads (Legacy)", icon: Target, group: "Sales" },
+    { href: "/admin/rfqs", label: "RFQs", icon: FileQuestion, group: "Sales" },
+    { href: "/admin/quotes", label: "Quotes", icon: FileSpreadsheet, group: "Sales" },
+    { href: "/admin/targets", label: "Targets", icon: Target, group: "Sales" },
+    { href: "/admin/market-radar", label: "Market Radar", icon: Radar, group: "Sales" },
+
+    { href: "/admin/parts", label: "Parts", icon: Package, group: "Procurement" },
+    { href: "/admin/purchase-orders", label: "Purchase Orders", icon: ShoppingCart, group: "Procurement" },
+    { href: "/admin/purchase-history", label: "Purchase History", icon: History, group: "Procurement" },
+    { href: "/admin/vendors", label: "Vendors", icon: Factory, group: "Procurement" },
+    { href: "/admin/vendor-ledger", label: "Vendor Ledger", icon: Wallet, group: "Procurement" },
+
+    { href: "/admin/stock", label: "Stock", icon: Boxes, group: "Inventory" },
+    { href: "/admin/products", label: "Products", icon: Package, group: "Inventory" },
+    { href: "/admin/price-lists", label: "Price Lists", icon: Tag, group: "Inventory" },
+
+    { href: "/admin/consignments", label: "Consignments", icon: Truck, group: "Logistics" },
+    { href: "/admin/operations", label: "Operations", icon: ClipboardList, group: "Logistics" },
+    { href: "/admin/freight", label: "Freight Charges", icon: Truck, group: "Logistics" },
+
+    { href: "/admin/orders", label: "Web Orders", icon: ShoppingBag, group: "Web Shop" },
+    { href: "/admin/web-customers", label: "Web Customers", icon: UserSquare, group: "Web Shop" },
+    { href: "/admin/chats", label: "Chats", icon: MessageSquare, badge: unreadChats, group: "Web Shop" },
+    { href: "/admin/contacts", label: "Enquiries", icon: MessageSquare, group: "Web Shop" },
+    { href: "/admin/blog", label: "Blog", icon: FileText, group: "Web Shop" },
+    { href: "/admin/sitemap", label: "Sitemap & SEO", icon: Map, group: "Web Shop" },
+
+    { href: "/admin/ledger", label: "Ledger", icon: Wallet, group: "Finance" },
+    { href: "/admin/payments", label: "Payments", icon: CreditCard, group: "Finance" },
+    { href: "/admin/bank", label: "Bank Accounts", icon: Landmark, group: "Finance" },
+    { href: "/admin/companies", label: "Companies", icon: Building2, group: "Finance" },
+
+    { href: "/admin/team", label: "Team", icon: Users, group: "People" },
+    { href: "/admin/users", label: "Create Users", icon: UserCog, group: "People" },
+    { href: "/admin/tasks", label: "Tasks", icon: CheckSquare, group: "People" },
+    { href: "/admin/tasks-legacy", label: "Tasks (Legacy)", icon: CheckSquare, group: "People" },
+    { href: "/admin/announcements", label: "Announcements", icon: Megaphone, group: "People" },
+    { href: "/admin/data-team", label: "Data Team", icon: UserCog, group: "People" },
+
+    { href: "/admin/marketing/campaigns", label: "Marketing", icon: Megaphone, group: "Marketing" },
+    { href: "/admin/ads-meta", label: "Meta Ads", icon: Facebook, group: "Marketing" },
+    { href: "/admin/ads-google", label: "Google Ads", icon: Search, group: "Marketing" },
+    { href: "/admin/ai-ledger", label: "AI Ledger", icon: Sparkles, group: "Marketing" },
+
+    { href: "/admin/settings", label: "Settings", icon: Settings, group: "System" },
+    { href: "/admin/integrations", label: "Integrations", icon: Link2, group: "System" },
+    { href: "/admin/account-requests", label: "Account Requests", icon: ClipboardList, group: "System" },
+    { href: "/admin/audit-logs", label: "Audit Log", icon: ScrollText, group: "System" },
+    { href: "/admin/notification-log", label: "Notification Log", icon: Bell, group: "System" },
+    { href: "/admin/webhook-events", label: "Webhook Events", icon: Bug, group: "System" },
   ];
+  const GROUP_ORDER = ["Overview", "Sales", "Procurement", "Inventory", "Logistics", "Web Shop", "Finance", "People", "Marketing", "System"];
 
   // Default to admin if role is somehow missing (legacy sessions)
   const effectiveRole: AdminRole = role || "admin";
@@ -157,36 +176,78 @@ export function AdminLayout({ children, title }: { children: ReactNode; title: s
           <div className="mt-2 text-[10px] uppercase tracking-widest text-indigo-600 font-bold">Admin Panel</div>
         </div>
 
-        <nav className="flex-1 p-3 space-y-1 overflow-y-auto">
-          {navItems.map((n) => {
-            const active = location.startsWith(n.href);
-            return (
-              <Link
-                key={n.href}
-                href={n.href}
-                className={
-                  "group flex items-center gap-3 px-4 py-2.5 rounded-xl text-sm transition " +
-                  (active
-                    ? "bg-indigo-50 text-indigo-700 font-semibold"
-                    : "text-slate-600 font-medium hover:bg-slate-100 hover:text-slate-900")
-                }
-                data-testid={`link-admin-${n.label.toLowerCase()}`}
-              >
-                <span className={
-                  "w-8 h-8 rounded-lg flex items-center justify-center flex-shrink-0 transition " +
-                  (active ? "bg-indigo-100 text-indigo-700" : "bg-slate-100 text-slate-500 group-hover:bg-indigo-100 group-hover:text-indigo-600")
-                }>
-                  <n.icon className="w-4 h-4" />
-                </span>
-                <span className="flex-1">{n.label}</span>
-                {"badge" in n && (n as any).badge > 0 && (
-                  <span className="bg-rose-500 text-white text-[10px] font-bold px-1.5 py-0.5 rounded-full" data-testid="badge-unread-chats">
-                    {(n as any).badge}
+        <div className="p-3 pb-1">
+          <div className="relative">
+            <Search className="w-3.5 h-3.5 absolute left-2.5 top-1/2 -translate-y-1/2 text-slate-400" />
+            <input
+              value={navSearch}
+              onChange={(e) => setNavSearch(e.target.value)}
+              placeholder="Search menu…"
+              className="w-full pl-8 pr-3 py-1.5 rounded-lg border border-slate-200 bg-slate-50 text-sm focus:outline-none focus:ring-1 focus:ring-indigo-300"
+              data-testid="input-nav-search"
+            />
+          </div>
+        </div>
+
+        <nav className="flex-1 p-3 pt-1 space-y-1 overflow-y-auto">
+          {(() => {
+            const q = navSearch.trim().toLowerCase();
+            const renderItem = (n: any) => {
+              const active = location.startsWith(n.href);
+              return (
+                <Link
+                  key={n.href}
+                  href={n.href}
+                  className={
+                    "group flex items-center gap-3 px-3 py-2 rounded-xl text-sm transition " +
+                    (active
+                      ? "bg-indigo-50 text-indigo-700 font-semibold"
+                      : "text-slate-600 font-medium hover:bg-slate-100 hover:text-slate-900")
+                  }
+                  data-testid={`link-admin-${n.label.toLowerCase()}`}
+                >
+                  <span className={
+                    "w-7 h-7 rounded-lg flex items-center justify-center flex-shrink-0 transition " +
+                    (active ? "bg-indigo-100 text-indigo-700" : "bg-slate-100 text-slate-500 group-hover:bg-indigo-100 group-hover:text-indigo-600")
+                  }>
+                    <n.icon className="w-4 h-4" />
                   </span>
-                )}
-              </Link>
-            );
-          })}
+                  <span className="flex-1">{n.label}</span>
+                  {"badge" in n && (n as any).badge > 0 && (
+                    <span className="bg-rose-500 text-white text-[10px] font-bold px-1.5 py-0.5 rounded-full" data-testid="badge-unread-chats">
+                      {(n as any).badge}
+                    </span>
+                  )}
+                </Link>
+              );
+            };
+
+            // When searching, flatten matches (ignore collapse state) so nothing hides.
+            if (q) {
+              const matches = navItems.filter((n) => n.label.toLowerCase().includes(q));
+              if (matches.length === 0) return <div className="px-3 py-6 text-center text-xs text-slate-400">No menu items match.</div>;
+              return matches.map(renderItem);
+            }
+
+            return GROUP_ORDER.map((g) => {
+              const items = navItems.filter((n) => n.group === g);
+              if (items.length === 0) return null;
+              const isOpen = expanded[g] ?? false;
+              return (
+                <div key={g}>
+                  <button
+                    onClick={() => toggleGroup(g)}
+                    className="w-full flex items-center gap-2 px-3 py-2 text-[11px] uppercase tracking-wider font-bold text-slate-400 hover:text-slate-600 transition"
+                    data-testid={`nav-group-${g.toLowerCase().replace(/\s+/g, "-")}`}
+                  >
+                    {isOpen ? <ChevronDown className="w-3.5 h-3.5" /> : <ChevronRight className="w-3.5 h-3.5" />}
+                    <span className="flex-1 text-left">{g}</span>
+                  </button>
+                  {isOpen && <div className="space-y-0.5 mb-1">{items.map(renderItem)}</div>}
+                </div>
+              );
+            });
+          })()}
         </nav>
 
         <div className="p-3 border-t border-slate-200 space-y-1">

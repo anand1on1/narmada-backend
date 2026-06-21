@@ -3,10 +3,13 @@ import RolePortalShell from "./RolePortalShell";
 import { FinanceAuth } from "@/lib/role-auth";
 import { Calculator } from "lucide-react";
 
-type Tab = "cash" | "headers" | "current" | "advances" | "employees" | "attendance" | "salary";
+type Tab = "cash" | "headers" | "current" | "advances" | "employees" | "ledger" | "attendance" | "salary";
+
+const BRANCHES = ["Delhi", "Patna"];
 
 // R27.4 — extracted body so the Finance portal landing page (FinanceDashboard)
 // can render the full accounts dashboard, not just a placeholder.
+// R27.5 #8 — fuller field sets per tab + a Person Ledger tab.
 export function AccountsBody() {
   const { token, user } = FinanceAuth.useAuth();
   const isAdmin = user?.role === "admin";
@@ -14,15 +17,16 @@ export function AccountsBody() {
   return (
     <>
       <div className="flex flex-wrap gap-2 mb-5">
-        {([["cash", "Cash in Hand"], ["headers", "Expense Headers"], ["current", "Current Expenses"], ["advances", "Advances"], ["employees", "Employees"], ["attendance", "Attendance"], ["salary", "Salary"]] as [Tab, string][]).map(([k, label]) => (
+        {([["cash", "Cash in Hand"], ["headers", "Expense Headers"], ["current", "Current Expenses"], ["advances", "Advances"], ["employees", "Employees"], ["ledger", "Person Ledger"], ["attendance", "Attendance"], ["salary", "Salary"]] as [Tab, string][]).map(([k, label]) => (
           <button key={k} onClick={() => setTab(k)} data-testid={`accounts-tab-${k}`} className={`px-3 py-1.5 rounded-lg text-sm font-semibold ${tab === k ? "bg-accent text-accent-foreground" : "border hover:bg-muted"}`}>{label}</button>
         ))}
       </div>
       {tab === "cash" && <CashTab token={token} />}
       {tab === "headers" && <HeadersTab token={token} />}
-      {tab === "current" && <CurrentTab token={token} />}
+      {tab === "current" && <CurrentTab token={token} isAdmin={isAdmin} />}
       {tab === "advances" && <AdvancesTab token={token} />}
       {tab === "employees" && <EmployeesTab token={token} isAdmin={isAdmin} />}
+      {tab === "ledger" && <LedgerTab token={token} />}
       {tab === "attendance" && <AttendanceTab token={token} />}
       {tab === "salary" && <SalaryTab token={token} isAdmin={isAdmin} />}
     </>
@@ -40,80 +44,133 @@ export default function AccountsDashboard() {
 const f = FinanceAuth.roleFetch;
 
 function CashTab({ token }: { token: string | null }) {
-  const [data, setData] = useState<{ rows: any[]; balance: number }>({ rows: [], balance: 0 });
-  const [form, setForm] = useState({ source: "", amount: "", reference: "" });
-  async function load() { const r = await f(token, "/api/finance/cash"); if (r.ok) setData(await r.json()); }
-  useEffect(() => { if (token) load(); }, [token]); // eslint-disable-line
+  const [data, setData] = useState<{ rows: any[]; balance: number; byBranch?: any[] }>({ rows: [], balance: 0 });
+  const [branch, setBranch] = useState("all");
+  const [form, setForm] = useState({ source: "", amount: "", reference: "", branch: "Delhi", direction: "in" });
+  async function load() { const r = await f(token, `/api/finance/cash${branch !== "all" ? `?branch=${branch}` : ""}`); if (r.ok) setData(await r.json()); }
+  useEffect(() => { if (token) load(); }, [token, branch]); // eslint-disable-line
   async function add() {
     if (!form.source || !form.amount) return;
-    const r = await f(token, "/api/finance/cash", { method: "POST", body: JSON.stringify({ source: form.source, amount: Number(form.amount), reference: form.reference }) });
-    if (r.ok) { setForm({ source: "", amount: "", reference: "" }); load(); }
+    const r = await f(token, "/api/finance/cash", { method: "POST", body: JSON.stringify({ source: form.source, amount: Number(form.amount), reference: form.reference, branch: form.branch, direction: form.direction }) });
+    if (r.ok) { setForm({ source: "", amount: "", reference: "", branch: form.branch, direction: "in" }); load(); }
   }
   return (
     <div>
-      <div className="bg-card border rounded-xl p-5 mb-4 flex items-center justify-between">
-        <span className="text-sm text-muted-foreground">Current cash balance</span>
-        <span className="text-2xl font-bold text-emerald-600">₹{(data.balance || 0).toLocaleString("en-IN")}</span>
+      <div className="grid sm:grid-cols-3 gap-3 mb-4">
+        <div className="bg-card border rounded-xl p-5 flex flex-col justify-between">
+          <span className="text-sm text-muted-foreground">{branch === "all" ? "Total cash balance" : `${branch} balance`}</span>
+          <span className="text-2xl font-bold text-emerald-600">₹{(data.balance || 0).toLocaleString("en-IN")}</span>
+        </div>
+        {(data.byBranch || []).map((b) => (
+          <div key={b.branch} className="bg-card border rounded-xl p-5 flex flex-col justify-between">
+            <span className="text-sm text-muted-foreground">{b.branch} register</span>
+            <span className="text-xl font-bold">₹{(b.balance || 0).toLocaleString("en-IN")}</span>
+          </div>
+        ))}
+      </div>
+      <div className="flex gap-2 mb-4 items-center">
+        <label className="text-xs text-muted-foreground">Filter branch</label>
+        <select value={branch} onChange={(e) => setBranch(e.target.value)} className="px-2 py-1.5 rounded-lg border bg-background text-sm" data-testid="cash-branch-filter"><option value="all">All</option>{BRANCHES.map((b) => <option key={b} value={b}>{b}</option>)}</select>
       </div>
       <div className="flex gap-2 mb-4 bg-card border rounded-xl p-4 items-end flex-wrap">
-        <div><label className="text-xs text-muted-foreground">Source</label><input value={form.source} onChange={(e) => setForm({ ...form, source: e.target.value })} className="block px-3 py-1.5 rounded-lg border bg-background text-sm w-48" /></div>
+        <div><label className="text-xs text-muted-foreground">Branch</label><select value={form.branch} onChange={(e) => setForm({ ...form, branch: e.target.value })} className="block px-3 py-1.5 rounded-lg border bg-background text-sm w-28">{BRANCHES.map((b) => <option key={b} value={b}>{b}</option>)}</select></div>
+        <div><label className="text-xs text-muted-foreground">Type</label><select value={form.direction} onChange={(e) => setForm({ ...form, direction: e.target.value })} className="block px-3 py-1.5 rounded-lg border bg-background text-sm w-28"><option value="in">Cash In</option><option value="out">Cash Out</option></select></div>
+        <div><label className="text-xs text-muted-foreground">Source</label><input value={form.source} onChange={(e) => setForm({ ...form, source: e.target.value })} className="block px-3 py-1.5 rounded-lg border bg-background text-sm w-44" /></div>
         <div><label className="text-xs text-muted-foreground">Amount (₹)</label><input type="number" value={form.amount} onChange={(e) => setForm({ ...form, amount: e.target.value })} className="block px-3 py-1.5 rounded-lg border bg-background text-sm w-32" /></div>
-        <div><label className="text-xs text-muted-foreground">Reference</label><input value={form.reference} onChange={(e) => setForm({ ...form, reference: e.target.value })} className="block px-3 py-1.5 rounded-lg border bg-background text-sm w-40" /></div>
+        <div><label className="text-xs text-muted-foreground">Reference</label><input value={form.reference} onChange={(e) => setForm({ ...form, reference: e.target.value })} className="block px-3 py-1.5 rounded-lg border bg-background text-sm w-36" /></div>
         <button onClick={add} className="px-3 py-1.5 rounded-lg bg-accent text-accent-foreground text-sm font-semibold">Add Entry</button>
       </div>
-      <Table cols={["Source", "Amount", "Reference", "Date"]} rows={data.rows.map((r) => [r.source, `₹${r.amount}`, r.reference || "—", r.date ? new Date(r.date).toLocaleDateString("en-IN") : "—"])} />
+      <Table cols={["Branch", "Type", "Source", "Amount", "Reference", "Date"]} rows={data.rows.map((r) => [r.branch || "Delhi", r.direction || "in", r.source, `₹${Number(r.amount).toLocaleString("en-IN")}`, r.reference || "—", r.date ? new Date(r.date).toLocaleDateString("en-IN") : "—"])} />
     </div>
   );
 }
 
 function HeadersTab({ token }: { token: string | null }) {
   const [rows, setRows] = useState<any[]>([]);
-  const [name, setName] = useState("");
+  const [form, setForm] = useState({ name: "", gl_code: "", budget: "", parent_id: "" });
   async function load() { const r = await f(token, "/api/finance/expense-headers"); if (r.ok) setRows(await r.json()); }
   useEffect(() => { if (token) load(); }, [token]); // eslint-disable-line
-  async function add() { if (!name.trim()) return; const r = await f(token, "/api/finance/expense-headers", { method: "POST", body: JSON.stringify({ name: name.trim(), fields: [] }) }); if (r.ok) { setName(""); load(); } }
+  async function add() {
+    if (!form.name.trim()) return;
+    const body: any = { name: form.name.trim(), fields: [], gl_code: form.gl_code || undefined, budget: form.budget ? Number(form.budget) : undefined, parent_id: form.parent_id ? Number(form.parent_id) : undefined };
+    const r = await f(token, "/api/finance/expense-headers", { method: "POST", body: JSON.stringify(body) });
+    if (r.ok) { setForm({ name: "", gl_code: "", budget: "", parent_id: "" }); load(); }
+  }
   async function del(id: number) { const r = await f(token, `/api/finance/expense-headers/${id}`, { method: "DELETE" }); if (r.ok) load(); }
+  const nameById = (id: number) => rows.find((x) => x.id === id)?.name || "—";
   return (
     <div>
-      <div className="flex gap-2 mb-4">
-        <input value={name} onChange={(e) => setName(e.target.value)} placeholder="New header (e.g. Office Rent)" className="px-3 py-1.5 rounded-lg border bg-background text-sm w-64" />
+      <div className="flex gap-2 mb-4 bg-card border rounded-xl p-4 items-end flex-wrap">
+        <div><label className="text-xs text-muted-foreground">Name</label><input value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} placeholder="e.g. Office Rent" className="block px-3 py-1.5 rounded-lg border bg-background text-sm w-48" /></div>
+        <div><label className="text-xs text-muted-foreground">GL code</label><input value={form.gl_code} onChange={(e) => setForm({ ...form, gl_code: e.target.value })} className="block px-3 py-1.5 rounded-lg border bg-background text-sm w-28" /></div>
+        <div><label className="text-xs text-muted-foreground">Monthly budget (₹)</label><input type="number" value={form.budget} onChange={(e) => setForm({ ...form, budget: e.target.value })} className="block px-3 py-1.5 rounded-lg border bg-background text-sm w-32" /></div>
+        <div><label className="text-xs text-muted-foreground">Parent</label><select value={form.parent_id} onChange={(e) => setForm({ ...form, parent_id: e.target.value })} className="block px-3 py-1.5 rounded-lg border bg-background text-sm w-40"><option value="">None</option>{rows.map((h) => <option key={h.id} value={h.id}>{h.name}</option>)}</select></div>
         <button onClick={add} className="px-3 py-1.5 rounded-lg bg-accent text-accent-foreground text-sm font-semibold">Add Header</button>
       </div>
-      <div className="bg-card border rounded-xl overflow-hidden">
+      <div className="bg-card border rounded-xl overflow-x-auto">
         {rows.length === 0 ? <div className="p-8 text-center text-muted-foreground">No expense headers yet.</div> : (
-          <table className="w-full text-sm"><tbody className="divide-y">
-            {rows.map((r) => (<tr key={r.id} className="hover:bg-muted/30"><td className="p-3 font-semibold">{r.name}</td><td className="p-3 text-right"><button onClick={() => del(r.id)} className="text-red-600 text-xs font-semibold hover:underline">Delete</button></td></tr>))}
-          </tbody></table>
+          <table className="w-full text-sm">
+            <thead className="bg-muted/50 text-left"><tr><th className="p-3">Name</th><th className="p-3">GL</th><th className="p-3 text-right">Budget</th><th className="p-3">Parent</th><th className="p-3"></th></tr></thead>
+            <tbody className="divide-y">
+              {rows.map((r) => (<tr key={r.id} className="hover:bg-muted/30"><td className="p-3 font-semibold">{r.name}</td><td className="p-3 font-mono text-xs">{r.gl_code || "—"}</td><td className="p-3 text-right">{r.budget != null ? `₹${Number(r.budget).toLocaleString("en-IN")}` : "—"}</td><td className="p-3 text-xs">{r.parent_id ? nameById(r.parent_id) : "—"}</td><td className="p-3 text-right"><button onClick={() => del(r.id)} className="text-red-600 text-xs font-semibold hover:underline">Delete</button></td></tr>))}
+            </tbody>
+          </table>
         )}
       </div>
     </div>
   );
 }
 
-function CurrentTab({ token }: { token: string | null }) {
+function CurrentTab({ token, isAdmin }: { token: string | null; isAdmin: boolean }) {
   const [rows, setRows] = useState<any[]>([]);
   const [headers, setHeaders] = useState<any[]>([]);
-  const [form, setForm] = useState({ expense_header_id: "", amount: "", expense_date: new Date().toISOString().slice(0, 10) });
+  const [statusFilter, setStatusFilter] = useState("all");
+  const [form, setForm] = useState({ expense_header_id: "", amount: "", expense_date: new Date().toISOString().slice(0, 10), branch: "Delhi" });
   async function load() {
-    const [r, h] = await Promise.all([f(token, "/api/finance/current-expenses"), f(token, "/api/finance/expense-headers")]);
+    const [r, h] = await Promise.all([f(token, `/api/finance/current-expenses${statusFilter !== "all" ? `?status=${statusFilter}` : ""}`), f(token, "/api/finance/expense-headers")]);
     if (r.ok) setRows(await r.json());
     if (h.ok) setHeaders(await h.json());
   }
-  useEffect(() => { if (token) load(); }, [token]); // eslint-disable-line
+  useEffect(() => { if (token) load(); }, [token, statusFilter]); // eslint-disable-line
   async function add() {
     if (!form.expense_header_id || !form.amount) return;
-    const r = await f(token, "/api/finance/current-expenses", { method: "POST", body: JSON.stringify({ expense_header_id: Number(form.expense_header_id), amount: Number(form.amount), expense_date: form.expense_date }) });
+    const r = await f(token, "/api/finance/current-expenses", { method: "POST", body: JSON.stringify({ expense_header_id: Number(form.expense_header_id), amount: Number(form.amount), expense_date: form.expense_date, branch: form.branch }) });
     if (r.ok) { setForm({ ...form, amount: "" }); load(); }
   }
+  async function decide(id: number, action: "approve" | "reject") {
+    const r = await f(token, `/api/finance/current-expenses/${id}/${action}`, { method: "POST" });
+    if (r.ok) load();
+  }
+  const statusBadge = (s: string) => s === "approved" ? "bg-emerald-600 text-white" : s === "rejected" ? "bg-red-600 text-white" : "bg-amber-500/15 text-amber-700";
   return (
     <div>
       <div className="flex gap-2 mb-4 bg-card border rounded-xl p-4 items-end flex-wrap">
         <div><label className="text-xs text-muted-foreground">Header</label><select value={form.expense_header_id} onChange={(e) => setForm({ ...form, expense_header_id: e.target.value })} className="block px-3 py-1.5 rounded-lg border bg-background text-sm w-48"><option value="">Select…</option>{headers.map((h) => <option key={h.id} value={h.id}>{h.name}</option>)}</select></div>
+        <div><label className="text-xs text-muted-foreground">Branch</label><select value={form.branch} onChange={(e) => setForm({ ...form, branch: e.target.value })} className="block px-3 py-1.5 rounded-lg border bg-background text-sm w-28">{BRANCHES.map((b) => <option key={b} value={b}>{b}</option>)}</select></div>
         <div><label className="text-xs text-muted-foreground">Amount (₹)</label><input type="number" value={form.amount} onChange={(e) => setForm({ ...form, amount: e.target.value })} className="block px-3 py-1.5 rounded-lg border bg-background text-sm w-32" /></div>
         <div><label className="text-xs text-muted-foreground">Date</label><input type="date" value={form.expense_date} onChange={(e) => setForm({ ...form, expense_date: e.target.value })} className="block px-3 py-1.5 rounded-lg border bg-background text-sm" /></div>
         <button onClick={add} className="px-3 py-1.5 rounded-lg bg-accent text-accent-foreground text-sm font-semibold">Add Expense</button>
       </div>
-      <Table cols={["Header", "Amount", "Date"]} rows={rows.map((r) => [r.headerName || "—", `₹${r.amount}`, r.expense_date])} />
+      <div className="flex gap-2 mb-3 items-center"><label className="text-xs text-muted-foreground">Status</label><select value={statusFilter} onChange={(e) => setStatusFilter(e.target.value)} className="px-2 py-1.5 rounded-lg border bg-background text-sm"><option value="all">All</option><option value="pending">Pending</option><option value="approved">Approved</option><option value="rejected">Rejected</option></select><span className="text-xs text-muted-foreground">Expenses above the auto-approve limit (₹5,000) need admin approval.</span></div>
+      <div className="bg-card border rounded-xl overflow-x-auto">
+        {rows.length === 0 ? <div className="p-8 text-center text-muted-foreground">No expenses.</div> : (
+          <table className="w-full text-sm">
+            <thead className="bg-muted/50 text-left"><tr><th className="p-3">Header</th><th className="p-3">Branch</th><th className="p-3 text-right">Amount</th><th className="p-3">Date</th><th className="p-3">Status</th><th className="p-3"></th></tr></thead>
+            <tbody className="divide-y">
+              {rows.map((r) => (
+                <tr key={r.id} className="hover:bg-muted/30">
+                  <td className="p-3">{r.headerName || "—"}</td>
+                  <td className="p-3 text-xs">{r.branch || "—"}</td>
+                  <td className="p-3 text-right">₹{Number(r.amount).toLocaleString("en-IN")}</td>
+                  <td className="p-3">{r.expense_date}</td>
+                  <td className="p-3"><span className={`text-xs font-bold rounded px-2 py-1 ${statusBadge(r.approval_status || "approved")}`}>{r.approval_status || "approved"}</span></td>
+                  <td className="p-3">{isAdmin && (r.approval_status === "pending") && (<span className="flex gap-2"><button onClick={() => decide(r.id, "approve")} className="text-emerald-600 text-xs font-semibold hover:underline">Approve</button><button onClick={() => decide(r.id, "reject")} className="text-red-600 text-xs font-semibold hover:underline">Reject</button></span>)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+      </div>
     </div>
   );
 }
@@ -171,27 +228,105 @@ function AdvancesTab({ token }: { token: string | null }) {
 
 function EmployeesTab({ token, isAdmin }: { token: string | null; isAdmin: boolean }) {
   const [rows, setRows] = useState<any[]>([]);
-  const [form, setForm] = useState({ name: "", contact: "", per_day_rate: "", retention_pct: "10" });
-  async function load() { const r = await f(token, "/api/finance/employees"); if (r.ok) setRows(await r.json()); }
-  useEffect(() => { if (token) load(); }, [token]); // eslint-disable-line
+  const [search, setSearch] = useState("");
+  const [debounced, setDebounced] = useState("");
+  const [open, setOpen] = useState(false);
+  const blank = { name: "", contact: "", email: "", role: "", branch: "Delhi", pan: "", aadhar: "", bank_account: "", ifsc: "", joined_at: "", gross_salary: "", per_day_rate: "", retention_pct: "10", working_days_default: "26" };
+  const [form, setForm] = useState<any>(blank);
+  async function load() { const r = await f(token, `/api/finance/employees${debounced ? `?q=${encodeURIComponent(debounced)}` : ""}`); if (r.ok) setRows(await r.json()); }
+  useEffect(() => { const id = setTimeout(() => setDebounced(search.trim()), 250); return () => clearTimeout(id); }, [search]);
+  useEffect(() => { if (token) load(); }, [token, debounced]); // eslint-disable-line
   async function add() {
     if (!form.name.trim()) return;
-    const body: any = { name: form.name.trim(), contact: form.contact, retention_pct: Number(form.retention_pct) || 10 };
+    const body: any = {
+      name: form.name.trim(), contact: form.contact, email: form.email, role: form.role, branch: form.branch,
+      pan: form.pan, aadhar: form.aadhar, bank_account: form.bank_account, ifsc: form.ifsc, joined_at: form.joined_at || undefined,
+      retention_pct: Number(form.retention_pct) || 10, working_days_default: Number(form.working_days_default) || 26,
+    };
+    if (isAdmin && form.gross_salary) body.gross_salary = Number(form.gross_salary);
     if (isAdmin && form.per_day_rate) body.per_day_rate = Number(form.per_day_rate);
     const r = await f(token, "/api/finance/employees", { method: "POST", body: JSON.stringify(body) });
-    if (r.ok) { setForm({ name: "", contact: "", per_day_rate: "", retention_pct: "10" }); load(); }
+    if (r.ok) { setForm(blank); setOpen(false); load(); }
+  }
+  async function toggleActive(emp: any) {
+    const r = await f(token, `/api/finance/employees/${emp.id}`, { method: "PUT", body: JSON.stringify({ active: !emp.active }) });
+    if (r.ok) load();
+  }
+  const inp = "block px-3 py-1.5 rounded-lg border bg-background text-sm w-full";
+  return (
+    <div>
+      {!isAdmin && <p className="text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2 mb-3">Salary figures are masked. Sign in as admin to view/edit pay.</p>}
+      <div className="flex gap-2 mb-4 items-center flex-wrap">
+        <input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Search name / contact / role / branch…" className="px-3 py-1.5 rounded-lg border bg-background text-sm w-72" data-testid="employee-search" />
+        <button onClick={() => setOpen((o) => !o)} className="px-3 py-1.5 rounded-lg bg-accent text-accent-foreground text-sm font-semibold">{open ? "Close" : "+ New Employee"}</button>
+      </div>
+      {open && (
+        <div className="bg-card border rounded-xl p-4 mb-4 grid sm:grid-cols-3 gap-3">
+          <div><label className="text-xs text-muted-foreground">Name *</label><input value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} className={inp} /></div>
+          <div><label className="text-xs text-muted-foreground">Role</label><input value={form.role} onChange={(e) => setForm({ ...form, role: e.target.value })} className={inp} /></div>
+          <div><label className="text-xs text-muted-foreground">Branch</label><select value={form.branch} onChange={(e) => setForm({ ...form, branch: e.target.value })} className={inp}>{BRANCHES.map((b) => <option key={b} value={b}>{b}</option>)}</select></div>
+          <div><label className="text-xs text-muted-foreground">Phone</label><input value={form.contact} onChange={(e) => setForm({ ...form, contact: e.target.value })} className={inp} /></div>
+          <div><label className="text-xs text-muted-foreground">Email</label><input value={form.email} onChange={(e) => setForm({ ...form, email: e.target.value })} className={inp} /></div>
+          <div><label className="text-xs text-muted-foreground">Joining date</label><input type="date" value={form.joined_at} onChange={(e) => setForm({ ...form, joined_at: e.target.value })} className={inp} /></div>
+          <div><label className="text-xs text-muted-foreground">PAN</label><input value={form.pan} onChange={(e) => setForm({ ...form, pan: e.target.value })} className={inp} /></div>
+          <div><label className="text-xs text-muted-foreground">Aadhaar</label><input value={form.aadhar} onChange={(e) => setForm({ ...form, aadhar: e.target.value })} className={inp} /></div>
+          <div><label className="text-xs text-muted-foreground">Bank account</label><input value={form.bank_account} onChange={(e) => setForm({ ...form, bank_account: e.target.value })} className={inp} /></div>
+          <div><label className="text-xs text-muted-foreground">IFSC</label><input value={form.ifsc} onChange={(e) => setForm({ ...form, ifsc: e.target.value })} className={inp} /></div>
+          <div><label className="text-xs text-muted-foreground">Working days/mo</label><input type="number" value={form.working_days_default} onChange={(e) => setForm({ ...form, working_days_default: e.target.value })} className={inp} /></div>
+          <div><label className="text-xs text-muted-foreground">Retention %</label><input type="number" value={form.retention_pct} onChange={(e) => setForm({ ...form, retention_pct: e.target.value })} className={inp} /></div>
+          {isAdmin && <div><label className="text-xs text-muted-foreground">Gross salary (₹)</label><input type="number" value={form.gross_salary} onChange={(e) => setForm({ ...form, gross_salary: e.target.value })} className={inp} /></div>}
+          {isAdmin && <div><label className="text-xs text-muted-foreground">Per-day (₹)</label><input type="number" value={form.per_day_rate} onChange={(e) => setForm({ ...form, per_day_rate: e.target.value })} className={inp} /></div>}
+          <div className="sm:col-span-3"><button onClick={add} className="px-4 py-2 rounded-lg bg-accent text-accent-foreground text-sm font-semibold">Save Employee</button></div>
+        </div>
+      )}
+      <div className="bg-card border rounded-xl overflow-x-auto">
+        {rows.length === 0 ? <div className="p-8 text-center text-muted-foreground">No employees{debounced ? " match your search." : "."}</div> : (
+          <table className="w-full text-sm">
+            <thead className="bg-muted/50 text-left"><tr><th className="p-3">Name</th><th className="p-3">Role</th><th className="p-3">Branch</th><th className="p-3">Phone</th><th className="p-3">Gross</th><th className="p-3">Active</th><th className="p-3"></th></tr></thead>
+            <tbody className="divide-y">
+              {rows.map((r) => (
+                <tr key={r.id} className="hover:bg-muted/30" data-testid={`employee-row-${r.id}`}>
+                  <td className="p-3 font-semibold">{r.name}</td>
+                  <td className="p-3 text-xs">{r.role || "—"}</td>
+                  <td className="p-3 text-xs">{r.branch || "—"}</td>
+                  <td className="p-3 text-xs">{r.contact || "—"}</td>
+                  <td className="p-3">{r.gross_salary != null ? `₹${Number(r.gross_salary).toLocaleString("en-IN")}` : (isAdmin ? "—" : "•••")}</td>
+                  <td className="p-3">{r.active ? <span className="text-emerald-600 text-xs font-semibold">Active</span> : <span className="text-muted-foreground text-xs">Inactive</span>}</td>
+                  <td className="p-3"><button onClick={() => toggleActive(r)} className="text-accent text-xs font-semibold hover:underline">{r.active ? "Deactivate" : "Activate"}</button></td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// R27.5 #8 — Person Ledger: running debit/credit balance per employee.
+function LedgerTab({ token }: { token: string | null }) {
+  const [emps, setEmps] = useState<any[]>([]);
+  const [empId, setEmpId] = useState("");
+  const [data, setData] = useState<{ rows: any[]; balance: number }>({ rows: [], balance: 0 });
+  useEffect(() => { if (token) f(token, "/api/finance/employees").then((r) => { if (r.ok) r.json().then(setEmps); }); }, [token]); // eslint-disable-line
+  async function load(id: string) {
+    if (!id) { setData({ rows: [], balance: 0 }); return; }
+    const r = await f(token, `/api/finance/person-ledger/${id}`); if (r.ok) setData(await r.json());
   }
   return (
     <div>
-      {!isAdmin && <p className="text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2 mb-3">Salary rates are masked. Sign in as admin to view/edit per-day rates.</p>}
-      <div className="flex gap-2 mb-4 bg-card border rounded-xl p-4 items-end flex-wrap">
-        <div><label className="text-xs text-muted-foreground">Name</label><input value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} className="block px-3 py-1.5 rounded-lg border bg-background text-sm w-40" /></div>
-        <div><label className="text-xs text-muted-foreground">Contact</label><input value={form.contact} onChange={(e) => setForm({ ...form, contact: e.target.value })} className="block px-3 py-1.5 rounded-lg border bg-background text-sm w-36" /></div>
-        {isAdmin && <div><label className="text-xs text-muted-foreground">Per-day (₹)</label><input type="number" value={form.per_day_rate} onChange={(e) => setForm({ ...form, per_day_rate: e.target.value })} className="block px-3 py-1.5 rounded-lg border bg-background text-sm w-28" /></div>}
-        <div><label className="text-xs text-muted-foreground">Retention %</label><input type="number" value={form.retention_pct} onChange={(e) => setForm({ ...form, retention_pct: e.target.value })} className="block px-3 py-1.5 rounded-lg border bg-background text-sm w-24" /></div>
-        <button onClick={add} className="px-3 py-1.5 rounded-lg bg-accent text-accent-foreground text-sm font-semibold">Add Employee</button>
+      <div className="flex gap-2 mb-4 items-end">
+        <div><label className="text-xs text-muted-foreground">Employee</label><select value={empId} onChange={(e) => { setEmpId(e.target.value); load(e.target.value); }} className="block px-3 py-1.5 rounded-lg border bg-background text-sm w-56" data-testid="ledger-employee"><option value="">Select…</option>{emps.map((e) => <option key={e.id} value={e.id}>{e.name}</option>)}</select></div>
+        {empId && <div className="bg-card border rounded-xl px-4 py-2 ml-auto"><span className="text-xs text-muted-foreground mr-2">Running balance</span><span className={`font-bold ${data.balance >= 0 ? "text-emerald-600" : "text-red-600"}`}>₹{(data.balance || 0).toLocaleString("en-IN")}</span></div>}
       </div>
-      <Table cols={["Name", "Contact", "Per-day", "Retention %", "Active"]} rows={rows.map((r) => [r.name, r.contact || "—", r.per_day_rate != null ? `₹${r.per_day_rate}` : (isAdmin ? "—" : "•••"), `${r.retention_pct ?? 10}%`, r.active ? "Yes" : "No"])} />
+      <Table cols={["Date", "Kind", "Debit", "Credit", "Balance", "Notes"]} rows={data.rows.map((r) => [
+        r.entry_date ? new Date(r.entry_date).toLocaleDateString("en-IN") : "—",
+        r.kind,
+        r.amount < 0 ? `₹${Math.abs(r.amount).toLocaleString("en-IN")}` : "—",
+        r.amount > 0 ? `₹${Number(r.amount).toLocaleString("en-IN")}` : "—",
+        `₹${Number(r.balance).toLocaleString("en-IN")}`,
+        r.notes || "—",
+      ])} />
     </div>
   );
 }

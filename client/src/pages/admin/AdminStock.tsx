@@ -29,6 +29,9 @@ export default function AdminStock() {
   const [search, setSearch] = useState("");
   const [debounced, setDebounced] = useState("");
   const [loading, setLoading] = useState(false);
+  // R27.5 #6 — "Live (net)" aggregates qty per part per branch from stock movements;
+  // "Detailed" shows every individual receipt row.
+  const [view, setView] = useState<"summary" | "detail">("summary");
 
   useEffect(() => { const id = setTimeout(() => setDebounced(search.trim()), 250); return () => clearTimeout(id); }, [search]);
 
@@ -40,15 +43,21 @@ export default function AdminStock() {
       try {
         const p = new URLSearchParams();
         if (branch !== "all") p.set("branch", branch);
-        if (status !== "all") p.set("status", status);
         if (debounced) p.set("q", debounced);
-        const r = await adminFetch(token, `/api/admin/stock?${p.toString()}`);
+        let url: string;
+        if (view === "summary") {
+          url = `/api/admin/stock/summary?${p.toString()}`;
+        } else {
+          if (status !== "all") p.set("status", status);
+          url = `/api/admin/stock?${p.toString()}`;
+        }
+        const r = await adminFetch(token, url);
         const j = r.ok ? await r.json() : [];
         if (alive) setRows(Array.isArray(j) ? j : []);
       } finally { if (alive) setLoading(false); }
     })();
     return () => { alive = false; };
-  }, [token, branch, status, debounced]);
+  }, [token, branch, status, debounced, view]);
 
   const branchBadge = (b: string) =>
     b === "Delhi" ? "bg-blue-500/15 text-blue-700" : b === "Patna" ? "bg-emerald-500/15 text-emerald-700" : "bg-slate-500/15 text-slate-700";
@@ -62,14 +71,20 @@ export default function AdminStock() {
             className="w-full border rounded-lg pl-9 pr-3 py-2 bg-background text-sm" data-testid="input-stock-search" />
         </div>
         <div className="flex items-center gap-2">
+          <div className="flex rounded-lg border overflow-hidden text-sm" data-testid="stock-view-toggle">
+            <button onClick={() => setView("summary")} className={`px-3 py-1.5 font-semibold ${view === "summary" ? "bg-accent text-accent-foreground" : "bg-background"}`} data-testid="stock-view-summary">Live (net)</button>
+            <button onClick={() => setView("detail")} className={`px-3 py-1.5 font-semibold ${view === "detail" ? "bg-accent text-accent-foreground" : "bg-background"}`} data-testid="stock-view-detail">Detailed</button>
+          </div>
           <label className="text-xs text-muted-foreground">Branch</label>
           <select value={branch} onChange={(e) => setBranch(e.target.value)} className="border rounded-lg px-2 py-1.5 bg-background text-sm" data-testid="select-stock-branch">
             {BRANCHES.map((b) => <option key={b} value={b}>{b === "all" ? "All" : b}</option>)}
           </select>
-          <label className="text-xs text-muted-foreground">Status</label>
-          <select value={status} onChange={(e) => setStatus(e.target.value)} className="border rounded-lg px-2 py-1.5 bg-background text-sm" data-testid="select-stock-status">
-            {STATUSES.map((s) => <option key={s} value={s}>{s === "all" ? "All" : s === "in_stock" ? "In Stock" : "Dispatched"}</option>)}
-          </select>
+          {view === "detail" && <>
+            <label className="text-xs text-muted-foreground">Status</label>
+            <select value={status} onChange={(e) => setStatus(e.target.value)} className="border rounded-lg px-2 py-1.5 bg-background text-sm" data-testid="select-stock-status">
+              {STATUSES.map((s) => <option key={s} value={s}>{s === "all" ? "All" : s === "in_stock" ? "In Stock" : "Dispatched"}</option>)}
+            </select>
+          </>}
         </div>
       </div>
 
