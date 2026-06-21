@@ -4,7 +4,7 @@ import { adminFetch, useAdminAuth } from "@/lib/admin-auth";
 import { BRANDS, PRODUCT_CATEGORIES } from "@/data/brands";
 import type { Product } from "@shared/schema";
 import { toSlug, parseJsonArray } from "@/lib/utils-app";
-import { Plus, Edit2, Trash2, X, Upload, Save, Search, Star, UploadCloud } from "lucide-react";
+import { Plus, Edit2, Trash2, X, Upload, Save, Search, Star, UploadCloud, Sparkles } from "lucide-react";
 import { BulkUploadModal } from "./BulkUploadModal";
 
 interface ProductForm {
@@ -111,6 +111,38 @@ export default function AdminProducts() {
       }
     };
     reader.readAsDataURL(file);
+  }
+
+  const [aiBusy, setAiBusy] = useState<string | null>(null);
+  async function aiFill(kind: "discounts" | "specifications" | "short-description" | "seo-meta") {
+    if (!editing || !token) return;
+    setAiBusy(kind); setError(null);
+    try {
+      const r = await adminFetch(token, `/api/admin/ai-fill/${kind}`, {
+        method: "POST",
+        body: JSON.stringify({
+          name: editing.name, brand: editing.brand, part_number: editing.partNumber,
+          description: editing.description, price_inr: editing.priceInr,
+        }),
+      });
+      const j = await r.json().catch(() => ({}));
+      if (!r.ok) { setError(j.error || "AI fill failed"); return; }
+      setEditing((prev) => {
+        if (!prev) return prev;
+        if (kind === "short-description" && j.short_description) return { ...prev, shortDescription: j.short_description };
+        if (kind === "seo-meta") return { ...prev, metaTitle: j.meta_title || prev.metaTitle, metaDescription: j.meta_description || prev.metaDescription, metaKeywords: j.meta_keywords || prev.metaKeywords };
+        if (kind === "specifications" && Array.isArray(j.specifications)) {
+          const block = "\n\nSpecifications:\n" + j.specifications.map((s: any) => `- ${s.key}: ${s.value}`).join("\n");
+          return { ...prev, description: (prev.description || "").trim() + block };
+        }
+        if (kind === "discounts" && Array.isArray(j.discount_tiers)) {
+          const block = "\n\nQuantity Discounts:\n" + j.discount_tiers.map((t: any) => `- Buy ${t.min_qty}+: ${t.discount_pct}% off`).join("\n");
+          return { ...prev, description: (prev.description || "").trim() + block };
+        }
+        return prev;
+      });
+    } catch (e: any) { setError(e.message || "AI fill failed"); }
+    finally { setAiBusy(null); }
   }
 
   const filtered = products.filter((p) =>
@@ -270,13 +302,26 @@ export default function AdminProducts() {
                 </div>
               </div>
 
+              {/* R27.3 — AI Fill toolbar */}
+              <div className="flex flex-wrap items-center gap-2 p-3 rounded-lg bg-indigo-50 border border-indigo-100">
+                <span className="text-xs font-bold text-indigo-700 inline-flex items-center gap-1"><Sparkles className="w-3.5 h-3.5" /> AI Fill:</span>
+                {([["short-description", "Short Description"], ["seo-meta", "SEO Meta"], ["specifications", "Specifications"], ["discounts", "Discounts"]] as const).map(([k, label]) => (
+                  <button key={k} type="button" onClick={() => aiFill(k)} disabled={!editing.name || aiBusy !== null}
+                    className="text-xs px-2.5 py-1 rounded-md bg-white border border-indigo-200 text-indigo-700 font-semibold hover:bg-indigo-100 disabled:opacity-50"
+                    data-testid={`button-aifill-${k}`}>
+                    {aiBusy === k ? "…" : label}
+                  </button>
+                ))}
+                {!editing.name && <span className="text-xs text-muted-foreground">Enter a product name first</span>}
+              </div>
+
               <div>
                 <label className="text-sm font-semibold mb-1.5 block">Short Description (1-2 lines)</label>
                 <input value={editing.shortDescription} onChange={(e) => setEditing({ ...editing, shortDescription: e.target.value })} className="w-full px-3 py-2 border rounded-lg bg-background" data-testid="input-short-desc" />
               </div>
 
               <div>
-                <label className="text-sm font-semibold mb-1.5 block">Full Description *</label>
+                <label className="text-sm font-semibold mb-1.5 block">Full Description * <span className="text-xs font-normal text-muted-foreground">(Specifications &amp; Discounts AI fills append here)</span></label>
                 <textarea value={editing.description} onChange={(e) => setEditing({ ...editing, description: e.target.value })} className="w-full px-3 py-2 border rounded-lg bg-background min-h-[120px]" data-testid="input-description" />
               </div>
 

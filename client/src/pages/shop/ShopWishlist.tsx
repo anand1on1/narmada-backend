@@ -17,7 +17,8 @@ export default function ShopWishlist() {
   const [items, setItems] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
 
-  useEffect(() => { if (ready && !user) navigate("/customer/login"); }, [ready, user, navigate]);
+  // R27.1b BUG-1 — only redirect when fully resolved AND no token (avoid race with revalidate).
+  useEffect(() => { if (ready && !token && !user) navigate("/customer/login"); }, [ready, token, user, navigate]);
 
   const load = async () => {
     if (!token) return;

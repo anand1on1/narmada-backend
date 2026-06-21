@@ -2,8 +2,8 @@ import { TeamLayout } from "./TeamLayout";
 import { teamFetch, useTeamAuth } from "@/lib/team-auth";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { Link } from "wouter";
-import { FileText, Trash2, Loader2, Eye } from "lucide-react";
-import { useState } from "react";
+import { FileText, Trash2, Loader2, Eye, Search, Copy } from "lucide-react";
+import { useState, useEffect } from "react";
 import { useToast } from "@/hooks/use-toast";
 import { DeviationSummaryModal } from "@/components/team/DeviationSummaryModal";
 
@@ -19,6 +19,7 @@ const STATUS_COLOR: Record<string, string> = {
   draft: "bg-slate-500/15 text-slate-700", open: "bg-blue-500/15 text-blue-700",
   partial: "bg-amber-500/15 text-amber-700", fulfilled: "bg-emerald-500/15 text-emerald-700",
   cancelled: "bg-red-500/15 text-red-700",
+  processed: "bg-emerald-600 text-white", dispatched: "bg-amber-500/15 text-amber-700", // R27.1b BUG-3
 };
 
 function fmt(d: number) { return new Date(d).toLocaleDateString("en-IN", { day: "2-digit", month: "short", year: "numeric" }); }
@@ -29,12 +30,38 @@ export default function TeamPOs() {
   const qc = useQueryClient();
   const [confirmDel, setConfirmDel] = useState<PO | null>(null);
   const [deviationPo, setDeviationPo] = useState<PO | null>(null);
+  // R27.1b BUG-4 — PO search (debounced) + date range, mirroring admin PO Dashboard.
+  const [q, setQ] = useState("");
+  const [dq, setDq] = useState("");
+  const [fromDate, setFromDate] = useState("");
+  const [toDate, setToDate] = useState("");
+  useEffect(() => { const t = setTimeout(() => setDq(q), 300); return () => clearTimeout(t); }, [q]);
 
   const { data: pos = [] } = useQuery<PO[]>({
-    queryKey: ["team-pos"],
-    queryFn: async () => { const r = await teamFetch(token, `/api/team/purchase-orders`); return r.ok ? r.json() : []; },
+    queryKey: ["team-pos", dq, fromDate, toDate],
+    queryFn: async () => {
+      const p = new URLSearchParams();
+      if (dq) p.set("q", dq);
+      if (fromDate) p.set("from", fromDate);
+      if (toDate) p.set("to", toDate);
+      const r = await teamFetch(token, `/api/team/purchase-orders?${p.toString()}`);
+      return r.ok ? r.json() : [];
+    },
     enabled: !!token,
     refetchInterval: 30000, // R24.5 — 30s auto-refresh, no page reload
+  });
+
+  const dupMut = useMutation({
+    mutationFn: async (id: number) => {
+      const r = await teamFetch(token, `/api/team/purchase-orders/${id}/duplicate`, { method: "POST" });
+      if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error || "Duplicate failed");
+      return r.json();
+    },
+    onSuccess: (data: any) => {
+      toast({ title: "PO duplicated", description: `Created ${data.poNumber || data.po_number || "new draft"}.` });
+      qc.invalidateQueries({ queryKey: ["team-pos"] });
+    },
+    onError: (e: any) => toast({ title: "Duplicate failed", description: e.message, variant: "destructive" }),
   });
 
   const delMut = useMutation({
@@ -53,8 +80,22 @@ export default function TeamPOs() {
 
   return (
     <TeamLayout title="Purchase Orders">
+      <div className="flex flex-wrap items-center gap-2 mb-4">
+        <div className="relative flex-1 min-w-56">
+          <Search className="w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground" />
+          <input value={q} onChange={(e) => setQ(e.target.value)} placeholder="Search PO #, customer…"
+            className="w-full border rounded-lg pl-9 pr-3 py-2 bg-background text-sm" data-testid="input-team-po-search" />
+        </div>
+        <label className="text-xs text-muted-foreground">From</label>
+        <input type="date" value={fromDate} onChange={(e) => setFromDate(e.target.value)} className="border rounded-lg px-2 py-1.5 bg-background text-sm" data-testid="input-team-po-from" />
+        <label className="text-xs text-muted-foreground">To</label>
+        <input type="date" value={toDate} onChange={(e) => setToDate(e.target.value)} className="border rounded-lg px-2 py-1.5 bg-background text-sm" data-testid="input-team-po-to" />
+        {(q || fromDate || toDate) && (
+          <button onClick={() => { setQ(""); setFromDate(""); setToDate(""); }} className="px-3 py-1.5 rounded-lg text-xs font-semibold border hover:bg-muted" data-testid="button-team-po-clear">Show all</button>
+        )}
+      </div>
       <div className="bg-card border rounded-xl overflow-x-auto shadow-sm">
-        {pos.length === 0 ? <div className="p-12 text-center text-muted-foreground">No purchase orders yet. Convert a quotation to a PO to get started.</div> : (
+        {pos.length === 0 ? <div className="p-12 text-center text-muted-foreground">{q || fromDate || toDate ? "No purchase orders match your search." : "No purchase orders yet. Convert a quotation to a PO to get started."}</div> : (
           <table className="w-full text-sm">
             <thead><tr className="bg-muted/50 text-left">
               <th className="px-3 py-3 font-semibold">PO Number</th>
@@ -117,6 +158,10 @@ export default function TeamPOs() {
                     <Link href={`/team/purchase-orders/${p.id}`}>
                       <a className="text-accent font-semibold inline-flex items-center gap-1 hover:underline text-xs"><FileText className="w-3.5 h-3.5" /> Open</a>
                     </Link>
+                    <button onClick={() => dupMut.mutate(p.id)} disabled={dupMut.isPending}
+                      className="text-indigo-600 hover:text-indigo-700 inline-flex items-center disabled:opacity-50" title="Duplicate PO" data-testid={`button-team-po-duplicate-${p.id}`}>
+                      <Copy className="w-4 h-4" />
+                    </button>
                     <button onClick={() => setConfirmDel(p)}
                       className="text-red-600 hover:text-red-700 inline-flex items-center" title="Delete PO">
                       <Trash2 className="w-4 h-4" />

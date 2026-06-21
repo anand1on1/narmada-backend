@@ -140,7 +140,7 @@ import AdminTasksV2 from "@/pages/admin/AdminTasksV2";
 import AdminUsers from "@/pages/admin/AdminUsers";
 
 // R26.5 — Sales/Finance/HR/Consignment role portals
-import { SalesAuth, FinanceAuth, HRAuth, ConsignmentAuth } from "@/lib/role-auth";
+import { SalesAuth, FinanceAuth, HRAuth, ConsignmentAuth, StoreAuth, DispatchAuth } from "@/lib/role-auth";
 import SalesLogin from "@/pages/roles/SalesLogin";
 import SalesDashboard from "@/pages/roles/SalesDashboard";
 import FinanceLogin from "@/pages/roles/FinanceLogin";
@@ -149,6 +149,12 @@ import HRLogin from "@/pages/roles/HRLogin";
 import HRDashboard from "@/pages/roles/HRDashboard";
 import ConsignmentLogin from "@/pages/roles/ConsignmentLogin";
 import ConsignmentDashboard from "@/pages/roles/ConsignmentDashboard";
+// R27.2/R27.3 — Store + Dispatch role portals, Accounts dashboard
+import StoreLogin from "@/pages/roles/StoreLogin";
+import StoreDashboard from "@/pages/roles/StoreDashboard";
+import DispatchLogin from "@/pages/roles/DispatchLogin";
+import DispatchDashboard from "@/pages/roles/DispatchDashboard";
+import AccountsDashboard from "@/pages/roles/AccountsDashboard";
 
 import { CustomerAuthProvider } from "@/lib/customer-auth";
 // R27.1 — e-commerce shopper auth + pages (distinct from the B2B /portal)
@@ -168,6 +174,10 @@ import AdminShopOrderDetail from "@/pages/admin/AdminShopOrderDetail";
 import AdminShopCustomers from "@/pages/admin/AdminShopCustomers";
 import AdminShopCustomerDetail from "@/pages/admin/AdminShopCustomerDetail";
 import AdminFreight from "@/pages/admin/AdminFreight";
+// R27.3 — Supreme AI Bar
+import AdminAIBar from "@/pages/admin/AdminAIBar";
+// R27.2 — Operations (expense approvals + deviations)
+import AdminOperations from "@/pages/admin/AdminOperations";
 import CustomerLogin from "@/pages/portal/CustomerLogin";
 import CustomerDashboard from "@/pages/portal/CustomerDashboard";
 import CustomerLedger from "@/pages/portal/CustomerLedger";
@@ -319,6 +329,10 @@ function AppRouter() {
         <Route path="/admin/freight" component={AdminFreight} />
         {/* R23.1 — owner Command Center */}
         <Route path="/admin/command-center" component={AdminCommandCenter} />
+        {/* R27.3 — Supreme AI Bar */}
+        <Route path="/admin/ai-bar" component={AdminAIBar} />
+        {/* R27.2 — Operations: expense approvals + deviations */}
+        <Route path="/admin/operations" component={AdminOperations} />
         {/* R24.4 — WhatsApp-web style Chats */}
         <Route path="/admin/chats" component={AdminChats} />
         {/* R26.6i — webhook events diagnostics */}
@@ -425,9 +439,40 @@ function AppRouter() {
             <Route path="/finance" component={FinanceLogin} />
             <Route path="/finance/login" component={FinanceLogin} />
             <Route path="/finance/dashboard" component={FinanceDashboard} />
+            <Route path="/finance/accounts" component={AccountsDashboard} />
             <Route component={NotFound} />
           </Switch>
         </FinanceAuth.Provider>
+      </ErrorBoundary>
+    );
+  }
+  // R27.2 — Store portal (Patna inbound transfers + stock)
+  if (location.startsWith("/store")) {
+    return (
+      <ErrorBoundary key={location} label="store">
+        <StoreAuth.Provider>
+          <Switch>
+            <Route path="/store" component={StoreLogin} />
+            <Route path="/store/login" component={StoreLogin} />
+            <Route path="/store/dashboard" component={StoreDashboard} />
+            <Route component={NotFound} />
+          </Switch>
+        </StoreAuth.Provider>
+      </ErrorBoundary>
+    );
+  }
+  // R27.2 — Dispatch portal (handover of ready stock)
+  if (location.startsWith("/dispatch")) {
+    return (
+      <ErrorBoundary key={location} label="dispatch">
+        <DispatchAuth.Provider>
+          <Switch>
+            <Route path="/dispatch" component={DispatchLogin} />
+            <Route path="/dispatch/login" component={DispatchLogin} />
+            <Route path="/dispatch/dashboard" component={DispatchDashboard} />
+            <Route component={NotFound} />
+          </Switch>
+        </DispatchAuth.Provider>
       </ErrorBoundary>
     );
   }

@@ -99,6 +99,7 @@ export default function AdminPOs() {
       draft: "bg-slate-500/15 text-slate-700", submitted: "bg-blue-500/15 text-blue-700",
       confirmed: "bg-indigo-500/15 text-indigo-700", dispatched: "bg-amber-500/15 text-amber-700",
       completed: "bg-emerald-500/15 text-emerald-700", cancelled: "bg-red-500/15 text-red-700",
+      processed: "bg-emerald-600 text-white", // R27.1b BUG-3 — processed POs show green
     };
     return <span className={`text-[10px] uppercase font-bold px-2 py-0.5 rounded ${map[s] || "bg-slate-500/15 text-slate-700"}`}>{s}</span>;
   };

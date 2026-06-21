@@ -1,7 +1,7 @@
 // R27.1 — website shopper (e-commerce) auth. SEPARATE from customer-auth.tsx
 // (which is the OTP-based B2B portal). Token in localStorage (narmada_shop_token);
 // revalidates via /api/shop/me using the x-shop-token header.
-import { createContext, useContext, useState, ReactNode, useCallback, useEffect } from "react";
+import { createContext, useContext, useState, ReactNode, useCallback, useEffect, useRef } from "react";
 import { apiUrl } from "@/lib/queryClient";
 
 interface ShopUser {
@@ -36,14 +36,20 @@ function safeSet(key: string, value: string | null) {
 
 let memToken: string | null = safeGet(K_TOKEN);
 
+const sleep = (ms: number) => new Promise<void>((res) => setTimeout(res, ms));
+
 export function ShopAuthProvider({ children }: { children: ReactNode }) {
   const [token, setToken] = useState<string | null>(memToken);
   const [user, setUser] = useState<ShopUser | null>(null);
   const [ready, setReady] = useState<boolean>(!memToken);
+  // R27.1b BUG-1 — when setAuth just stored a fresh server-issued user, skip the
+  // next revalidate cycle so a racing /api/shop/me can't transiently clear() it.
+  const justSetRef = useRef(false);
 
   const setAuth = useCallback((t: string, u: ShopUser) => {
     memToken = t;
     safeSet(K_TOKEN, t);
+    justSetRef.current = true;
     setToken(t); setUser(u); setReady(true);
     // R27.1a BUG 3 — notify any non-context listeners (and other tabs sync via storage).
     try { window.dispatchEvent(new Event("shop:auth-changed")); } catch {}
@@ -56,28 +62,41 @@ export function ShopAuthProvider({ children }: { children: ReactNode }) {
     try { window.dispatchEvent(new Event("shop:auth-changed")); } catch {}
   }, []);
 
-  const refresh = useCallback(async () => {
+  // R27.1b BUG-1 — revalidate with retry/backoff. Only clear() on a definitive
+  // 401/403 (token rejected). Network errors and 5xx leave state intact.
+  const revalidate = useCallback(async () => {
     if (!memToken) { setReady(true); return; }
-    try {
-      const r = await fetch(apiUrl("/api/shop/me"), { headers: { "x-shop-token": memToken } });
-      if (r.ok) { setUser(await r.json()); setReady(true); }
-      else { clear(); }
-    } catch { clear(); }
+    const delays = [0, 500, 1500];
+    for (let i = 0; i < delays.length; i++) {
+      if (delays[i]) await sleep(delays[i]);
+      if (memToken == null) { setReady(true); return; }
+      try {
+        const r = await fetch(apiUrl("/api/shop/me"), { headers: { "x-shop-token": memToken } });
+        if (r.ok) { setUser(await r.json()); setReady(true); return; }
+        if (r.status === 401 || r.status === 403) { clear(); return; }
+        // 5xx / other: retry
+      } catch {
+        // network: retry
+      }
+    }
+    // All retries exhausted on transient errors — keep existing state, just mark ready.
+    setReady(true);
   }, [clear]);
 
+  const refresh = useCallback(async () => { await revalidate(); }, [revalidate]);
+
   useEffect(() => {
-    let mounted = true;
     if (!token) { setReady(true); return; }
-    (async () => {
-      try {
-        const r = await fetch(apiUrl("/api/shop/me"), { headers: { "x-shop-token": token } });
-        if (!mounted) return;
-        if (r.ok) { setUser(await r.json()); setReady(true); }
-        else clear();
-      } catch { if (mounted) clear(); }
-    })();
+    if (justSetRef.current) {
+      // Fresh user came straight from the server via setAuth — trust it, skip one cycle.
+      justSetRef.current = false;
+      setReady(true);
+      return;
+    }
+    let mounted = true;
+    (async () => { if (mounted) await revalidate(); })();
     return () => { mounted = false; };
-  }, [token, clear]);
+  }, [token, revalidate]);
 
   // R27.1a BUG 3 — keep auth state in sync if the token changes in another tab
   // (storage event) or via the custom event we dispatch on login/verify/logout.

@@ -29,8 +29,9 @@ export default function CheckoutPage() {
   // Redirect to login if not authenticated (after ready). R27.1a BUG 3 — pass
   // ?next=checkout so login/verify returns the shopper straight back to checkout.
   useEffect(() => {
-    if (ready && !user) navigate("/customer/login?next=checkout");
-  }, [ready, user, navigate]);
+    // R27.1b BUG-1 — only redirect when fully resolved AND no token (avoid race with revalidate).
+    if (ready && !token && !user) navigate("/customer/login?next=checkout");
+  }, [ready, token, user, navigate]);
 
   // Empty cart guard.
   useEffect(() => { setItems(getCart()); }, []);

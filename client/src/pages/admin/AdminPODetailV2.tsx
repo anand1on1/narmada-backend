@@ -87,9 +87,9 @@ export default function AdminPODetailV2() {
                 </div>
               </div>
               <div className="flex items-center gap-2">
-                <span className="inline-block px-3 py-1 rounded-full bg-indigo-500/15 text-indigo-700 text-xs font-bold uppercase tracking-wider">{po.status || "—"}</span>
+                <span className={`inline-block px-3 py-1 rounded-full text-xs font-bold uppercase tracking-wider ${status === "processed" ? "bg-emerald-600 text-white" : "bg-indigo-500/15 text-indigo-700"}`}>{po.status || "—"}</span>
                 {status === "processed" ? (
-                  <span className="inline-flex items-center gap-1 px-3 py-2 text-xs font-semibold rounded-lg bg-green-500/15 text-green-700"><CheckCircle2 className="w-3 h-3" /> Processed</span>
+                  <span className="inline-flex items-center gap-1 px-3 py-2 text-xs font-semibold rounded-lg bg-emerald-600 text-white"><CheckCircle2 className="w-3 h-3" /> Processed</span>
                 ) : (
                   <button
                     onClick={() => processMut.mutate()}

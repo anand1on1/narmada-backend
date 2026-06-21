@@ -25,9 +25,11 @@ export default function ShopAccount() {
   const [form, setForm] = useState<any>(EMPTY);
   const [showForm, setShowForm] = useState(false);
 
+  // R27.1b BUG-1 — only redirect when fully resolved AND no token at all. If a token
+  // exists but user is briefly null (revalidate in flight), show the loading skeleton.
   useEffect(() => {
-    if (ready && !user) navigate("/customer/login");
-  }, [ready, user, navigate]);
+    if (ready && !token && !user) navigate("/customer/login");
+  }, [ready, token, user, navigate]);
 
   const loadAddresses = async () => {
     if (!token) return;
@@ -59,7 +61,8 @@ export default function ShopAccount() {
     navigate("/");
   };
 
-  if (!ready || !user) return <div className="max-w-4xl mx-auto px-4 py-20 text-center text-muted-foreground">Loading…</div>;
+  if (!ready || (!user && token)) return <div className="max-w-4xl mx-auto px-4 py-20 text-center text-muted-foreground">Loading…</div>;
+  if (!user) return <div className="max-w-4xl mx-auto px-4 py-20 text-center text-muted-foreground">Redirecting…</div>;
 
   return (
     <>

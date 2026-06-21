@@ -9,7 +9,7 @@ import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigge
 import { whatsappLink } from "@/lib/utils-app";
 import { StickyGetQuote } from "./StickyGetQuote";
 import { cartCount, subscribeCart } from "@/lib/cart";
-import { getCurrency, setCurrency, subscribeCurrency, loadFxRate, Currency } from "@/lib/currency";
+import { getCurrency, setCurrency, subscribeCurrency, loadFxRate, getUsdInr, Currency } from "@/lib/currency";
 import { useShopAuth } from "@/lib/shop-auth";
 
 const NAV = [
@@ -192,18 +192,29 @@ function CartIcon() {
 
 function CurrencyPicker() {
   const [cur, setCur] = useState<Currency>(getCurrency());
+  const [rate, setRate] = useState<number>(getUsdInr());
   useEffect(() => {
-    loadFxRate();
-    return subscribeCurrency(() => setCur(getCurrency()));
+    loadFxRate().then(() => setRate(getUsdInr()));
+    return subscribeCurrency(() => { setCur(getCurrency()); setRate(getUsdInr()); });
   }, []);
+  // R27.1b BUG-2 — prominent badge style with explicit symbol + code, larger touch
+  // target (h-10), and an "(at ₹X)" rate label when USD is active.
   return (
     <DropdownMenu>
-      <DropdownMenuTrigger className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-md text-[13px] font-medium text-[hsl(220_60%_12%)]/82 hover:text-[hsl(220_60%_12%)] hover:bg-[hsl(220_45%_20%)]/5 transition-colors" data-testid="currency-picker">
-        <Globe className="h-3.5 w-3.5" /> {cur} <ChevronDown className="h-3 w-3" />
+      <DropdownMenuTrigger
+        className="inline-flex items-center gap-1.5 h-10 px-3 rounded-md text-[13px] font-bold bg-[hsl(212_95%_50%)]/10 text-[hsl(212_95%_38%)] border border-[hsl(212_95%_50%)]/30 hover:bg-[hsl(212_95%_50%)]/20 transition-colors"
+        data-testid="currency-picker"
+        aria-label="Select currency"
+      >
+        {cur === "USD" ? "$ USD" : "₹ INR"}
+        {cur === "USD" && (
+          <span className="text-[11px] font-medium text-[hsl(212_95%_38%)]/70">(at ₹{rate.toFixed(1)})</span>
+        )}
+        <ChevronDown className="h-3.5 w-3.5" />
       </DropdownMenuTrigger>
-      <DropdownMenuContent align="end" className="bg-[hsl(210_35%_98%)] border-[hsl(220_45%_20%)]/10 text-[hsl(220_60%_12%)] min-w-[120px]">
-        <DropdownMenuItem onClick={() => setCurrency("INR")} data-testid="currency-inr">₹ INR</DropdownMenuItem>
-        <DropdownMenuItem onClick={() => setCurrency("USD")} data-testid="currency-usd">$ USD</DropdownMenuItem>
+      <DropdownMenuContent align="end" className="bg-[hsl(210_35%_98%)] border-[hsl(220_45%_20%)]/10 text-[hsl(220_60%_12%)] min-w-[140px]">
+        <DropdownMenuItem onClick={() => setCurrency("INR")} data-testid="currency-inr" className="font-medium">₹ INR — Indian Rupee</DropdownMenuItem>
+        <DropdownMenuItem onClick={() => setCurrency("USD")} data-testid="currency-usd" className="font-medium">$ USD — US Dollar</DropdownMenuItem>
       </DropdownMenuContent>
     </DropdownMenu>
   );

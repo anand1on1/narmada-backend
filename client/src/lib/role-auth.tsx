@@ -5,7 +5,7 @@
 import { createContext, useContext, useState, ReactNode, useCallback, useEffect } from "react";
 import { apiUrl } from "@/lib/queryClient";
 
-export type PortalRole = "sales" | "finance" | "hr" | "consignment";
+export type PortalRole = "sales" | "finance" | "hr" | "consignment" | "store" | "dispatch";
 
 interface RoleUser {
   id: number; username: string; name?: string | null; role?: string | null;
@@ -91,3 +91,5 @@ export const SalesAuth = makeRoleAuth("sales");
 export const FinanceAuth = makeRoleAuth("finance");
 export const HRAuth = makeRoleAuth("hr");
 export const ConsignmentAuth = makeRoleAuth("consignment");
+export const StoreAuth = makeRoleAuth("store");
+export const DispatchAuth = makeRoleAuth("dispatch");

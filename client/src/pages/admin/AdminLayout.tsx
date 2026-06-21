@@ -19,7 +19,7 @@ import {
 // sales     = dashboard + future customers/rfqs (Session B) + price lists + products + contacts
 const ROLE_PAGES: Record<AdminRole, Set<string>> = {
   admin: new Set([
-    "/admin/command-center", "/admin/chats",
+    "/admin/command-center", "/admin/chats", "/admin/ai-bar", "/admin/operations",
     "/admin/dashboard", "/admin/products", "/admin/blog", "/admin/price-lists",
     "/admin/consignments", "/admin/contacts", "/admin/sitemap", "/admin/team", "/admin/settings",
     "/admin/customers", "/admin/ledger", "/admin/payments",
@@ -91,6 +91,7 @@ export function AdminLayout({ children, title }: { children: ReactNode; title: s
 
   const allItems = [
     { href: "/admin/command-center", label: "Command Center", icon: Gauge },
+    { href: "/admin/ai-bar", label: "AI Bar", icon: Sparkles },
     { href: "/admin/dashboard", label: "Dashboard", icon: LayoutDashboard },
     { href: "/admin/chats", label: "Chats", icon: MessageSquare, badge: unreadChats },
     { href: "/admin/customers", label: "Customers", icon: UserSquare },
@@ -103,6 +104,7 @@ export function AdminLayout({ children, title }: { children: ReactNode; title: s
     { href: "/admin/parts", label: "Parts", icon: Package },
     { href: "/admin/purchase-orders", label: "Purchase Orders", icon: ShoppingCart },
     { href: "/admin/purchase-history", label: "Purchase History", icon: History },
+    { href: "/admin/operations", label: "Operations", icon: ClipboardList },
     { href: "/admin/web-customers", label: "Web Customers", icon: UserSquare },
     { href: "/admin/freight", label: "Freight Charges", icon: Truck },
     { href: "/admin/bank", label: "Bank Accounts", icon: Landmark },

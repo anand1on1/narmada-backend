@@ -15,16 +15,21 @@ export default function AdminFreight() {
   const [newPart, setNewPart] = useState("");
   const [newFreight, setNewFreight] = useState("");
 
+  // R27.1b BUG-5 — debounce the search box so typing filters live (300ms) instead of
+  // only firing on Enter/submit. dq is the debounced query actually sent to the server.
+  const [dq, setDq] = useState("");
+  useEffect(() => { const t = setTimeout(() => setDq(q), 300); return () => clearTimeout(t); }, [q]);
+
   async function load() {
     if (!token) return;
     const params = new URLSearchParams();
-    if (q) params.set("q", q);
+    if (dq) params.set("q", dq);
     if (zeroOnly) params.set("zero_only", "1");
     params.set("limit", "200");
     const r = await adminFetch(token, `/api/admin/freight-charges?${params.toString()}`);
     if (r.ok) { const d = await r.json(); setRows(d.rows || []); setTotal(d.total || 0); }
   }
-  useEffect(() => { load(); }, [token, zeroOnly]); // eslint-disable-line
+  useEffect(() => { load(); }, [token, zeroOnly, dq]); // eslint-disable-line
 
   async function saveOne(partNumber: string) {
     const val = edits[partNumber];
@@ -57,7 +62,8 @@ export default function AdminFreight() {
       <div className="flex flex-wrap items-center gap-2 mb-4">
         <form onSubmit={(e) => { e.preventDefault(); load(); }} className="flex gap-2">
           <input value={q} onChange={(e) => setQ(e.target.value)} placeholder="Search part # or product" className="px-3 py-1.5 rounded-lg border bg-card text-sm w-64" data-testid="search-input" />
-          <button className="px-3 py-1.5 rounded-lg bg-accent text-accent-foreground text-sm font-semibold" data-testid="search-btn">Search</button>
+          <button type="submit" className="px-3 py-1.5 rounded-lg bg-accent text-accent-foreground text-sm font-semibold" data-testid="search-btn">Search</button>
+          {q && <button type="button" onClick={() => setQ("")} className="px-3 py-1.5 rounded-lg border text-sm font-semibold hover:bg-muted" data-testid="search-clear">Show all</button>}
         </form>
         <label className="flex items-center gap-2 text-sm ml-2"><input type="checkbox" checked={zeroOnly} onChange={(e) => setZeroOnly(e.target.checked)} data-testid="zero-only" /> Zero freight only</label>
         <label className="ml-auto px-3 py-1.5 rounded-lg border text-sm font-semibold cursor-pointer hover:bg-muted" data-testid="csv-upload-label">
@@ -74,7 +80,7 @@ export default function AdminFreight() {
 
       <div className="bg-card border rounded-xl overflow-hidden">
         {rows.length === 0 ? (
-          <div className="p-12 text-center text-muted-foreground">No freight charges yet. Add one above or import a CSV (columns: part_number, freight_inr).</div>
+          <div className="p-12 text-center text-muted-foreground">{dq ? `No freight charges match "${dq}". Try a different part # or product name, or click Show all.` : "No freight charges configured yet. Add one above or import a CSV (columns: part_number, freight_inr)."}</div>
         ) : (
           <table className="w-full text-sm">
             <thead className="bg-muted/50 text-left"><tr><th className="p-3">Part #</th><th className="p-3">Product</th><th className="p-3">Freight (₹)</th><th className="p-3"></th></tr></thead>

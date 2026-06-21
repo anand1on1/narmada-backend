@@ -3031,7 +3031,13 @@ function registerR4toR7Routes(
     res.json(await v2.listVendors({ q: req.query.q as string | undefined, activeOnly: req.query.activeOnly === "true" }));
   });
   app.get("/api/team/purchase-orders", requireDataTeam, async (req, res) => {
-    const allRows = await v2.listPurchaseOrdersV2WithTotals({ status: req.query.status as string | undefined });
+    // R27.1b BUG-4 — team portal PO search (mirror admin q/from/to filters).
+    const allRows = await v2.listPurchaseOrdersV2WithTotals({
+      status: req.query.status as string | undefined,
+      q: req.query.q as string | undefined,
+      from: req.query.from as string | undefined,
+      to: req.query.to as string | undefined,
+    });
     // R23.2 — opt-in pagination: ?limit=&offset= slices the list and sets X-Total-Count.
     // When ?limit is omitted the full array is returned (backward compatible).
     const total = allRows.length;
@@ -3044,8 +3050,12 @@ function registerR4toR7Routes(
     res.setHeader("X-Total-Count", String(total));
     // R12: attach per-PO dispatch rollup (Status/Carrier/Bundles/Docket# columns).
     const summary = await v2.getDispatchSummaryForPOs(rows.map((r: any) => r.id));
+    // R27.2-4 — per-PO open-deviation rollup so the team list can show the deviation column.
+    let devSummary: Record<number, { count: number }> = {};
+    try { const r27mod = await import("./storage-r27"); devSummary = r27mod.deviationSummaryForPOs(rows.map((r: any) => r.id)); } catch { /* deviation table may not exist on older DBs */ }
     res.json(rows.map((r: any) => {
       const s = summary[r.id];
+      const dev = devSummary[r.id];
       return {
         ...r,
         dispatches: s?.dispatches || [],
@@ -3053,6 +3063,8 @@ function registerR4toR7Routes(
         dispatchBundles: s?.bundles || 0,
         dispatchDockets: s?.docketNumbers || [],
         hasInternalTransfer: s?.hasInternalTransfer || false,
+        hasDeviation: !!(dev && dev.count > 0),
+        deviationCount: dev?.count || 0,
       };
     }));
   });
@@ -3076,6 +3088,14 @@ function registerR4toR7Routes(
       const u = (req as any).teamUser;
       const { items, ...po } = req.body || {};
       res.json(await v2.createPurchaseOrderV2({ ...po, createdBy: u?.username }, items || []));
+    } catch (e: any) { res.status(500).json({ error: e.message }); }
+  });
+  // R27.1b BUG-4 — team portal Duplicate action (mirrors admin /duplicate).
+  app.post("/api/team/purchase-orders/:id/duplicate", requireDataTeam, async (req, res) => {
+    try {
+      const dup = await v2.duplicatePurchaseOrderV2(parseInt(String(req.params.id), 10));
+      if (!dup) return res.status(404).json({ error: "Not found" });
+      res.json(dup);
     } catch (e: any) { res.status(500).json({ error: e.message }); }
   });
   app.patch("/api/team/purchase-orders/:id", requireDataTeam, async (req, res) => {
@@ -3326,6 +3346,17 @@ function registerR4toR7Routes(
           }
           if (customer?.email) {
             sendGenericEmail({ to: customer.email, subject: "Your order has been dispatched — Narmada Mobility", html: `<p>Dear ${customer.name}, your order (${item.partNumber || ""}) has been dispatched. Docket: ${docket_no || "-"}, Courier: ${courier || "-"}.</p>`, text: `Your order has been dispatched. Docket ${docket_no || "-"}.`, event: "dispatch_notify" }).catch(() => {});
+          }
+          // R27.2-5 — auto-create draft products from the PO's parts (vendor_price × markup),
+          // and open a Delhi→Patna branch transfer so the Store incharge can mark-received.
+          if (item.poId) {
+            try {
+              const r27 = await import("./storage-r27");
+              const ap = r27.autoCreateProductsForPo(item.poId);
+              console.log(`[R27.2] auto-product PO ${item.poId}: created=${ap.created} skipped=${ap.skipped}`);
+              const existingTransfer = (r27.listTransfers() as any[]).find((t) => t.po_id === item.poId && t.status === "in_transit");
+              if (!existingTransfer) r27.createBranchTransfer({ poId: item.poId, notes: `Auto-created on Delhi dispatch of PO ${po?.poNumber || item.poId}` });
+            } catch (e: any) { console.error("[R27.2] auto-product/transfer hook:", e?.message || e); }
           }
         } catch (e: any) { console.error("[delhi] dispatch side-effects:", e?.message); }
       }
@@ -6955,6 +6986,441 @@ function registerR8Routes(
       res.json({ ok: true });
     } catch (e: any) { res.status(400).json({ error: e.message }); }
   });
+
+  // ============================================================================
+  // R27.2 + R27.3 — Procurement invoice flow, deviation engine, store + dispatch
+  // roles, sales-expense approval, accounts dashboard, Supreme AI bar, AI fill.
+  // All storage in ./storage-r27. Additive routes; no existing endpoint touched.
+  // ============================================================================
+  const r27 = () => import("./storage-r27");
+
+  // ---- Store + Dispatch role middleware (extends data_team_users role auth) ----
+  // requireDataTeamRole already reads x-team-token + authorization; add the two new
+  // header names so the dedicated portals can send their own token header.
+  function requireRoleHeaders(...allowed: string[]) {
+    return async (req: Request, res: Response, next: NextFunction): Promise<void> => {
+      const token = (req.headers["x-store-token"] as string | undefined)
+        || (req.headers["x-dispatch-token"] as string | undefined)
+        || (req.headers["x-sales-token"] as string | undefined)
+        || (req.headers["x-finance-token"] as string | undefined)
+        || (req.headers["x-team-token"] as string | undefined)
+        || (req.headers["authorization"] as string | undefined)?.replace("Bearer ", "");
+      if (!token) { res.status(401).json({ error: "Unauthorized" }); return; }
+      const session = await v2.getDataTeamSession(token);
+      if (!session) { res.status(401).json({ error: "Unauthorized" }); return; }
+      const user = await v2.getDataTeamUser(session.userId);
+      if (!user || !user.active) { res.status(401).json({ error: "Unauthorized" }); return; }
+      if (allowed.length && user.role !== "admin" && !allowed.includes(user.role)) {
+        res.status(403).json({ error: `Role ${allowed.join("/")} required` }); return;
+      }
+      (req as any).teamUser = user;
+      next();
+    };
+  }
+  const requireStore = requireRoleHeaders("store_incharge");
+  const requireDispatch = requireRoleHeaders("dispatch_incharge");
+  // Finance reads the accounts dashboard; admin always passes. Salary numbers masked unless admin.
+  const requireFinanceAcct = requireRoleHeaders("finance");
+
+  app.post("/api/store/login", makeRoleLogin("store_incharge"));
+  app.post("/api/dispatch/login", makeRoleLogin("dispatch_incharge"));
+  app.get("/api/store/me", requireStore, (req, res) => { const { passwordHash: _p, ...s } = (req as any).teamUser; res.json(s); });
+  app.get("/api/dispatch/me", requireDispatch, (req, res) => { const { passwordHash: _p, ...s } = (req as any).teamUser; res.json(s); });
+
+  // ---- R27.2-1 Procurement invoice flow (admin token) ----
+  app.post("/api/admin/purchase-orders/:id/generate-invoice-copy", requireAuth, async (req: any, res) => {
+    try { const s = await r27(); res.json(s.generateInvoiceCopy(parseInt(req.params.id as string, 10), (req.user?.username) || "admin")); }
+    catch (e: any) { res.status(500).json({ error: e.message }); }
+  });
+  app.put("/api/admin/purchase-orders/:id/invoice-copy", requireAuth, async (req: any, res) => {
+    try { const s = await r27(); res.json(s.updateInvoiceCopy(parseInt(req.params.id as string, 10), req.body || {}, (req.user?.username) || "admin")); }
+    catch (e: any) { res.status(500).json({ error: e.message }); }
+  });
+  app.post("/api/admin/purchase-orders/:id/delhi-invoice", requireAuth, async (req: any, res) => {
+    try { const s = await r27(); res.json(s.createDelhiInvoice(parseInt(req.params.id as string, 10), req.body || {}, (req.user?.username) || "delhi")); }
+    catch (e: any) { res.status(500).json({ error: e.message }); }
+  });
+  app.get("/api/admin/purchase-orders/:id/invoices", requireAuth, async (req, res) => {
+    try { const s = await r27(); res.json(s.listInvoices(parseInt(req.params.id as string, 10))); }
+    catch (e: any) { res.status(500).json({ error: e.message }); }
+  });
+
+  // ---- R27.2-4 Deviation engine (admin token; procurement mirror reuses same data) ----
+  app.get("/api/admin/deviations", requireAuth, async (req, res) => {
+    try {
+      const s = await r27();
+      res.json(s.listDeviations({ status: req.query.status as string | undefined, from: req.query.from as string | undefined, to: req.query.to as string | undefined, poId: req.query.po_id ? parseInt(req.query.po_id as string, 10) : undefined }));
+    } catch (e: any) { res.status(500).json({ error: e.message }); }
+  });
+  app.post("/api/admin/deviations", requireAuth, async (req: any, res) => {
+    try {
+      const { po_id, field, expected, actual, notes } = req.body || {};
+      if (!po_id || !field) return res.status(400).json({ error: "po_id and field required" });
+      const s = await r27();
+      const id = s.addDeviation(parseInt(String(po_id), 10), String(field), String(expected ?? ""), String(actual ?? ""), (req.user?.username) || "admin", "manual", notes);
+      res.json({ id });
+    } catch (e: any) { res.status(400).json({ error: e.message }); }
+  });
+  app.post("/api/admin/deviations/:id/resolve", requireAuth, async (req: any, res) => {
+    try { const s = await r27(); res.json(s.resolveDeviation(parseInt(req.params.id as string, 10), (req.user?.username) || "admin", req.body?.notes)); }
+    catch (e: any) { res.status(500).json({ error: e.message }); }
+  });
+  app.post("/api/admin/deviations/:id/create-sub-po", requireAuth, async (req: any, res) => {
+    try { const s = await r27(); res.json(await s.createSubPoForDeviation(parseInt(req.params.id as string, 10), (req.user?.username) || "admin")); }
+    catch (e: any) { res.status(400).json({ error: e.message }); }
+  });
+  app.get("/api/admin/deviations/export.xlsx", requireAuth, async (_req, res) => {
+    try {
+      const s = await r27();
+      const rows = s.deviationExportRows();
+      const XLSX = require("xlsx");
+      const ws = XLSX.utils.json_to_sheet(rows);
+      const wb = XLSX.utils.book_new();
+      XLSX.utils.book_append_sheet(wb, ws, "Deviations");
+      const buf = XLSX.write(wb, { type: "buffer", bookType: "xlsx" });
+      res.setHeader("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
+      res.setHeader("Content-Disposition", `attachment; filename="deviations.xlsx"`);
+      res.send(buf);
+    } catch (e: any) { res.status(500).json({ error: e.message }); }
+  });
+
+  // ---- R27.2-2/3 Store incharge: branch transfers + receive + stock ----
+  app.get("/api/store/transfers", requireStore, async (req, res) => {
+    try { const s = await r27(); res.json(s.listTransfers({ status: req.query.status as string | undefined })); }
+    catch (e: any) { res.status(500).json({ error: e.message }); }
+  });
+  app.get("/api/store/transfers/:id", requireStore, async (req, res) => {
+    try { const s = await r27(); const d = s.getTransferDetail(parseInt(req.params.id as string, 10)); if (!d) return res.status(404).json({ error: "Not found" }); res.json(d); }
+    catch (e: any) { res.status(500).json({ error: e.message }); }
+  });
+  app.post("/api/store/transfers/:id/receive", requireStore, async (req: any, res) => {
+    try {
+      const s = await r27();
+      const items = Array.isArray(req.body?.items) ? req.body.items : [];
+      if (!items.length) return res.status(400).json({ error: "items required" });
+      res.json(await s.receiveTransfer(parseInt(req.params.id as string, 10), items, (req.teamUser?.id)));
+    } catch (e: any) { res.status(400).json({ error: e.message }); }
+  });
+  app.get("/api/store/stock", requireStore, async (req, res) => {
+    try { const s = await r27(); res.json(s.listBranchStock("Patna", (req.query.status as string) || "in_stock")); }
+    catch (e: any) { res.status(500).json({ error: e.message }); }
+  });
+
+  // ---- R27.2 Dispatch incharge: ready stock + handover ----
+  app.get("/api/dispatch/ready", requireDispatch, async (_req, res) => {
+    try { const s = await r27(); res.json(s.dispatchReady("Patna")); }
+    catch (e: any) { res.status(500).json({ error: e.message }); }
+  });
+  app.post("/api/dispatch/handover", requireDispatch, async (req, res) => {
+    try {
+      const s = await r27();
+      const stockIds = Array.isArray(req.body?.stock_ids) ? req.body.stock_ids.map((n: any) => parseInt(String(n), 10)) : [];
+      res.json(s.dispatchHandover(stockIds, req.body?.customer_id ? parseInt(String(req.body.customer_id), 10) : undefined, req.body?.invoice_number));
+    } catch (e: any) { res.status(400).json({ error: e.message }); }
+  });
+
+  // ---- R27.2-5 Auto-product markup setting (admin) ----
+  app.get("/api/admin/settings/auto-product-markup", requireAuth, async (_req, res) => {
+    try {
+      const { rawSqlite } = await import("./storage");
+      const row = rawSqlite.prepare(`SELECT value FROM shop_settings WHERE key = 'auto_product_markup_pct'`).get() as any;
+      res.json({ markup_pct: Number(row?.value) || 20 });
+    } catch (e: any) { res.status(500).json({ error: e.message }); }
+  });
+  app.put("/api/admin/settings/auto-product-markup", requireAdminRole, async (req, res) => {
+    try {
+      const pct = Number(req.body?.markup_pct);
+      if (!Number.isFinite(pct) || pct < 0) return res.status(400).json({ error: "markup_pct must be a non-negative number" });
+      const { rawSqlite } = await import("./storage");
+      rawSqlite.prepare(`INSERT INTO shop_settings (key, value) VALUES ('auto_product_markup_pct', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value`).run(String(pct));
+      res.json({ markup_pct: pct });
+    } catch (e: any) { res.status(400).json({ error: e.message }); }
+  });
+
+  // ---- R27.2-6 Sales-expense approval (admin Expenses tab) ----
+  app.get("/api/admin/sales-expenses", requireAuth, async (req, res) => {
+    try {
+      const s = await r27();
+      res.json(s.listSalesExpensesAdmin({ status: req.query.status as string | undefined, userId: req.query.user_id ? parseInt(req.query.user_id as string, 10) : undefined, from: req.query.from as string | undefined, to: req.query.to as string | undefined }));
+    } catch (e: any) { res.status(500).json({ error: e.message }); }
+  });
+  app.post("/api/admin/sales-expenses/:id/approve", requireAuth, async (req: any, res) => {
+    try { const s = await r27(); res.json(s.approveSalesExpense(parseInt(req.params.id as string, 10), undefined, req.body?.note)); }
+    catch (e: any) { res.status(500).json({ error: e.message }); }
+  });
+  app.post("/api/admin/sales-expenses/:id/reject", requireAuth, async (req: any, res) => {
+    try { const s = await r27(); res.json(s.rejectSalesExpense(parseInt(req.params.id as string, 10), undefined, req.body?.note)); }
+    catch (e: any) { res.status(500).json({ error: e.message }); }
+  });
+
+  // ============================================================================
+  // R27.3 — Accounts dashboard (finance role; admin sees salary numbers, finance masked)
+  // ============================================================================
+  // Admin token OR finance token both reach these; we detect "admin sees salary" by
+  // checking the admin token map first, falling back to the finance role session.
+  function acctAuth(req: Request, res: Response, next: NextFunction) {
+    // Try admin token first (grants salary visibility).
+    const adminTok = req.headers["x-admin-token"] as string | undefined;
+    if (adminTok) {
+      const info = ctx.tokenMap.get(adminTok) || rehydrateSession(ctx.tokenMap, adminTok);
+      if (info) { (req as any).user = info; (req as any).isAdminAcct = info.role === "admin"; return next(); }
+    }
+    return requireFinanceAcct(req, res, () => { (req as any).isAdminAcct = (req as any).teamUser?.role === "admin"; next(); });
+  }
+
+  // Expense headers
+  app.get("/api/finance/expense-headers", acctAuth, async (_req, res) => { const s = await r27(); res.json(s.listExpenseHeaders()); });
+  app.post("/api/finance/expense-headers", acctAuth, async (req, res) => {
+    try { if (!req.body?.name) return res.status(400).json({ error: "name required" }); const s = await r27(); res.json(s.createExpenseHeader(String(req.body.name), req.body.fields || [])); }
+    catch (e: any) { res.status(400).json({ error: e.message }); }
+  });
+  app.put("/api/finance/expense-headers/:id", acctAuth, async (req, res) => {
+    try { const s = await r27(); res.json(s.updateExpenseHeader(parseInt(req.params.id as string, 10), req.body?.name, req.body?.fields)); }
+    catch (e: any) { res.status(400).json({ error: e.message }); }
+  });
+  app.delete("/api/finance/expense-headers/:id", acctAuth, async (req, res) => {
+    try { const s = await r27(); res.json(s.deleteExpenseHeader(parseInt(req.params.id as string, 10))); }
+    catch (e: any) { res.status(400).json({ error: e.message }); }
+  });
+
+  // Cash in hand
+  app.get("/api/finance/cash", acctAuth, async (_req, res) => { const s = await r27(); res.json(s.listCash()); });
+  app.post("/api/finance/cash", acctAuth, async (req: any, res) => {
+    try { if (!req.body?.source) return res.status(400).json({ error: "source required" }); const s = await r27(); res.json(s.createCash(req.body, req.teamUser?.id)); }
+    catch (e: any) { res.status(400).json({ error: e.message }); }
+  });
+
+  // Advances + reconciliation
+  app.get("/api/finance/advances", acctAuth, async (req, res) => {
+    const s = await r27();
+    res.json(s.listAdvances({ employeeId: req.query.employee_id ? parseInt(req.query.employee_id as string, 10) : undefined, status: req.query.status as string | undefined }));
+  });
+  app.post("/api/finance/advances", acctAuth, async (req: any, res) => {
+    try { if (!req.body?.employee_id) return res.status(400).json({ error: "employee_id required" }); const s = await r27(); res.json(s.createAdvance(req.body, req.teamUser?.id)); }
+    catch (e: any) { res.status(400).json({ error: e.message }); }
+  });
+  app.post("/api/finance/advances/:id/reconcile", acctAuth, async (req, res) => {
+    try { const s = await r27(); res.json(s.reconcileAdvance(parseInt(req.params.id as string, 10), req.body || {})); }
+    catch (e: any) { res.status(400).json({ error: e.message }); }
+  });
+
+  // Current expenses
+  app.get("/api/finance/current-expenses", acctAuth, async (req, res) => {
+    const s = await r27();
+    res.json(s.listCurrentExpenses({ from: req.query.from as string | undefined, to: req.query.to as string | undefined, headerId: req.query.header_id ? parseInt(req.query.header_id as string, 10) : undefined }));
+  });
+  app.post("/api/finance/current-expenses", acctAuth, async (req: any, res) => {
+    try { if (!req.body?.expense_header_id || !req.body?.expense_date) return res.status(400).json({ error: "expense_header_id and expense_date required" }); const s = await r27(); res.json(s.createCurrentExpense(req.body, req.teamUser?.id)); }
+    catch (e: any) { res.status(400).json({ error: e.message }); }
+  });
+
+  // Person ledger
+  app.get("/api/finance/person-ledger/:personId", acctAuth, async (req, res) => {
+    const s = await r27(); res.json(s.getPersonLedger(parseInt(req.params.personId as string, 10)));
+  });
+
+  // Employees (salary masked unless admin)
+  app.get("/api/finance/employees", acctAuth, async (req: any, res) => {
+    const s = await r27(); res.json(s.listEmployees(!req.isAdminAcct));
+  });
+  app.get("/api/finance/employees/:id", acctAuth, async (req: any, res) => {
+    const s = await r27(); const e = s.getEmployee(parseInt(req.params.id as string, 10), !req.isAdminAcct); if (!e) return res.status(404).json({ error: "Not found" }); res.json(e);
+  });
+  app.post("/api/finance/employees", acctAuth, async (req, res) => {
+    try { if (!req.body?.name) return res.status(400).json({ error: "name required" }); const s = await r27(); res.json(s.createEmployee(req.body)); }
+    catch (e: any) { res.status(400).json({ error: e.message }); }
+  });
+  app.put("/api/finance/employees/:id", acctAuth, async (req: any, res) => {
+    try { const s = await r27(); res.json(s.updateEmployee(parseInt(req.params.id as string, 10), req.body || {}, !!req.isAdminAcct)); }
+    catch (e: any) { res.status(400).json({ error: e.message }); }
+  });
+
+  // Attendance
+  app.get("/api/finance/attendance", acctAuth, async (req, res) => {
+    const s = await r27(); res.json(s.listAttendance(req.query.month as string | undefined));
+  });
+  app.post("/api/finance/attendance", acctAuth, async (req: any, res) => {
+    try {
+      const { employee_id, month, absent_days } = req.body || {};
+      if (!employee_id || !month) return res.status(400).json({ error: "employee_id and month required" });
+      const s = await r27(); res.json(s.upsertAttendance(parseInt(String(employee_id), 10), String(month), Number(absent_days) || 0, req.teamUser?.id));
+    } catch (e: any) { res.status(400).json({ error: e.message }); }
+  });
+
+  // Salary compute / finalize / email (admin only — salary numbers)
+  app.get("/api/finance/salary/compute", acctAuth, async (req: any, res) => {
+    try {
+      if (!req.isAdminAcct) return res.status(403).json({ error: "Admin role required for salary figures" });
+      const employeeId = parseInt(req.query.employee_id as string, 10);
+      const month = String(req.query.month || "");
+      if (!employeeId || !month) return res.status(400).json({ error: "employee_id and month required" });
+      const s = await r27(); res.json(s.computeSalary(employeeId, month));
+    } catch (e: any) { res.status(400).json({ error: e.message }); }
+  });
+  app.post("/api/finance/salary/finalize", acctAuth, async (req: any, res) => {
+    try {
+      if (!req.isAdminAcct) return res.status(403).json({ error: "Admin role required to finalize salary" });
+      const { employee_id, month, payment_ref } = req.body || {};
+      if (!employee_id || !month) return res.status(400).json({ error: "employee_id and month required" });
+      const s = await r27(); res.json(s.finalizeSalary(parseInt(String(employee_id), 10), String(month), payment_ref));
+    } catch (e: any) { res.status(400).json({ error: e.message }); }
+  });
+  app.post("/api/finance/salary/email", acctAuth, async (req: any, res) => {
+    try {
+      if (!req.isAdminAcct) return res.status(403).json({ error: "Admin role required" });
+      const { employee_id, month, to } = req.body || {};
+      if (!employee_id || !month) return res.status(400).json({ error: "employee_id and month required" });
+      const s = await r27();
+      const run: any = s.finalizeSalary(parseInt(String(employee_id), 10), String(month));
+      if (to) {
+        sendGenericEmail({ to: String(to), subject: `Salary slip — ${month}`, html: `<h3>Salary slip ${month}</h3><p>Working days: ${run.working_days}</p><p>Gross: ₹${run.gross}</p><p>Advance deduction: ₹${run.advance_deduction}</p><p>Retention: ₹${run.retention_amount}</p><p><b>Net payable: ₹${run.net_payable}</b></p>`, text: `Salary ${month}: net payable ₹${run.net_payable}`, event: "salary_slip" }).catch(() => {});
+      }
+      s.markSalaryEmailed(parseInt(String(employee_id), 10), String(month));
+      res.json({ ok: true, run });
+    } catch (e: any) { res.status(400).json({ error: e.message }); }
+  });
+  app.get("/api/finance/salary/runs", acctAuth, async (req: any, res) => {
+    if (!req.isAdminAcct) return res.status(403).json({ error: "Admin role required for salary figures" });
+    const s = await r27(); res.json(s.listSalaryRuns(req.query.month as string | undefined));
+  });
+  app.get("/api/finance/salary/export.xlsx", acctAuth, async (req: any, res) => {
+    try {
+      if (!req.isAdminAcct) return res.status(403).json({ error: "Admin role required" });
+      const s = await r27();
+      const rows = s.listSalaryRuns(req.query.month as string | undefined) as any[];
+      const XLSX = require("xlsx");
+      const ws = XLSX.utils.json_to_sheet(rows);
+      const wb = XLSX.utils.book_new();
+      XLSX.utils.book_append_sheet(wb, ws, "Salary");
+      const buf = XLSX.write(wb, { type: "buffer", bookType: "xlsx" });
+      res.setHeader("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
+      res.setHeader("Content-Disposition", `attachment; filename="salary.xlsx"`);
+      res.send(buf);
+    } catch (e: any) { res.status(500).json({ error: e.message }); }
+  });
+
+  // ============================================================================
+  // R27.3-2 — Supreme AI Bar. LLM tool-use over read-only DB queries when
+  // CLAUDE_API_KEY is set; deterministic keyword routing otherwise.
+  // ============================================================================
+  app.get("/api/admin/ai-bar/history", requireAuth, async (_req, res) => {
+    try { const s = await r27(); res.json(s.aiBarHistory(20)); }
+    catch (e: any) { res.status(500).json({ error: e.message }); }
+  });
+  app.post("/api/admin/ai-bar/ask", requireAuth, async (req: any, res) => {
+    try {
+      const prompt = String(req.body?.prompt || "").trim();
+      if (!prompt) return res.status(400).json({ error: "prompt required" });
+      const { rawSqlite } = await import("./storage");
+      const q = (sql: string, ...p: any[]) => { try { return rawSqlite.prepare(sql).all(...p); } catch { return []; } };
+      const one = (sql: string, ...p: any[]) => { try { return rawSqlite.prepare(sql).get(...p); } catch { return null; } };
+
+      // Read-only tool catalogue (used both by LLM tool-use and deterministic routing).
+      const tools: Record<string, () => any> = {
+        open_pos: () => q(`SELECT po_number, status, total FROM purchase_orders_v2 WHERE deleted_at IS NULL AND status IN ('draft','open','partial') ORDER BY id DESC LIMIT 25`),
+        processed_pos: () => q(`SELECT po_number, status, total FROM purchase_orders_v2 WHERE status='processed' ORDER BY id DESC LIMIT 25`),
+        po_count: () => one(`SELECT COUNT(*) c FROM purchase_orders_v2 WHERE deleted_at IS NULL`),
+        open_deviations: () => q(`SELECT po_id, field, expected, actual FROM po_deviations WHERE resolved_at IS NULL ORDER BY id DESC LIMIT 25`),
+        pending_expenses: () => q(`SELECT id, expense_type, amount, expense_date FROM sales_expenses WHERE approval_status='pending' ORDER BY id DESC LIMIT 25`),
+        cash_balance: () => one(`SELECT COALESCE(SUM(amount),0) balance FROM cash_in_hand`),
+        open_advances: () => q(`SELECT employee_id, amount_given, status FROM advance_expenses WHERE status != 'reconciled' ORDER BY id DESC LIMIT 25`),
+        patna_stock: () => q(`SELECT part_number, qty, status FROM branch_stock WHERE branch='Patna' AND status='in_stock' ORDER BY id DESC LIMIT 25`),
+        in_transit_transfers: () => q(`SELECT id, po_id, status FROM branch_transfers WHERE status='in_transit' ORDER BY id DESC LIMIT 25`),
+        low_stock_products: () => q(`SELECT name, part_number, stock_qty FROM products WHERE active=1 AND stock_qty <= 2 ORDER BY stock_qty ASC LIMIT 25`),
+        recent_orders: () => q(`SELECT order_number, status, total_inr FROM shop_orders ORDER BY id DESC LIMIT 25`),
+        customer_count: () => one(`SELECT COUNT(*) c FROM customers WHERE deleted_at IS NULL`),
+        salary_due: () => q(`SELECT e.name, s.month, s.net_payable FROM salary_runs s LEFT JOIN employees e ON e.id=s.employee_id WHERE s.paid_at IS NULL ORDER BY s.id DESC LIMIT 25`),
+        top_vendors: () => q(`SELECT name, city FROM vendors ORDER BY id DESC LIMIT 15`),
+        attendance_month: () => q(`SELECT a.month, e.name, a.absent_days FROM attendance a LEFT JOIN employees e ON e.id=a.employee_id ORDER BY a.month DESC LIMIT 25`),
+        unresolved_leads: () => q(`SELECT name, stage FROM leads WHERE stage NOT IN ('won','lost') ORDER BY id DESC LIMIT 25`),
+      };
+
+      const s = await r27();
+      const claude = require("./claude-service") as typeof import("./claude-service");
+      let summary = ""; let data: any = null; let usedTool = "";
+
+      if (claude.isClaudeConfigured()) {
+        // Ask the LLM which single tool best answers the question (cheap routing, no write tools).
+        const toolNames = Object.keys(tools);
+        const routed = await claude.claudeJSON<{ tool: string }>(
+          `You route an admin's question to ONE read-only data tool. Available tools: ${toolNames.join(", ")}. Reply ONLY JSON {"tool":"<name>"}. If none fit, use "po_count".`,
+          prompt, 256,
+        ).catch(() => null);
+        usedTool = (routed?.tool && tools[routed.tool]) ? routed.tool : "po_count";
+        data = tools[usedTool]();
+        const text = await claude.claudeText(
+          `You are Narmada's operations assistant. Given the user's question and a JSON result from tool "${usedTool}", answer concisely in 1-3 sentences. Do not invent data.`,
+          `Question: ${prompt}\n\nData: ${JSON.stringify(data).slice(0, 4000)}`, 512,
+        ).catch(() => null);
+        summary = text || `Result from ${usedTool}.`;
+      } else {
+        // Deterministic keyword routing fallback.
+        const p = prompt.toLowerCase();
+        const pick =
+          /deviat/.test(p) ? "open_deviations" :
+          /expense|approv/.test(p) ? "pending_expenses" :
+          /cash/.test(p) ? "cash_balance" :
+          /advance/.test(p) ? "open_advances" :
+          /stock|inventory/.test(p) ? "patna_stock" :
+          /transit|transfer/.test(p) ? "in_transit_transfers" :
+          /low.?stock/.test(p) ? "low_stock_products" :
+          /order/.test(p) ? "recent_orders" :
+          /customer/.test(p) ? "customer_count" :
+          /salary|payroll/.test(p) ? "salary_due" :
+          /vendor|seller/.test(p) ? "top_vendors" :
+          /attendance/.test(p) ? "attendance_month" :
+          /lead/.test(p) ? "unresolved_leads" :
+          /processed/.test(p) ? "processed_pos" :
+          /\bpo\b|purchase order/.test(p) ? "open_pos" : "po_count";
+        usedTool = pick;
+        data = tools[pick]();
+        const count = Array.isArray(data) ? data.length : 1;
+        summary = `(${Array.isArray(data) ? `${count} row(s)` : "summary"}) via ${pick}. Set CLAUDE_API_KEY for natural-language answers.`;
+      }
+
+      s.aiBarLog((req.user && (req.user.id ?? null)) || null, prompt, summary, { tool: usedTool, data });
+      res.json({ summary, tool: usedTool, data, llm: claude.isClaudeConfigured() });
+    } catch (e: any) { res.status(500).json({ error: e.message }); }
+  });
+
+  // ============================================================================
+  // R27.3-3 — AI Fill extensions for product editor (4 endpoints).
+  // Each returns a small JSON the AdminProducts form merges into editing state.
+  // ============================================================================
+  async function aiFill(req: any, res: any, kind: "discounts" | "specifications" | "short-description" | "seo-meta") {
+    try {
+      const { name, brand, part_number, description, price_inr } = req.body || {};
+      if (!name) return res.status(400).json({ error: "name required" });
+      const claude = require("./claude-service") as typeof import("./claude-service");
+      const ctx = `Product: ${name}; brand: ${brand || "-"}; part#: ${part_number || "-"}; price: ₹${price_inr || "-"}; description: ${(description || "").slice(0, 600)}`;
+      if (!claude.isClaudeConfigured()) {
+        // Deterministic fallbacks so the buttons always do something useful offline.
+        if (kind === "discounts") return res.json({ discount_tiers: [{ min_qty: 5, discount_pct: 3 }, { min_qty: 10, discount_pct: 5 }, { min_qty: 25, discount_pct: 8 }] });
+        if (kind === "short-description") return res.json({ short_description: `${name}${brand ? ` by ${brand}` : ""} — genuine quality automotive spare part.` });
+        if (kind === "specifications") return res.json({ specifications: [{ key: "Brand", value: brand || "-" }, { key: "Part Number", value: part_number || "-" }] });
+        return res.json({ meta_title: `${name} | Narmada Mobility`.slice(0, 60), meta_description: `Buy ${name}${brand ? ` (${brand})` : ""} online at Narmada Mobility. Genuine automotive spare parts.`.slice(0, 160), meta_keywords: [name, brand, part_number].filter(Boolean).join(", ") });
+      }
+      if (kind === "discounts") {
+        const j = await claude.claudeJSON(`Suggest 2-4 quantity-based discount tiers for a B2B automotive part. Reply ONLY JSON {"discount_tiers":[{"min_qty":N,"discount_pct":N}]}.`, ctx, 512);
+        return res.json(j || { discount_tiers: [] });
+      }
+      if (kind === "specifications") {
+        const j = await claude.claudeJSON(`Generate technical specifications for this automotive part. Reply ONLY JSON {"specifications":[{"key":"...","value":"..."}]}.`, ctx, 800);
+        return res.json(j || { specifications: [] });
+      }
+      if (kind === "short-description") {
+        const t = await claude.claudeText(`Write a single punchy 1-sentence product short description (max 140 chars). Reply with the sentence only.`, ctx, 200);
+        return res.json({ short_description: (t || "").trim().slice(0, 200) });
+      }
+      // seo-meta
+      const j = await claude.claudeJSON(`Generate SEO meta for an e-commerce product page. Reply ONLY JSON {"meta_title":"<=60 chars","meta_description":"<=160 chars","meta_keywords":"comma,separated"}.`, ctx, 600);
+      return res.json(j || { meta_title: "", meta_description: "", meta_keywords: "" });
+    } catch (e: any) { res.status(500).json({ error: e.message }); }
+  }
+  app.post("/api/admin/ai-fill/discounts", requireAuth, (req, res) => aiFill(req, res, "discounts"));
+  app.post("/api/admin/ai-fill/specifications", requireAuth, (req, res) => aiFill(req, res, "specifications"));
+  app.post("/api/admin/ai-fill/short-description", requireAuth, (req, res) => aiFill(req, res, "short-description"));
+  app.post("/api/admin/ai-fill/seo-meta", requireAuth, (req, res) => aiFill(req, res, "seo-meta"));
 
   // ==================== H. CROSS-TEAM NOTIFICATIONS FEED ====================
   app.get("/api/notifications", requireDataTeamRole(), async (req, res) => {

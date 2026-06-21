@@ -2232,3 +2232,245 @@ export function runR27_1aMigrations() {
   }
   console.log("[migrations] R27.1a: complete");
 }
+
+// ============================================================================
+// R27.2 — Procurement invoice flow, Store+Dispatch roles, branch transfers,
+// deviation engine, auto-product, sales-expense approval. Additive only:
+// each DDL/ALTER is wrapped in its own try/catch with [migrations] R27.2 markers.
+// ============================================================================
+export function runR27_2Migrations() {
+  console.log("[migrations] R27.2: start");
+  const run = (desc: string, sql: string) => {
+    try { sqlite.exec(sql); console.log(`[migrations] R27.2: ${desc} ok`); }
+    catch (e: any) { console.log(`[migrations] R27.2: ${desc} skip (${e?.message || e})`); }
+  };
+  const addCol = (table: string, col: string, type: string) => {
+    try { sqlite.exec(`ALTER TABLE ${table} ADD COLUMN ${col} ${type};`); console.log(`[migrations] R27.2: ${table}.${col} added`); }
+    catch (e: any) { console.log(`[migrations] R27.2: ${table}.${col} skip (${e?.message || e})`); }
+  };
+
+  // --- R27.2-1 procurement invoice flow ---
+  addCol("purchase_orders_v2", "ai_invoice_copy_id", "INTEGER");
+  addCol("purchase_orders_v2", "delhi_invoice_id", "INTEGER");
+  addCol("purchase_orders_v2", "delhi_invoice_created_at", "TEXT");
+  run("po_invoice_copies", `
+    CREATE TABLE IF NOT EXISTS po_invoice_copies (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      po_id INTEGER NOT NULL,
+      kind TEXT NOT NULL,
+      invoice_number TEXT,
+      invoice_date TEXT,
+      invoice_pdf_url TEXT,
+      line_items_json TEXT,
+      subtotal REAL, tax REAL, total REAL,
+      created_by TEXT,
+      created_at TEXT DEFAULT CURRENT_TIMESTAMP
+    );`);
+  run("po_deviations", `
+    CREATE TABLE IF NOT EXISTS po_deviations (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      po_id INTEGER NOT NULL,
+      field TEXT NOT NULL,
+      expected TEXT, actual TEXT,
+      detected_at TEXT DEFAULT CURRENT_TIMESTAMP,
+      detected_by TEXT,
+      resolved_at TEXT, resolved_by TEXT,
+      notes TEXT,
+      source TEXT,
+      sub_po_id INTEGER
+    );`);
+
+  // --- R27.2-2/3 branch transfers + stock (Patna) ---
+  run("branch_transfers", `
+    CREATE TABLE IF NOT EXISTS branch_transfers (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      po_id INTEGER,
+      consignment_id INTEGER,
+      from_branch TEXT NOT NULL DEFAULT 'Delhi',
+      to_branch TEXT NOT NULL DEFAULT 'Patna',
+      dispatched_at TEXT,
+      received_at TEXT,
+      received_by INTEGER,
+      status TEXT DEFAULT 'in_transit',
+      notes TEXT,
+      created_at TEXT DEFAULT CURRENT_TIMESTAMP
+    );`);
+  run("branch_stock", `
+    CREATE TABLE IF NOT EXISTS branch_stock (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      branch TEXT NOT NULL,
+      product_id INTEGER,
+      part_number TEXT,
+      client_id INTEGER,
+      po_id INTEGER,
+      qty INTEGER NOT NULL,
+      rate REAL,
+      received_at TEXT DEFAULT CURRENT_TIMESTAMP,
+      status TEXT DEFAULT 'in_stock'
+    );`);
+  run("branch_received_items", `
+    CREATE TABLE IF NOT EXISTS branch_received_items (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      transfer_id INTEGER NOT NULL,
+      part_number TEXT,
+      product_id INTEGER,
+      expected_qty INTEGER,
+      received_qty INTEGER,
+      deviation_qty INTEGER,
+      reason TEXT,
+      marked_at TEXT DEFAULT CURRENT_TIMESTAMP
+    );`);
+
+  // --- R27.2-4 deviation engine: sub-PO links on purchase_orders_v2 ---
+  addCol("purchase_orders_v2", "parent_po_id", "INTEGER");
+  addCol("purchase_orders_v2", "is_sub_po", "INTEGER DEFAULT 0");
+
+  // --- R27.2-6 sales-expense approval ---
+  addCol("sales_expenses", "approval_status", "TEXT DEFAULT 'pending'");
+  addCol("sales_expenses", "approver_id", "INTEGER");
+  addCol("sales_expenses", "approval_note", "TEXT");
+  addCol("sales_expenses", "approved_at", "TEXT");
+  addCol("sales_expenses", "rejected_at", "TEXT");
+  // backfill: existing rows w/ null approval_status -> pending
+  try { sqlite.exec(`UPDATE sales_expenses SET approval_status = 'pending' WHERE approval_status IS NULL`); } catch {}
+
+  // --- new role logins: store_incharge + dispatch_incharge ---
+  try {
+    const { scryptSync, randomBytes } = require("node:crypto");
+    const hash = (plain: string) => { const salt = randomBytes(16).toString("hex"); return `${salt}:${scryptSync(plain, salt, 64).toString("hex")}`; };
+    const users: Array<{ username: string; password: string; role: string; name: string }> = [
+      { username: "store", password: "Store@123", role: "store_incharge", name: "Patna Store Incharge" },
+      { username: "dispatch", password: "Dispatch@123", role: "dispatch_incharge", name: "Patna Dispatch Incharge" },
+    ];
+    const ins = sqlite.prepare(`INSERT OR IGNORE INTO data_team_users (username, password_hash, name, role, active, created_at) VALUES (?, ?, ?, ?, 1, ?)`);
+    const now = Date.now();
+    let seeded = 0;
+    for (const u of users) { if (ins.run(u.username, hash(u.password), u.name, u.role, now).changes > 0) seeded++; }
+    console.log(`[migrations] R27.2: seeded ${seeded} store/dispatch role user(s)`);
+  } catch (e: any) { console.log(`[migrations] R27.2: role seed skip (${e?.message || e})`); }
+
+  console.log("[migrations] R27.2: complete");
+}
+
+// ============================================================================
+// R27.3 — Accounts dashboard tables, AI bar history. Additive only.
+// ============================================================================
+export function runR27_3Migrations() {
+  console.log("[migrations] R27.3: start");
+  const run = (desc: string, sql: string) => {
+    try { sqlite.exec(sql); console.log(`[migrations] R27.3: ${desc} ok`); }
+    catch (e: any) { console.log(`[migrations] R27.3: ${desc} skip (${e?.message || e})`); }
+  };
+  run("expense_headers", `
+    CREATE TABLE IF NOT EXISTS expense_headers (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      name TEXT NOT NULL UNIQUE,
+      fields_json TEXT,
+      created_at TEXT DEFAULT CURRENT_TIMESTAMP
+    );`);
+  run("cash_in_hand", `
+    CREATE TABLE IF NOT EXISTS cash_in_hand (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      source TEXT NOT NULL,
+      amount REAL NOT NULL,
+      reference TEXT,
+      date TEXT DEFAULT CURRENT_TIMESTAMP,
+      notes TEXT,
+      created_by INTEGER
+    );`);
+  run("advance_expenses", `
+    CREATE TABLE IF NOT EXISTS advance_expenses (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      employee_id INTEGER NOT NULL,
+      amount_given REAL NOT NULL,
+      given_at TEXT DEFAULT CURRENT_TIMESTAMP,
+      purpose TEXT,
+      status TEXT DEFAULT 'open',
+      reconciled_at TEXT,
+      given_by INTEGER
+    );`);
+  run("advance_reconciliations", `
+    CREATE TABLE IF NOT EXISTS advance_reconciliations (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      advance_id INTEGER NOT NULL,
+      expense_header_id INTEGER,
+      amount REAL NOT NULL,
+      description TEXT,
+      proof_url TEXT,
+      recorded_at TEXT DEFAULT CURRENT_TIMESTAMP
+    );`);
+  run("current_expenses", `
+    CREATE TABLE IF NOT EXISTS current_expenses (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      expense_header_id INTEGER NOT NULL,
+      amount REAL NOT NULL,
+      fields_data_json TEXT,
+      proof_url TEXT,
+      expense_date TEXT NOT NULL,
+      created_by INTEGER,
+      created_at TEXT DEFAULT CURRENT_TIMESTAMP
+    );`);
+  run("person_ledger", `
+    CREATE TABLE IF NOT EXISTS person_ledger (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      person_id INTEGER NOT NULL,
+      kind TEXT NOT NULL,
+      amount REAL NOT NULL,
+      reference_id INTEGER,
+      reference_table TEXT,
+      notes TEXT,
+      entry_date TEXT DEFAULT CURRENT_TIMESTAMP
+    );`);
+  run("employees", `
+    CREATE TABLE IF NOT EXISTS employees (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      name TEXT NOT NULL,
+      contact TEXT,
+      aadhar TEXT,
+      image_url TEXT,
+      per_day_rate REAL,
+      monthly_salary REAL,
+      retention_pct REAL DEFAULT 10,
+      joined_at TEXT,
+      active INTEGER DEFAULT 1,
+      created_at TEXT DEFAULT CURRENT_TIMESTAMP
+    );`);
+  run("attendance", `
+    CREATE TABLE IF NOT EXISTS attendance (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      employee_id INTEGER NOT NULL,
+      month TEXT NOT NULL,
+      absent_days INTEGER NOT NULL DEFAULT 0,
+      uploaded_at TEXT DEFAULT CURRENT_TIMESTAMP,
+      uploaded_by INTEGER,
+      UNIQUE(employee_id, month)
+    );`);
+  run("salary_runs", `
+    CREATE TABLE IF NOT EXISTS salary_runs (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      employee_id INTEGER NOT NULL,
+      month TEXT NOT NULL,
+      working_days INTEGER,
+      absent_days INTEGER,
+      per_day_rate REAL,
+      gross REAL,
+      advance_deduction REAL,
+      retention_amount REAL,
+      retention_pct REAL,
+      net_payable REAL,
+      paid_at TEXT,
+      payment_ref TEXT,
+      emailed_at TEXT,
+      created_at TEXT DEFAULT CURRENT_TIMESTAMP
+    );`);
+  run("ai_bar_history", `
+    CREATE TABLE IF NOT EXISTS ai_bar_history (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      user_id INTEGER,
+      prompt TEXT NOT NULL,
+      answer_summary TEXT,
+      data_json TEXT,
+      asked_at TEXT DEFAULT CURRENT_TIMESTAMP
+    );`);
+  console.log("[migrations] R27.3: complete");
+}
