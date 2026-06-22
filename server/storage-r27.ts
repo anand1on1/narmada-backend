@@ -483,6 +483,69 @@ export function listDispatchStockItems() {
   return rows;
 }
 
+// ===========================================================================
+// R27.14 — dispatch state must be reflected on branch_stock so the in_stock view
+// (Detailed + Live net) stops showing items that have been put on a dispatch invoice.
+// branch_stock.dispatched_qty records the consumed amount; status flips to 'dispatched'
+// once a row is fully consumed. Allocation is FIFO (oldest row first) across Patna
+// in_stock rows for the part (the dispatch flow only operates on Patna stock).
+// recomputeDispatchedForPart is the single source of truth used by BOTH the forward
+// path (assign/remove dispatch item) and the boot backfill — it is fully idempotent.
+// ===========================================================================
+export function recomputeDispatchedForPart(partNo: string | null | undefined) {
+  const pn = String(partNo || "").trim();
+  if (!pn) return;
+  // Total qty consumed by live dispatch invoices (pending + processed; there is no
+  // cancelled state, so every assignment holds its stock) for this part.
+  const consumedRow = sqlite.prepare(
+    `SELECT COALESCE(SUM(dii.quantity), 0) AS consumed
+       FROM dispatch_invoice_items dii
+       JOIN dispatch_invoices di ON di.id = dii.dispatch_invoice_id
+      WHERE di.status IN ('pending', 'processed') AND dii.part_no = ?`,
+  ).get(pn) as any;
+  let remaining = Number(consumedRow?.consumed || 0);
+  const tx = sqlite.transaction(() => {
+    // Revert any previously auto-managed rows back to a clean in_stock baseline so the
+    // recompute is idempotent. dispatched_qty > 0 marks a row we touched; legacy rows
+    // dispatched manually via dispatchHandover keep dispatched_qty = 0 and are left alone.
+    sqlite.prepare(
+      `UPDATE branch_stock SET dispatched_qty = 0, status = 'in_stock'
+        WHERE part_number = ? AND LOWER(TRIM(branch)) = 'patna' AND COALESCE(dispatched_qty, 0) > 0`,
+    ).run(pn);
+    // Allocate consumed qty across the part's Patna in_stock rows, oldest first.
+    const rows = sqlite.prepare(
+      `SELECT id, qty FROM branch_stock
+        WHERE part_number = ? AND LOWER(TRIM(branch)) = 'patna' AND status = 'in_stock'
+        ORDER BY id ASC`,
+    ).all(pn) as any[];
+    for (const r of rows) {
+      if (remaining <= 0) break;
+      const rowQty = Number(r.qty || 0);
+      if (rowQty <= 0) continue;
+      const take = Math.min(remaining, rowQty);
+      const fully = take >= rowQty;
+      sqlite.prepare(`UPDATE branch_stock SET dispatched_qty = ?, status = ? WHERE id = ?`)
+        .run(take, fully ? "dispatched" : "in_stock", r.id);
+      remaining -= take;
+    }
+  });
+  tx();
+}
+
+// One-time / boot backfill: reconcile dispatched_qty for every part that appears on any
+// dispatch invoice item. Idempotent — safe to run on every boot.
+export function backfillDispatchedQty() {
+  try {
+    const parts = sqlite.prepare(
+      `SELECT DISTINCT part_no FROM dispatch_invoice_items WHERE part_no IS NOT NULL AND TRIM(part_no) <> ''`,
+    ).all() as any[];
+    for (const p of parts) recomputeDispatchedForPart(p.part_no);
+    console.log(`[R27.14] backfillDispatchedQty reconciled ${parts.length} part(s)`);
+  } catch (e: any) {
+    console.error(`[R27.14] backfillDispatchedQty failed: ${e?.message || e}`);
+  }
+}
+
 export function createDispatchInvoice(opts: { invoice_no: string; company_id?: number | null; client_id?: number | null; by?: number | null }) {
   const invoiceNo = String(opts.invoice_no || "").trim();
   if (!invoiceNo) throw new Error("Invoice number is required");
@@ -586,11 +649,18 @@ export function assignDispatchItem(invoiceId: number, transferItemId: number) {
     `INSERT INTO dispatch_invoice_items (dispatch_invoice_id, transfer_item_id, po_no, client_name, item_name, part_no, quantity, assigned, created_at)
      VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?)`,
   ).run(invoiceId, transferItemId, ri.poNumber || ri.customerPoNumber || (ri.po_id ? String(ri.po_id) : null), ri.clientName || "Internal Transfer", itemName, ri.partNo || null, ri.quantity ?? null, nowIso());
+  // R27.14 — reflect the dispatch on branch_stock (non-fatal: must never break assignment).
+  try { recomputeDispatchedForPart(ri.partNo); } catch (e: any) { console.error(`[R27.14] recompute on assign failed for ${ri.partNo}: ${e?.message || e}`); }
   return getDispatchInvoiceDetail(invoiceId);
 }
 
 export function removeDispatchItem(transferItemId: number) {
+  // R27.14 — capture the part before deleting so we can release its stock afterwards.
+  const existing = sqlite.prepare(`SELECT part_no FROM dispatch_invoice_items WHERE transfer_item_id = ?`).get(transferItemId) as any;
   sqlite.prepare(`DELETE FROM dispatch_invoice_items WHERE transfer_item_id = ?`).run(transferItemId);
+  if (existing?.part_no) {
+    try { recomputeDispatchedForPart(existing.part_no); } catch (e: any) { console.error(`[R27.14] recompute on remove failed for ${existing.part_no}: ${e?.message || e}`); }
+  }
   return { ok: true };
 }
 
@@ -757,10 +827,19 @@ export function listBranchStockAdmin(opts: { branch?: string; q?: string; status
     params.push(like, like);
   }
   const where = conds.length ? `WHERE ${conds.join(" AND ")}` : "";
-  return sqlite.prepare(
+  const rows = sqlite.prepare(
     `SELECT s.*, p.name AS productName FROM branch_stock s LEFT JOIN products p ON p.id = s.product_id
      ${where} ORDER BY s.branch ASC, s.id DESC`,
-  ).all(...params);
+  ).all(...params) as any[];
+  // R27.14 — surface available qty (qty - dispatched_qty) for rows still in_stock so a
+  // partially-dispatched line shows what is actually on the shelf. Fully-dispatched rows
+  // already carry status='dispatched' and are excluded by the status='in_stock' filter.
+  // For dispatched-status rows leave qty as-is (it represents the dispatched amount).
+  for (const r of rows) {
+    const dq = Number(r.dispatched_qty || 0);
+    if (String(r.status) !== "dispatched" && dq > 0) r.qty = Number(r.qty || 0) - dq;
+  }
+  return rows;
 }
 
 // R27.5 #6 — live aggregated stock: net qty per part per branch (sums all in-stock rows
@@ -774,24 +853,23 @@ export function listBranchStockSummary(opts: { branch?: string; q?: string } = {
   // stock) per part. The dispatch flow operates on Patna stock, so the deduction is
   // attributed to the Patna branch only. Rows whose net <= 0 are hidden entirely.
   // The Detailed view (listBranchStockAdmin) is intentionally left unchanged.
-  const conds: string[] = ["s.status = 'in_stock'"]; const params: any[] = [];
+  // R27.14 — net = available qty per part/branch, driven by the persisted branch_stock
+  // .dispatched_qty (maintained by recomputeDispatchedForPart on every assign/remove and
+  // by the boot backfill). A row fully consumed has status='dispatched' (contributes 0);
+  // a partial row stays in_stock and contributes (qty - dispatched_qty). Manually
+  // dispatched rows (dispatchHandover) are status='dispatched' and likewise contribute 0.
+  // No dispatch_invoice_items join is needed — the column is authoritative.
+  const conds: string[] = []; const params: any[] = [];
   if (opts.branch) { conds.push("LOWER(TRIM(s.branch)) = ?"); params.push(opts.branch.toLowerCase().trim()); }
   if (opts.q) { const like = `%${opts.q}%`; conds.push("(s.part_number LIKE ? OR p.name LIKE ?)"); params.push(like, like); }
-  const where = `WHERE ${conds.join(" AND ")}`;
-  const netExpr = `SUM(s.qty) - CASE WHEN LOWER(TRIM(s.branch)) = 'patna' THEN COALESCE(MAX(c.consumed), 0) ELSE 0 END`;
+  const where = conds.length ? `WHERE ${conds.join(" AND ")}` : "";
+  const netExpr = `SUM(CASE WHEN s.status = 'dispatched' THEN 0 ELSE (s.qty - COALESCE(s.dispatched_qty, 0)) END)`;
   return sqlite.prepare(
     `SELECT MIN(s.id) AS id, s.branch AS branch, s.part_number AS part_number,
             MAX(s.product_id) AS product_id, MAX(p.name) AS productName,
             ${netExpr} AS qty, AVG(s.rate) AS rate, MAX(s.received_at) AS received_at, 'in_stock' AS status
      FROM branch_stock s
      LEFT JOIN products p ON p.id = s.product_id
-     LEFT JOIN (
-       SELECT dii.part_no AS part_no, SUM(dii.quantity) AS consumed
-       FROM dispatch_invoice_items dii
-       JOIN dispatch_invoices di ON di.id = dii.dispatch_invoice_id
-       WHERE di.status IN ('pending', 'processed')
-       GROUP BY dii.part_no
-     ) c ON c.part_no = s.part_number
      ${where}
      GROUP BY LOWER(TRIM(s.branch)), s.part_number
      HAVING ${netExpr} > 0

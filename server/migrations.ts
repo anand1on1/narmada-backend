@@ -3051,3 +3051,17 @@ export function runR27_13Migrations() {
 
   console.log("[migrations] R27.13: complete");
 }
+
+export function runR27_14Migrations() {
+  console.log("[migrations] R27.14: start");
+  const addCol = (table: string, col: string, decl: string) => {
+    try { sqlite.exec(`ALTER TABLE ${table} ADD COLUMN ${col} ${decl}`); console.log(`[migrations] R27.14: ${table}.${col} added`); }
+    catch (e: any) { console.log(`[migrations] R27.14: ${table}.${col} skip (${e?.message || e})`); }
+  };
+  // Track how much of a branch_stock row has been put on a (live) dispatch invoice.
+  // status flips to 'dispatched' once dispatched_qty >= qty. Available = qty - dispatched_qty.
+  // The actual recompute/backfill runs in storage-r27 backfillDispatchedQty() at boot, so the
+  // allocation algorithm is single-sourced with the forward (assign/remove) path.
+  addCol("branch_stock", "dispatched_qty", "INTEGER DEFAULT 0");
+  console.log("[migrations] R27.14: complete");
+}
