@@ -3000,3 +3000,34 @@ export function runR27_11Migrations() {
 
   console.log("[migrations] R27.11: complete");
 }
+
+// ── R27.12 ─────────────────────────────────────────────────────────────────
+// Fix "Mark Processed" on quotations. Root cause: in server/storage.ts the
+// `ALTER TABLE quotations ADD COLUMN shipping_*` statements run *before* the
+// `CREATE TABLE IF NOT EXISTS quotations`. On a fresh DB the table doesn't yet
+// exist when the ALTERs fire, so they silently no-op (empty catch), and the
+// table is then created WITHOUT the shipping_* columns. The Drizzle schema
+// still declares them, so every `updateQuotation` (which uses `.returning()`
+// over all schema columns) — including mark-processed and the admin PATCH —
+// dies with `no such column: "shipping_name"`.
+//
+// Fix is purely additive and ordering-safe: re-run the ADD COLUMN statements
+// here, after every table is guaranteed to exist. Idempotent — already-present
+// columns are skipped. No drops/renames.
+export function runR27_12Migrations() {
+  console.log("[migrations] R27.12: start");
+  const addCol = (table: string, col: string, decl: string) => {
+    try { sqlite.exec(`ALTER TABLE ${table} ADD COLUMN ${col} ${decl}`); console.log(`[migrations] R27.12: ${table}.${col} added`); }
+    catch (e: any) { console.log(`[migrations] R27.12: ${table}.${col} skip (${e?.message || e})`); }
+  };
+
+  // The per-quotation ship-to columns the Drizzle schema expects.
+  addCol("quotations", "shipping_name", "TEXT");
+  addCol("quotations", "shipping_address", "TEXT");
+  addCol("quotations", "shipping_city", "TEXT");
+  addCol("quotations", "shipping_state", "TEXT");
+  addCol("quotations", "shipping_pincode", "TEXT");
+  addCol("quotations", "shipping_phone", "TEXT");
+
+  console.log("[migrations] R27.12: complete");
+}
