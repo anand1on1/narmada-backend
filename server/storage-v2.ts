@@ -1743,8 +1743,12 @@ export async function listPurchaseOrdersV2(opts: { status?: string; customerId?:
   const conds: any[] = [];
   if (opts.status) conds.push(eq(purchaseOrdersV2.status, opts.status));
   if (opts.customerId) conds.push(eq(purchaseOrdersV2.customerId, opts.customerId));
+  // R27.13 T6 — order by the editable PO date (falling back to created_at) so that
+  // updating a PO's date to today floats it to the top of the list, ahead of POs with
+  // older dates, until a newer PO is created/dated.
+  const order = sql`COALESCE(${purchaseOrdersV2.poDate}, ${purchaseOrdersV2.createdAt}) DESC`;
   const base = db.select().from(purchaseOrdersV2);
-  return conds.length ? base.where(and(...conds)).orderBy(desc(purchaseOrdersV2.createdAt)).all() : base.orderBy(desc(purchaseOrdersV2.createdAt)).all();
+  return conds.length ? base.where(and(...conds)).orderBy(order).all() : base.orderBy(order).all();
 }
 // R10 — list with live customer/cost totals + customer name for the team PO list.
 export async function listPurchaseOrdersV2WithTotals(opts: { status?: string; customerId?: number; q?: string; from?: string; to?: string } = {}): Promise<Array<PurchaseOrderV2 & { customerName: string | null; companyName: string | null; companyLogoUrl: string | null; custTotal: number; costTotal: number }>> {

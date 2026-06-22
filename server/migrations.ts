@@ -3031,3 +3031,23 @@ export function runR27_12Migrations() {
 
   console.log("[migrations] R27.12: complete");
 }
+
+// ── R27.13 ─────────────────────────────────────────────────────────────────
+// Additive columns for: (T4) auto-mirroring a dispatch invoice into a draft
+// consignment, and (T5) recording the dispatch origin (e.g. "Delhi") on a
+// consignment. All purely additive + idempotent (already-present columns skip).
+export function runR27_13Migrations() {
+  console.log("[migrations] R27.13: start");
+  const addCol = (table: string, col: string, decl: string) => {
+    try { sqlite.exec(`ALTER TABLE ${table} ADD COLUMN ${col} ${decl}`); console.log(`[migrations] R27.13: ${table}.${col} added`); }
+    catch (e: any) { console.log(`[migrations] R27.13: ${table}.${col} skip (${e?.message || e})`); }
+  };
+
+  // T5 — where the consignment was dispatched from (free text, e.g. "Delhi").
+  addCol("consignments", "dispatch_origin", "TEXT");
+  // T4 — link + provenance for auto-created (dispatch-invoice) consignment stubs.
+  addCol("consignments", "auto_created_from_invoice_id", "INTEGER");
+  addCol("consignments", "source", "TEXT");
+
+  console.log("[migrations] R27.13: complete");
+}

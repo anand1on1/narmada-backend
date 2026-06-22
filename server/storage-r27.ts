@@ -490,7 +490,43 @@ export function createDispatchInvoice(opts: { invoice_no: string; company_id?: n
     `INSERT INTO dispatch_invoices (invoice_no, company_id, client_id, status, created_by, created_at)
      VALUES (?, ?, ?, 'pending', ?, ?)`,
   ).run(invoiceNo, opts.company_id ?? null, opts.client_id ?? null, opts.by ?? null, nowIso());
-  return getDispatchInvoice(Number(info.lastInsertRowid));
+  const invoiceId = Number(info.lastInsertRowid);
+  // R27.13 T4 — mirror every new dispatch invoice into a draft consignment so the
+  // consignment team sees it automatically. Non-fatal: a failure here must never break
+  // invoice creation. Idempotent on auto_created_from_invoice_id. No backfill of history.
+  autoCreateConsignmentForInvoice(invoiceId, invoiceNo, opts.client_id ?? null);
+  return getDispatchInvoice(invoiceId);
+}
+
+function autoCreateConsignmentForInvoice(invoiceId: number, invoiceNo: string, clientId: number | null) {
+  try {
+    const existing = sqlite.prepare(
+      `SELECT id FROM consignments WHERE auto_created_from_invoice_id = ? LIMIT 1`,
+    ).get(invoiceId) as any;
+    if (existing) return;
+    let customerName: string | null = null;
+    let destination = "TBD";
+    if (clientId) {
+      const cust = sqlite.prepare(`SELECT name, city, state FROM customers WHERE id = ?`).get(clientId) as any;
+      if (cust) {
+        customerName = cust.name || null;
+        destination = String(cust.city || cust.state || "TBD").trim() || "TBD";
+      }
+    }
+    // docket_number is NOT NULL UNIQUE; derive a stable, collision-resistant value.
+    const docket = `AUTO/INV/${invoiceNo}/${invoiceId}`;
+    // consignments.created_at/updated_at are integer epoch-ms (Drizzle), not ISO text.
+    const now = Date.now();
+    sqlite.prepare(
+      `INSERT INTO consignments
+         (docket_number, origin, destination, customer_id, customer_name, bundles_count,
+          invoice_number, status, source, auto_created_from_invoice_id, created_by, created_at, updated_at)
+       VALUES (?, 'Delhi', ?, ?, ?, 1, ?, 'pending', 'dispatch_auto', ?, 'dispatch_auto', ?, ?)`,
+    ).run(docket, destination, clientId, customerName, invoiceNo, invoiceId, now, now);
+    console.log(`[R27.13 T4] auto-created consignment for invoice ${invoiceId} (${invoiceNo})`);
+  } catch (e: any) {
+    console.error(`[R27.13 T4] failed to auto-create consignment for invoice ${invoiceId}: ${e?.message || e}`);
+  }
 }
 
 export function getDispatchInvoice(id: number) {
@@ -567,8 +603,10 @@ export function tickDispatchItem(transferItemId: number, ticked: boolean) {
 export function markDispatchInvoiceProcessed(id: number) {
   const inv = getDispatchInvoice(id);
   if (!inv) throw new Error("Invoice not found");
+  // R27.13 T2 — idempotent: re-processing an already-processed invoice is a no-op success
+  // (returns the row) rather than an error, so a double-click never surfaces as a failure.
+  if (String(inv.status) === "processed") return inv;
   if (Number(inv.itemsCount) < 1) throw new Error("Add at least one item before processing");
-  if (String(inv.status) === "processed") throw new Error("Invoice already processed");
   sqlite.prepare(`UPDATE dispatch_invoices SET status = 'processed', processed_at = ? WHERE id = ?`).run(nowIso(), id);
   return getDispatchInvoice(id);
 }
@@ -728,18 +766,35 @@ export function listBranchStockAdmin(opts: { branch?: string; q?: string; status
 // R27.5 #6 — live aggregated stock: net qty per part per branch (sums all in-stock rows
 // after procurement / transfer / order movements). Powers the Stock page summary view.
 export function listBranchStockSummary(opts: { branch?: string; q?: string } = {}) {
+  // R27.13 T1 — "Live (net)" must reflect what is actually still on the shelf. Stock
+  // that has been put on a dispatch invoice is earmarked/consumed but its branch_stock
+  // row stays status='in_stock' (the dispatch-invoice flow never flips it). So the raw
+  // SUM(qty) over-reports. Subtract the quantity assigned to any live dispatch invoice
+  // (pending or processed — there is no cancelled state, so every assignment holds its
+  // stock) per part. The dispatch flow operates on Patna stock, so the deduction is
+  // attributed to the Patna branch only. Rows whose net <= 0 are hidden entirely.
+  // The Detailed view (listBranchStockAdmin) is intentionally left unchanged.
   const conds: string[] = ["s.status = 'in_stock'"]; const params: any[] = [];
   if (opts.branch) { conds.push("LOWER(TRIM(s.branch)) = ?"); params.push(opts.branch.toLowerCase().trim()); }
   if (opts.q) { const like = `%${opts.q}%`; conds.push("(s.part_number LIKE ? OR p.name LIKE ?)"); params.push(like, like); }
   const where = `WHERE ${conds.join(" AND ")}`;
+  const netExpr = `SUM(s.qty) - CASE WHEN LOWER(TRIM(s.branch)) = 'patna' THEN COALESCE(MAX(c.consumed), 0) ELSE 0 END`;
   return sqlite.prepare(
     `SELECT MIN(s.id) AS id, s.branch AS branch, s.part_number AS part_number,
             MAX(s.product_id) AS product_id, MAX(p.name) AS productName,
-            SUM(s.qty) AS qty, AVG(s.rate) AS rate, MAX(s.received_at) AS received_at, 'in_stock' AS status
-     FROM branch_stock s LEFT JOIN products p ON p.id = s.product_id
+            ${netExpr} AS qty, AVG(s.rate) AS rate, MAX(s.received_at) AS received_at, 'in_stock' AS status
+     FROM branch_stock s
+     LEFT JOIN products p ON p.id = s.product_id
+     LEFT JOIN (
+       SELECT dii.part_no AS part_no, SUM(dii.quantity) AS consumed
+       FROM dispatch_invoice_items dii
+       JOIN dispatch_invoices di ON di.id = dii.dispatch_invoice_id
+       WHERE di.status IN ('pending', 'processed')
+       GROUP BY dii.part_no
+     ) c ON c.part_no = s.part_number
      ${where}
      GROUP BY LOWER(TRIM(s.branch)), s.part_number
-     HAVING SUM(s.qty) <> 0
+     HAVING ${netExpr} > 0
      ORDER BY branch ASC, productName ASC`,
   ).all(...params);
 }

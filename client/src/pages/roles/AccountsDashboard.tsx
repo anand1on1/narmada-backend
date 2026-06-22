@@ -489,6 +489,8 @@ function EmployeesTab({ token, isAdmin }: { token: string | null; isAdmin: boole
   }
   // R27.9 #2 — admin-only salary entry + history, gated behind /api/admin/* (x-admin-token).
   const [salaryFor, setSalaryFor] = useState<any | null>(null);
+  // R27.13 T3 — edit basic + banking details (finance + admin; salary stays admin-only via Salary panel).
+  const [editFor, setEditFor] = useState<any | null>(null);
   // R27.10 #3 — per-row Issue Advance (finance + admin).
   const [advanceFor, setAdvanceFor] = useState<any | null>(null);
   const [balances, setBalances] = useState<Record<number, number>>({});
@@ -563,6 +565,7 @@ function EmployeesTab({ token, isAdmin }: { token: string | null; isAdmin: boole
                   <td className="p-3 text-right text-xs">{balances[r.id] ? <span className="font-semibold text-emerald-700">₹{balances[r.id].toLocaleString("en-IN")}</span> : <span className="text-muted-foreground">—</span>}</td>
                   <td className="p-3">{r.active ? <span className="text-emerald-600 text-xs font-semibold">Active</span> : <span className="text-muted-foreground text-xs">Inactive</span>}</td>
                   <td className="p-3 whitespace-nowrap">
+                    <button onClick={() => setEditFor(r)} data-testid={`employee-edit-${r.id}`} className="text-accent text-xs font-semibold hover:underline mr-3">Edit</button>
                     <button onClick={() => setAdvanceFor(r)} data-testid={`employee-advance-${r.id}`} className="text-accent text-xs font-semibold hover:underline mr-3">Issue Advance</button>
                     {isAdmin && <button onClick={() => setSalaryFor(r)} data-testid={`employee-salary-${r.id}`} className="text-accent text-xs font-semibold hover:underline mr-3">Salary</button>}
                     {isAdmin && !r.linked_user_id && <button onClick={() => setLinkFor(r)} data-testid={`employee-link-${r.id}`} className="text-accent text-xs font-semibold hover:underline mr-3">Link user</button>}
@@ -575,6 +578,7 @@ function EmployeesTab({ token, isAdmin }: { token: string | null; isAdmin: boole
         )}
       </div>
       {isAdmin && salaryFor && <SalaryEntryPanel token={token} emp={salaryFor} onClose={() => { setSalaryFor(null); load(); }} />}
+      {editFor && <EditEmployeePanel token={token} emp={editFor} onClose={() => { setEditFor(null); load(); }} />}
       {advanceFor && <IssueAdvancePanel token={token} emp={advanceFor} onClose={() => { setAdvanceFor(null); load(); }} />}
       {isAdmin && linkFor && <LinkUserPanel token={token} emp={linkFor} users={portalUsers} onClose={() => { setLinkFor(null); load(); }} />}
     </div>
@@ -607,6 +611,66 @@ function LinkUserPanel({ token, emp, users, onClose }: { token: string | null; e
         <div className="flex justify-end gap-2">
           <button onClick={onClose} className="px-3 py-1.5 rounded-lg border text-sm">Cancel</button>
           <button onClick={save} disabled={busy || !uid} className="px-4 py-1.5 rounded-lg bg-accent text-accent-foreground text-sm font-semibold disabled:opacity-50">Link</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// R27.13 T3 — edit an employee's basic + banking details. Uses PUT /api/finance/employees/:id
+// which accepts a partial body; salary fields are deliberately NOT here (admin-only, edited via
+// the Salary panel), so finance can update banking/contact without touching pay.
+function EditEmployeePanel({ token, emp, onClose }: { token: string | null; emp: any; onClose: () => void }) {
+  const f = useF();
+  const toDateInput = (v: any) => {
+    if (!v) return "";
+    const n = Number(v);
+    const d = Number.isFinite(n) && String(v).length >= 10 && !String(v).includes("-") ? new Date(n) : new Date(v);
+    return Number.isNaN(d.getTime()) ? "" : d.toISOString().slice(0, 10);
+  };
+  const [form, setForm] = useState<any>({
+    name: emp.name || "", contact: emp.contact || "", email: emp.email || "", role: emp.role || "",
+    branch: emp.branch || "Delhi", joined_at: toDateInput(emp.joined_at), pan: emp.pan || "", aadhar: emp.aadhar || "",
+    bank_account: emp.bank_account || "", ifsc: emp.ifsc || "", bank_name: emp.bank_name || "",
+  });
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState<string | null>(null);
+  async function save() {
+    if (!form.name.trim()) { setMsg("Name is required."); return; }
+    setBusy(true);
+    const body: any = {
+      name: form.name.trim(), contact: form.contact, email: form.email, role: form.role, branch: form.branch,
+      pan: form.pan, aadhar: form.aadhar, bank_account: form.bank_account, ifsc: form.ifsc, bank_name: form.bank_name,
+    };
+    if (form.joined_at) body.joined_at = form.joined_at;
+    const r = await f(token, `/api/finance/employees/${emp.id}`, { method: "PUT", body: JSON.stringify(body) });
+    setBusy(false);
+    if (r.ok) onClose();
+    else { const e = await r.json().catch(() => ({})); setMsg(e.error || "Could not update employee"); }
+  }
+  const inp = "block px-3 py-1.5 rounded-lg border bg-background text-sm w-full";
+  return (
+    <div className="fixed inset-0 bg-black/40 flex items-start justify-center z-50 p-4 overflow-y-auto" onClick={onClose}>
+      <div className="bg-card border rounded-xl p-5 w-full max-w-lg mt-16" onClick={(e) => e.stopPropagation()}>
+        <h3 className="font-semibold mb-3">Edit <span className="text-accent">{emp.name}</span></h3>
+        <div className="grid sm:grid-cols-2 gap-3">
+          <div><label className="text-xs text-muted-foreground">Name *</label><input value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} className={inp} data-testid="edit-emp-name" /></div>
+          <div><label className="text-xs text-muted-foreground">Role</label><input value={form.role} onChange={(e) => setForm({ ...form, role: e.target.value })} className={inp} /></div>
+          <div><label className="text-xs text-muted-foreground">Branch</label><select value={form.branch} onChange={(e) => setForm({ ...form, branch: e.target.value })} className={inp}>{BRANCHES.map((b) => <option key={b} value={b}>{b}</option>)}</select></div>
+          <div><label className="text-xs text-muted-foreground">Phone</label><input value={form.contact} onChange={(e) => setForm({ ...form, contact: e.target.value })} className={inp} /></div>
+          <div><label className="text-xs text-muted-foreground">Email</label><input value={form.email} onChange={(e) => setForm({ ...form, email: e.target.value })} className={inp} /></div>
+          <div><label className="text-xs text-muted-foreground">Joining date</label><input type="date" value={form.joined_at} onChange={(e) => setForm({ ...form, joined_at: e.target.value })} className={inp} /></div>
+          <div><label className="text-xs text-muted-foreground">PAN</label><input value={form.pan} onChange={(e) => setForm({ ...form, pan: e.target.value })} className={inp} /></div>
+          <div><label className="text-xs text-muted-foreground">Aadhaar</label><input value={form.aadhar} onChange={(e) => setForm({ ...form, aadhar: e.target.value })} className={inp} /></div>
+          <div><label className="text-xs text-muted-foreground">Bank name</label><input value={form.bank_name} onChange={(e) => setForm({ ...form, bank_name: e.target.value })} className={inp} data-testid="edit-emp-bank-name" /></div>
+          <div><label className="text-xs text-muted-foreground">Bank account</label><input value={form.bank_account} onChange={(e) => setForm({ ...form, bank_account: e.target.value })} className={inp} data-testid="edit-emp-bank-account" /></div>
+          <div><label className="text-xs text-muted-foreground">IFSC</label><input value={form.ifsc} onChange={(e) => setForm({ ...form, ifsc: e.target.value })} className={inp} data-testid="edit-emp-ifsc" /></div>
+        </div>
+        {msg && <p className="text-xs text-rose-600 mt-3">{msg}</p>}
+        <p className="text-xs text-muted-foreground mt-3">Salary is edited separately via the admin-only Salary action.</p>
+        <div className="flex justify-end gap-2 mt-4">
+          <button onClick={onClose} className="px-3 py-1.5 rounded-lg border text-sm">Cancel</button>
+          <button onClick={save} disabled={busy} className="px-4 py-1.5 rounded-lg bg-accent text-accent-foreground text-sm font-semibold disabled:opacity-50" data-testid="edit-emp-save">Save</button>
         </div>
       </div>
     </div>

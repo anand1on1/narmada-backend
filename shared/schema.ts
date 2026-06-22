@@ -155,6 +155,8 @@ export const consignments = sqliteTable("consignments", {
   // R10 — uploaded invoice / docket documents
   invoiceUrl: text("invoice_url"),
   docketUrl: text("docket_url"),
+  // R27.13 T5 — where the consignment was dispatched from (e.g. "Delhi").
+  dispatchOrigin: text("dispatch_origin"),
 });
 export const insertConsignmentSchema = createInsertSchema(consignments).omit({
   id: true,

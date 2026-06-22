@@ -15,6 +15,7 @@ interface Consignment {
   bundlesCount: number | null; invoiceNumber: string | null; invoiceAmount: number | null;
   status: string; dispatchDate: number | null; etaDate: number | null; deliveredDate: number | null;
   notes?: string | null; invoiceUrl?: string | null; docketUrl?: string | null;
+  dispatchOrigin?: string | null;
 }
 interface FromDelhiPO {
   id: number; poNumber: string; customerName: string | null; customerPhone: string | null;
@@ -36,6 +37,9 @@ interface CustomerRow {
 
 const INP = "w-full border rounded-lg px-3 py-2 bg-background text-sm";
 const STATUSES = ["pending", "in_transit", "out_for_delivery", "delivered", "cancelled"];
+// R27.13 T5 — dispatch origin lets the consignment team record where a shipment left
+// from (e.g. Delhi), regardless of its destination. Free choice from common origins.
+const DISPATCH_ORIGINS = ["Delhi", "Patna", "Other"];
 const STATUS_COLOR: Record<string, string> = {
   pending: "bg-slate-500/15 text-slate-700", in_transit: "bg-amber-500/15 text-amber-700",
   out_for_delivery: "bg-blue-500/15 text-blue-700", delivered: "bg-emerald-500/15 text-emerald-700",
@@ -220,6 +224,12 @@ function ConsignmentsTab({ token }: { token: string | null }) {
                 {STATUSES.map((s) => <option key={s} value={s}>{s.replace(/_/g, " ")}</option>)}
               </select>
             </Field>
+            <Field label="Dispatch Origin">
+              <select value={open.dispatchOrigin || ""} onChange={(e) => setOpen({ ...open, dispatchOrigin: e.target.value })} className={INP} data-testid="sel-dispatch-origin">
+                <option value="">—</option>
+                {DISPATCH_ORIGINS.map((o) => <option key={o} value={o}>{o}</option>)}
+              </select>
+            </Field>
             <Field label="Dispatch Date"><input type="date" value={open.dispatchDate || ""} onChange={(e) => setOpen({ ...open, dispatchDate: e.target.value })} className={INP} /></Field>
             <Field label="ETA Date"><input type="date" value={open.etaDate || ""} onChange={(e) => setOpen({ ...open, etaDate: e.target.value })} className={INP} /></Field>
             <Field label="Notes" full><textarea value={open.notes || ""} onChange={(e) => setOpen({ ...open, notes: e.target.value })} className={INP} rows={2} /></Field>
@@ -247,6 +257,7 @@ function ConsignmentsTab({ token }: { token: string | null }) {
             <Info label="Invoice Amount" value={inr(view.invoiceAmount)} />
             <Info label="Bundles" value={String(view.bundlesCount ?? "—")} />
             <Info label="Status" value={view.status.replace(/_/g, " ")} />
+            <Info label="Dispatch Origin" value={view.dispatchOrigin || "—"} />
             <Info label="Dispatch" value={fmtDate(view.dispatchDate)} />
             <Info label="ETA" value={fmtDate(view.etaDate)} />
           </dl>
