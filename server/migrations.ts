@@ -3172,5 +3172,15 @@ export function runPartSetuMigrations() {
     updated_at INTEGER
   )`);
 
+  // v1.2: persistent LLM keyword-expansion cache (additive, idempotent).
+  run("R27.partsetu-v1.2: partsetu_query_expansions", `CREATE TABLE IF NOT EXISTS partsetu_query_expansions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    query_text TEXT NOT NULL UNIQUE,
+    expansions_json TEXT NOT NULL,
+    created_at INTEGER NOT NULL
+  )`);
+  // Guard for DBs created before catalog_context_id was added to the schema.
+  run("R27.partsetu-v1.2: conversations.catalog_context_id", `ALTER TABLE partsetu_conversations ADD COLUMN catalog_context_id INTEGER`);
+
   console.log("[migrations] PartSetu: complete");
 }

@@ -8197,6 +8197,8 @@ Rules:
 - NEVER quote, estimate, or mention any price or cost. If asked about price, reply that pricing is shared by the Narmada team via a formal quote, and give no number.
 - If a part is part of a kit or "not serviced" separately, say so.
 - Be concise and professional (2-4 sentences). Use 'seller' (not 'supplier') if you refer to the vendor side.
+- If the CONTEXT begins with "VEHICLE CONTEXT LOCKED", restrict every suggestion to that vehicle's catalogue, and confirm before switching vehicles.
+- If the CONTEXT begins with "CHASSIS PROVIDED BUT UNRESOLVED", do NOT answer the part query yet — first ask the user to confirm the vehicle model (e.g. 'SIGNA 4232.TK'), since the chassis number could not be matched to a catalogue.
 
 CONTEXT (catalogue + cross-reference matches for this query):
 ${contextBlock}`;
@@ -8253,7 +8255,12 @@ ${contextBlock}`;
 
       partsetuStore.addMessage({ conversationId: Number(conversationId), role: "user", content: String(content) });
 
-      const contextBlock = partsetuStore.buildContextBlock(String(content));
+      // v1.2: lock the conversation to a vehicle catalogue (by model name in the
+      // text, then by chassis/VC number) before searching, so generic queries
+      // are scoped to one catalogue instead of matching noise across all OEMs.
+      const catalogId = partsetuStore.ensureCatalogContext(Number(conversationId), String(content));
+      const convNow = partsetuStore.getConversation(Number(conversationId));
+      const contextBlock = await partsetuStore.buildContextBlock(String(content), catalogId, convNow?.chassis_no || null);
       const history = partsetuHistory(Number(conversationId));
       const result = await claudeSvc.callClaudeHaiku(PARTSETU_SYSTEM(contextBlock), history);
 
@@ -8287,7 +8294,10 @@ ${contextBlock}`;
       const ext = path.extname(file.filename).toLowerCase();
       const mediaType: any = ext === ".png" ? "image/png" : ext === ".webp" ? "image/webp" : ext === ".gif" ? "image/gif" : "image/jpeg";
       const base64 = fs.readFileSync(file.path).toString("base64");
-      const visionSystem = PARTSETU_SYSTEM(partsetuStore.buildContextBlock(userText)) +
+      const imgCatalogId = partsetuStore.ensureCatalogContext(conversationId, userText);
+      const imgConvNow = partsetuStore.getConversation(conversationId);
+      const imgContext = await partsetuStore.buildContextBlock(userText, imgCatalogId, imgConvNow?.chassis_no || null);
+      const visionSystem = PARTSETU_SYSTEM(imgContext) +
         "\n\nThe user has attached a photo of a part. Describe the part you see and, using the CONTEXT, suggest likely matching part number(s). Never invent a number, and never mention price.";
       const result = await claudeSvc.callClaudeSonnetVision(visionSystem, userText, base64, mediaType);
 
