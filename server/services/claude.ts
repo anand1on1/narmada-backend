@@ -7,8 +7,10 @@ import Anthropic from "@anthropic-ai/sdk";
 const CLAUDE_API_KEY = process.env.CLAUDE_API_KEY || process.env.ANTHROPIC_API_KEY || "";
 
 // Safe, currently-available model ids. Overridable via env without a redeploy.
-const HAIKU_MODEL = process.env.PARTSETU_HAIKU_MODEL || "claude-3-5-haiku-20241022";
-const SONNET_MODEL = process.env.PARTSETU_SONNET_MODEL || "claude-3-5-sonnet-20241022";
+// Accept both PARTSETU_* and CLAUDE_* naming for operator convenience.
+const HAIKU_MODEL = process.env.CLAUDE_HAIKU_MODEL || process.env.PARTSETU_HAIKU_MODEL || "claude-haiku-4-5";
+const SONNET_MODEL = process.env.CLAUDE_SONNET_MODEL || process.env.PARTSETU_SONNET_MODEL || "claude-sonnet-4-5";
+console.log(`[PartSetu Claude] init haiku=${HAIKU_MODEL} sonnet=${SONNET_MODEL} key=${process.env.CLAUDE_API_KEY ? "set" : "missing"}`);
 
 // Approx public list prices (USD / 1M tokens) for usage cost accounting only.
 const PRICE: Record<string, { in: number; out: number }> = {
