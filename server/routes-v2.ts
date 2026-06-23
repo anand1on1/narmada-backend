@@ -8176,6 +8176,18 @@ function registerR8Routes(
   // ==================================================================
   const partsetuStore = require("./partsetu") as typeof import("./partsetu");
   const claudeSvc = require("./services/claude") as typeof import("./services/claude");
+  const catalogIngester = require("./services/catalog-ingester") as typeof import("./services/catalog-ingester");
+  const catalogStorage = require("./services/catalog-storage") as typeof import("./services/catalog-storage");
+
+  // v1.3: admin catalog PDF upload — in-memory (max 100MB), PDF magic-byte check.
+  const partsetuCatalogUpload = multer({
+    storage: multer.memoryStorage(),
+    limits: { fileSize: 100 * 1024 * 1024 },
+    fileFilter: (_req: any, file: any, cb: any) => {
+      const ok = file.mimetype === "application/pdf" || /\.pdf$/i.test(file.originalname || "");
+      cb(ok ? null : new Error("Only PDF files are accepted"), ok);
+    },
+  });
 
   const partsetuImgDir = path.join(uploadsRoot, "partsetu", "images");
   try { fs.mkdirSync(partsetuImgDir, { recursive: true }); } catch {}
@@ -8353,6 +8365,73 @@ ${contextBlock}`;
   app.get("/api/admin/partsetu/usage", requireAuth, async (_req, res) => {
     try { res.json(partsetuStore.usageSummary()); }
     catch (e: any) { res.status(500).json({ error: e?.message }); }
+  });
+
+  // ---- Admin: catalog PDF upload + ingest (v1.3) ----
+  // Upload a spare-parts catalogue PDF; it is stored on the persistent disk and
+  // parsed synchronously into partsetu_catalogs/partsetu_parts. ~30s for a large
+  // catalogue is acceptable; the admin sees the result inline.
+  app.post("/api/admin/partsetu/catalogs/upload", requireAuth, partsetuCatalogUpload.single("file"), async (req, res) => {
+    try {
+      const file = (req as any).file;
+      if (!file || !file.buffer?.length) return res.status(400).json({ error: "No PDF uploaded" });
+      // Magic-byte check: a real PDF starts with "%PDF".
+      if (file.buffer.subarray(0, 4).toString("latin1") !== "%PDF") {
+        return res.status(400).json({ error: "File is not a valid PDF (bad header)" });
+      }
+      const uploadedBy = ((req as any).user?.username as string) || "admin";
+      const tmpPath = catalogStorage.saveTmpPdf(file.buffer);
+      try {
+        const r = await catalogIngester.ingestCatalogPdf({ pdfPath: tmpPath, uploadedBy, cleanupSrc: true });
+        res.json({ catalogId: r.catalogId, partsCount: r.partsCount, vcNo: r.vcNo, model: r.model });
+      } catch (err: any) {
+        catalogStorage.deleteTmp(tmpPath);
+        res.status(422).json({ error: err?.message || "Ingestion failed" });
+      }
+    } catch (e: any) { res.status(500).json({ error: e?.message || "Upload failed" }); }
+  });
+
+  app.get("/api/admin/partsetu/catalogs", requireAuth, async (_req, res) => {
+    try {
+      const rows = rawSqlite.prepare(
+        `SELECT c.id, c.oem, c.model, c.variant, c.vc_no, c.status, c.file_size_bytes,
+                c.uploaded_at, c.uploaded_by, c.ingest_error, c.total_pages,
+                (SELECT COUNT(*) FROM partsetu_parts p WHERE p.catalog_id = c.id) AS parts_count
+         FROM partsetu_catalogs c
+         ORDER BY COALESCE(c.uploaded_at, c.ingested_at) DESC, c.id DESC`,
+      ).all();
+      res.json(rows);
+    } catch (e: any) { res.status(500).json({ error: e?.message }); }
+  });
+
+  app.get("/api/admin/partsetu/catalogs/:id/pdf", requireAuth, async (req, res) => {
+    try {
+      const id = Number(req.params.id);
+      const p = catalogStorage.getCatalogPdfPath(id);
+      if (!catalogStorage.catalogPdfExists(id)) return res.status(404).json({ error: "PDF not found on disk" });
+      res.setHeader("Content-Type", "application/pdf");
+      res.sendFile(p);
+    } catch (e: any) { res.status(500).json({ error: e?.message }); }
+  });
+
+  app.delete("/api/admin/partsetu/catalogs/:id", requireAuth, async (req, res) => {
+    try {
+      const id = Number(req.params.id);
+      rawSqlite.prepare(`UPDATE partsetu_conversations SET catalog_context_id = NULL WHERE catalog_context_id = ?`).run(id);
+      rawSqlite.prepare(`DELETE FROM partsetu_parts WHERE catalog_id = ?`).run(id);
+      rawSqlite.prepare(`DELETE FROM partsetu_catalogs WHERE id = ?`).run(id);
+      catalogStorage.deleteCatalogPdf(id);
+      res.json({ deleted: true });
+    } catch (e: any) { res.status(500).json({ error: e?.message }); }
+  });
+
+  app.post("/api/admin/partsetu/catalogs/:id/reingest", requireAuth, async (req, res) => {
+    try {
+      const id = Number(req.params.id);
+      const uploadedBy = ((req as any).user?.username as string) || "admin";
+      const r = await catalogIngester.reingestCatalog(id, uploadedBy);
+      res.json({ catalogId: r.catalogId, partsCount: r.partsCount });
+    } catch (e: any) { res.status(422).json({ error: e?.message || "Re-ingest failed" }); }
   });
 
   // ---- public: currencies (TASK 7) ----

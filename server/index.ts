@@ -218,6 +218,15 @@ app.use((req, res, next) => {
     console.log("[boot] step: post-R27.14 migrations");
     runPartSetuMigrations();
     console.log("[boot] step: post-PartSetu migrations");
+    // v1.3: ensure the persistent-disk dirs for catalog PDF storage exist.
+    try {
+      const { mkdirSync } = await import("node:fs");
+      const { join } = await import("node:path");
+      const dataDir = process.env.DATA_DIR || ".";
+      mkdirSync(join(dataDir, "partsetu", "catalogs"), { recursive: true });
+      mkdirSync(join(dataDir, "partsetu", "tmp"), { recursive: true });
+      console.log(`[boot] step: PartSetu catalog dirs ready under ${join(dataDir, "partsetu")}`);
+    } catch (e: any) { console.error("[boot] PartSetu catalog dir mkdir failed:", e?.message || e); }
     const { seedR5Defaults } = await import("./seed-r5");
     await seedR5Defaults();
     console.log("[boot] step: post-seed");

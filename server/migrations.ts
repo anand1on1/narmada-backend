@@ -3182,5 +3182,15 @@ export function runPartSetuMigrations() {
   // Guard for DBs created before catalog_context_id was added to the schema.
   run("R27.partsetu-v1.2: conversations.catalog_context_id", `ALTER TABLE partsetu_conversations ADD COLUMN catalog_context_id INTEGER`);
 
+  // v1.3: admin catalog uploads — persistent-disk PDF path + ingest bookkeeping.
+  // ALTER ... ADD COLUMN throws "duplicate column" when already present; the
+  // per-statement try/catch swallows it so re-runs are no-ops (idempotent).
+  run("R27.partsetu-v1.3: catalogs.file_path", `ALTER TABLE partsetu_catalogs ADD COLUMN file_path TEXT`);
+  run("R27.partsetu-v1.3: catalogs.file_size_bytes", `ALTER TABLE partsetu_catalogs ADD COLUMN file_size_bytes INTEGER`);
+  run("R27.partsetu-v1.3: catalogs.uploaded_by", `ALTER TABLE partsetu_catalogs ADD COLUMN uploaded_by TEXT`);
+  run("R27.partsetu-v1.3: catalogs.uploaded_at", `ALTER TABLE partsetu_catalogs ADD COLUMN uploaded_at INTEGER`);
+  run("R27.partsetu-v1.3: catalogs.status", `ALTER TABLE partsetu_catalogs ADD COLUMN status TEXT DEFAULT 'active'`);
+  run("R27.partsetu-v1.3: catalogs.ingest_error", `ALTER TABLE partsetu_catalogs ADD COLUMN ingest_error TEXT`);
+
   console.log("[migrations] PartSetu: complete");
 }

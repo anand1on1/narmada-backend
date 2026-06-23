@@ -26,4 +26,7 @@ services:
     disk:
       name: narmada-data
       mountPath: /opt/render/project/src/data
-      sizeGB: 1
+      # v1.3: bumped 1→5GB — PartSetu catalog PDFs are stored under
+      # $DATA_DIR/partsetu/catalogs (up to 100MB each). Render disks can grow but
+      # not shrink. Resize in the Render dashboard if this blueprint isn't re-applied.
+      sizeGB: 5
