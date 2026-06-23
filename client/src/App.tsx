@@ -177,6 +177,7 @@ import AdminShopCustomers from "@/pages/admin/AdminShopCustomers";
 import AdminShopCustomerDetail from "@/pages/admin/AdminShopCustomerDetail";
 import AdminFreight from "@/pages/admin/AdminFreight";
 import AdminStock from "@/pages/admin/AdminStock";
+import AdminCatalogRequests from "@/pages/admin/AdminCatalogRequests";
 // R27.3 — Supreme AI Bar
 import AdminAIBar from "@/pages/admin/AdminAIBar";
 // R27.2 — Operations (expense approvals + deviations)
@@ -335,6 +336,7 @@ function AppRouter() {
         <Route path="/admin/web-customers/:id" component={AdminShopCustomerDetail} />
         <Route path="/admin/customer-users/:id" component={AdminShopCustomerDetail} />
         <Route path="/admin/web-customers" component={AdminShopCustomers} />
+        <Route path="/admin/catalog-requests" component={AdminCatalogRequests} />
         <Route path="/admin/freight" component={AdminFreight} />
         <Route path="/admin/stock" component={AdminStock} />
         {/* R23.1 — owner Command Center */}

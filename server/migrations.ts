@@ -3065,3 +3065,112 @@ export function runR27_14Migrations() {
   addCol("branch_stock", "dispatched_qty", "INTEGER DEFAULT 0");
   console.log("[migrations] R27.14: complete");
 }
+
+// =====================================================================
+// PartSetu AI v1 — Spare Parts Intelligence Chatbot (additive, idempotent)
+// 7 new tables. Per-statement try/catch with [migrations] PartSetu: markers.
+// Nothing here drops/renames existing tables.
+// =====================================================================
+export function runPartSetuMigrations() {
+  console.log("[migrations] PartSetu: start");
+  const run = (label: string, sql: string) => {
+    try { sqlite.exec(sql); console.log(`[migrations] PartSetu: ${label} ok`); }
+    catch (e: any) { console.log(`[migrations] PartSetu: ${label} skip (${e?.message || e})`); }
+  };
+
+  run("partsetu_catalogs", `CREATE TABLE IF NOT EXISTS partsetu_catalogs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    oem TEXT,
+    model TEXT,
+    variant TEXT,
+    vc_no TEXT,
+    pdf_filename TEXT,
+    total_pages INTEGER,
+    ingested_at INTEGER
+  )`);
+  run("idx_partsetu_catalogs_vc", `CREATE UNIQUE INDEX IF NOT EXISTS idx_partsetu_catalogs_vc ON partsetu_catalogs(vc_no)`);
+
+  run("partsetu_parts", `CREATE TABLE IF NOT EXISTS partsetu_parts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    catalog_id INTEGER,
+    group_code TEXT,
+    table_code TEXT,
+    assembly_name TEXT,
+    fig_no TEXT,
+    part_number TEXT,
+    description TEXT,
+    qty INTEGER,
+    remarks TEXT,
+    is_kit_parent INTEGER DEFAULT 0,
+    parent_part_id INTEGER,
+    is_serviceable INTEGER DEFAULT 1,
+    page_no INTEGER,
+    diagram_path TEXT,
+    created_at INTEGER
+  )`);
+  run("idx_partsetu_parts_pn", `CREATE INDEX IF NOT EXISTS idx_partsetu_parts_pn ON partsetu_parts(part_number)`);
+  run("idx_partsetu_parts_catalog", `CREATE INDEX IF NOT EXISTS idx_partsetu_parts_catalog ON partsetu_parts(catalog_id)`);
+
+  run("partsetu_xref", `CREATE TABLE IF NOT EXISTS partsetu_xref (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    source_brand TEXT,
+    source_part_no TEXT,
+    source_description TEXT,
+    customer_oem TEXT,
+    customer_part_no TEXT,
+    status TEXT,
+    source_sheet TEXT,
+    source_file TEXT,
+    created_at INTEGER
+  )`);
+  run("idx_xref_source_pn", `CREATE INDEX IF NOT EXISTS idx_xref_source_pn ON partsetu_xref(source_part_no)`);
+  run("idx_xref_customer_pn", `CREATE INDEX IF NOT EXISTS idx_xref_customer_pn ON partsetu_xref(customer_part_no)`);
+  // Idempotency guard for ingest-xref (INSERT OR IGNORE relies on this).
+  run("idx_xref_uniq", `CREATE UNIQUE INDEX IF NOT EXISTS idx_xref_uniq ON partsetu_xref(source_part_no, customer_oem, customer_part_no)`);
+
+  run("partsetu_conversations", `CREATE TABLE IF NOT EXISTS partsetu_conversations (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    customer_id INTEGER,
+    guest_session_id TEXT,
+    chassis_no TEXT,
+    registration_no TEXT,
+    catalog_context_id INTEGER,
+    started_at INTEGER,
+    last_message_at INTEGER
+  )`);
+  run("idx_partsetu_conv_guest", `CREATE INDEX IF NOT EXISTS idx_partsetu_conv_guest ON partsetu_conversations(guest_session_id)`);
+
+  run("partsetu_messages", `CREATE TABLE IF NOT EXISTS partsetu_messages (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    conversation_id INTEGER,
+    role TEXT,
+    content TEXT,
+    image_url TEXT,
+    ai_model TEXT,
+    input_tokens INTEGER,
+    output_tokens INTEGER,
+    cost_usd REAL,
+    latency_ms INTEGER,
+    created_at INTEGER
+  )`);
+  run("idx_partsetu_msg_conv", `CREATE INDEX IF NOT EXISTS idx_partsetu_msg_conv ON partsetu_messages(conversation_id)`);
+
+  run("partsetu_catalog_requests", `CREATE TABLE IF NOT EXISTS partsetu_catalog_requests (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    customer_id INTEGER,
+    make TEXT,
+    model TEXT,
+    variant TEXT,
+    year TEXT,
+    chassis_no TEXT,
+    engine_model TEXT,
+    notes TEXT,
+    photo_url TEXT,
+    status TEXT DEFAULT 'pending',
+    admin_notes TEXT,
+    created_at INTEGER,
+    updated_at INTEGER
+  )`);
+
+  console.log("[migrations] PartSetu: complete");
+}

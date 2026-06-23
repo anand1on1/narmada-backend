@@ -133,6 +133,7 @@ export function AdminLayout({ children, title }: { children: ReactNode; title: s
 
     { href: "/admin/orders", label: "Web Orders", icon: ShoppingBag, group: "Web Shop" },
     { href: "/admin/web-customers", label: "Web Customers", icon: UserSquare, group: "Web Shop" },
+    { href: "/admin/catalog-requests", label: "Catalog Requests", icon: FileQuestion, group: "Web Shop" },
     { href: "/admin/chats", label: "Chats", icon: MessageSquare, badge: unreadChats, group: "Web Shop" },
     { href: "/admin/contacts", label: "Enquiries", icon: MessageSquare, group: "Web Shop" },
     { href: "/admin/blog", label: "Blog", icon: FileText, group: "Web Shop" },

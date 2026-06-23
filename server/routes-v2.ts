@@ -8171,6 +8171,180 @@ function registerR8Routes(
     next();
   }
 
+  // ==================================================================
+  // PartSetu AI v1 — Spare Parts Intelligence Chatbot
+  // ==================================================================
+  const partsetuStore = require("./partsetu") as typeof import("./partsetu");
+  const claudeSvc = require("./services/claude") as typeof import("./services/claude");
+
+  const partsetuImgDir = path.join(uploadsRoot, "partsetu", "images");
+  try { fs.mkdirSync(partsetuImgDir, { recursive: true }); } catch {}
+  const partsetuImgStore = multer({
+    storage: multer.diskStorage({
+      destination: (_req: any, _file: any, cb: any) => cb(null, partsetuImgDir),
+      filename: (_req: any, file: any, cb: any) => cb(null, `${Date.now()}-${String(file.originalname || "image").replace(/[^a-zA-Z0-9._-]/g, "_")}`),
+    }),
+    limits: { fileSize: 10 * 1024 * 1024 },
+  });
+
+  const PARTSETU_SYSTEM = (contextBlock: string) => `You are PartSetu AI, the spare-parts identification assistant for Narmada Mobility, an Indian commercial-vehicle (truck & bus) spare-parts supplier. Your tagline is "Your bridge to the right spare part."
+
+You help customers identify the correct OEM spare-part numbers for Tata, Ashok Leyland, Eicher, BharatBenz and other commercial vehicles, and find cross-references between brands.
+
+Rules:
+- Cite EXACT part numbers verbatim, only from the CONTEXT below. Never invent, guess, or modify a part number.
+- If the CONTEXT has no relevant match, say you could not find it in the catalogue and offer to raise a "Request Catalog" so the team can add it. Ask for the chassis number, VC number, or vehicle model to narrow the search.
+- NEVER quote, estimate, or mention any price or cost. If asked about price, reply that pricing is shared by the Narmada team via a formal quote, and give no number.
+- If a part is part of a kit or "not serviced" separately, say so.
+- Be concise and professional (2-4 sentences). Use 'seller' (not 'supplier') if you refer to the vendor side.
+
+CONTEXT (catalogue + cross-reference matches for this query):
+${contextBlock}`;
+
+  // Resolve an optional shop session from the x-shop-token header (no error if absent).
+  function partsetuOptionalShopUser(req: Request): number | null {
+    const token = req.headers["x-shop-token"] as string | undefined;
+    if (!token) return null;
+    const session = shop.getShopSession(token);
+    return session ? session.shopUserId : null;
+  }
+
+  // Map stored messages to the {role, content} history Claude expects (text only).
+  function partsetuHistory(conversationId: number): Array<{ role: "user" | "assistant"; content: string }> {
+    return partsetuStore
+      .listMessages(conversationId)
+      .filter((m: any) => m.content && (m.role === "user" || m.role === "assistant"))
+      .map((m: any) => ({ role: m.role, content: String(m.content) }));
+  }
+
+  // Start a conversation (guest or logged-in).
+  app.post("/api/partsetu/conversation", async (req, res) => {
+    try {
+      const { guestSessionId, chassisNo, registrationNo } = req.body || {};
+      const customerId = partsetuOptionalShopUser(req);
+      const id = partsetuStore.createConversation({
+        customerId, guestSessionId: guestSessionId || null,
+        chassisNo: chassisNo || null, registrationNo: registrationNo || null,
+      });
+      res.json({ conversationId: id, requiresLogin: false });
+    } catch (e: any) { res.status(500).json({ error: e?.message || "Failed to start conversation" }); }
+  });
+
+  // Send a text message. Pattern B gating: the FIRST user message is free for a
+  // guest; any further message requires login (401 requires_login:true).
+  app.post("/api/partsetu/message", async (req, res) => {
+    try {
+      const { conversationId, content } = req.body || {};
+      if (!conversationId || !content || !String(content).trim()) {
+        return res.status(400).json({ error: "conversationId and content are required" });
+      }
+      const conv = partsetuStore.getConversation(Number(conversationId));
+      if (!conv) return res.status(404).json({ error: "Conversation not found" });
+
+      const shopUserId = partsetuOptionalShopUser(req);
+      const priorUserMsgs = partsetuStore.countUserMessages(Number(conversationId));
+      if (priorUserMsgs >= 1 && !shopUserId) {
+        return res.status(401).json({ requires_login: true, error: "Please log in to continue chatting with PartSetu AI." });
+      }
+      // Link a guest conversation to the customer once they are logged in.
+      if (shopUserId && !conv.customer_id) {
+        partsetuStore.linkConversationToCustomer(Number(conversationId), shopUserId);
+      }
+
+      partsetuStore.addMessage({ conversationId: Number(conversationId), role: "user", content: String(content) });
+
+      const contextBlock = partsetuStore.buildContextBlock(String(content));
+      const history = partsetuHistory(Number(conversationId));
+      const result = await claudeSvc.callClaudeHaiku(PARTSETU_SYSTEM(contextBlock), history);
+
+      partsetuStore.addMessage({
+        conversationId: Number(conversationId), role: "assistant", content: result.text,
+        aiModel: result.model, inputTokens: result.inputTokens, outputTokens: result.outputTokens,
+        costUsd: result.costUsd, latencyMs: result.latencyMs,
+      });
+
+      res.json({ reply: result.text, requires_login: false, ai_available: result.ok });
+    } catch (e: any) { res.status(500).json({ error: e?.message || "Message failed" }); }
+  });
+
+  // Upload an image for visual part identification (login required).
+  app.post("/api/partsetu/upload-image", requireShop, partsetuImgStore.single("image"), async (req, res) => {
+    try {
+      const file = (req as any).file;
+      if (!file) return res.status(400).json({ error: "No image uploaded" });
+      const conversationId = Number(req.body?.conversationId);
+      if (!conversationId || !partsetuStore.getConversation(conversationId)) {
+        return res.status(400).json({ error: "Valid conversationId required" });
+      }
+      const shopUserId = (req as any).shopUserId as number;
+      const convRow = partsetuStore.getConversation(conversationId);
+      if (convRow && !convRow.customer_id) partsetuStore.linkConversationToCustomer(conversationId, shopUserId);
+
+      const imageUrl = `/uploads/partsetu/images/${file.filename}`;
+      const userText = String(req.body?.content || "Identify this spare part and suggest the matching OEM part number.");
+      partsetuStore.addMessage({ conversationId, role: "user", content: userText, imageUrl });
+
+      const ext = path.extname(file.filename).toLowerCase();
+      const mediaType: any = ext === ".png" ? "image/png" : ext === ".webp" ? "image/webp" : ext === ".gif" ? "image/gif" : "image/jpeg";
+      const base64 = fs.readFileSync(file.path).toString("base64");
+      const visionSystem = PARTSETU_SYSTEM(partsetuStore.buildContextBlock(userText)) +
+        "\n\nThe user has attached a photo of a part. Describe the part you see and, using the CONTEXT, suggest likely matching part number(s). Never invent a number, and never mention price.";
+      const result = await claudeSvc.callClaudeSonnetVision(visionSystem, userText, base64, mediaType);
+
+      partsetuStore.addMessage({
+        conversationId, role: "assistant", content: result.text,
+        aiModel: result.model, inputTokens: result.inputTokens, outputTokens: result.outputTokens,
+        costUsd: result.costUsd, latencyMs: result.latencyMs,
+      });
+      res.json({ reply: result.text, imageUrl, ai_available: result.ok });
+    } catch (e: any) { res.status(500).json({ error: e?.message || "Image upload failed" }); }
+  });
+
+  // Request a catalog be added (login required).
+  app.post("/api/partsetu/catalog-request", requireShop, async (req, res) => {
+    try {
+      const { make, model, variant, year, chassisNo, engineModel, notes, photoUrl } = req.body || {};
+      const id = partsetuStore.createCatalogRequest({
+        customerId: (req as any).shopUserId as number,
+        make: make || null, model: model || null, variant: variant || null, year: year || null,
+        chassisNo: chassisNo || null, engineModel: engineModel || null, notes: notes || null, photoUrl: photoUrl || null,
+      });
+      res.json({ ok: true, id });
+    } catch (e: any) { res.status(500).json({ error: e?.message || "Request failed" }); }
+  });
+
+  // ---- Admin: catalog requests, conversations, usage ----
+  app.get("/api/admin/partsetu/catalog-requests", requireAuth, async (req, res) => {
+    try {
+      const status = (req.query.status as string) || undefined;
+      res.json(partsetuStore.listCatalogRequests(status));
+    } catch (e: any) { res.status(500).json({ error: e?.message }); }
+  });
+
+  app.patch("/api/admin/partsetu/catalog-requests/:id", requireAuth, async (req, res) => {
+    try {
+      const id = Number(req.params.id);
+      const { status, adminNotes } = req.body || {};
+      partsetuStore.updateCatalogRequest(id, { status, adminNotes });
+      res.json({ ok: true });
+    } catch (e: any) { res.status(500).json({ error: e?.message }); }
+  });
+
+  app.get("/api/admin/partsetu/conversations", requireAuth, async (_req, res) => {
+    try { res.json(partsetuStore.listConversationsAdmin(200)); }
+    catch (e: any) { res.status(500).json({ error: e?.message }); }
+  });
+
+  app.get("/api/admin/partsetu/conversations/:id/messages", requireAuth, async (req, res) => {
+    try { res.json(partsetuStore.listMessages(Number(req.params.id))); }
+    catch (e: any) { res.status(500).json({ error: e?.message }); }
+  });
+
+  app.get("/api/admin/partsetu/usage", requireAuth, async (_req, res) => {
+    try { res.json(partsetuStore.usageSummary()); }
+    catch (e: any) { res.status(500).json({ error: e?.message }); }
+  });
+
   // ---- public: currencies (TASK 7) ----
   app.get("/api/public/currencies", async (_req, res) => {
     try {

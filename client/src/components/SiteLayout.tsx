@@ -8,6 +8,7 @@ import { BRANDS, BRAND_WALL } from "@/data/brands";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 import { whatsappLink } from "@/lib/utils-app";
 import { StickyGetQuote } from "./StickyGetQuote";
+import { PartSetuChat } from "./PartSetuChat";
 import { cartCount, subscribeCart } from "@/lib/cart";
 import { getCurrency, setCurrency, subscribeCurrency, loadFxRate, getUsdInr, Currency } from "@/lib/currency";
 import { useShopAuth } from "@/lib/shop-auth";
@@ -174,6 +175,9 @@ export function SiteLayout({ children }: { children: React.ReactNode }) {
 
       {/* Sticky Get-Quote button (bottom-left) */}
       <StickyGetQuote />
+
+      {/* PartSetu AI chatbot (bottom-right, above WhatsApp) */}
+      <PartSetuChat />
     </div>
   );
 }
