@@ -58,6 +58,107 @@ function isHeaderToken(v: string): boolean {
   return /\b(part|material|customer|description|status|wabco|no)\b/i.test(v) && !/\d/.test(v);
 }
 
+// A value that is not a usable part number (empty, placeholder, or a label).
+function isBadPart(v: string): boolean {
+  if (!v) return true;
+  if (/^(-+|n\/?a|na|tbd|nil)$/i.test(v)) return true;
+  if (/\b(part|number|application|description|configuration)\b/i.test(v) && !/\d/.test(v)) return true;
+  return false;
+}
+
+// R27.21 — file-level brand tokens for catalogs whose SHEETS are not named after
+// the brand (e.g. MEI catalog with sheets "Table 4".."Table 75"). Order matters:
+// the more specific multi-word tokens come first.
+const FILE_BRAND_TOKENS: Array<[RegExp, string]> = [
+  [/knorr[\s_-]*bremse|\bbremse\b/i, "Knorr-Bremse"],
+  [/\bknorr\b/i, "Knorr"],
+  [/\bmei\b/i, "MEI"],
+  [/\bbosch\b/i, "Bosch"],
+  [/\bdelphi\b/i, "Delphi"],
+  [/\blucas\b/i, "Lucas"],
+  [/turbo[\s_-]*energy/i, "Turbo Energy"],
+  [/\bdenso\b/i, "Denso"],
+  [/\bendurance\b/i, "Endurance"],
+  [/\bvarroc\b/i, "Varroc"],
+  [/\bwabco\b/i, "WABCO"],
+];
+
+function detectFileBrand(...names: string[]): string | null {
+  const hay = names.filter(Boolean).join(" ");
+  for (const [re, brand] of FILE_BRAND_TOKENS) if (re.test(hay)) return brand;
+  return null;
+}
+
+// Best-effort: map a "Vehicle Application" string to the OEM that built the truck.
+function inferOemFromApplication(text: string): string {
+  const t = String(text || "").toUpperCase();
+  if (/\bTATA\b|M\/HCV|M\/LCV|\bLCV\b|\bHCV\b|SIGNA|PRIMA|\bLPT\b|JNNURM/.test(t)) return "TML";
+  if (/LEYLAND|ASHOK|\bAL\b/.test(t)) return "AL";
+  if (/EICHER/.test(t)) return "Eicher";
+  if (/BHARAT\s*BENZ/.test(t)) return "BharatBenz";
+  if (/VOLVO/.test(t)) return "Volvo";
+  return "OEM";
+}
+
+// First-cell keywords that mark a sheet as notes / contacts rather than parts.
+const NON_PARTS_FIRST_CELL = /\b(superseded|notes?|contact|team|executive|manager|e-?mail|representatives?)\b/i;
+const SUBHEADER_TOKENS = /\b(front|rear|lh|rh|left|right)\b/i;
+
+interface MeiCols { oe: number; customer: number; desc: number; dataStart: number }
+
+// R27.21 — detect the OE-part / brand-part / description columns for a MEI-style
+// sheet by scanning the first 5 rows for `OE Part No` + `<brand> Part No` headers.
+// Returns null when the sheet has no such header pair (caller skips it).
+function detectMeiColumns(rows: any[][], brand: string): MeiCols | null {
+  const brandLc = brand.toLowerCase();
+  const brandRe = new RegExp(`${brandLc.replace(/[-/\\^$*+?.()|[\]{}]/g, "\\$&")}\\s*part\\s*(no|number)`);
+  const norm = (v: any) => String(v ?? "").toLowerCase().replace(/[\r\n]+/g, " ").replace(/\s+/g, " ").trim();
+
+  for (let i = 0; i < Math.min(5, rows.length); i++) {
+    const r = (rows[i] || []).map(norm);
+    const oe = r.findIndex((c) => /\boe(m)?\s*part\s*(no|number)\b/.test(c));
+    const customer = r.findIndex((c) => brandRe.test(c) || /\bmei\s*part\s*(no|number)\b/.test(c));
+    if (oe >= 0 && customer >= 0 && oe !== customer) {
+      const desc = r.findIndex((c, idx) => idx !== oe && idx !== customer && /(desc|vehicle|application|product)/.test(c));
+      let dataStart = i + 1;
+      // Skip a sub-header row (e.g. Front / Rear / LH / RH) if present.
+      const next = (rows[dataStart] || []).map(norm);
+      const nextHasParts = clean((rows[dataStart] || [])[oe]) || clean((rows[dataStart] || [])[customer]);
+      if (!nextHasParts && next.some((c) => SUBHEADER_TOKENS.test(c))) dataStart++;
+      return { oe, customer, desc, dataStart };
+    }
+  }
+  return null;
+}
+
+interface SupersededLayout { brand: string; pairs: Array<[number, number]>; dataStart: number }
+
+// R27.21 — "S-ASA Superseded Part Numbers" sheets are NOT notes: they are real
+// OE<->brand cross-reference tables with an OEM-name row, then a "MEI"/"OE"
+// sub-header giving one or more (brand, OE) column pairs (Old + New part). We
+// ingest each pair as a genuine OE->brand mapping. Returns null if not this shape.
+function detectSupersededLayout(rows: any[][]): SupersededLayout | null {
+  const up = (v: any) => String(v ?? "").trim().toUpperCase();
+  let hdr = -1;
+  for (let i = 0; i < Math.min(6, rows.length); i++) {
+    const r = (rows[i] || []).map(up);
+    if (r.includes("MEI") && r.includes("OE")) { hdr = i; break; }
+  }
+  if (hdr < 0) return null;
+  const r = (rows[hdr] || []).map(up);
+  const pairs: Array<[number, number]> = [];
+  for (let i = 1; i < r.length; i++) {
+    if (r[i] === "OE" && r[i - 1] === "MEI") pairs.push([i - 1, i]); // [brandCol, oeCol]
+  }
+  if (!pairs.length) return null;
+  let brand = "OEM";
+  for (let i = 0; i < hdr; i++) {
+    const b = inferOemFromApplication(String((rows[i] || [])[0] ?? ""));
+    if (b !== "OEM") { brand = b; break; }
+  }
+  return { brand, pairs, dataStart: hdr + 1 };
+}
+
 interface Cols { wabco: number; brand: number; desc: number }
 
 // Detect the Wabco / brand / description columns for a single-layout sheet.
@@ -177,16 +278,26 @@ export function ingestXrefWorkbook(opts: {
     perSheet: [], errors: [],
   };
 
-  // Insert one (oemPart, wabcoPart) pair. Returns 'inserted' | 'skipped'.
-  const tryInsert = (brand: string, oemPart: any, wabcoPart: any, desc: any, sheetName: string): "inserted" | "skipped" => {
-    const sourcePn = clean(oemPart);
-    const wabcoPn = clean(wabcoPart);
-    if (!sourcePn || !wabcoPn) return "skipped";
-    if (isHeaderToken(sourcePn) || isHeaderToken(wabcoPn)) return "skipped";
+  // Insert one (sourcePart, customerPart) pair. customerOem defaults to WABCO
+  // (the brand-by-sheet / wide layouts); MEI-style files pass the file brand.
+  // Returns 'inserted' | 'skipped'.
+  const tryInsert = (
+    srcBrand: string, sourcePart: any, customerPart: any, desc: any, sheetName: string, customerOem: string = WABCO,
+  ): "inserted" | "skipped" => {
+    const sourcePn = clean(sourcePart);
+    const customerPn = clean(customerPart);
+    if (isBadPart(sourcePn) || isBadPart(customerPn)) return "skipped";
     const d = clean(desc);
-    const res = insert.run(brand, sourcePn, d || null, WABCO, wabcoPn, null, sheetName, sourceName, sourceFileId, ts);
+    const res = insert.run(srcBrand, sourcePn, d || null, customerOem, customerPn, null, sheetName, sourceName, sourceFileId, ts);
     return res.changes > 0 ? "inserted" : "skipped";
   };
+
+  // R27.21 — brand-by-sheet first (existing behavior). If NO sheet name matches a
+  // known brand, fall back to a single file-level brand inferred from the filename
+  // (MEI-PARTS-CATALOGUE.xlsx → MEI) and treat every sheet as that brand.
+  const anySheetBrand = wb.SheetNames.some((sn: string) => BRAND_BY_SHEET[sn.trim().toLowerCase()]);
+  const fileBrand = anySheetBrand ? null : detectFileBrand(sourceName, xlsxPath.split(/[\\/]/).pop() || "");
+  if (fileBrand) console.log(`[xref-ingester] file_brand=${fileBrand} (no brand-named sheets; using filename)`);
 
   for (const sheetName of wb.SheetNames) {
     try {
@@ -196,6 +307,82 @@ export function ingestXrefWorkbook(opts: {
 
       const header0 = rows[0] || [];
       const widePairs = detectWidePairs(header0);
+
+      // --- R27.21: MEI-style file-level brand (sheets named "Table N") ---
+      if (fileBrand && !widePairs) {
+        const firstCell = clean(header0[0]);
+
+        // Superseded part tables ARE valid OE<->brand xref data (Old + New pairs),
+        // so handle them before the non-parts skip below.
+        if (/superseded/i.test(firstCell)) {
+          const sl = detectSupersededLayout(rows);
+          if (sl) {
+            let rowsIn = 0, inserted = 0, skipped = 0;
+            const tx = db.transaction(() => {
+              for (let i = sl.dataStart; i < rows.length; i++) {
+                const r = rows[i];
+                if (!r) continue;
+                for (const [brandCol, oeCol] of sl.pairs) {
+                  if (!clean(r[oeCol]) && !clean(r[brandCol])) continue;
+                  rowsIn++;
+                  try {
+                    const out = tryInsert(sl.brand, r[oeCol], r[brandCol], "", sheetName, fileBrand);
+                    if (out === "inserted") inserted++; else skipped++;
+                  } catch (e: any) { skipped++; result.errors.push(`${sheetName} row ${i}: ${e?.message}`); }
+                }
+              }
+            });
+            tx();
+            result.sheetsProcessed++;
+            if (inserted > 0) result.sheetsUsed++;
+            result.rowsRead += rowsIn; result.rowsInserted += inserted; result.rowsSkipped += skipped;
+            result.perSheet.push({ sheet: sheetName, brand: fileBrand, cols: `superseded:${sl.pairs.length} pairs src=${sl.brand}`, rowsIn, inserted, skipped });
+            console.log(`[xref-ingester] sheet="${sheetName}" brand=${fileBrand} cols=superseded(${sl.pairs.length}) src=${sl.brand} rows_in=${rowsIn} inserted=${inserted} skipped=${skipped}`);
+            continue;
+          }
+        }
+
+        if (NON_PARTS_FIRST_CELL.test(firstCell)) {
+          result.sheetsSkipped.push(`${sheetName} (non-parts sheet)`);
+          console.log(`[xref-ingester] sheet="${sheetName}" SKIPPED (non-parts sheet)`);
+          continue;
+        }
+        const mc = detectMeiColumns(rows, fileBrand);
+        if (!mc) {
+          result.sheetsSkipped.push(`${sheetName} (no OE/${fileBrand} headers)`);
+          console.log(`[xref-ingester] sheet="${sheetName}" SKIPPED (no OE/${fileBrand} headers)`);
+          continue;
+        }
+        let rowsIn = 0, inserted = 0, skipped = 0;
+        const tx = db.transaction(() => {
+          for (let i = mc.dataStart; i < rows.length; i++) {
+            const r = rows[i];
+            if (!r) continue;
+            rowsIn++;
+            try {
+              const appn = mc.desc >= 0 ? clean(r[mc.desc]) : "";
+              const srcBrand = inferOemFromApplication(appn);
+              const out = tryInsert(srcBrand, r[mc.oe], r[mc.customer], appn, sheetName, fileBrand);
+              if (out === "inserted") inserted++; else skipped++;
+            } catch (e: any) { skipped++; result.errors.push(`${sheetName} row ${i}: ${e?.message}`); }
+          }
+        });
+        tx();
+        if (inserted < 3 && rowsIn - skipped < 3) {
+          // Few/no usable data rows — treat as a non-parts sheet for clarity.
+          if (inserted === 0) {
+            result.sheetsSkipped.push(`${sheetName} (no usable data)`);
+            console.log(`[xref-ingester] sheet="${sheetName}" SKIPPED (no usable data)`);
+            continue;
+          }
+        }
+        result.sheetsProcessed++;
+        if (inserted > 0) result.sheetsUsed++;
+        result.rowsRead += rowsIn; result.rowsInserted += inserted; result.rowsSkipped += skipped;
+        result.perSheet.push({ sheet: sheetName, brand: fileBrand, cols: `oe=${mc.oe} brand=${mc.customer} desc=${mc.desc}`, rowsIn, inserted, skipped });
+        console.log(`[xref-ingester] sheet="${sheetName}" brand=${fileBrand} cols=[oe=${mc.oe} brand=${mc.customer} desc=${mc.desc}] rows_in=${rowsIn} inserted=${inserted} skipped=${skipped}`);
+        continue;
+      }
 
       // --- Wide multi-pair verification layout (single sheet, many WABCO cols) ---
       if (widePairs) {
@@ -268,7 +455,7 @@ export function ingestXrefWorkbook(opts: {
 
   result.totalInserted = result.rowsInserted;
   db.prepare(`UPDATE partsetu_xref_sources SET row_count = ? WHERE id = ?`).run(result.totalInserted, sourceFileId);
-  console.log(`[xref-ingester] source="${sourceName}" sheetsProcessed=${result.sheetsProcessed} skipped=${result.sheetsSkipped.length} rowsRead=${result.rowsRead} inserted=${result.rowsInserted} skipped=${result.rowsSkipped}`);
+  console.log(`[xref-ingester] source="${sourceName}" file_brand=${fileBrand ?? "(per-sheet)"} sheetsProcessed=${result.sheetsProcessed} skipped=${result.sheetsSkipped.length} rowsRead=${result.rowsRead} inserted=${result.rowsInserted} skipped=${result.rowsSkipped}`);
   return result;
 }
 
