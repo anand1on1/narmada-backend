@@ -225,6 +225,11 @@ export function registerV2Routes(app: Express, ctx: V2Context) {
       if (!rehydrated) return res.status(401).json({ error: "Unauthorized" });
       info = rehydrated;
     }
+    // v1.4a — data_center users are revoked from the admin app entirely. They must
+    // use /datacenter/login and the x-datacenter-token header; never x-admin-token.
+    if (info.role === "data_center") {
+      return res.status(403).json({ error: "Data Center users must log in at /datacenter/login" });
+    }
     (req as any).user = info;
     next();
   }
@@ -271,6 +276,10 @@ export function registerV2Routes(app: Express, ctx: V2Context) {
         // DB user
         const user = await v2.getAdminUserByUsername(username);
         if (user && user.active && verifyPassword(password, user.passwordHash)) {
+          // v1.4a — data_center accounts cannot use the admin login.
+          if (user.role === "data_center") {
+            return res.status(403).json({ error: "Data Center users must log in at /datacenter/login" });
+          }
           info = {
             username: user.username,
             role: (VALID_ROLES.includes(user.role as AdminRole) ? user.role : "admin") as AdminRole,
@@ -4867,16 +4876,51 @@ function registerR8Routes(
   const poUploadsDir = path2.join(uploadsRoot, "customer-pos");
   if (!fs2.existsSync(poUploadsDir)) fs2.mkdirSync(poUploadsDir, { recursive: true });
 
-  // PartSetu v1.4 F5 — allow admin + data_center, but data_center can never DELETE.
-  // Guards the PartSetu/Products management routes the Data Center role owns.
+  // PartSetu v1.4a — Data Center is now a fully separate app with its own token.
+  // Validate the x-datacenter-token header against the shared tokenMap. The token must
+  // resolve to a data_center role (dc_-prefixed token issued by /api/datacenter/login).
+  const resolveDataCenterToken = (req: Request): TokenInfo | null => {
+    const token = req.headers["x-datacenter-token"] as string | undefined;
+    if (!token) return null;
+    let info = ctx.tokenMap.get(token);
+    if (!info) {
+      const rehydrated = rehydrateSession(ctx.tokenMap, token);
+      if (!rehydrated) return null;
+      info = rehydrated;
+    }
+    if (info.role !== "data_center") return null;
+    return info;
+  };
+
+  // requireDataCenterToken — data_center role only, via x-datacenter-token. DELETE blocked.
+  const requireDataCenterToken = (req: Request, res: Response, next: NextFunction) => {
+    const info = resolveDataCenterToken(req);
+    if (!info) return res.status(401).json({ error: "Data Center authentication required" });
+    if (req.method === "DELETE") {
+      return res.status(403).json({ error: "Data Center role cannot delete" });
+    }
+    (req as any).user = info;
+    next();
+  };
+
+  // requireDataCenterOrAdmin (v1.4a dual-token) — accepts EITHER an admin token
+  // (x-admin-token, role admin) OR a Data Center token (x-datacenter-token, role
+  // data_center). data_center can never DELETE. Guards the shared PartSetu/Products
+  // management routes the Data Center role owns alongside admins.
   const requireDataCenterOrAdmin = (req: Request, res: Response, next: NextFunction) => {
+    const dc = resolveDataCenterToken(req);
+    if (dc) {
+      if (req.method === "DELETE") {
+        return res.status(403).json({ error: "Data Center role cannot delete" });
+      }
+      (req as any).user = dc;
+      return next();
+    }
+    // Fall back to admin token (requireAuth rejects data_center x-admin-token outright).
     requireAuth(req, res, () => {
       const u = (req as any).user as TokenInfo;
-      if (u.role !== "admin" && u.role !== "data_center") {
+      if (u.role !== "admin") {
         return res.status(403).json({ error: "Admin or Data Center role required" });
-      }
-      if (u.role === "data_center" && req.method === "DELETE") {
-        return res.status(403).json({ error: "Data Center role cannot delete" });
       }
       next();
     });
@@ -8040,10 +8084,10 @@ function registerR8Routes(
       return res.json(j || { meta_title: "", meta_description: "", meta_keywords: "" });
     } catch (e: any) { res.status(500).json({ error: e.message }); }
   }
-  app.post("/api/admin/ai-fill/discounts", requireAuth, (req, res) => aiFill(req, res, "discounts"));
-  app.post("/api/admin/ai-fill/specifications", requireAuth, (req, res) => aiFill(req, res, "specifications"));
-  app.post("/api/admin/ai-fill/short-description", requireAuth, (req, res) => aiFill(req, res, "short-description"));
-  app.post("/api/admin/ai-fill/seo-meta", requireAuth, (req, res) => aiFill(req, res, "seo-meta"));
+  app.post("/api/admin/ai-fill/discounts", requireDataCenterOrAdmin, (req, res) => aiFill(req, res, "discounts"));
+  app.post("/api/admin/ai-fill/specifications", requireDataCenterOrAdmin, (req, res) => aiFill(req, res, "specifications"));
+  app.post("/api/admin/ai-fill/short-description", requireDataCenterOrAdmin, (req, res) => aiFill(req, res, "short-description"));
+  app.post("/api/admin/ai-fill/seo-meta", requireDataCenterOrAdmin, (req, res) => aiFill(req, res, "seo-meta"));
 
   // ==================== H. CROSS-TEAM NOTIFICATIONS FEED ====================
   app.get("/api/notifications", requireDataTeamRole(), async (req, res) => {
@@ -8431,7 +8475,7 @@ ${contextBlock}`;
     } catch (e: any) { res.status(500).json({ error: e?.message }); }
   });
 
-  app.delete("/api/admin/partsetu/catalogs/:id", requireDataCenterOrAdmin, async (req, res) => {
+  app.delete("/api/admin/partsetu/catalogs/:id", requireAdminRole, async (req, res) => {
     try {
       const id = Number(req.params.id);
       rawSqlite.prepare(`UPDATE partsetu_conversations SET catalog_context_id = NULL WHERE catalog_context_id = ?`).run(id);
@@ -8509,7 +8553,7 @@ ${contextBlock}`;
       res.json(r);
     } catch (e: any) { res.status(422).json({ error: e?.message || "Re-ingest failed" }); }
   });
-  app.delete("/api/admin/partsetu/xrefs/:id", requireDataCenterOrAdmin, async (req, res) => {
+  app.delete("/api/admin/partsetu/xrefs/:id", requireAdminRole, async (req, res) => {
     try { res.json(xrefIngester.deleteXrefSource(Number(req.params.id))); }
     catch (e: any) { res.status(500).json({ error: e?.message }); }
   });
@@ -8560,7 +8604,7 @@ ${contextBlock}`;
     try { res.json(rawSqlite.prepare(`SELECT * FROM partsetu_prices WHERE source_file_id = ? LIMIT 500`).all(Number(req.params.id))); }
     catch (e: any) { res.status(500).json({ error: e?.message }); }
   });
-  app.delete("/api/admin/partsetu/prices/:id", requireDataCenterOrAdmin, async (req, res) => {
+  app.delete("/api/admin/partsetu/prices/:id", requireAdminRole, async (req, res) => {
     try { res.json(sheetIngester.deletePriceSource(Number(req.params.id))); }
     catch (e: any) { res.status(500).json({ error: e?.message }); }
   });
@@ -8595,7 +8639,7 @@ ${contextBlock}`;
     try { res.json(rawSqlite.prepare(`SELECT * FROM partsetu_consumption WHERE source_file_id = ? LIMIT 500`).all(Number(req.params.id))); }
     catch (e: any) { res.status(500).json({ error: e?.message }); }
   });
-  app.delete("/api/admin/partsetu/consumption/:id", requireDataCenterOrAdmin, async (req, res) => {
+  app.delete("/api/admin/partsetu/consumption/:id", requireAdminRole, async (req, res) => {
     try { res.json(sheetIngester.deleteConsumptionSource(Number(req.params.id))); }
     catch (e: any) { res.status(500).json({ error: e?.message }); }
   });
@@ -8639,7 +8683,7 @@ ${contextBlock}`;
       res.json({ ok: true });
     } catch (e: any) { res.status(500).json({ error: e?.message }); }
   });
-  app.delete("/api/admin/partsetu/synonyms/:id", requireDataCenterOrAdmin, async (req, res) => {
+  app.delete("/api/admin/partsetu/synonyms/:id", requireAdminRole, async (req, res) => {
     try { rawSqlite.prepare(`DELETE FROM partsetu_synonyms WHERE id = ?`).run(Number(req.params.id)); res.json({ deleted: true }); }
     catch (e: any) { res.status(500).json({ error: e?.message }); }
   });
@@ -8676,7 +8720,7 @@ ${contextBlock}`;
       res.json({ ok: true });
     } catch (e: any) { res.status(500).json({ error: e?.message }); }
   });
-  app.delete("/api/admin/partsetu/answers/:id", requireDataCenterOrAdmin, async (req, res) => {
+  app.delete("/api/admin/partsetu/answers/:id", requireAdminRole, async (req, res) => {
     try { rawSqlite.prepare(`DELETE FROM partsetu_answers WHERE id = ?`).run(Number(req.params.id)); res.json({ deleted: true }); }
     catch (e: any) { res.status(500).json({ error: e?.message }); }
   });
@@ -8714,7 +8758,7 @@ ${contextBlock}`;
       res.json({ ok: true });
     } catch (e: any) { res.status(500).json({ error: e?.message }); }
   });
-  app.delete("/api/admin/partsetu/rules/:id", requireDataCenterOrAdmin, async (req, res) => {
+  app.delete("/api/admin/partsetu/rules/:id", requireAdminRole, async (req, res) => {
     try { rawSqlite.prepare(`DELETE FROM partsetu_rules WHERE id = ?`).run(Number(req.params.id)); res.json({ deleted: true }); }
     catch (e: any) { res.status(500).json({ error: e?.message }); }
   });

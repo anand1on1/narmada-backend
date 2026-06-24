@@ -2,19 +2,18 @@
 // Four tabs: Synonyms, Answers, Rules (CRUD) and Lessons Import (parse free text
 // via Claude → review → apply). All teaching lives in our sqlite DB only.
 import { useEffect, useState } from "react";
-import { AdminLayout } from "./AdminLayout";
-import { adminFetch, useAdminAuth } from "@/lib/admin-auth";
+import { ShellLayout, useShellAuth } from "@/lib/shell";
 import { Plus, Trash2, Sparkles, BookOpen, MessageSquare, ScrollText } from "lucide-react";
 
 type Tab = "synonyms" | "answers" | "rules" | "lessons";
 
 export default function AdminPartSetuTeach() {
-  const { token, role } = useAdminAuth();
+  const { token, role } = useShellAuth();
   const canDelete = role !== "data_center";
   const [tab, setTab] = useState<Tab>("synonyms");
 
   return (
-    <AdminLayout title="PartSetu — Teach">
+    <ShellLayout title="PartSetu — Teach">
       <div className="mb-4 flex items-center gap-2 text-sm text-muted-foreground">
         <Sparkles className="w-4 h-4" /> Teach the PartSetu chatbot. Synonyms expand queries, Answers bypass search for known questions, Rules inject high-authority guidance. Everything is stored in our database.
       </div>
@@ -37,7 +36,7 @@ export default function AdminPartSetuTeach() {
       {tab === "answers" && <AnswersTab token={token} canDelete={canDelete} />}
       {tab === "rules" && <RulesTab token={token} canDelete={canDelete} />}
       {tab === "lessons" && <LessonsTab token={token} />}
-    </AdminLayout>
+    </ShellLayout>
   );
 }
 
@@ -48,6 +47,7 @@ function Msg({ m }: { m: { kind: "ok" | "err"; text: string } | null }) {
 
 // ---------------- Synonyms ----------------
 function SynonymsTab({ token, canDelete }: { token: string | null; canDelete: boolean }) {
+  const { adminFetch } = useShellAuth();
   const [rows, setRows] = useState<any[]>([]);
   const [msg, setMsg] = useState<{ kind: "ok" | "err"; text: string } | null>(null);
   const [queryTerm, setQueryTerm] = useState("");
@@ -103,6 +103,7 @@ function SynonymsTab({ token, canDelete }: { token: string | null; canDelete: bo
 
 // ---------------- Answers ----------------
 function AnswersTab({ token, canDelete }: { token: string | null; canDelete: boolean }) {
+  const { adminFetch } = useShellAuth();
   const [rows, setRows] = useState<any[]>([]);
   const [msg, setMsg] = useState<{ kind: "ok" | "err"; text: string } | null>(null);
   const [pattern, setPattern] = useState("");
@@ -160,6 +161,7 @@ function AnswersTab({ token, canDelete }: { token: string | null; canDelete: boo
 
 // ---------------- Rules ----------------
 function RulesTab({ token, canDelete }: { token: string | null; canDelete: boolean }) {
+  const { adminFetch } = useShellAuth();
   const [rows, setRows] = useState<any[]>([]);
   const [msg, setMsg] = useState<{ kind: "ok" | "err"; text: string } | null>(null);
   const [ruleText, setRuleText] = useState("");
@@ -222,6 +224,7 @@ function RulesTab({ token, canDelete }: { token: string | null; canDelete: boole
 
 // ---------------- Lessons Import ----------------
 function LessonsTab({ token }: { token: string | null }) {
+  const { adminFetch } = useShellAuth();
   const [rawText, setRawText] = useState("");
   const [parsing, setParsing] = useState(false);
   const [applying, setApplying] = useState(false);

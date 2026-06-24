@@ -10,17 +10,27 @@ export default function AdminLogin() {
   const [password, setPassword] = useState("");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // v1.4a — when a Data Center account tries the admin login, the backend returns 403
+  // and we steer them to their own login instead of admitting them to the admin shell.
+  const [showDcLink, setShowDcLink] = useState(false);
 
   async function onSubmit(e: React.FormEvent) {
     e.preventDefault();
-    setError(null); setLoading(true);
+    setError(null); setShowDcLink(false); setLoading(true);
     try {
       let data: any;
       try {
         const res = await apiRequest("POST", "/api/admin/login", { username, password });
         data = await res.json();
       } catch (err: any) {
-        setError("Invalid credentials");
+        // v1.4a — surface the Data Center redirect message for revoked accounts.
+        const msg = String(err?.message || "");
+        if (msg.includes("datacenter/login") || (msg.startsWith("403") && msg.toLowerCase().includes("data center"))) {
+          setError("Use the Data Center login page.");
+          setShowDcLink(true);
+        } else {
+          setError("Invalid credentials");
+        }
         return;
       }
       // Session A V2: pass role + displayName so context tracks them and we don't need a 2nd fetch
@@ -29,7 +39,6 @@ export default function AdminLogin() {
       // Per-role redirect destination
       let redirectPath = '/admin/dashboard';
       if (role === 'logistics') redirectPath = '/admin/consignments';
-      else if (role === 'data_center') redirectPath = '/datacenter/dashboard';
       // (accounts and sales land on dashboard — Session B will add their dedicated pages)
       // Defer navigation so React commits the auth state first.
       setTimeout(() => {
@@ -88,7 +97,13 @@ export default function AdminLogin() {
 
             {error && (
               <div className="flex items-center gap-2 p-3 bg-red-500/10 border border-red-500/30 rounded-lg text-red-600 text-sm">
-                <AlertCircle className="w-4 h-4 flex-shrink-0" /> {error}
+                <AlertCircle className="w-4 h-4 flex-shrink-0" />
+                <span>
+                  {error}
+                  {showDcLink && (
+                    <> <a href="#/datacenter/login" className="font-semibold underline" data-testid="link-datacenter-login">Go to Data Center login</a></>
+                  )}
+                </span>
               </div>
             )}
 

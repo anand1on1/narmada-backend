@@ -1,6 +1,5 @@
 import { useEffect, useState } from "react";
-import { AdminLayout } from "./AdminLayout";
-import { adminFetch, useAdminAuth } from "@/lib/admin-auth";
+import { ShellLayout, useShellAuth } from "@/lib/shell";
 import { BRANDS, PRODUCT_CATEGORIES } from "@/data/brands";
 import type { Product } from "@shared/schema";
 import { toSlug, parseJsonArray } from "@/lib/utils-app";
@@ -30,7 +29,7 @@ const EMPTY: ProductForm = {
 };
 
 export default function AdminProducts() {
-  const { token } = useAdminAuth();
+  const { shell, token, adminFetch, hideDelete } = useShellAuth();
   const [products, setProducts] = useState<Product[]>([]);
   const [editing, setEditing] = useState<ProductForm | null>(null);
   const [search, setSearch] = useState("");
@@ -152,7 +151,7 @@ export default function AdminProducts() {
   );
 
   return (
-    <AdminLayout title="Products">
+    <ShellLayout title="Products">
       {/* Toolbar */}
       <div className="flex flex-col sm:flex-row gap-3 mb-6">
         <div className="relative flex-1 max-w-md">
@@ -165,13 +164,15 @@ export default function AdminProducts() {
             data-testid="input-search-products"
           />
         </div>
-        <button
-          onClick={() => setShowBulk(true)}
-          className="px-5 py-2.5 border border-accent/40 text-accent rounded-lg font-bold inline-flex items-center gap-2 hover:bg-accent/10"
-          data-testid="button-bulk-upload"
-        >
-          <UploadCloud className="w-4 h-4" /> Bulk Upload
-        </button>
+        {shell === "admin" && (
+          <button
+            onClick={() => setShowBulk(true)}
+            className="px-5 py-2.5 border border-accent/40 text-accent rounded-lg font-bold inline-flex items-center gap-2 hover:bg-accent/10"
+            data-testid="button-bulk-upload"
+          >
+            <UploadCloud className="w-4 h-4" /> Bulk Upload
+          </button>
+        )}
         <button
           onClick={() => startEdit()}
           className="px-5 py-2.5 bg-accent text-accent-foreground rounded-lg font-bold inline-flex items-center gap-2 hover:bg-accent/90"
@@ -240,9 +241,11 @@ export default function AdminProducts() {
                       <button onClick={() => startEdit(p)} className="p-2 hover:bg-slate-200 dark:hover:bg-slate-800 rounded" data-testid={`button-edit-${p.id}`}>
                         <Edit2 className="w-4 h-4" />
                       </button>
-                      <button onClick={() => remove(p.id)} className="p-2 hover:bg-red-500/10 text-red-600 rounded" data-testid={`button-delete-${p.id}`}>
-                        <Trash2 className="w-4 h-4" />
-                      </button>
+                      {!hideDelete && (
+                        <button onClick={() => remove(p.id)} className="p-2 hover:bg-red-500/10 text-red-600 rounded" data-testid={`button-delete-${p.id}`}>
+                          <Trash2 className="w-4 h-4" />
+                        </button>
+                      )}
                     </td>
                   </tr>
                 );
@@ -392,7 +395,7 @@ export default function AdminProducts() {
           </div>
         </div>
       )}
-    </AdminLayout>
+    </ShellLayout>
   );
 }
 

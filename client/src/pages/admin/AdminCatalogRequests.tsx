@@ -2,8 +2,7 @@
 // Lists partsetu_catalog_requests with a status filter and a detail modal where
 // the team can change status and record internal notes.
 import { useEffect, useState } from "react";
-import { AdminLayout } from "./AdminLayout";
-import { adminFetch, useAdminAuth } from "@/lib/admin-auth";
+import { ShellLayout, useShellAuth } from "@/lib/shell";
 import { FileQuestion, X } from "lucide-react";
 
 interface CatalogRequest {
@@ -41,7 +40,7 @@ function fmtDate(ts: number | null) {
 }
 
 export default function AdminCatalogRequests() {
-  const { token } = useAdminAuth();
+  const { token, adminFetch } = useShellAuth();
   const [rows, setRows] = useState<CatalogRequest[]>([]);
   const [status, setStatus] = useState("all");
   const [loading, setLoading] = useState(false);
@@ -62,7 +61,7 @@ export default function AdminCatalogRequests() {
   useEffect(() => { load(); /* eslint-disable-next-line */ }, [token, status]);
 
   return (
-    <AdminLayout title="Catalog Requests">
+    <ShellLayout title="Catalog Requests">
       <div className="mb-4 flex flex-wrap gap-3 items-center">
         <div className="flex items-center gap-2 text-sm text-muted-foreground">
           <FileQuestion className="w-4 h-4" /> PartSetu catalog requests from customers
@@ -116,7 +115,7 @@ export default function AdminCatalogRequests() {
           onSaved={() => { setActive(null); load(); }}
         />
       )}
-    </AdminLayout>
+    </ShellLayout>
   );
 }
 
@@ -126,6 +125,7 @@ function DetailModal({ token, request, onClose, onSaved }: {
   onClose: () => void;
   onSaved: () => void;
 }) {
+  const { adminFetch } = useShellAuth();
   const [status, setStatus] = useState(request.status);
   const [adminNotes, setAdminNotes] = useState(request.admin_notes || "");
   const [busy, setBusy] = useState(false);

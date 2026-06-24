@@ -11,7 +11,7 @@ import fs from "node:fs";
 import Papa from "papaparse";
 import { sendContactEmail } from "./email";
 import { registerBulkRoutes } from "./bulk";
-import { registerV2Routes, TokenMap, persistAdminSession, rehydrateSession, deleteAdminSession } from "./routes-v2";
+import { registerV2Routes, TokenMap, TokenInfo, persistAdminSession, rehydrateSession, deleteAdminSession } from "./routes-v2";
 import type { AdminRole } from "@shared/schema";
 
 const ADMIN_USERNAME = "narmadamobility123";
@@ -128,6 +128,34 @@ function requireAdmin(req: Request, res: Response, next: NextFunction) {
   next();
 }
 
+// --- v1.4a Data Center auth (separate app, separate token) ---
+// Data Center users authenticate at /api/datacenter/login and present the
+// x-datacenter-token header. Tokens live in the same shared adminTokens map but are
+// dc_-prefixed and always carry role data_center.
+function resolveDataCenter(req: Request): TokenInfo | null {
+  const token = (req.headers["x-datacenter-token"] as string) || "";
+  if (!token) return null;
+  let info = adminTokens.get(token);
+  if (!info) {
+    const rehydrated = rehydrateSession(adminTokens, token);
+    if (rehydrated) info = rehydrated;
+  }
+  if (!info || info.role !== "data_center") return null;
+  return info;
+}
+// requireDataCenterOrAdmin — accepts an admin x-admin-token OR a data_center
+// x-datacenter-token. data_center can never DELETE. Guards shared product/management
+// endpoints the Data Center role co-owns with admins.
+function requireDataCenterOrAdmin(req: Request, res: Response, next: NextFunction) {
+  const dc = resolveDataCenter(req);
+  if (dc) {
+    if (req.method === "DELETE") return res.status(403).json({ error: "Data Center role cannot delete" });
+    (req as any).user = dc;
+    return next();
+  }
+  return requireAdmin(req, res, next);
+}
+
 // --- Uploads dir ---
 const UPLOADS_DIR = path.resolve(process.env.DATA_DIR || ".", "uploads");
 fs.mkdirSync(UPLOADS_DIR, { recursive: true });
@@ -161,6 +189,11 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
       const { verifyPassword } = await import("./routes-v2");
       const user = await v2.getAdminUserByUsername(username);
       if (user && user.active && verifyPassword(password, user.passwordHash)) {
+        // v1.4a — Data Center accounts are barred from the admin app entirely.
+        // They must authenticate at /datacenter/login and use the x-datacenter-token.
+        if (user.role === "data_center") {
+          return res.status(403).json({ error: "Data Center users must log in at /datacenter/login" });
+        }
         const validRoles: AdminRole[] = ["admin", "logistics", "accounts", "sales"];
         const role = (validRoles.includes(user.role as AdminRole) ? user.role : "admin") as AdminRole;
         const token = issueToken(user.username, role, user.displayName || undefined);
@@ -186,6 +219,50 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
     }
     if (!info) return res.status(401).json({ error: "Unauthorized" });
     res.json({ ok: true, username: info.username, role: info.role, displayName: info.displayName });
+  });
+
+  // -------- v1.4a DATA CENTER AUTH (separate app) --------
+  // Validates against the same admin_users table but ONLY admits role data_center.
+  // Issues a dc_-prefixed token; everything else 403/401. No new env, no schema change.
+  app.post("/api/datacenter/login", async (req, res) => {
+    const { username, password } = req.body || {};
+    if (!username || !password) return res.status(400).json({ error: "Username and password required" });
+    try {
+      const v2 = await import("./storage-v2");
+      const { verifyPassword } = await import("./routes-v2");
+      const user = await v2.getAdminUserByUsername(username);
+      if (!user || !user.active || !verifyPassword(password, user.passwordHash)) {
+        return res.status(401).json({ error: "Invalid credentials" });
+      }
+      if (user.role !== "data_center") {
+        return res.status(403).json({ error: "This login is for Data Center users only." });
+      }
+      const token = "dc_" + randomBytes(32).toString("hex");
+      const info: TokenInfo = { username: user.username, role: "data_center", displayName: user.displayName || user.username };
+      adminTokens.set(token, info);
+      persistAdminSession(token, info).catch(() => {});
+      Promise.resolve(v2.writeAuditLog({
+        actorType: "admin", actorId: info.username, action: "datacenter_login",
+        ip: req.ip, userAgent: req.headers["user-agent"] as string,
+      })).catch((e: any) => console.error("[audit] datacenter login write failed:", e?.message));
+      return res.json({ token, username: info.username, role: info.role, displayName: info.displayName });
+    } catch (e: any) {
+      console.error("[datacenter] login failed:", e?.message);
+      return res.status(500).json({ error: "Login failed" });
+    }
+  });
+  app.get("/api/datacenter/me", (req, res) => {
+    const info = resolveDataCenter(req);
+    if (!info) return res.status(401).json({ error: "Unauthorized" });
+    res.json({ ok: true, username: info.username, role: info.role, displayName: info.displayName });
+  });
+  app.post("/api/datacenter/logout", (req, res) => {
+    const token = (req.headers["x-datacenter-token"] as string) || "";
+    if (token) {
+      adminTokens.delete(token);
+      deleteAdminSession(token);
+    }
+    res.json({ ok: true });
   });
 
   // -------- PUBLIC: settings (USD/INR) --------
@@ -236,10 +313,10 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
   });
 
   // -------- PRODUCTS (admin) --------
-  app.get("/api/admin/products", requireAdmin, async (_req, res) => {
+  app.get("/api/admin/products", requireDataCenterOrAdmin, async (_req, res) => {
     res.json(await storage.listProducts({}));
   });
-  app.post("/api/admin/products", requireAdmin, async (req, res) => {
+  app.post("/api/admin/products", requireDataCenterOrAdmin, async (req, res) => {
     try {
       const body = { ...req.body };
       // ensure slug
@@ -258,7 +335,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
       res.status(400).json({ error: e.message || "Invalid payload", details: e.errors });
     }
   });
-  app.patch("/api/admin/products/:id", requireAdmin, async (req, res) => {
+  app.patch("/api/admin/products/:id", requireDataCenterOrAdmin, async (req, res) => {
     try {
       const id = parseInt(req.params.id as string, 10);
       const body = { ...req.body };
@@ -285,7 +362,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
 
   // -------- IMAGE UPLOAD (admin) --------
   // Accepts base64 data URL or raw base64 string and writes to /uploads/<id>.<ext>
-  app.post("/api/admin/upload-image", requireAdmin, async (req, res) => {
+  app.post("/api/admin/upload-image", requireDataCenterOrAdmin, async (req, res) => {
     try {
       const { dataUrl, filename } = req.body || {};
       if (!dataUrl) return res.status(400).json({ error: "Missing dataUrl" });

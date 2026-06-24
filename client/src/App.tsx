@@ -183,7 +183,13 @@ import AdminPartSetuXrefs from "@/pages/admin/AdminPartSetuXrefs";
 import AdminPartSetuPrices from "@/pages/admin/AdminPartSetuPrices";
 import AdminPartSetuConsumption from "@/pages/admin/AdminPartSetuConsumption";
 import AdminPartSetuTeach from "@/pages/admin/AdminPartSetuTeach";
+import AdminPartSetuConversations from "@/pages/admin/AdminPartSetuConversations";
 import AdminDataCenterDashboard from "@/pages/admin/AdminDataCenterDashboard";
+// v1.4a — separate Data Center app (own login, own shell, own routes)
+import { DataCenterAuthProvider } from "@/hooks/useDataCenterAuth";
+import { ShellProvider } from "@/lib/shell";
+import DataCenterLogin from "@/pages/datacenter/DataCenterLogin";
+import DataCenterDashboard from "@/pages/datacenter/DataCenterDashboard";
 // R27.3 — Supreme AI Bar
 import AdminAIBar from "@/pages/admin/AdminAIBar";
 // R27.2 — Operations (expense approvals + deviations)
@@ -348,7 +354,7 @@ function AppRouter() {
         <Route path="/admin/partsetu/prices" component={AdminPartSetuPrices} />
         <Route path="/admin/partsetu/consumption" component={AdminPartSetuConsumption} />
         <Route path="/admin/partsetu/teach" component={AdminPartSetuTeach} />
-        <Route path="/datacenter/dashboard" component={AdminDataCenterDashboard} />
+        <Route path="/admin/partsetu/conversations" component={AdminPartSetuConversations} />
         <Route path="/admin/freight" component={AdminFreight} />
         <Route path="/admin/stock" component={AdminStock} />
         {/* R23.1 — owner Command Center */}
@@ -374,6 +380,33 @@ function AppRouter() {
         <Route path="/admin/discovery" component={MarketRadarRedirect} />
         <Route component={NotFound} />
       </Switch>
+      </ErrorBoundary>
+    );
+  }
+  // v1.4a — Data Center: a fully separate app. Own login, own shell, own routes.
+  // Reuses the SAME PartSetu/Products page components, made shell-aware via
+  // ShellProvider shell="datacenter" + useShellAuth (x-datacenter-token, no delete).
+  if (location.startsWith("/datacenter")) {
+    return (
+      <ErrorBoundary key={location} label="datacenter">
+        <DataCenterAuthProvider>
+          <ShellProvider shell="datacenter">
+            <Switch>
+              <Route path="/datacenter" component={DataCenterLogin} />
+              <Route path="/datacenter/login" component={DataCenterLogin} />
+              <Route path="/datacenter/dashboard" component={DataCenterDashboard} />
+              <Route path="/datacenter/products" component={AdminProducts} />
+              <Route path="/datacenter/partsetu/catalogs" component={AdminPartSetuCatalogs} />
+              <Route path="/datacenter/partsetu/xrefs" component={AdminPartSetuXrefs} />
+              <Route path="/datacenter/partsetu/prices" component={AdminPartSetuPrices} />
+              <Route path="/datacenter/partsetu/consumption" component={AdminPartSetuConsumption} />
+              <Route path="/datacenter/partsetu/teach" component={AdminPartSetuTeach} />
+              <Route path="/datacenter/partsetu/conversations" component={AdminPartSetuConversations} />
+              <Route path="/datacenter/partsetu/requests" component={AdminCatalogRequests} />
+              <Route component={NotFound} />
+            </Switch>
+          </ShellProvider>
+        </DataCenterAuthProvider>
       </ErrorBoundary>
     );
   }

@@ -2,8 +2,7 @@
 // and Consumption Reports (C3). Upload → backend returns columns + sample rows →
 // admin maps each schema field to a column → ingest with the chosen mapping.
 import { useEffect, useRef, useState } from "react";
-import { AdminLayout } from "./AdminLayout";
-import { adminFetch, useAdminAuth } from "@/lib/admin-auth";
+import { ShellLayout, useShellAuth } from "@/lib/shell";
 import { apiUrl } from "@/lib/queryClient";
 import { UploadCloud, Trash2, ArrowRight } from "lucide-react";
 
@@ -36,7 +35,7 @@ export function AdminPartSetuSheet({ kind, title, hint, accept, maxMb }: {
   accept: string;
   maxMb: number;
 }) {
-  const { token, role } = useAdminAuth();
+  const { token, role, adminFetch, uploadHeaders } = useShellAuth();
   const canDelete = role !== "data_center";
   const [rows, setRows] = useState<SourceRow[]>([]);
   const [loading, setLoading] = useState(false);
@@ -71,7 +70,7 @@ export function AdminPartSetuSheet({ kind, title, hint, accept, maxMb }: {
       fd.append("kind", kind);
       const r = await fetch(apiUrl("/api/admin/partsetu/sheet/preview"), {
         method: "POST",
-        headers: { "x-admin-token": token },
+        headers: uploadHeaders,
         body: fd,
       });
       const j = await r.json().catch(() => ({}));
@@ -129,7 +128,7 @@ export function AdminPartSetuSheet({ kind, title, hint, accept, maxMb }: {
   }
 
   return (
-    <AdminLayout title={title}>
+    <ShellLayout title={title}>
       <div className="mb-4 flex items-center gap-2 text-sm text-muted-foreground">
         <UploadCloud className="w-4 h-4" /> {hint}
       </div>
@@ -246,6 +245,6 @@ export function AdminPartSetuSheet({ kind, title, hint, accept, maxMb }: {
           </tbody>
         </table>
       </div>
-    </AdminLayout>
+    </ShellLayout>
   );
 }

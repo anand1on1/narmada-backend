@@ -2,8 +2,7 @@
 // Upload WABCO-style cross-reference .xlsx workbooks. These feed part xref
 // matching only — NEVER pricing (prices come from partsetu_prices + price_master).
 import { useEffect, useRef, useState } from "react";
-import { AdminLayout } from "./AdminLayout";
-import { adminFetch, useAdminAuth } from "@/lib/admin-auth";
+import { ShellLayout, useShellAuth } from "@/lib/shell";
 import { apiUrl } from "@/lib/queryClient";
 import { Link2, UploadCloud, RefreshCw, Trash2 } from "lucide-react";
 
@@ -22,7 +21,7 @@ function fmtDate(ts: number | null) {
 }
 
 export default function AdminPartSetuXrefs() {
-  const { token, role } = useAdminAuth();
+  const { token, role, adminFetch, uploadHeaders } = useShellAuth();
   const canDelete = role !== "data_center";
   const [rows, setRows] = useState<XrefSource[]>([]);
   const [loading, setLoading] = useState(false);
@@ -56,7 +55,7 @@ export default function AdminPartSetuXrefs() {
       if (sourceBrand.trim()) fd.append("sourceBrand", sourceBrand.trim());
       const r = await fetch(apiUrl("/api/admin/partsetu/xrefs/upload"), {
         method: "POST",
-        headers: { "x-admin-token": token },
+        headers: uploadHeaders,
         body: fd,
       });
       const j = await r.json().catch(() => ({}));
@@ -100,7 +99,7 @@ export default function AdminPartSetuXrefs() {
   }
 
   return (
-    <AdminLayout title="PartSetu — Comparative Sheets">
+    <ShellLayout title="PartSetu — Comparative Sheets">
       <div className="mb-4 flex items-center gap-2 text-sm text-muted-foreground">
         <Link2 className="w-4 h-4" /> Upload cross-reference / comparative workbooks (.xlsx). These power part cross-matching only — pricing never comes from these sheets.
       </div>
@@ -184,6 +183,6 @@ export default function AdminPartSetuXrefs() {
           </tbody>
         </table>
       </div>
-    </AdminLayout>
+    </ShellLayout>
   );
 }

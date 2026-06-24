@@ -3,8 +3,7 @@
 // auto-ingested into partsetu_catalogs/partsetu_parts), then view / re-ingest /
 // delete them. Models the structure of AdminCatalogRequests.tsx.
 import { useEffect, useRef, useState } from "react";
-import { AdminLayout } from "./AdminLayout";
-import { adminFetch, useAdminAuth } from "@/lib/admin-auth";
+import { ShellLayout, useShellAuth } from "@/lib/shell";
 import { apiUrl } from "@/lib/queryClient";
 import { BookOpen, UploadCloud, RefreshCw, Trash2, FileText } from "lucide-react";
 
@@ -44,7 +43,7 @@ function fmtSize(b: number | null) {
 }
 
 export default function AdminPartSetuCatalogs() {
-  const { token, role } = useAdminAuth();
+  const { token, role, adminFetch, uploadHeaders } = useShellAuth();
   const canDelete = role !== "data_center";
   const [rows, setRows] = useState<CatalogRow[]>([]);
   const [loading, setLoading] = useState(false);
@@ -78,7 +77,7 @@ export default function AdminPartSetuCatalogs() {
       // Manual fetch: adminFetch forces JSON Content-Type, which breaks multipart.
       const r = await fetch(apiUrl("/api/admin/partsetu/catalogs/upload"), {
         method: "POST",
-        headers: { "x-admin-token": token },
+        headers: uploadHeaders,
         body: fd,
       });
       const j = await r.json().catch(() => ({}));
@@ -133,7 +132,7 @@ export default function AdminPartSetuCatalogs() {
   }
 
   return (
-    <AdminLayout title="PartSetu — Catalog Management">
+    <ShellLayout title="PartSetu — Catalog Management">
       <div className="mb-4 flex items-center gap-2 text-sm text-muted-foreground">
         <BookOpen className="w-4 h-4" /> Upload spare-parts catalogue PDFs. They are stored on the server's persistent disk and auto-indexed for the PartSetu chatbot.
       </div>
@@ -220,6 +219,6 @@ export default function AdminPartSetuCatalogs() {
           </tbody>
         </table>
       </div>
-    </AdminLayout>
+    </ShellLayout>
   );
 }
