@@ -232,6 +232,27 @@ function detectWidePairs(headerRow: any[]): Array<[number, number]> | null {
   return wabcoCols.map((w) => [w - 1, w] as [number, number]).filter(([c]) => c >= 0);
 }
 
+// R27.22 — an explicit, user-confirmed mapping plan (from the AI format detector
+// + confirm dialog). When passed to ingestXrefWorkbook it fully replaces the
+// heuristic per-sheet detection: each sheet's columns are taken verbatim. The
+// deterministic R27.19/R27.21 path remains the fallback when no plan is given.
+export interface XrefSheetPlan {
+  name: string;
+  action: "ingest" | "skip";
+  source_brand?: string;   // per-sheet OEM; "" or "auto" → infer from desc column
+  source_col?: number;     // 0-based: the OEM/source part-number column
+  customer_col?: number;   // 0-based: the seller brand's part-number column
+  desc_col?: number;       // 0-based, or -1 when there is no description column
+  header_row?: number;     // 0-based; data starts at header_row + 1
+  reason?: string;
+}
+export interface XrefMappingPlan {
+  file_brand: string;      // the customer_oem stored for every row (e.g. MEI / WABCO)
+  layout?: string;
+  confidence?: number;
+  sheets: XrefSheetPlan[];
+}
+
 export interface XrefIngestResult {
   // Back-compat fields (callers/UI may read these).
   totalInserted: number;
@@ -254,8 +275,9 @@ export function ingestXrefWorkbook(opts: {
   sourceName: string;
   sourceBrand?: string;
   uploadedBy: string;
+  mappingPlan?: XrefMappingPlan;
 }): XrefIngestResult {
-  const { xlsxPath, sourceName, sourceBrand = WABCO, uploadedBy } = opts;
+  const { xlsxPath, sourceName, sourceBrand = WABCO, uploadedBy, mappingPlan } = opts;
   if (!fs.existsSync(xlsxPath)) throw new Error(`xlsx not found: ${xlsxPath}`);
 
   const ts = Date.now();
@@ -291,6 +313,65 @@ export function ingestXrefWorkbook(opts: {
     const res = insert.run(srcBrand, sourcePn, d || null, customerOem, customerPn, null, sheetName, sourceName, sourceFileId, ts);
     return res.changes > 0 ? "inserted" : "skipped";
   };
+
+  // R27.22 — plan-driven ingest. When a user-confirmed mapping plan is supplied
+  // we trust its per-sheet columns verbatim and skip all heuristic detection.
+  if (mappingPlan && Array.isArray(mappingPlan.sheets)) {
+    const customerOem = clean(mappingPlan.file_brand) || sourceBrand;
+    const bySheet = new Map<string, XrefSheetPlan>();
+    for (const sp of mappingPlan.sheets) if (sp && sp.name) bySheet.set(String(sp.name), sp);
+
+    for (const sheetName of wb.SheetNames) {
+      try {
+        const sp = bySheet.get(sheetName);
+        if (!sp || sp.action !== "ingest") {
+          result.sheetsSkipped.push(`${sheetName} (${sp?.reason || "skip per plan"})`);
+          continue;
+        }
+        const srcCol = Number(sp.source_col);
+        const custCol = Number(sp.customer_col);
+        const descCol = sp.desc_col == null ? -1 : Number(sp.desc_col);
+        const headerRow = sp.header_row == null ? 0 : Number(sp.header_row);
+        if (!Number.isInteger(srcCol) || !Number.isInteger(custCol) || srcCol < 0 || custCol < 0 || srcCol === custCol) {
+          result.sheetsSkipped.push(`${sheetName} (invalid plan columns)`);
+          continue;
+        }
+        const sheet = wb.Sheets[sheetName];
+        const rows: any[][] = XLSX.utils.sheet_to_json(sheet, { header: 1, defval: "" }) as any[][];
+        const planBrand = clean(sp.source_brand);
+        const autoBrand = !planBrand || /^auto$/i.test(planBrand);
+
+        let rowsIn = 0, inserted = 0, skipped = 0;
+        const tx = db.transaction(() => {
+          for (let i = headerRow + 1; i < rows.length; i++) {
+            const r = rows[i];
+            if (!r) continue;
+            rowsIn++;
+            try {
+              const desc = descCol >= 0 ? clean(r[descCol]) : "";
+              const srcBrand = autoBrand ? inferOemFromApplication(desc) : planBrand;
+              const out = tryInsert(srcBrand, r[srcCol], r[custCol], desc, sheetName, customerOem);
+              if (out === "inserted") inserted++; else skipped++;
+            } catch (e: any) { skipped++; result.errors.push(`${sheetName} row ${i}: ${e?.message}`); }
+          }
+        });
+        tx();
+        result.sheetsProcessed++;
+        if (inserted > 0) result.sheetsUsed++;
+        result.rowsRead += rowsIn; result.rowsInserted += inserted; result.rowsSkipped += skipped;
+        result.perSheet.push({ sheet: sheetName, brand: autoBrand ? "(auto)" : planBrand, cols: `src=${srcCol} cust=${custCol} desc=${descCol} hdr=${headerRow}`, rowsIn, inserted, skipped });
+        console.log(`[xref-ingester] (plan) sheet="${sheetName}" customer_oem=${customerOem} src=${srcCol} cust=${custCol} desc=${descCol} hdr=${headerRow} rows_in=${rowsIn} inserted=${inserted} skipped=${skipped}`);
+      } catch (e: any) {
+        result.errors.push(`${sheetName}: ${e?.message}`);
+        console.log(`[xref-ingester] (plan) sheet="${sheetName}" ERROR ${e?.message}`);
+      }
+    }
+
+    result.totalInserted = result.rowsInserted;
+    db.prepare(`UPDATE partsetu_xref_sources SET row_count = ? WHERE id = ?`).run(result.totalInserted, sourceFileId);
+    console.log(`[xref-ingester] (plan) source="${sourceName}" file_brand=${customerOem} sheetsProcessed=${result.sheetsProcessed} skipped=${result.sheetsSkipped.length} rowsRead=${result.rowsRead} inserted=${result.rowsInserted} skipped=${result.rowsSkipped}`);
+    return result;
+  }
 
   // R27.21 — brand-by-sheet first (existing behavior). If NO sheet name matches a
   // known brand, fall back to a single file-level brand inferred from the filename

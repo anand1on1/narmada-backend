@@ -148,6 +148,42 @@ function parsePartsIntoCatalog(pages: string[], catalogId: number): number {
 
 export interface IngestResult { catalogId: number; partsCount: number; vcNo: string; model: string; }
 
+// R27.22 — optional user-confirmed metadata (from the AI catalog detector +
+// confirm dialog). Any non-null field overrides what the deterministic parser /
+// enrichment produced; null/undefined fields fall back to the parsed values.
+export interface CatalogMetaOverride {
+  oem?: string | null; model?: string | null; variant?: string | null;
+  vc_no?: string | null; chassis_no?: string | null;
+  emission_stage?: string | null; body_type?: string | null; drive_type?: string | null;
+  tyre_count?: number | null; fuel_type?: string | null; engine_family?: string | null;
+  short_desc?: string | null; long_desc?: string | null;
+}
+
+function nz(v: any): boolean { return v !== null && v !== undefined && String(v).trim() !== ""; }
+
+// Apply confirmed metadata over a catalog row (used after parse + enrichment so
+// the user's confirmed values win). Only writes fields that were supplied.
+function applyCatalogMeta(catalogId: number, meta: CatalogMetaOverride): void {
+  const sets: string[] = [];
+  const vals: any[] = [];
+  const put = (col: string, v: any) => { sets.push(`${col} = ?`); vals.push(v); };
+  if (nz(meta.oem)) put("oem", String(meta.oem).trim());
+  if (nz(meta.model)) put("model", String(meta.model).trim());
+  if (nz(meta.variant)) put("variant", String(meta.variant).trim());
+  if (nz(meta.chassis_no)) put("chassis_no", String(meta.chassis_no).trim());
+  if (nz(meta.emission_stage)) put("emission_stage", String(meta.emission_stage).trim());
+  if (nz(meta.body_type)) put("body_type", String(meta.body_type).trim());
+  if (nz(meta.drive_type)) put("drive_type", String(meta.drive_type).trim());
+  if (meta.tyre_count != null && Number.isFinite(Number(meta.tyre_count))) put("tyre_count", Number(meta.tyre_count));
+  if (nz(meta.fuel_type)) put("fuel_type", String(meta.fuel_type).trim());
+  if (nz(meta.engine_family)) put("engine_family", String(meta.engine_family).trim());
+  if (nz(meta.short_desc)) put("short_desc", String(meta.short_desc).trim());
+  if (nz(meta.long_desc)) put("long_desc", String(meta.long_desc).trim());
+  if (!sets.length) return;
+  vals.push(catalogId);
+  db.prepare(`UPDATE partsetu_catalogs SET ${sets.join(", ")} WHERE id = ?`).run(...vals);
+}
+
 // Ingest a freshly-uploaded (or CLI-provided) PDF. Upserts the catalog by vc_no,
 // stores the PDF as <id>.pdf on the persistent disk, parses parts, and flips
 // status active. On failure the row is kept with status='failed' + ingest_error
@@ -158,8 +194,9 @@ export async function ingestCatalogPdf(opts: {
   oem?: string;
   chassisNo?: string;
   cleanupSrc?: boolean;
+  meta?: CatalogMetaOverride;
 }): Promise<IngestResult> {
-  const { pdfPath, uploadedBy, oem = "TATA", chassisNo, cleanupSrc = false } = opts;
+  const { pdfPath, uploadedBy, oem = "TATA", chassisNo, cleanupSrc = false, meta: override } = opts;
   if (!fs.existsSync(pdfPath)) throw new Error(`PDF not found: ${pdfPath}`);
 
   const totalPages = pdfPageCount(pdfPath);
@@ -167,6 +204,12 @@ export async function ingestCatalogPdf(opts: {
   const pages = raw.split("\f");
   const meta = parseCatalogMeta(pages[0] || "");
   const ts = Date.now();
+
+  // R27.22 — confirmed metadata (if any) wins over parsed values for the upsert keys.
+  const effOem = override && nz(override.oem) ? String(override.oem).trim() : oem;
+  const effModel = override && nz(override.model) ? String(override.model).trim() : meta.model;
+  const effVariant = override && nz(override.variant) ? String(override.variant).trim() : meta.chassis;
+  const effVcNo = override && nz(override.vc_no) ? String(override.vc_no).trim() : meta.vcNo;
 
   // Upsert catalog (by vc_no) and mark it ingesting.
   db.prepare(
@@ -176,9 +219,9 @@ export async function ingestCatalogPdf(opts: {
        oem=excluded.oem, model=excluded.model, variant=excluded.variant,
        pdf_filename=excluded.pdf_filename, total_pages=excluded.total_pages, ingested_at=excluded.ingested_at,
        status='ingesting', uploaded_by=excluded.uploaded_by, uploaded_at=excluded.uploaded_at`,
-  ).run(oem, meta.model, meta.chassis, meta.vcNo, path.basename(pdfPath), totalPages || pages.length, ts, uploadedBy, ts);
+  ).run(effOem, effModel, effVariant, effVcNo, path.basename(pdfPath), totalPages || pages.length, ts, uploadedBy, ts);
 
-  const catalogId = (db.prepare(`SELECT id FROM partsetu_catalogs WHERE vc_no = ?`).get(meta.vcNo) as any).id as number;
+  const catalogId = (db.prepare(`SELECT id FROM partsetu_catalogs WHERE vc_no = ?`).get(effVcNo) as any).id as number;
 
   try {
     const finalPath = copyToCatalog(pdfPath, catalogId);
@@ -197,9 +240,12 @@ export async function ingestCatalogPdf(opts: {
       await enrichCatalog({ catalogId, coverText: pages[0] || "", firstPagesText: (pages[1] || "") + "\n" + (pages[2] || "") });
     } catch (e: any) { console.warn("[catalog-ingester] enrichment failed:", e?.message || e); }
 
+    // R27.22 — apply user-confirmed metadata last so it wins over parse + enrichment.
+    if (override) applyCatalogMeta(catalogId, override);
+
     db.prepare(`UPDATE partsetu_catalogs SET status = 'active', ingest_error = NULL WHERE id = ?`).run(catalogId);
     if (cleanupSrc) { try { fs.unlinkSync(pdfPath); } catch { /* non-fatal */ } }
-    return { catalogId, partsCount, vcNo: meta.vcNo, model: meta.model };
+    return { catalogId, partsCount, vcNo: effVcNo, model: effModel };
   } catch (err: any) {
     db.prepare(`UPDATE partsetu_catalogs SET status = 'failed', ingest_error = ? WHERE id = ?`)
       .run(String(err?.message || err).slice(0, 1000), catalogId);

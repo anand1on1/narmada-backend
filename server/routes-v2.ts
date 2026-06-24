@@ -8474,6 +8474,51 @@ ${contextBlock}`;
     } catch (e: any) { res.status(500).json({ error: e?.message || "Upload failed" }); }
   });
 
+  // R27.22 — AI-driven catalog metadata detection. Stages the PDF under its
+  // fingerprint and returns the (cached or AI-proposed) metadata for the confirm
+  // dialog. The catalog row is NOT created here; confirm-upload does that.
+  const catalogMetaDetector = require("./services/catalog-metadata-detector") as typeof import("./services/catalog-metadata-detector");
+  app.post("/api/admin/partsetu/catalogs/detect-metadata", requireDataCenterOrAdmin, partsetuCatalogUpload.single("file"), async (req, res) => {
+    try {
+      const file = (req as any).file;
+      if (!file || !file.buffer?.length) return res.status(400).json({ error: "No PDF uploaded" });
+      if (file.buffer.subarray(0, 4).toString("latin1") !== "%PDF") {
+        return res.status(400).json({ error: "File is not a valid PDF (bad header)" });
+      }
+      const r = await catalogMetaDetector.detectCatalogMetadata({ buffer: file.buffer, filename: String(file.originalname || "catalog.pdf") });
+      res.json(r);
+    } catch (e: any) { res.status(500).json({ error: e?.message || "Detection failed" }); }
+  });
+
+  // R27.22 — confirm catalog metadata + ingest the staged PDF. Body:
+  // { fingerprint, metadata, originalFilename, edited? }. Moves the staged PDF
+  // into the ingester (which copies it to its final <id>.pdf) and applies the
+  // confirmed metadata. Saves the confirmed metadata to the cache.
+  app.post("/api/admin/partsetu/catalogs/confirm-upload", requireDataCenterOrAdmin, async (req, res) => {
+    try {
+      const fingerprint = String(req.body?.fingerprint || "").trim();
+      if (!fingerprint || !/^[a-f0-9]{16,128}$/i.test(fingerprint)) return res.status(400).json({ error: "Missing or invalid fingerprint" });
+      const stagedPath = catalogMetaDetector.catalogStagingPath(fingerprint);
+      if (!fs.existsSync(stagedPath)) return res.status(404).json({ error: "Staged PDF not found — please re-upload" });
+      const metadata = (req.body?.metadata || {}) as import("./services/catalog-metadata-detector").CatalogMetadata;
+      const uploadedBy = ((req as any).user?.username as string) || "admin";
+      const override = catalogMetaDetector.toCatalogMetaOverride(metadata);
+      const chassisNo = metadata?.chassis_no ? String(metadata.chassis_no).trim() : undefined;
+      try {
+        const r = await catalogIngester.ingestCatalogPdf({
+          pdfPath: stagedPath, uploadedBy,
+          oem: override.oem ? String(override.oem) : undefined,
+          chassisNo, cleanupSrc: true, meta: override,
+        });
+        const source = req.body?.edited ? "user-edited" : "user-confirmed";
+        try { catalogMetaDetector.saveCatalogMetaCache({ fingerprint, metadata, confidence: req.body?.confidence ?? null, source, createdBy: uploadedBy }); } catch { /* non-fatal */ }
+        res.json({ catalogId: r.catalogId, partsCount: r.partsCount, vcNo: r.vcNo, model: r.model });
+      } catch (err: any) {
+        res.status(422).json({ error: err?.message || "Ingestion failed" });
+      }
+    } catch (e: any) { res.status(500).json({ error: e?.message || "Confirm failed" }); }
+  });
+
   app.get("/api/admin/partsetu/catalogs", requireDataCenterOrAdmin, async (_req, res) => {
     try {
       const rows = rawSqlite.prepare(
@@ -8554,6 +8599,46 @@ ${contextBlock}`;
       res.json(r);
     } catch (e: any) { res.status(422).json({ error: e?.message || "Xref ingest failed" }); }
   });
+
+  // R27.22 — AI-driven xref format detection. Uses in-memory upload so the
+  // detector can fingerprint + stage the workbook under its fingerprint, then
+  // returns the (cached or AI-proposed) per-sheet mapping plan + preview.
+  const xrefFormatDetector = require("./services/xref-format-detector") as typeof import("./services/xref-format-detector");
+  const xrefDetectUpload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 100 * 1024 * 1024 } });
+  app.post("/api/admin/partsetu/xrefs/detect-format", requireDataCenterOrAdmin, xrefDetectUpload.single("file"), async (req, res) => {
+    try {
+      const file = (req as any).file;
+      if (!file || !file.buffer?.length) return res.status(400).json({ error: "No file uploaded" });
+      const r = await xrefFormatDetector.detectXrefFormat({ buffer: file.buffer, filename: String(file.originalname || "xref.xlsx") });
+      res.json(r);
+    } catch (e: any) { res.status(500).json({ error: e?.message || "Detection failed" }); }
+  });
+
+  // R27.22 — confirm xref mapping plan + ingest the staged workbook. Body:
+  // { fingerprint, plan, originalFilename, edited? }. Runs the ingester with the
+  // confirmed plan and saves the plan to the format cache.
+  app.post("/api/admin/partsetu/xrefs/confirm-format", requireDataCenterOrAdmin, async (req, res) => {
+    try {
+      const fingerprint = String(req.body?.fingerprint || "").trim();
+      if (!fingerprint || !/^[a-f0-9]{16,128}$/i.test(fingerprint)) return res.status(400).json({ error: "Missing or invalid fingerprint" });
+      const stagedPath = xrefFormatDetector.xrefStagingPath(fingerprint);
+      if (!fs.existsSync(stagedPath)) return res.status(404).json({ error: "Staged workbook not found — please re-upload" });
+      const plan = req.body?.plan as import("./services/xref-ingester").XrefMappingPlan;
+      if (!plan || !Array.isArray(plan.sheets)) return res.status(400).json({ error: "Missing or invalid mapping plan" });
+      const uploadedBy = ((req as any).user?.username as string) || "admin";
+      const sourceName = String(req.body?.originalFilename || "comparative-sheet");
+      const sourceBrand = plan.file_brand ? String(plan.file_brand) : "WABCO";
+      try {
+        const r = xrefIngester.ingestXrefWorkbook({ xlsxPath: stagedPath, sourceName, sourceBrand, uploadedBy, mappingPlan: plan });
+        const source = req.body?.edited ? "user-edited" : "user-confirmed";
+        try { xrefFormatDetector.saveXrefCache({ fingerprint, plan, source, label: plan.layout || null, createdBy: uploadedBy }); } catch { /* non-fatal */ }
+        res.json(r);
+      } catch (err: any) {
+        res.status(422).json({ error: err?.message || "Xref ingest failed" });
+      }
+    } catch (e: any) { res.status(500).json({ error: e?.message || "Confirm failed" }); }
+  });
+
   app.get("/api/admin/partsetu/xrefs", requireDataCenterOrAdmin, async (_req, res) => {
     try {
       res.json(rawSqlite.prepare(`SELECT * FROM partsetu_xref_sources ORDER BY id DESC`).all());

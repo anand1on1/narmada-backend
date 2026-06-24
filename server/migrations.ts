@@ -3420,5 +3420,40 @@ export function runPartSetuMigrations() {
     console.log(`[migrations] PartSetu: R27.partsetu-v1.4: seed skip (${e?.message || e})`);
   }
 
+  // ==================================================================
+  // R27.22 — AI-driven format detection caches (xref layout + catalog meta).
+  // Additive only. Persistent format/metadata cache so re-uploads of similar
+  // files skip the AI call. All teaching stays in sqlite.
+  // ==================================================================
+  run("R27.22: partsetu_xref_format_cache", `CREATE TABLE IF NOT EXISTS partsetu_xref_format_cache (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    fingerprint TEXT NOT NULL,
+    format_label TEXT,
+    file_brand TEXT,
+    plan_json TEXT NOT NULL,
+    source TEXT NOT NULL,
+    confidence REAL,
+    hit_count INTEGER DEFAULT 1,
+    last_used_at INTEGER,
+    created_by TEXT,
+    created_at INTEGER NOT NULL
+  )`);
+  run("R27.22: idx_xref_format_cache_fp", `CREATE INDEX IF NOT EXISTS idx_xref_format_cache_fp ON partsetu_xref_format_cache(fingerprint)`);
+
+  run("R27.22: partsetu_catalog_metadata_cache", `CREATE TABLE IF NOT EXISTS partsetu_catalog_metadata_cache (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    fingerprint TEXT NOT NULL,
+    oem TEXT, model TEXT, variant TEXT, chassis_no TEXT, vc_no TEXT,
+    emission_stage TEXT, body_type TEXT, drive_type TEXT, tyre_count INTEGER,
+    fuel_type TEXT, engine_family TEXT, short_desc TEXT, long_desc TEXT,
+    confidence REAL,
+    source TEXT NOT NULL,
+    hit_count INTEGER DEFAULT 1,
+    last_used_at INTEGER,
+    created_by TEXT,
+    created_at INTEGER NOT NULL
+  )`);
+  run("R27.22: idx_catalog_meta_cache_fp", `CREATE INDEX IF NOT EXISTS idx_catalog_meta_cache_fp ON partsetu_catalog_metadata_cache(fingerprint)`);
+
   console.log("[migrations] PartSetu: complete");
 }

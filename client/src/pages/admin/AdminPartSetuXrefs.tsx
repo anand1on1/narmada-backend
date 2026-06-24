@@ -5,6 +5,7 @@ import { useEffect, useRef, useState } from "react";
 import { ShellLayout, useShellAuth } from "@/lib/shell";
 import { apiUrl } from "@/lib/queryClient";
 import { Link2, UploadCloud, RefreshCw, Trash2 } from "lucide-react";
+import FormatConfirmDialog, { type XrefMappingPlan, type XrefSheetPreview } from "@/components/FormatConfirmDialog";
 
 interface XrefSource {
   id: number;
@@ -31,6 +32,11 @@ export default function AdminPartSetuXrefs() {
   const [sourceName, setSourceName] = useState("");
   const [sourceBrand, setSourceBrand] = useState("WABCO");
   const fileRef = useRef<HTMLInputElement>(null);
+  // R27.22 — AI format-detection flow.
+  const [detecting, setDetecting] = useState(false);
+  const [pendingFile, setPendingFile] = useState<File | null>(null);
+  const [detect, setDetect] = useState<{ fingerprint: string; cached: boolean; plan: XrefMappingPlan | null; preview: XrefSheetPreview[] } | null>(null);
+  const [confirming, setConfirming] = useState(false);
 
   async function load() {
     if (!token) return;
@@ -43,9 +49,57 @@ export default function AdminPartSetuXrefs() {
   }
   useEffect(() => { load(); /* eslint-disable-next-line */ }, [token]);
 
-  async function upload(file: File) {
-    if (!token || uploading) return;
+  // Step 1: AI format detection. Stages the file server-side under its
+  // fingerprint and opens the confirm dialog. Falls back to legacy upload if
+  // detection itself fails.
+  async function detectFormat(file: File) {
+    if (!token || detecting || uploading) return;
     if (!/\.(xlsx|xls)$/i.test(file.name)) { setMsg({ kind: "err", text: "Please choose a .xlsx file." }); return; }
+    setDetecting(true);
+    setMsg(null);
+    setPendingFile(file);
+    try {
+      const fd = new FormData();
+      fd.append("file", file);
+      const r = await fetch(apiUrl("/api/admin/partsetu/xrefs/detect-format"), { method: "POST", headers: uploadHeaders, body: fd });
+      const j = await r.json().catch(() => ({}));
+      if (r.ok) {
+        setDetect({ fingerprint: j.fingerprint, cached: !!j.cached, plan: j.plan || null, preview: Array.isArray(j.preview) ? j.preview : [] });
+      } else {
+        setMsg({ kind: "err", text: j.error || `Detection failed (${r.status}). Uploading with legacy handler…` });
+        await legacyUpload(file);
+      }
+    } catch (e: any) {
+      setMsg({ kind: "err", text: e?.message || "Detection failed." });
+    } finally { setDetecting(false); }
+  }
+
+  // Step 2a: confirm the (possibly edited) mapping plan and ingest the staged file.
+  async function confirmFormat(plan: XrefMappingPlan, edited: boolean) {
+    if (!token || !detect || confirming) return;
+    setConfirming(true);
+    setMsg(null);
+    try {
+      const r = await adminFetch(token, "/api/admin/partsetu/xrefs/confirm-format", {
+        method: "POST",
+        body: JSON.stringify({ fingerprint: detect.fingerprint, plan, originalFilename: pendingFile?.name || sourceName.trim() || "comparative-sheet", edited }),
+      });
+      const j = await r.json().catch(() => ({}));
+      if (r.ok) {
+        setMsg({ kind: "ok", text: `Ingested ${j.totalInserted} xref rows from ${j.sheetsUsed} sheet(s).` });
+        closeDialog();
+        load();
+      } else {
+        setMsg({ kind: "err", text: j.error || `Confirm failed (${r.status}).` });
+      }
+    } catch (e: any) {
+      setMsg({ kind: "err", text: e?.message || "Confirm failed." });
+    } finally { setConfirming(false); }
+  }
+
+  // Step 2b: skip AI — upload via the legacy deterministic handler.
+  async function legacyUpload(file: File) {
+    if (!token || uploading) return;
     setUploading(true);
     setMsg(null);
     try {
@@ -53,15 +107,11 @@ export default function AdminPartSetuXrefs() {
       fd.append("file", file);
       if (sourceName.trim()) fd.append("sourceName", sourceName.trim());
       if (sourceBrand.trim()) fd.append("sourceBrand", sourceBrand.trim());
-      const r = await fetch(apiUrl("/api/admin/partsetu/xrefs/upload"), {
-        method: "POST",
-        headers: uploadHeaders,
-        body: fd,
-      });
+      const r = await fetch(apiUrl("/api/admin/partsetu/xrefs/upload"), { method: "POST", headers: uploadHeaders, body: fd });
       const j = await r.json().catch(() => ({}));
       if (r.ok) {
         setMsg({ kind: "ok", text: `Ingested ${j.totalInserted} xref rows from ${j.sheetsUsed} sheet(s).` });
-        if (fileRef.current) fileRef.current.value = "";
+        closeDialog();
         load();
       } else {
         setMsg({ kind: "err", text: j.error || `Upload failed (${r.status}).` });
@@ -69,6 +119,12 @@ export default function AdminPartSetuXrefs() {
     } catch (e: any) {
       setMsg({ kind: "err", text: e?.message || "Upload failed." });
     } finally { setUploading(false); }
+  }
+
+  function closeDialog() {
+    setDetect(null);
+    setPendingFile(null);
+    if (fileRef.current) fileRef.current.value = "";
   }
 
   async function reingest(row: XrefSource) {
@@ -128,20 +184,20 @@ export default function AdminPartSetuXrefs() {
             ref={fileRef}
             type="file"
             accept=".xlsx,.xls,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-            onChange={(e) => { const f = e.target.files?.[0]; if (f) upload(f); }}
-            disabled={uploading}
+            onChange={(e) => { const f = e.target.files?.[0]; if (f) detectFormat(f); }}
+            disabled={uploading || detecting}
             className="text-sm"
             data-testid="input-xref-file"
           />
           <button
             onClick={() => fileRef.current?.click()}
-            disabled={uploading}
+            disabled={uploading || detecting}
             className="inline-flex items-center gap-2 px-3 py-1.5 rounded-lg bg-blue-600 text-white text-sm font-semibold disabled:opacity-50"
             data-testid="button-xref-upload"
           >
-            <UploadCloud className="w-4 h-4" /> {uploading ? "Uploading & parsing…" : "Upload workbook"}
+            <UploadCloud className="w-4 h-4" /> {detecting ? "Detecting format…" : uploading ? "Uploading & parsing…" : "Upload workbook"}
           </button>
-          <span className="text-xs text-muted-foreground">.xlsx only, up to 100 MB.</span>
+          <span className="text-xs text-muted-foreground">.xlsx only, up to 100 MB. Format auto-detected before ingest.</span>
         </div>
         {msg && (
           <div className={`mt-3 text-sm ${msg.kind === "ok" ? "text-emerald-700" : "text-rose-700"}`} data-testid="text-xref-msg">
@@ -183,6 +239,19 @@ export default function AdminPartSetuXrefs() {
           </tbody>
         </table>
       </div>
+
+      {detect && (
+        <FormatConfirmDialog
+          mode="xref"
+          plan={detect.plan}
+          preview={detect.preview}
+          cached={detect.cached}
+          busy={confirming || uploading}
+          onConfirm={confirmFormat}
+          onCancel={closeDialog}
+          onSkip={() => { if (pendingFile) legacyUpload(pendingFile); }}
+        />
+      )}
     </ShellLayout>
   );
 }

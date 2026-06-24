@@ -6,6 +6,7 @@ import { useEffect, useRef, useState } from "react";
 import { ShellLayout, useShellAuth } from "@/lib/shell";
 import { apiUrl } from "@/lib/queryClient";
 import { BookOpen, UploadCloud, RefreshCw, Trash2, FileText } from "lucide-react";
+import FormatConfirmDialog, { type CatalogMetadata } from "@/components/FormatConfirmDialog";
 
 interface CatalogRow {
   id: number;
@@ -52,6 +53,11 @@ export default function AdminPartSetuCatalogs() {
   const [busyId, setBusyId] = useState<number | null>(null);
   const [chassisNo, setChassisNo] = useState("");
   const fileRef = useRef<HTMLInputElement>(null);
+  // R27.22 — AI metadata-detection flow.
+  const [detecting, setDetecting] = useState(false);
+  const [pendingFile, setPendingFile] = useState<File | null>(null);
+  const [detect, setDetect] = useState<{ fingerprint: string; cached: boolean; metadata: CatalogMetadata | null; confidence: number | null; snippets: string[] } | null>(null);
+  const [confirming, setConfirming] = useState(false);
 
   async function load() {
     if (!token) return;
@@ -65,9 +71,57 @@ export default function AdminPartSetuCatalogs() {
 
   useEffect(() => { load(); /* eslint-disable-next-line */ }, [token]);
 
-  async function upload(file: File) {
-    if (!token || uploading) return;
+  // Step 1: AI metadata detection. Stages the PDF server-side under its
+  // fingerprint and opens the confirm dialog. Falls back to legacy upload if
+  // detection itself fails.
+  async function detectMetadata(file: File) {
+    if (!token || detecting || uploading) return;
     if (!/\.pdf$/i.test(file.name)) { setMsg({ kind: "err", text: "Please choose a .pdf file." }); return; }
+    setDetecting(true);
+    setMsg(null);
+    setPendingFile(file);
+    try {
+      const fd = new FormData();
+      fd.append("file", file);
+      const r = await fetch(apiUrl("/api/admin/partsetu/catalogs/detect-metadata"), { method: "POST", headers: uploadHeaders, body: fd });
+      const j = await r.json().catch(() => ({}));
+      if (r.ok) {
+        setDetect({ fingerprint: j.fingerprint, cached: !!j.cached, metadata: j.metadata || null, confidence: j.confidence ?? null, snippets: Array.isArray(j.snippets) ? j.snippets : [] });
+      } else {
+        setMsg({ kind: "err", text: j.error || `Detection failed (${r.status}). Uploading with legacy handler…` });
+        await legacyUpload(file);
+      }
+    } catch (e: any) {
+      setMsg({ kind: "err", text: e?.message || "Detection failed." });
+    } finally { setDetecting(false); }
+  }
+
+  // Step 2a: confirm the (possibly edited) metadata and ingest the staged PDF.
+  async function confirmUpload(metadata: CatalogMetadata, edited: boolean) {
+    if (!token || !detect || confirming) return;
+    setConfirming(true);
+    setMsg(null);
+    try {
+      const r = await adminFetch(token, "/api/admin/partsetu/catalogs/confirm-upload", {
+        method: "POST",
+        body: JSON.stringify({ fingerprint: detect.fingerprint, metadata, confidence: detect.confidence, originalFilename: pendingFile?.name || "catalog.pdf", edited }),
+      });
+      const j = await r.json().catch(() => ({}));
+      if (r.ok) {
+        setMsg({ kind: "ok", text: `Ingested "${j.model || j.vcNo || "catalog"}" — ${j.partsCount} parts.` });
+        closeDialog();
+        load();
+      } else {
+        setMsg({ kind: "err", text: j.error || `Confirm failed (${r.status}).` });
+      }
+    } catch (e: any) {
+      setMsg({ kind: "err", text: e?.message || "Confirm failed." });
+    } finally { setConfirming(false); }
+  }
+
+  // Step 2b: skip AI — upload via the legacy deterministic parser.
+  async function legacyUpload(file: File) {
+    if (!token || uploading) return;
     setUploading(true);
     setMsg(null);
     try {
@@ -83,7 +137,7 @@ export default function AdminPartSetuCatalogs() {
       const j = await r.json().catch(() => ({}));
       if (r.ok) {
         setMsg({ kind: "ok", text: `Ingested "${j.model || j.vcNo || "catalog"}" — ${j.partsCount} parts.` });
-        if (fileRef.current) fileRef.current.value = "";
+        closeDialog();
         load();
       } else {
         setMsg({ kind: "err", text: j.error || `Upload failed (${r.status}).` });
@@ -91,6 +145,12 @@ export default function AdminPartSetuCatalogs() {
     } catch (e: any) {
       setMsg({ kind: "err", text: e?.message || "Upload failed." });
     } finally { setUploading(false); }
+  }
+
+  function closeDialog() {
+    setDetect(null);
+    setPendingFile(null);
+    if (fileRef.current) fileRef.current.value = "";
   }
 
   async function reingest(row: CatalogRow) {
@@ -143,18 +203,18 @@ export default function AdminPartSetuCatalogs() {
             ref={fileRef}
             type="file"
             accept="application/pdf,.pdf"
-            onChange={(e) => { const f = e.target.files?.[0]; if (f) upload(f); }}
-            disabled={uploading}
+            onChange={(e) => { const f = e.target.files?.[0]; if (f) detectMetadata(f); }}
+            disabled={uploading || detecting}
             className="text-sm"
             data-testid="input-catalog-pdf"
           />
           <button
             onClick={() => fileRef.current?.click()}
-            disabled={uploading}
+            disabled={uploading || detecting}
             className="inline-flex items-center gap-2 px-3 py-1.5 rounded-lg bg-blue-600 text-white text-sm font-semibold disabled:opacity-50"
             data-testid="button-catalog-upload"
           >
-            <UploadCloud className="w-4 h-4" /> {uploading ? "Uploading & parsing…" : "Upload catalog PDF"}
+            <UploadCloud className="w-4 h-4" /> {detecting ? "Detecting metadata…" : uploading ? "Uploading & parsing…" : "Upload catalog PDF"}
           </button>
           <input
             type="text"
@@ -219,6 +279,20 @@ export default function AdminPartSetuCatalogs() {
           </tbody>
         </table>
       </div>
+
+      {detect && (
+        <FormatConfirmDialog
+          mode="catalog"
+          metadata={detect.metadata || {}}
+          snippets={detect.snippets}
+          confidence={detect.confidence}
+          cached={detect.cached}
+          busy={confirming || uploading}
+          onConfirm={confirmUpload}
+          onCancel={closeDialog}
+          onSkip={() => { if (pendingFile) legacyUpload(pendingFile); }}
+        />
+      )}
     </ShellLayout>
   );
 }
