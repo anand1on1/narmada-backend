@@ -50,7 +50,7 @@ async function resolvePdfCompany(quotation: any): Promise<PdfCompany | null> {
     }
   }
   if (quotation?.quotingCompanyId) {
-    const q: any = await v2.getQuotingCompany(quotation.quotingCompanyId);
+    const q: any = await v2.resolveQuotingEntity(quotation.quotingCompanyId);
     if (q) {
       return {
         name: q.name, gstin: q.gstin ?? null, address: q.address ?? null,
@@ -1668,7 +1668,8 @@ export function registerV2Routes(app: Express, ctx: V2Context) {
   // an admin role — a Data Team session (incl. admin SSO) is not admin-role, so those
   // returned 401/empty. These mirrors expose the same read data under requireDataTeam.
   app.get("/api/team/quoting-companies", requireDataTeam, async (_req, res) => {
-    try { res.json(await v2.listQuotingCompanies()); }
+    // R27.15 — union of legacy quoting_companies + user-managed companies table.
+    try { res.json(await v2.listAllQuotingEntities()); }
     catch (e: any) { res.status(500).json({ error: e.message }); }
   });
 
@@ -1851,7 +1852,8 @@ export function registerV2Routes(app: Express, ctx: V2Context) {
 
   // -------- ADMIN: QUOTING COMPANIES --------
   app.get("/api/admin/quoting-companies", requireAdminRole, async (_req, res) => {
-    try { res.json(await v2.listQuotingCompanies()); }
+    // R27.15 — union of legacy quoting_companies + user-managed companies table.
+    try { res.json(await v2.listAllQuotingEntities()); }
     catch (e: any) { res.status(500).json({ error: e.message }); }
   });
 
@@ -2141,7 +2143,7 @@ export function registerV2Routes(app: Express, ctx: V2Context) {
       }
       let companyPrefix = "NM";
       if (quotationData.quotingCompanyId) {
-        const co = await v2.getQuotingCompany(Number(quotationData.quotingCompanyId));
+        const co = await v2.resolveQuotingEntity(Number(quotationData.quotingCompanyId));
         if (co?.quotePrefix) companyPrefix = co.quotePrefix;
       }
       const { quotation, items: savedItems } = await v2.createQuotation(
@@ -6423,7 +6425,7 @@ function registerR8Routes(
       const items = Array.isArray(rawItems) ? rawItems : [];
       let companyPrefix = "NM";
       if (quotationData.quotingCompanyId) {
-        const co = await v2.getQuotingCompany(Number(quotationData.quotingCompanyId));
+        const co = await v2.resolveQuotingEntity(Number(quotationData.quotingCompanyId));
         if (co?.quotePrefix) companyPrefix = co.quotePrefix;
       }
       const { quotation, items: savedItems } = await v2.createQuotation(

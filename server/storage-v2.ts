@@ -832,6 +832,59 @@ export async function deleteQuotingCompany(id: number): Promise<void> {
   db.delete(quotingCompanies).where(eq(quotingCompanies.id, id)).run();
 }
 
+// R27.15 — map a unified `companies` row into the legacy QuotingCompany response
+// shape so both tables can be presented through one quoting-company picker. The id
+// is negated to namespace company-sourced entries and avoid colliding with the
+// positive ids of the legacy quoting_companies table.
+function mapCompanyToQuotingCompany(row: Company): QuotingCompany & { _source: string } {
+  return {
+    id: -row.id,
+    name: row.name,
+    gstin: row.gstin ?? null,
+    pan: row.pan ?? null,
+    address: [row.addressLine1, row.addressLine2].filter(Boolean).join(", ") || null,
+    city: row.city ?? null,
+    state: row.state ?? null,
+    pincode: row.pincode ?? null,
+    phone: row.signatoryPhone ?? null,
+    email: row.signatoryEmail ?? null,
+    bankName: row.bankName ?? null,
+    bankAccount: row.accountNo ?? null,
+    bankIfsc: row.ifsc ?? null,
+    bankBranch: row.bankBranch ?? null,
+    logoUrl: row.logoUrl ?? null,
+    signatureUrl: null,
+    quotePrefix: (row.code || "NM").split("/")[0] || "NM",
+    defaultTerms: null,
+    active: row.isActive,
+    createdAt: row.createdAt,
+    _source: "companies",
+  };
+}
+
+// R27.15 — UNION of the legacy quoting_companies table and the user-managed
+// companies table (active only), so quotations created in the Admin "Companies"
+// page are visible in the New Quotation wizard. Dedupe by GSTIN, with the
+// companies row winning (it is the one the user actively maintains).
+export async function listAllQuotingEntities(): Promise<QuotingCompany[]> {
+  const qc = db.select().from(quotingCompanies).orderBy(quotingCompanies.name).all();
+  const c = db.select().from(companies).where(eq(companies.isActive, true)).orderBy(companies.name).all();
+  const cMapped = c.map(mapCompanyToQuotingCompany);
+  const seenGstins = new Set(cMapped.filter((x) => x.gstin).map((x) => x.gstin!.trim().toUpperCase()));
+  const qcFiltered = qc.filter((x) => !x.gstin || !seenGstins.has(x.gstin.trim().toUpperCase()));
+  return [...cMapped, ...qcFiltered].sort((a, b) => a.name.localeCompare(b.name));
+}
+
+// R27.15 — resolve a quoting-company id from either source. Negative ids map to a
+// companies-table row; positive ids hit the legacy quoting_companies table.
+export async function resolveQuotingEntity(id: number): Promise<QuotingCompany | undefined> {
+  if (id < 0) {
+    const row = db.select().from(companies).where(eq(companies.id, -id)).get();
+    return row ? mapCompanyToQuotingCompany(row) : undefined;
+  }
+  return getQuotingCompany(id);
+}
+
 // -------- DATA TEAM USERS --------
 const DATA_TEAM_SESSION_TTL_MS = 30 * 24 * 60 * 60 * 1000; // 30 days
 
