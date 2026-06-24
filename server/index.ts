@@ -32,7 +32,10 @@ app.use((req, res, next) => {
       // and GET /api/store/* — surfacing as "couldn't reach the server" and an
       // empty store dashboard. Keep this list in sync with every x-*-token the
       // server reads.
-      "Content-Type, Authorization, X-Requested-With, x-admin-token, x-customer-token, x-team-token, x-sales-token, x-finance-token, x-hr-token, x-consignment-token, x-shop-token, x-store-token, x-dispatch-token",
+      // R27.16 — added x-datacenter-token (v1.4a Data Center shell uploads were
+      // rejected by the GoDaddy→Render CORS preflight, surfacing as "Failed to
+      // fetch" on /api/admin/partsetu/catalogs/upload from /datacenter/*).
+      "Content-Type, Authorization, X-Requested-With, x-admin-token, x-customer-token, x-team-token, x-sales-token, x-finance-token, x-hr-token, x-consignment-token, x-shop-token, x-store-token, x-dispatch-token, x-datacenter-token",
     );
   }
   if (req.method === "OPTIONS") {
