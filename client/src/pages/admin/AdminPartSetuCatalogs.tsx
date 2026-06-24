@@ -44,12 +44,14 @@ function fmtSize(b: number | null) {
 }
 
 export default function AdminPartSetuCatalogs() {
-  const { token } = useAdminAuth();
+  const { token, role } = useAdminAuth();
+  const canDelete = role !== "data_center";
   const [rows, setRows] = useState<CatalogRow[]>([]);
   const [loading, setLoading] = useState(false);
   const [uploading, setUploading] = useState(false);
   const [msg, setMsg] = useState<{ kind: "ok" | "err"; text: string } | null>(null);
   const [busyId, setBusyId] = useState<number | null>(null);
+  const [chassisNo, setChassisNo] = useState("");
   const fileRef = useRef<HTMLInputElement>(null);
 
   async function load() {
@@ -72,6 +74,7 @@ export default function AdminPartSetuCatalogs() {
     try {
       const fd = new FormData();
       fd.append("file", file);
+      if (chassisNo.trim()) fd.append("chassisNo", chassisNo.trim());
       // Manual fetch: adminFetch forces JSON Content-Type, which breaks multipart.
       const r = await fetch(apiUrl("/api/admin/partsetu/catalogs/upload"), {
         method: "POST",
@@ -154,6 +157,15 @@ export default function AdminPartSetuCatalogs() {
           >
             <UploadCloud className="w-4 h-4" /> {uploading ? "Uploading & parsing…" : "Upload catalog PDF"}
           </button>
+          <input
+            type="text"
+            value={chassisNo}
+            onChange={(e) => setChassisNo(e.target.value)}
+            placeholder="Chassis No (optional)"
+            disabled={uploading}
+            className="text-sm border rounded-lg px-3 py-1.5 bg-background"
+            data-testid="input-catalog-chassis"
+          />
           <span className="text-xs text-muted-foreground">PDF only, up to 100 MB. Parsing a large catalogue can take ~30s.</span>
         </div>
         {msg && (
@@ -200,7 +212,7 @@ export default function AdminPartSetuCatalogs() {
                   <div className="flex items-center gap-2 justify-end">
                     <button onClick={() => viewPdf(r.id)} className="inline-flex items-center gap-1 text-blue-600 hover:underline" data-testid={`catalog-view-${r.id}`}><FileText className="w-4 h-4" />PDF</button>
                     <button onClick={() => reingest(r)} disabled={busyId === r.id} className="inline-flex items-center gap-1 text-amber-700 hover:underline disabled:opacity-50" data-testid={`catalog-reingest-${r.id}`}><RefreshCw className="w-4 h-4" />Re-ingest</button>
-                    <button onClick={() => remove(r)} disabled={busyId === r.id} className="inline-flex items-center gap-1 text-rose-600 hover:underline disabled:opacity-50" data-testid={`catalog-delete-${r.id}`}><Trash2 className="w-4 h-4" />Delete</button>
+                    {canDelete && <button onClick={() => remove(r)} disabled={busyId === r.id} className="inline-flex items-center gap-1 text-rose-600 hover:underline disabled:opacity-50" data-testid={`catalog-delete-${r.id}`}><Trash2 className="w-4 h-4" />Delete</button>}
                   </div>
                 </td>
               </tr>

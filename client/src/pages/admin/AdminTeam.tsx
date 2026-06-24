@@ -17,6 +17,7 @@ const ROLE_META: Record<AdminRole, { label: string; desc: string; icon: any; bad
   logistics: { label: "Logistics", desc: "Consignments only",        icon: Truck,       badge: "bg-blue-500/15 text-blue-700" },
   accounts:  { label: "Accounts",  desc: "Dashboard + consignments", icon: Calculator,  badge: "bg-emerald-500/15 text-emerald-700" },
   sales:     { label: "Sales",     desc: "Price lists + products",   icon: Briefcase,   badge: "bg-amber-500/15 text-amber-700" },
+  data_center: { label: "Data Center", desc: "PartSetu + Products (no delete)", icon: Briefcase, badge: "bg-cyan-500/15 text-cyan-700" },
 };
 
 export default function AdminTeam() {

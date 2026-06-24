@@ -238,7 +238,7 @@ export async function searchParts(query: string, limit = 5, catalogId?: number |
 
   // 2) Semantic description match via LLM-expanded catalogue phrasings.
   if (out.length < limit) {
-    const terms = await expandPartQuery(q);
+    const terms = await expandPartQuery(q, catalogId ?? null);
     const likeTerms = Array.from(new Set(
       terms.map((t) => t.toUpperCase().trim()).filter((t) => t.length >= 2),
     ));
@@ -280,6 +280,138 @@ export function searchXref(query: string, limit = 5): XrefRow[] {
   ).all(pn, pn, `%${pn}%`, `%${pn}%`, limit) as XrefRow[];
 }
 
+// ---- v1.4 D3: teaching integration (rules / answers) ----------------------
+
+// Load active teaching rules that apply to the current context, highest priority
+// first. Matches scope='global' OR oem=current OR catalog_id=current OR
+// category=current. Returns rule_text strings ready to inject into the prompt.
+export function getActiveRules(opts: { catalogId?: number | null; oem?: string | null; category?: string | null }): string[] {
+  try {
+    const rows = db.prepare(
+      `SELECT rule_text, priority FROM partsetu_rules
+       WHERE active = 1 AND (
+         scope = 'global'
+         OR (oem IS NOT NULL AND ? IS NOT NULL AND LOWER(oem) = LOWER(?))
+         OR (catalog_id IS NOT NULL AND catalog_id = ?)
+         OR (category IS NOT NULL AND ? IS NOT NULL AND LOWER(category) = LOWER(?))
+       )
+       ORDER BY priority DESC, id ASC`,
+    ).all(opts.oem ?? null, opts.oem ?? null, opts.catalogId ?? null, opts.category ?? null, opts.category ?? null) as Array<{ rule_text: string }>;
+    return rows.map((r) => r.rule_text);
+  } catch { return []; }
+}
+
+// D3 Answers — before full RAG, check partsetu_answers for a query_pattern that
+// appears in the user's message AND matches the locked catalog (or is global).
+// Returns the taught answer when matched (admin-verified), else null.
+export function findTaughtAnswer(query: string, catalogContextId?: number | null): { partNumbers: string[]; notes: string | null } | null {
+  try {
+    const q = String(query || "").toLowerCase();
+    if (!q.trim()) return null;
+    const rows = db.prepare(
+      `SELECT query_pattern, part_numbers_json, notes, catalog_id FROM partsetu_answers`,
+    ).all() as Array<{ query_pattern: string; part_numbers_json: string | null; notes: string | null; catalog_id: number | null }>;
+    // catalog-scoped match wins over global; pattern must be a substring of the message.
+    const candidates = rows.filter((r) => r.query_pattern && q.includes(r.query_pattern.toLowerCase().trim()));
+    if (!candidates.length) return null;
+    const scoped = catalogContextId != null ? candidates.find((r) => r.catalog_id === catalogContextId) : undefined;
+    const chosen = scoped || candidates.find((r) => r.catalog_id == null) || candidates[0];
+    let partNumbers: string[] = [];
+    try { const arr = JSON.parse(chosen.part_numbers_json || "[]"); if (Array.isArray(arr)) partNumbers = arr.map(String); } catch { /* ignore */ }
+    return { partNumbers, notes: chosen.notes };
+  } catch { return null; }
+}
+
+// ---- v1.4 E1: cross-fitment ------------------------------------------------
+
+// Reverse-lookup: which vehicles (catalogs) does this part number appear in?
+export function findVehiclesForPart(partNumber: string): Array<{ catalog_id: number; oem: string; model: string; variant: string }> {
+  const pn = normalizePN(partNumber);
+  if (pn.length < 4) return [];
+  try {
+    return db.prepare(
+      `SELECT DISTINCT c.id AS catalog_id, c.oem AS oem, c.model AS model, c.variant AS variant
+       FROM partsetu_parts p JOIN partsetu_catalogs c ON c.id = p.catalog_id
+       WHERE REPLACE(REPLACE(UPPER(p.part_number),'-',''),' ','') = ?
+          OR REPLACE(REPLACE(UPPER(p.part_number),'-',''),' ','') LIKE ?
+       LIMIT 25`,
+    ).all(pn, `%${pn}%`) as any[];
+  } catch { return []; }
+}
+
+// ---- v1.4 E2: spec queries -------------------------------------------------
+
+const SPEC_QUERY_RE = /\b(spec|specs|specification|dimension|dimensions|thread|length|diameter|width|height|size|measurement|mm|inch|bore|stroke|pitch|torque)\b/i;
+export function isSpecQuery(text: string): boolean {
+  return SPEC_QUERY_RE.test(String(text || ""));
+}
+
+// Look up extracted specs for parts matching a query within the locked catalog.
+export function findSpecsForQuery(query: string, catalogContextId?: number | null): Array<{ part_number: string; spec_name: string; spec_value: string; unit: string | null; source: string }> {
+  try {
+    const pn = normalizePN(query);
+    const scope = catalogContextId ? ` AND p.catalog_id = ${Number(catalogContextId)}` : "";
+    if (pn.length >= 4) {
+      return db.prepare(
+        `SELECT p.part_number AS part_number, s.spec_name, s.spec_value, s.unit, s.source
+         FROM partsetu_part_specs s JOIN partsetu_parts p ON p.id = s.part_id
+         WHERE (REPLACE(REPLACE(UPPER(p.part_number),'-',''),' ','') = ?
+            OR REPLACE(REPLACE(UPPER(p.part_number),'-',''),' ','') LIKE ?)${scope}
+         LIMIT 40`,
+      ).all(pn, `%${pn}%`) as any[];
+    }
+    return [];
+  } catch { return []; }
+}
+
+// ---- v1.4 E3: vague-query narrowing ----------------------------------------
+
+// Pull a tyre count mentioned in the text ("10 tyre", "10 tyer", "10-tyre").
+export function extractTyreCount(text: string): number | null {
+  const m = String(text || "").match(/\b(\d{1,2})\s*(?:tyre|tyer|tire|wheel)\b/i);
+  return m ? parseInt(m[1], 10) : null;
+}
+
+const EMISSION_RE = /\b(BS\s?-?\s?[3456](?:\s?PH\s?2)?)\b/i;
+export function extractEmissionStage(text: string): string | null {
+  const m = String(text || "").match(EMISSION_RE);
+  return m ? m[1].toUpperCase().replace(/\s+/g, "") : null;
+}
+
+// Narrow catalogs by attributes detected in the user's text (tyre count,
+// emission stage). Returns a short candidate list to inject when no catalog
+// is locked yet.
+export function narrowCatalogs(text: string): Array<{ id: number; oem: string; model: string; variant: string; tyre_count: number | null; emission_stage: string | null }> {
+  try {
+    const tyre = extractTyreCount(text);
+    const emission = extractEmissionStage(text);
+    if (tyre == null && !emission) return [];
+    const where: string[] = [];
+    const params: any[] = [];
+    if (tyre != null) { where.push("tyre_count = ?"); params.push(tyre); }
+    if (emission) { where.push("UPPER(REPLACE(emission_stage,' ','')) = ?"); params.push(emission); }
+    return db.prepare(
+      `SELECT id, oem, model, variant, tyre_count, emission_stage FROM partsetu_catalogs
+       WHERE ${where.join(" AND ")} LIMIT 15`,
+    ).all(...params) as any[];
+  } catch { return []; }
+}
+
+// ---- v1.4 E4: per-message language detection -------------------------------
+
+// Lightweight heuristic: Devanagari → Hindi; Arabic block → Urdu; a small
+// Hinglish wordlist → Hinglish; else English. Per-message, not per-session.
+const HINGLISH_WORDS = ["kaun", "kaunsa", "konsa", "lgega", "lagega", "chahiye", "hai", "kya", "kitna", "kitne", "me", "mein", "gaadi", "gadi", "wala", "wali", "batao", "bta", "kar", "krna", "nahi", "nahin", "haan"];
+export function detectLanguage(text: string): "Hindi" | "Urdu" | "Hinglish" | "English" {
+  const t = String(text || "");
+  if (/[ऀ-ॿ]/.test(t)) return "Hindi";
+  if (/[؀-ۿ]/.test(t)) return "Urdu";
+  const lc = t.toLowerCase();
+  const hits = HINGLISH_WORDS.filter((w) => new RegExp(`\\b${w}\\b`).test(lc)).length;
+  if (hits >= 1) return "Hinglish";
+  return "English";
+}
+
 // Build the context block injected into the Claude system prompt. Note: this
 // NEVER contains prices — only catalog identification + cross-reference data.
 // v1.2: scoped to a locked catalogue when one is resolved; prepends a vehicle
@@ -293,6 +425,31 @@ export async function buildContextBlock(
   const lines: string[] = [];
 
   const catalog = catalogContextId ? getCatalog(catalogContextId) : null;
+
+  // v1.4 D3 — inject active teaching rules (highest authority) first.
+  const rules = getActiveRules({ catalogId: catalogContextId ?? null, oem: catalog?.oem ?? null, category: null });
+  if (rules.length) {
+    lines.push("TEACHING RULES (admin-taught — these have the highest authority, follow them strictly):");
+    rules.forEach((r, i) => lines.push(`${i + 1}. ${r}`));
+    lines.push("");
+  }
+
+  // v1.4 E4 — instruct reply language for this message.
+  const lang = detectLanguage(query);
+  lines.push(`REPLY LANGUAGE: respond in ${lang} (detected from the customer's latest message). If they switch language next time, switch with them.`, "");
+
+  // v1.4 D3 — taught direct answer takes precedence over RAG.
+  const taught = findTaughtAnswer(query, catalogContextId);
+  if (taught) {
+    lines.push(
+      "ADMIN-VERIFIED ANSWER (use this; it was taught by our team and is authoritative):",
+      `Part numbers: ${taught.partNumbers.length ? taught.partNumbers.join(", ") : "(none listed)"}` +
+      `${taught.notes ? ` | Notes: ${taught.notes}` : ""}`,
+      "Present this as the verified answer. You may still add helpful context, but do not contradict it.",
+      "",
+    );
+  }
+
   if (catalog) {
     lines.push(
       `VEHICLE CONTEXT LOCKED: ${catalog.model || catalog.oem || "vehicle"}, VC No ${catalog.vc_no || "-"}.`,
@@ -329,6 +486,40 @@ export async function buildContextBlock(
   if (!parts.length && !xrefs.length) {
     lines.push("(no matching catalog or cross-reference data found for this query)");
   }
+
+  // v1.4 E1 — cross-fitment: when the user asks where a part fits / which
+  // vehicles use it, reverse-lookup the part across all catalogs.
+  if (/\b(where|which vehicle|which truck|kis|kaun|fit|fits|fitment|used in|lagega|lgega)\b/i.test(query)) {
+    const pnTok = (query.match(/\b([A-Za-z0-9]{6,})\b/g) || []).find((t) => /\d/.test(t));
+    if (pnTok) {
+      const vehicles = findVehiclesForPart(pnTok);
+      if (vehicles.length) {
+        lines.push("", `CROSS-FITMENT — part ${pnTok} appears in these catalogs:`);
+        for (const v of vehicles) lines.push(`- ${v.oem || "?"} ${v.model || ""} ${v.variant || ""}`.trim());
+      }
+    }
+  }
+
+  // v1.4 E2 — spec query: surface extracted specs (always show ALL known specs).
+  if (isSpecQuery(query)) {
+    const specs = findSpecsForQuery(query, catalogContextId);
+    if (specs.length) {
+      lines.push("", "EXTRACTED SPECS (show ALL of these in a clean table, with the source column):");
+      for (const s of specs) lines.push(`- ${s.part_number}: ${s.spec_name} = ${s.spec_value}${s.unit ? " " + s.unit : ""} [source: ${s.source}]`);
+    }
+  }
+
+  // v1.4 E3 — vague-query narrowing when no catalog is locked yet.
+  if (!catalog) {
+    const candidates = narrowCatalogs(query);
+    if (candidates.length) {
+      lines.push("", "NARROWED CANDIDATES (matched on vehicle attributes in the query — ask the user to pick variant/OEM to lock one):");
+      for (const c of candidates) {
+        lines.push(`- [#${c.id}] ${c.oem || "?"} ${c.model || ""} ${c.variant || ""}${c.tyre_count != null ? ` | ${c.tyre_count} tyre` : ""}${c.emission_stage ? ` | ${c.emission_stage}` : ""}`.trim());
+      }
+    }
+  }
+
   lines.push(
     "",
     "The DB search results above were retrieved using semantically-expanded keyword variants. If results look irrelevant, ask the user about the part's location/function on the vehicle to narrow down.",

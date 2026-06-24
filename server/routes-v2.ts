@@ -75,7 +75,7 @@ export interface TokenInfo {
   displayName?: string;
 }
 export type TokenMap = Map<string, TokenInfo>;
-const VALID_ROLES: AdminRole[] = ["admin", "logistics", "accounts", "sales"];
+const VALID_ROLES: AdminRole[] = ["admin", "logistics", "accounts", "sales", "data_center"];
 
 // Session A V2: DB-backed admin session helpers (token survives Render restarts)
 const SESSION_TTL_MS = 30 * 24 * 60 * 60 * 1000; // 30 days
@@ -4867,6 +4867,21 @@ function registerR8Routes(
   const poUploadsDir = path2.join(uploadsRoot, "customer-pos");
   if (!fs2.existsSync(poUploadsDir)) fs2.mkdirSync(poUploadsDir, { recursive: true });
 
+  // PartSetu v1.4 F5 — allow admin + data_center, but data_center can never DELETE.
+  // Guards the PartSetu/Products management routes the Data Center role owns.
+  const requireDataCenterOrAdmin = (req: Request, res: Response, next: NextFunction) => {
+    requireAuth(req, res, () => {
+      const u = (req as any).user as TokenInfo;
+      if (u.role !== "admin" && u.role !== "data_center") {
+        return res.status(403).json({ error: "Admin or Data Center role required" });
+      }
+      if (u.role === "data_center" && req.method === "DELETE") {
+        return res.status(403).json({ error: "Data Center role cannot delete" });
+      }
+      next();
+    });
+  };
+
   const multerPO = multer({
     storage: multer.diskStorage({
       destination: (_req: any, _file: any, cb: any) => cb(null, poUploadsDir),
@@ -8336,14 +8351,14 @@ ${contextBlock}`;
   });
 
   // ---- Admin: catalog requests, conversations, usage ----
-  app.get("/api/admin/partsetu/catalog-requests", requireAuth, async (req, res) => {
+  app.get("/api/admin/partsetu/catalog-requests", requireDataCenterOrAdmin, async (req, res) => {
     try {
       const status = (req.query.status as string) || undefined;
       res.json(partsetuStore.listCatalogRequests(status));
     } catch (e: any) { res.status(500).json({ error: e?.message }); }
   });
 
-  app.patch("/api/admin/partsetu/catalog-requests/:id", requireAuth, async (req, res) => {
+  app.patch("/api/admin/partsetu/catalog-requests/:id", requireDataCenterOrAdmin, async (req, res) => {
     try {
       const id = Number(req.params.id);
       const { status, adminNotes } = req.body || {};
@@ -8352,17 +8367,17 @@ ${contextBlock}`;
     } catch (e: any) { res.status(500).json({ error: e?.message }); }
   });
 
-  app.get("/api/admin/partsetu/conversations", requireAuth, async (_req, res) => {
+  app.get("/api/admin/partsetu/conversations", requireDataCenterOrAdmin, async (_req, res) => {
     try { res.json(partsetuStore.listConversationsAdmin(200)); }
     catch (e: any) { res.status(500).json({ error: e?.message }); }
   });
 
-  app.get("/api/admin/partsetu/conversations/:id/messages", requireAuth, async (req, res) => {
+  app.get("/api/admin/partsetu/conversations/:id/messages", requireDataCenterOrAdmin, async (req, res) => {
     try { res.json(partsetuStore.listMessages(Number(req.params.id))); }
     catch (e: any) { res.status(500).json({ error: e?.message }); }
   });
 
-  app.get("/api/admin/partsetu/usage", requireAuth, async (_req, res) => {
+  app.get("/api/admin/partsetu/usage", requireDataCenterOrAdmin, async (_req, res) => {
     try { res.json(partsetuStore.usageSummary()); }
     catch (e: any) { res.status(500).json({ error: e?.message }); }
   });
@@ -8371,7 +8386,7 @@ ${contextBlock}`;
   // Upload a spare-parts catalogue PDF; it is stored on the persistent disk and
   // parsed synchronously into partsetu_catalogs/partsetu_parts. ~30s for a large
   // catalogue is acceptable; the admin sees the result inline.
-  app.post("/api/admin/partsetu/catalogs/upload", requireAuth, partsetuCatalogUpload.single("file"), async (req, res) => {
+  app.post("/api/admin/partsetu/catalogs/upload", requireDataCenterOrAdmin, partsetuCatalogUpload.single("file"), async (req, res) => {
     try {
       const file = (req as any).file;
       if (!file || !file.buffer?.length) return res.status(400).json({ error: "No PDF uploaded" });
@@ -8380,9 +8395,11 @@ ${contextBlock}`;
         return res.status(400).json({ error: "File is not a valid PDF (bad header)" });
       }
       const uploadedBy = ((req as any).user?.username as string) || "admin";
+      // B1 — optional free-form chassis number from the upload form.
+      const chassisNo = req.body?.chassisNo ? String(req.body.chassisNo).trim() : undefined;
       const tmpPath = catalogStorage.saveTmpPdf(file.buffer);
       try {
-        const r = await catalogIngester.ingestCatalogPdf({ pdfPath: tmpPath, uploadedBy, cleanupSrc: true });
+        const r = await catalogIngester.ingestCatalogPdf({ pdfPath: tmpPath, uploadedBy, chassisNo, cleanupSrc: true });
         res.json({ catalogId: r.catalogId, partsCount: r.partsCount, vcNo: r.vcNo, model: r.model });
       } catch (err: any) {
         catalogStorage.deleteTmp(tmpPath);
@@ -8391,7 +8408,7 @@ ${contextBlock}`;
     } catch (e: any) { res.status(500).json({ error: e?.message || "Upload failed" }); }
   });
 
-  app.get("/api/admin/partsetu/catalogs", requireAuth, async (_req, res) => {
+  app.get("/api/admin/partsetu/catalogs", requireDataCenterOrAdmin, async (_req, res) => {
     try {
       const rows = rawSqlite.prepare(
         `SELECT c.id, c.oem, c.model, c.variant, c.vc_no, c.status, c.file_size_bytes,
@@ -8404,7 +8421,7 @@ ${contextBlock}`;
     } catch (e: any) { res.status(500).json({ error: e?.message }); }
   });
 
-  app.get("/api/admin/partsetu/catalogs/:id/pdf", requireAuth, async (req, res) => {
+  app.get("/api/admin/partsetu/catalogs/:id/pdf", requireDataCenterOrAdmin, async (req, res) => {
     try {
       const id = Number(req.params.id);
       const p = catalogStorage.getCatalogPdfPath(id);
@@ -8414,7 +8431,7 @@ ${contextBlock}`;
     } catch (e: any) { res.status(500).json({ error: e?.message }); }
   });
 
-  app.delete("/api/admin/partsetu/catalogs/:id", requireAuth, async (req, res) => {
+  app.delete("/api/admin/partsetu/catalogs/:id", requireDataCenterOrAdmin, async (req, res) => {
     try {
       const id = Number(req.params.id);
       rawSqlite.prepare(`UPDATE partsetu_conversations SET catalog_context_id = NULL WHERE catalog_context_id = ?`).run(id);
@@ -8425,13 +8442,342 @@ ${contextBlock}`;
     } catch (e: any) { res.status(500).json({ error: e?.message }); }
   });
 
-  app.post("/api/admin/partsetu/catalogs/:id/reingest", requireAuth, async (req, res) => {
+  app.post("/api/admin/partsetu/catalogs/:id/reingest", requireDataCenterOrAdmin, async (req, res) => {
     try {
       const id = Number(req.params.id);
       const uploadedBy = ((req as any).user?.username as string) || "admin";
       const r = await catalogIngester.reingestCatalog(id, uploadedBy);
       res.json({ catalogId: r.catalogId, partsCount: r.partsCount });
     } catch (e: any) { res.status(422).json({ error: e?.message || "Re-ingest failed" }); }
+  });
+
+  // ==================================================================
+  // PartSetu v1.4 — Comparative Sheets (C1), Price Lists (C2),
+  // Consumption Reports (C3), and Teaching Module (D2).
+  // All guarded by requireDataCenterOrAdmin (data_center: no DELETE).
+  // ==================================================================
+  const xrefIngester = require("./services/xref-ingester") as typeof import("./services/xref-ingester");
+  const sheetIngester = require("./services/sheet-ingester") as typeof import("./services/sheet-ingester");
+
+  // Disk storage for uploaded sheets on the persistent disk.
+  const partsetuDataDir = path.join(process.env.DATA_DIR || ".", "uploads", "partsetu");
+  const mkSheetStore = (sub: string, maxMb: number) => {
+    const dir = path.join(partsetuDataDir, sub);
+    try { fs.mkdirSync(dir, { recursive: true }); } catch {}
+    return multer({
+      storage: multer.diskStorage({
+        destination: (_req: any, _file: any, cb: any) => cb(null, dir),
+        filename: (_req: any, file: any, cb: any) => cb(null, `${Date.now()}-${String(file.originalname || "sheet").replace(/[^a-zA-Z0-9._-]/g, "_")}`),
+      }),
+      limits: { fileSize: maxMb * 1024 * 1024 },
+    });
+  };
+  const xrefUpload = mkSheetStore("xrefs", 100);
+  const priceUpload = mkSheetStore("prices", 50);
+  const consumptionUpload = mkSheetStore("consumption", 50);
+
+  // ---- C1: Comparative sheets (xref) ----
+  app.post("/api/admin/partsetu/xrefs/upload", requireDataCenterOrAdmin, xrefUpload.single("file"), async (req, res) => {
+    try {
+      const file = (req as any).file;
+      if (!file) return res.status(400).json({ error: "No file uploaded" });
+      const uploadedBy = ((req as any).user?.username as string) || "admin";
+      const sourceName = String(req.body?.sourceName || file.originalname || "comparative-sheet");
+      const sourceBrand = req.body?.sourceBrand ? String(req.body.sourceBrand) : "WABCO";
+      const r = xrefIngester.ingestXrefWorkbook({ xlsxPath: file.path, sourceName, sourceBrand, uploadedBy });
+      res.json(r);
+    } catch (e: any) { res.status(422).json({ error: e?.message || "Xref ingest failed" }); }
+  });
+  app.get("/api/admin/partsetu/xrefs", requireDataCenterOrAdmin, async (_req, res) => {
+    try {
+      res.json(rawSqlite.prepare(`SELECT * FROM partsetu_xref_sources ORDER BY id DESC`).all());
+    } catch (e: any) { res.status(500).json({ error: e?.message }); }
+  });
+  app.get("/api/admin/partsetu/xrefs/:id/rows", requireDataCenterOrAdmin, async (req, res) => {
+    try {
+      res.json(rawSqlite.prepare(`SELECT * FROM partsetu_xref WHERE source_file_id = ? LIMIT 500`).all(Number(req.params.id)));
+    } catch (e: any) { res.status(500).json({ error: e?.message }); }
+  });
+  app.post("/api/admin/partsetu/xrefs/:id/reingest", requireDataCenterOrAdmin, async (req, res) => {
+    try {
+      const src = rawSqlite.prepare(`SELECT * FROM partsetu_xref_sources WHERE id = ?`).get(Number(req.params.id)) as any;
+      if (!src) return res.status(404).json({ error: "Source not found" });
+      if (!src.file_path || !fs.existsSync(src.file_path)) return res.status(404).json({ error: "Stored file not found" });
+      xrefIngester.deleteXrefSource(Number(req.params.id));
+      const uploadedBy = ((req as any).user?.username as string) || "admin";
+      const r = xrefIngester.ingestXrefWorkbook({ xlsxPath: src.file_path, sourceName: src.source_name, sourceBrand: src.source_brand || "WABCO", uploadedBy });
+      res.json(r);
+    } catch (e: any) { res.status(422).json({ error: e?.message || "Re-ingest failed" }); }
+  });
+  app.delete("/api/admin/partsetu/xrefs/:id", requireDataCenterOrAdmin, async (req, res) => {
+    try { res.json(xrefIngester.deleteXrefSource(Number(req.params.id))); }
+    catch (e: any) { res.status(500).json({ error: e?.message }); }
+  });
+
+  // ---- C2/C3 shared: preview a sheet's columns + sample rows for mapping ----
+  // The upload is stored, parsed, and its detected columns + 5 sample rows are
+  // returned so the admin can map each column to a schema field before ingest.
+  const previewUpload = mkSheetStore("tmp", 50);
+  app.post("/api/admin/partsetu/sheet/preview", requireDataCenterOrAdmin, previewUpload.single("file"), async (req, res) => {
+    try {
+      const file = (req as any).file;
+      if (!file) return res.status(400).json({ error: "No file uploaded" });
+      const preview = sheetIngester.parseSheetPreview(file.path);
+      const kind = String(req.body?.kind || "prices");
+      const fields = kind === "consumption" ? sheetIngester.CONSUMPTION_SCHEMA_FIELDS : sheetIngester.PRICE_SCHEMA_FIELDS;
+      res.json({ filePath: file.path, originalName: file.originalname, schemaFields: fields, ...preview });
+    } catch (e: any) { res.status(422).json({ error: e?.message || "Preview failed" }); }
+  });
+
+  // ---- C2: Price lists ----
+  app.post("/api/admin/partsetu/prices/upload", requireDataCenterOrAdmin, priceUpload.single("file"), async (req, res) => {
+    try {
+      const file = (req as any).file;
+      if (!file) return res.status(400).json({ error: "No file uploaded" });
+      const uploadedBy = ((req as any).user?.username as string) || "admin";
+      const sourceName = String(req.body?.sourceName || file.originalname || "price-list");
+      let columnMap: any = {};
+      try { columnMap = JSON.parse(req.body?.columnMap || "{}"); } catch { columnMap = {}; }
+      const r = sheetIngester.ingestPrices({ filePath: file.path, sourceName, columnMap, uploadedBy });
+      res.json(r);
+    } catch (e: any) { res.status(422).json({ error: e?.message || "Price ingest failed" }); }
+  });
+  // Ingest from an already-previewed (uploaded) file path + chosen mapping.
+  app.post("/api/admin/partsetu/prices/ingest", requireDataCenterOrAdmin, async (req, res) => {
+    try {
+      const { filePath, sourceName, columnMap } = req.body || {};
+      if (!filePath || !fs.existsSync(filePath)) return res.status(400).json({ error: "filePath missing or not found" });
+      const uploadedBy = ((req as any).user?.username as string) || "admin";
+      const r = sheetIngester.ingestPrices({ filePath, sourceName: String(sourceName || "price-list"), columnMap: columnMap || {}, uploadedBy });
+      res.json(r);
+    } catch (e: any) { res.status(422).json({ error: e?.message || "Price ingest failed" }); }
+  });
+  app.get("/api/admin/partsetu/prices", requireDataCenterOrAdmin, async (_req, res) => {
+    try { res.json(rawSqlite.prepare(`SELECT * FROM partsetu_price_sources ORDER BY id DESC`).all()); }
+    catch (e: any) { res.status(500).json({ error: e?.message }); }
+  });
+  app.get("/api/admin/partsetu/prices/:id/rows", requireDataCenterOrAdmin, async (req, res) => {
+    try { res.json(rawSqlite.prepare(`SELECT * FROM partsetu_prices WHERE source_file_id = ? LIMIT 500`).all(Number(req.params.id))); }
+    catch (e: any) { res.status(500).json({ error: e?.message }); }
+  });
+  app.delete("/api/admin/partsetu/prices/:id", requireDataCenterOrAdmin, async (req, res) => {
+    try { res.json(sheetIngester.deletePriceSource(Number(req.params.id))); }
+    catch (e: any) { res.status(500).json({ error: e?.message }); }
+  });
+
+  // ---- C3: Consumption reports ----
+  app.post("/api/admin/partsetu/consumption/upload", requireDataCenterOrAdmin, consumptionUpload.single("file"), async (req, res) => {
+    try {
+      const file = (req as any).file;
+      if (!file) return res.status(400).json({ error: "No file uploaded" });
+      const uploadedBy = ((req as any).user?.username as string) || "admin";
+      const sourceName = String(req.body?.sourceName || file.originalname || "consumption-report");
+      let columnMap: any = {};
+      try { columnMap = JSON.parse(req.body?.columnMap || "{}"); } catch { columnMap = {}; }
+      const r = sheetIngester.ingestConsumption({ filePath: file.path, sourceName, columnMap, uploadedBy });
+      res.json(r);
+    } catch (e: any) { res.status(422).json({ error: e?.message || "Consumption ingest failed" }); }
+  });
+  app.post("/api/admin/partsetu/consumption/ingest", requireDataCenterOrAdmin, async (req, res) => {
+    try {
+      const { filePath, sourceName, columnMap } = req.body || {};
+      if (!filePath || !fs.existsSync(filePath)) return res.status(400).json({ error: "filePath missing or not found" });
+      const uploadedBy = ((req as any).user?.username as string) || "admin";
+      const r = sheetIngester.ingestConsumption({ filePath, sourceName: String(sourceName || "consumption-report"), columnMap: columnMap || {}, uploadedBy });
+      res.json(r);
+    } catch (e: any) { res.status(422).json({ error: e?.message || "Consumption ingest failed" }); }
+  });
+  app.get("/api/admin/partsetu/consumption", requireDataCenterOrAdmin, async (_req, res) => {
+    try { res.json(rawSqlite.prepare(`SELECT * FROM partsetu_consumption_sources ORDER BY id DESC`).all()); }
+    catch (e: any) { res.status(500).json({ error: e?.message }); }
+  });
+  app.get("/api/admin/partsetu/consumption/:id/rows", requireDataCenterOrAdmin, async (req, res) => {
+    try { res.json(rawSqlite.prepare(`SELECT * FROM partsetu_consumption WHERE source_file_id = ? LIMIT 500`).all(Number(req.params.id))); }
+    catch (e: any) { res.status(500).json({ error: e?.message }); }
+  });
+  app.delete("/api/admin/partsetu/consumption/:id", requireDataCenterOrAdmin, async (req, res) => {
+    try { res.json(sheetIngester.deleteConsumptionSource(Number(req.params.id))); }
+    catch (e: any) { res.status(500).json({ error: e?.message }); }
+  });
+
+  // ==================================================================
+  // PartSetu v1.4 D2 — Teaching Module CRUD (synonyms / answers / rules)
+  // + Lessons Import (parse via Claude, then apply selected).
+  // ==================================================================
+  const teachNow = () => Date.now();
+
+  // Synonyms
+  app.get("/api/admin/partsetu/synonyms", requireDataCenterOrAdmin, async (_req, res) => {
+    try { res.json(rawSqlite.prepare(`SELECT * FROM partsetu_synonyms ORDER BY id DESC`).all()); }
+    catch (e: any) { res.status(500).json({ error: e?.message }); }
+  });
+  app.post("/api/admin/partsetu/synonyms", requireDataCenterOrAdmin, async (req, res) => {
+    try {
+      const { queryTerm, expandedTerms, catalogId } = req.body || {};
+      if (!queryTerm || !Array.isArray(expandedTerms)) return res.status(400).json({ error: "queryTerm and expandedTerms[] required" });
+      const taughtBy = ((req as any).user?.username as string) || "admin";
+      const ts = teachNow();
+      const r = rawSqlite.prepare(
+        `INSERT OR IGNORE INTO partsetu_synonyms (query_term, expanded_terms_json, catalog_id, taught_by, source, created_at, updated_at)
+         VALUES (?, ?, ?, ?, 'admin', ?, ?)`,
+      ).run(String(queryTerm).toLowerCase(), JSON.stringify(expandedTerms), catalogId ?? null, taughtBy, ts, ts);
+      res.json({ id: Number(r.lastInsertRowid), changes: r.changes });
+    } catch (e: any) { res.status(500).json({ error: e?.message }); }
+  });
+  app.patch("/api/admin/partsetu/synonyms/:id", requireDataCenterOrAdmin, async (req, res) => {
+    try {
+      const { queryTerm, expandedTerms, catalogId } = req.body || {};
+      rawSqlite.prepare(
+        `UPDATE partsetu_synonyms SET query_term = COALESCE(?, query_term),
+           expanded_terms_json = COALESCE(?, expanded_terms_json),
+           catalog_id = ?, updated_at = ? WHERE id = ?`,
+      ).run(
+        queryTerm != null ? String(queryTerm).toLowerCase() : null,
+        Array.isArray(expandedTerms) ? JSON.stringify(expandedTerms) : null,
+        catalogId ?? null, teachNow(), Number(req.params.id),
+      );
+      res.json({ ok: true });
+    } catch (e: any) { res.status(500).json({ error: e?.message }); }
+  });
+  app.delete("/api/admin/partsetu/synonyms/:id", requireDataCenterOrAdmin, async (req, res) => {
+    try { rawSqlite.prepare(`DELETE FROM partsetu_synonyms WHERE id = ?`).run(Number(req.params.id)); res.json({ deleted: true }); }
+    catch (e: any) { res.status(500).json({ error: e?.message }); }
+  });
+
+  // Answers
+  app.get("/api/admin/partsetu/answers", requireDataCenterOrAdmin, async (_req, res) => {
+    try { res.json(rawSqlite.prepare(`SELECT * FROM partsetu_answers ORDER BY id DESC`).all()); }
+    catch (e: any) { res.status(500).json({ error: e?.message }); }
+  });
+  app.post("/api/admin/partsetu/answers", requireDataCenterOrAdmin, async (req, res) => {
+    try {
+      const { catalogId, queryPattern, partNumbers, notes } = req.body || {};
+      if (!queryPattern) return res.status(400).json({ error: "queryPattern required" });
+      const taughtBy = ((req as any).user?.username as string) || "admin";
+      const ts = teachNow();
+      const r = rawSqlite.prepare(
+        `INSERT INTO partsetu_answers (catalog_id, query_pattern, part_numbers_json, notes, taught_by, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      ).run(catalogId ?? null, String(queryPattern), JSON.stringify(partNumbers || []), notes ?? null, taughtBy, ts, ts);
+      res.json({ id: Number(r.lastInsertRowid) });
+    } catch (e: any) { res.status(500).json({ error: e?.message }); }
+  });
+  app.patch("/api/admin/partsetu/answers/:id", requireDataCenterOrAdmin, async (req, res) => {
+    try {
+      const { catalogId, queryPattern, partNumbers, notes } = req.body || {};
+      rawSqlite.prepare(
+        `UPDATE partsetu_answers SET catalog_id = ?, query_pattern = COALESCE(?, query_pattern),
+           part_numbers_json = COALESCE(?, part_numbers_json), notes = ?, updated_at = ? WHERE id = ?`,
+      ).run(
+        catalogId ?? null, queryPattern ?? null,
+        Array.isArray(partNumbers) ? JSON.stringify(partNumbers) : null,
+        notes ?? null, teachNow(), Number(req.params.id),
+      );
+      res.json({ ok: true });
+    } catch (e: any) { res.status(500).json({ error: e?.message }); }
+  });
+  app.delete("/api/admin/partsetu/answers/:id", requireDataCenterOrAdmin, async (req, res) => {
+    try { rawSqlite.prepare(`DELETE FROM partsetu_answers WHERE id = ?`).run(Number(req.params.id)); res.json({ deleted: true }); }
+    catch (e: any) { res.status(500).json({ error: e?.message }); }
+  });
+
+  // Rules
+  app.get("/api/admin/partsetu/rules", requireDataCenterOrAdmin, async (_req, res) => {
+    try { res.json(rawSqlite.prepare(`SELECT * FROM partsetu_rules ORDER BY priority DESC, id DESC`).all()); }
+    catch (e: any) { res.status(500).json({ error: e?.message }); }
+  });
+  app.post("/api/admin/partsetu/rules", requireDataCenterOrAdmin, async (req, res) => {
+    try {
+      const { ruleText, scope, priority, oem, catalogId, category } = req.body || {};
+      if (!ruleText) return res.status(400).json({ error: "ruleText required" });
+      const taughtBy = ((req as any).user?.username as string) || "admin";
+      const ts = teachNow();
+      const r = rawSqlite.prepare(
+        `INSERT INTO partsetu_rules (rule_text, scope, priority, oem, catalog_id, category, active, taught_by, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?, ?)`,
+      ).run(String(ruleText), String(scope || "global"), Number(priority ?? 50), oem ?? null, catalogId ?? null, category ?? null, taughtBy, ts, ts);
+      res.json({ id: Number(r.lastInsertRowid) });
+    } catch (e: any) { res.status(500).json({ error: e?.message }); }
+  });
+  app.patch("/api/admin/partsetu/rules/:id", requireDataCenterOrAdmin, async (req, res) => {
+    try {
+      const { ruleText, scope, priority, oem, catalogId, category, active } = req.body || {};
+      rawSqlite.prepare(
+        `UPDATE partsetu_rules SET rule_text = COALESCE(?, rule_text), scope = COALESCE(?, scope),
+           priority = COALESCE(?, priority), oem = ?, catalog_id = ?, category = ?,
+           active = COALESCE(?, active), updated_at = ? WHERE id = ?`,
+      ).run(
+        ruleText ?? null, scope ?? null, priority != null ? Number(priority) : null,
+        oem ?? null, catalogId ?? null, category ?? null,
+        active != null ? (active ? 1 : 0) : null, teachNow(), Number(req.params.id),
+      );
+      res.json({ ok: true });
+    } catch (e: any) { res.status(500).json({ error: e?.message }); }
+  });
+  app.delete("/api/admin/partsetu/rules/:id", requireDataCenterOrAdmin, async (req, res) => {
+    try { rawSqlite.prepare(`DELETE FROM partsetu_rules WHERE id = ?`).run(Number(req.params.id)); res.json({ deleted: true }); }
+    catch (e: any) { res.status(500).json({ error: e?.message }); }
+  });
+
+  // ---- Lessons Import: parse free text into structured lessons, then apply ----
+  app.post("/api/admin/partsetu/lessons-import/parse", requireDataCenterOrAdmin, async (req, res) => {
+    try {
+      const rawText = String(req.body?.rawText || "").trim();
+      if (!rawText) return res.status(400).json({ error: "rawText required" });
+      const taughtBy = ((req as any).user?.username as string) || "admin";
+      const sys = `You convert free-form PartSetu teaching notes into structured lessons. Return ONLY a JSON object with keys: rules (array of {rule_text, scope, priority, oem}), synonyms (array of {query_term, expanded_terms: string[]}), answers (array of {query_pattern, part_numbers: string[], notes}). scope is 'global' or 'oem'. priority 50-100. Omit fields you can't infer. No prose, no markdown.`;
+      const r = await claudeSvc.callClaudeSonnet(sys, [{ role: "user", content: rawText.slice(0, 16000) }], 2048);
+      let parsed: any = { rules: [], synonyms: [], answers: [] };
+      if (r.ok) {
+        try { parsed = JSON.parse(r.text.replace(/^```(?:json)?/i, "").replace(/```$/, "").trim()); } catch { /* keep empty */ }
+      }
+      const ts = teachNow();
+      const ins = rawSqlite.prepare(
+        `INSERT INTO partsetu_lessons_import (raw_text, parsed_lessons_json, status, taught_by, created_at)
+         VALUES (?, ?, 'pending', ?, ?)`,
+      ).run(rawText, JSON.stringify(parsed), taughtBy, ts);
+      res.json({ importId: Number(ins.lastInsertRowid), parsed, aiAvailable: r.ok });
+    } catch (e: any) { res.status(500).json({ error: e?.message || "Parse failed" }); }
+  });
+  app.post("/api/admin/partsetu/lessons-import/apply", requireDataCenterOrAdmin, async (req, res) => {
+    try {
+      const { importId, lessons } = req.body || {};
+      const sel = lessons || {};
+      const taughtBy = ((req as any).user?.username as string) || "admin";
+      const ts = teachNow();
+      let rules = 0, synonyms = 0, answers = 0;
+      const tx = rawSqlite.transaction(() => {
+        for (const r of (sel.rules || [])) {
+          if (!r?.rule_text) continue;
+          rawSqlite.prepare(
+            `INSERT INTO partsetu_rules (rule_text, scope, priority, oem, catalog_id, category, active, taught_by, created_at, updated_at)
+             VALUES (?, ?, ?, ?, NULL, NULL, 1, ?, ?, ?)`,
+          ).run(String(r.rule_text), String(r.scope || "global"), Number(r.priority ?? 50), r.oem ?? null, taughtBy, ts, ts);
+          rules++;
+        }
+        for (const s of (sel.synonyms || [])) {
+          if (!s?.query_term || !Array.isArray(s.expanded_terms)) continue;
+          rawSqlite.prepare(
+            `INSERT OR IGNORE INTO partsetu_synonyms (query_term, expanded_terms_json, catalog_id, taught_by, source, created_at, updated_at)
+             VALUES (?, ?, NULL, ?, 'lessons-import', ?, ?)`,
+          ).run(String(s.query_term).toLowerCase(), JSON.stringify(s.expanded_terms), taughtBy, ts, ts);
+          synonyms++;
+        }
+        for (const a of (sel.answers || [])) {
+          if (!a?.query_pattern) continue;
+          rawSqlite.prepare(
+            `INSERT INTO partsetu_answers (catalog_id, query_pattern, part_numbers_json, notes, taught_by, created_at, updated_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?)`,
+          ).run(a.catalog_id ?? null, String(a.query_pattern), JSON.stringify(a.part_numbers || []), a.notes ?? null, taughtBy, ts, ts);
+          answers++;
+        }
+        if (importId) {
+          rawSqlite.prepare(`UPDATE partsetu_lessons_import SET status = 'applied', applied_at = ? WHERE id = ?`).run(ts, Number(importId));
+        }
+      });
+      tx();
+      res.json({ applied: { rules, synonyms, answers } });
+    } catch (e: any) { res.status(500).json({ error: e?.message || "Apply failed" }); }
   });
 
   // ---- public: currencies (TASK 7) ----

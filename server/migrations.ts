@@ -3192,5 +3192,233 @@ export function runPartSetuMigrations() {
   run("R27.partsetu-v1.3: catalogs.status", `ALTER TABLE partsetu_catalogs ADD COLUMN status TEXT DEFAULT 'active'`);
   run("R27.partsetu-v1.3: catalogs.ingest_error", `ALTER TABLE partsetu_catalogs ADD COLUMN ingest_error TEXT`);
 
+  // ====================================================================
+  // PartSetu v1.4 — teaching module, ingest enrichment, 3 upload types,
+  // Data Center role, and Classes 1-3 seed. All additive (ADD COLUMN /
+  // CREATE TABLE IF NOT EXISTS). Per-statement try/catch via run().
+  // ====================================================================
+
+  // B1/B3 — catalog upload chassis field + auto-generated vehicle profile cols.
+  run("R27.partsetu-v1.4: catalogs.chassis_no", `ALTER TABLE partsetu_catalogs ADD COLUMN chassis_no TEXT`);
+  run("R27.partsetu-v1.4: catalogs.emission_stage", `ALTER TABLE partsetu_catalogs ADD COLUMN emission_stage TEXT`);
+  run("R27.partsetu-v1.4: catalogs.body_type", `ALTER TABLE partsetu_catalogs ADD COLUMN body_type TEXT`);
+  run("R27.partsetu-v1.4: catalogs.drive_type", `ALTER TABLE partsetu_catalogs ADD COLUMN drive_type TEXT`);
+  run("R27.partsetu-v1.4: catalogs.tyre_count", `ALTER TABLE partsetu_catalogs ADD COLUMN tyre_count INTEGER`);
+  run("R27.partsetu-v1.4: catalogs.fuel_type", `ALTER TABLE partsetu_catalogs ADD COLUMN fuel_type TEXT`);
+  run("R27.partsetu-v1.4: catalogs.engine_family", `ALTER TABLE partsetu_catalogs ADD COLUMN engine_family TEXT`);
+  run("R27.partsetu-v1.4: catalogs.short_desc", `ALTER TABLE partsetu_catalogs ADD COLUMN short_desc TEXT`);
+  run("R27.partsetu-v1.4: catalogs.long_desc", `ALTER TABLE partsetu_catalogs ADD COLUMN long_desc TEXT`);
+
+  // B4 — part category/subcategory auto-classification.
+  run("R27.partsetu-v1.4: parts.category", `ALTER TABLE partsetu_parts ADD COLUMN category TEXT`);
+  run("R27.partsetu-v1.4: parts.subcategory", `ALTER TABLE partsetu_parts ADD COLUMN subcategory TEXT`);
+
+  // B5 — spec extraction.
+  run("R27.partsetu-v1.4: partsetu_part_specs", `CREATE TABLE IF NOT EXISTS partsetu_part_specs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    part_id INTEGER NOT NULL,
+    spec_name TEXT NOT NULL,
+    spec_value TEXT,
+    unit TEXT,
+    source TEXT DEFAULT 'description_extracted',
+    confidence REAL DEFAULT 0.5,
+    source_doc_id INTEGER,
+    created_at INTEGER NOT NULL
+  )`);
+  run("R27.partsetu-v1.4: idx_part_specs_part", `CREATE INDEX IF NOT EXISTS idx_partsetu_part_specs_part ON partsetu_part_specs(part_id)`);
+
+  // C1 — comparative sheet (xref) source tracking.
+  run("R27.partsetu-v1.4: partsetu_xref_sources", `CREATE TABLE IF NOT EXISTS partsetu_xref_sources (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    source_name TEXT,
+    file_path TEXT,
+    row_count INTEGER DEFAULT 0,
+    source_brand TEXT,
+    uploaded_by TEXT,
+    uploaded_at INTEGER,
+    created_at INTEGER NOT NULL
+  )`);
+  run("R27.partsetu-v1.4: xref.source_file_id", `ALTER TABLE partsetu_xref ADD COLUMN source_file_id INTEGER`);
+
+  // C2 — price list uploads. HARD RULE: PartSetu prices come ONLY from this
+  // table + Narmada price_master, NEVER from partsetu_xref.
+  run("R27.partsetu-v1.4: partsetu_prices", `CREATE TABLE IF NOT EXISTS partsetu_prices (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    part_number TEXT,
+    oem TEXT,
+    mrp REAL,
+    dealer_price REAL,
+    currency TEXT DEFAULT 'INR',
+    effective_from INTEGER,
+    effective_to INTEGER,
+    source_file_id INTEGER,
+    created_at INTEGER NOT NULL
+  )`);
+  run("R27.partsetu-v1.4: idx_prices_pn_oem", `CREATE INDEX IF NOT EXISTS idx_partsetu_prices_pn_oem ON partsetu_prices(part_number, oem, effective_from DESC)`);
+  run("R27.partsetu-v1.4: partsetu_price_sources", `CREATE TABLE IF NOT EXISTS partsetu_price_sources (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    source_name TEXT,
+    file_path TEXT,
+    row_count INTEGER DEFAULT 0,
+    column_map_json TEXT,
+    uploaded_by TEXT,
+    uploaded_at INTEGER,
+    created_at INTEGER NOT NULL
+  )`);
+
+  // C3 — consumption reports.
+  run("R27.partsetu-v1.4: partsetu_consumption", `CREATE TABLE IF NOT EXISTS partsetu_consumption (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    customer_name TEXT,
+    customer_id INTEGER,
+    vehicle_chassis TEXT,
+    vehicle_reg TEXT,
+    vehicle_oem TEXT,
+    vehicle_model TEXT,
+    vehicle_variant TEXT,
+    part_number TEXT,
+    part_description TEXT,
+    qty REAL,
+    consumed_date INTEGER,
+    source_file_id INTEGER,
+    created_at INTEGER NOT NULL
+  )`);
+  run("R27.partsetu-v1.4: idx_consumption_pn", `CREATE INDEX IF NOT EXISTS idx_partsetu_consumption_pn ON partsetu_consumption(part_number)`);
+  run("R27.partsetu-v1.4: idx_consumption_chassis", `CREATE INDEX IF NOT EXISTS idx_partsetu_consumption_chassis ON partsetu_consumption(vehicle_chassis)`);
+  run("R27.partsetu-v1.4: partsetu_consumption_sources", `CREATE TABLE IF NOT EXISTS partsetu_consumption_sources (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    source_name TEXT,
+    file_path TEXT,
+    row_count INTEGER DEFAULT 0,
+    column_map_json TEXT,
+    uploaded_by TEXT,
+    uploaded_at INTEGER,
+    created_at INTEGER NOT NULL
+  )`);
+
+  // D1 — teaching module tables.
+  run("R27.partsetu-v1.4: partsetu_synonyms", `CREATE TABLE IF NOT EXISTS partsetu_synonyms (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    query_term TEXT NOT NULL,
+    expanded_terms_json TEXT NOT NULL,
+    catalog_id INTEGER,
+    taught_by TEXT,
+    source TEXT DEFAULT 'admin',
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL
+  )`);
+  // UNIQUE over (query_term, catalog_id) treating global (NULL) as 0 so
+  // INSERT OR IGNORE de-dupes global seeds on re-run.
+  run("R27.partsetu-v1.4: uniq_synonyms", `CREATE UNIQUE INDEX IF NOT EXISTS uniq_partsetu_synonyms ON partsetu_synonyms(query_term, COALESCE(catalog_id, 0))`);
+  run("R27.partsetu-v1.4: partsetu_answers", `CREATE TABLE IF NOT EXISTS partsetu_answers (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    catalog_id INTEGER,
+    query_pattern TEXT NOT NULL,
+    part_numbers_json TEXT,
+    notes TEXT,
+    taught_by TEXT,
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL
+  )`);
+  run("R27.partsetu-v1.4: partsetu_rules", `CREATE TABLE IF NOT EXISTS partsetu_rules (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    rule_text TEXT NOT NULL,
+    scope TEXT DEFAULT 'global',
+    priority INTEGER DEFAULT 50,
+    oem TEXT,
+    catalog_id INTEGER,
+    category TEXT,
+    active INTEGER DEFAULT 1,
+    taught_by TEXT,
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL
+  )`);
+  run("R27.partsetu-v1.4: partsetu_lessons_import", `CREATE TABLE IF NOT EXISTS partsetu_lessons_import (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    raw_text TEXT NOT NULL,
+    parsed_lessons_json TEXT,
+    status TEXT DEFAULT 'pending',
+    applied_at INTEGER,
+    taught_by TEXT,
+    created_at INTEGER NOT NULL
+  )`);
+
+  // F2 — Data Center demo admin user (admin_users; login path checks this table).
+  try {
+    const { scryptSync, randomBytes } = require("node:crypto");
+    const hash = (plain: string) => {
+      const salt = randomBytes(16).toString("hex");
+      return `${salt}:${scryptSync(plain, salt, 64).toString("hex")}`;
+    };
+    sqlite.prepare(
+      `INSERT OR IGNORE INTO admin_users (username, password_hash, role, display_name, active, created_at)
+       VALUES (?, ?, 'data_center', ?, 1, ?)`,
+    ).run("datacenter", hash("DataCenter@123"), "Data Center", Date.now());
+    console.log("[migrations] PartSetu: R27.partsetu-v1.4: datacenter user ok");
+  } catch (e: any) {
+    console.log(`[migrations] PartSetu: R27.partsetu-v1.4: datacenter user skip (${e?.message || e})`);
+  }
+
+  // G — seed Classes 1-3 lessons (rules + synonyms). Idempotent via NOT EXISTS /
+  // INSERT OR IGNORE so re-running this migration never duplicates.
+  try {
+    const ts = Date.now();
+    const seedRules: Array<{ text: string; scope: string; priority: number; oem: string | null }> = [
+      { text: "Never quote a confident part number when vehicle identification is incomplete. Required identifiers: chassis_no OR (oem + model + variant). If user provides only model name without variant, list available variants for that model and ask the user to pick. If the user insists despite incomplete info, return candidates explicitly labeled 'These MAY be candidates — confirm variant for exact answer.'", scope: "global", priority: 100, oem: null },
+      { text: "When a query relates to a specific OEM (detected from chassis prefix or explicit OEM mention), restrict catalog and parts search to that OEM only. Never mix Tata results into Leyland queries and vice versa.", scope: "global", priority: 95, oem: null },
+      { text: "Tata chassis numbers start with 'MAT' followed by exactly 6 numeric digits — those 6 digits are the unique match key. Everything after the 6 digits is garbage and must be ignored. Example: MAT862011XYZ123 -> match on '862011'. Even when a registration-lookup API returns a masked chassis, this 6-digit segment is typically visible and sufficient.", scope: "oem", priority: 90, oem: "Tata" },
+      { text: "Ashok Leyland chassis numbers start with 'M' but remainder is uneven length and alphanumeric. Use full-string substring matching (no fixed-length rule). Example pattern: MB1SAFR3R3R3RRWSD.", scope: "oem", priority: 90, oem: "Ashok Leyland" },
+      { text: "Model names are generic prefixes (e.g. TATA 2518). Variant names contain the model as prefix plus additional descriptors like emission stage, body type, drive code (e.g. TATA 2518 BS3 BOOGIE SUSPENSION). Catalogs are tied to variants, not models. When user gives only model, list variants we have catalogs for and let them pick.", scope: "global", priority: 85, oem: null },
+      { text: "When user provides only registration number, attempt to look up chassis via configured RC API. Most providers mask part of the chassis but typically leave the 6-digit Tata segment visible — that is enough. If lookup fails or returns insufficient data, ask user for owner-book variant name or chassis.", scope: "global", priority: 80, oem: null },
+      { text: "Drive codes encode tyre configuration. Mapping: 4x2 = 4 tyres, 4x4 = 4, 6x2 = 6, 6x4 = 10 (dual rear), 8x2 = 8, 8x4 = 12, AC10x2 = 12, 10x2 = 10, 10x4 = 14. When user query mentions tyre count without specifying vehicle, filter catalogs by tyre_count from the vehicle profile.", scope: "global", priority: 75, oem: null },
+      { text: "When user query has insufficient identifiers but mentions a vehicle attribute (e.g. '10 tyre me kaun sa air filter lgega?'), first scope by that attribute, then ask follow-up questions to narrow down: emission stage, OEM, model, variant. Only after enough narrowing, perform the part lookup.", scope: "global", priority: 75, oem: null },
+      { text: "When user asks about a specific part name (e.g. 'main shaft', 'clutch plate'), reason offline which category/subcategory that part belongs to (e.g. main shaft -> Transmission > Gearbox), then scope DB search to that subcategory within the locked catalog. Do NOT ask the user 'where is it fitted?' or 'which category?' — infer it.", scope: "global", priority: 70, oem: null },
+      { text: "PartSetu must never fabricate a confident answer from partial info. Either it has full variant lock -> exact answer. Or it asks. Or it lists candidates labeled 'candidates only'.", scope: "global", priority: 100, oem: null },
+      { text: "Detect language of each user message (Hindi / Hinglish / Urdu / English) and reply in the same language. Language detection is per-message, not per-session (users may switch).", scope: "global", priority: 60, oem: null },
+      { text: "When customer asks about any specification (dimension/thread/length/diameter/etc), return all known specs for the part in a clean table format, not just the one asked. If specs not available, say so honestly and suggest OEM manual or seller contact.", scope: "global", priority: 65, oem: null },
+      { text: "For each spec, prefer in order: (1) OEM original catalog, (2) component manufacturer catalog (Wabco/Bosch/etc), (3) admin-taught value, (4) auto-extracted from description. Always show the source.", scope: "global", priority: 65, oem: null },
+      { text: "Support both cross-fitment directions: (a) 'will part X fit my vehicle Y?' — check Y's catalog for X; if absent, check xref; (b) 'where does part X fit?' — reverse-lookup X across all catalogs, group results by OEM/model.", scope: "global", priority: 70, oem: null },
+      { text: "PartSetu prices come ONLY from partsetu_prices (price list uploads) and Narmada price_master. NEVER from partsetu_xref (comparative/Wabco sheet). The xref table is for cross-reference (which parts are equivalent), not pricing. This is a hard rule.", scope: "global", priority: 100, oem: null },
+      { text: "If PartSetu doesn't have the requested data (catalog not ingested, spec not extracted, price not loaded), say so plainly. Never invent. Suggest customer reach out to sales@Narmadamobility.com or seller for what we don't have.", scope: "global", priority: 80, oem: null },
+    ];
+    const insRule = sqlite.prepare(
+      `INSERT INTO partsetu_rules (rule_text, scope, priority, oem, catalog_id, category, active, taught_by, created_at, updated_at)
+       SELECT ?, ?, ?, ?, NULL, NULL, 1, 'seed-classes-1-3', ?, ?
+       WHERE NOT EXISTS (SELECT 1 FROM partsetu_rules WHERE rule_text = ? AND taught_by = 'seed-classes-1-3')`,
+    );
+    let rulesInserted = 0;
+    for (const r of seedRules) {
+      const res = insRule.run(r.text, r.scope, r.priority, r.oem, ts, ts, r.text);
+      rulesInserted += res.changes;
+    }
+
+    const seedSynonyms: Array<[string, string[]]> = [
+      ["clutch plate", ["clutch plate", "clutch disc", "driven plate", "pressure plate", "clutch disc assy", "clutch assembly", "plate clutch", "driven disc"]],
+      ["brake pad", ["brake pad", "brake lining", "brake shoe", "brake liner", "lining brake", "shoe brake"]],
+      ["air filter", ["air filter", "air cleaner", "filter air", "air filter element", "air cleaner element", "AFE"]],
+      ["oil filter", ["oil filter", "lube filter", "filter oil", "engine oil filter", "lubricating filter"]],
+      ["fuel filter", ["fuel filter", "diesel filter", "filter fuel", "fuel water separator", "FWS"]],
+      ["main shaft", ["main shaft", "mainshaft", "input shaft gearbox", "transmission main shaft"]],
+      ["UJ cross", ["UJ cross", "universal joint", "u-joint", "cardan cross", "spider cross", "cross kit"]],
+      ["wheel bearing", ["wheel bearing", "hub bearing", "bearing wheel", "taper roller bearing"]],
+      ["tie rod", ["tie rod", "track rod", "drag link", "steering tie rod", "tie rod end"]],
+      ["leaf spring", ["leaf spring", "spring leaf", "main leaf", "spring assembly", "rear spring", "front spring"]],
+    ];
+    const insSyn = sqlite.prepare(
+      `INSERT OR IGNORE INTO partsetu_synonyms (query_term, expanded_terms_json, catalog_id, taught_by, source, created_at, updated_at)
+       VALUES (?, ?, NULL, 'seed-classes-1-3', 'seed', ?, ?)`,
+    );
+    let synInserted = 0;
+    for (const [term, terms] of seedSynonyms) {
+      const res = insSyn.run(term.toLowerCase(), JSON.stringify(terms), ts, ts);
+      synInserted += res.changes;
+    }
+
+    const answersInserted = 0; // No seed direct-answer entries (framework only).
+    console.log(`[seed] PartSetu v1.4 lessons seeded: ${rulesInserted} rules, ${synInserted} synonyms, ${answersInserted} answers`);
+  } catch (e: any) {
+    console.log(`[migrations] PartSetu: R27.partsetu-v1.4: seed skip (${e?.message || e})`);
+  }
+
   console.log("[migrations] PartSetu: complete");
 }

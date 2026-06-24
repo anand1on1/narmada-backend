@@ -179,6 +179,11 @@ import AdminFreight from "@/pages/admin/AdminFreight";
 import AdminStock from "@/pages/admin/AdminStock";
 import AdminCatalogRequests from "@/pages/admin/AdminCatalogRequests";
 import AdminPartSetuCatalogs from "@/pages/admin/AdminPartSetuCatalogs";
+import AdminPartSetuXrefs from "@/pages/admin/AdminPartSetuXrefs";
+import AdminPartSetuPrices from "@/pages/admin/AdminPartSetuPrices";
+import AdminPartSetuConsumption from "@/pages/admin/AdminPartSetuConsumption";
+import AdminPartSetuTeach from "@/pages/admin/AdminPartSetuTeach";
+import AdminDataCenterDashboard from "@/pages/admin/AdminDataCenterDashboard";
 // R27.3 — Supreme AI Bar
 import AdminAIBar from "@/pages/admin/AdminAIBar";
 // R27.2 — Operations (expense approvals + deviations)
@@ -339,6 +344,11 @@ function AppRouter() {
         <Route path="/admin/web-customers" component={AdminShopCustomers} />
         <Route path="/admin/catalog-requests" component={AdminCatalogRequests} />
         <Route path="/admin/partsetu/catalogs" component={AdminPartSetuCatalogs} />
+        <Route path="/admin/partsetu/xrefs" component={AdminPartSetuXrefs} />
+        <Route path="/admin/partsetu/prices" component={AdminPartSetuPrices} />
+        <Route path="/admin/partsetu/consumption" component={AdminPartSetuConsumption} />
+        <Route path="/admin/partsetu/teach" component={AdminPartSetuTeach} />
+        <Route path="/datacenter/dashboard" component={AdminDataCenterDashboard} />
         <Route path="/admin/freight" component={AdminFreight} />
         <Route path="/admin/stock" component={AdminStock} />
         {/* R23.1 — owner Command Center */}

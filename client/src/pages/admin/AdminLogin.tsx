@@ -24,11 +24,12 @@ export default function AdminLogin() {
         return;
       }
       // Session A V2: pass role + displayName so context tracks them and we don't need a 2nd fetch
-      const role = (data.role || "admin") as "admin" | "logistics" | "accounts" | "sales";
+      const role = (data.role || "admin") as "admin" | "logistics" | "accounts" | "sales" | "data_center";
       setAuth(data.token, data.username, role, data.displayName || data.username);
       // Per-role redirect destination
       let redirectPath = '/admin/dashboard';
       if (role === 'logistics') redirectPath = '/admin/consignments';
+      else if (role === 'data_center') redirectPath = '/datacenter/dashboard';
       // (accounts and sales land on dashboard — Session B will add their dedicated pages)
       // Defer navigation so React commits the auth state first.
       setTimeout(() => {

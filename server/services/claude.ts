@@ -96,6 +96,16 @@ export async function callClaudeHaiku(
   return callWithRetry(HAIKU_MODEL, systemPrompt, messages as Msg[], maxTokens);
 }
 
+// PartSetu v1.4 — text-only Sonnet caller for ingest enrichment (profile/category/spec
+// extraction), lessons parsing, and chat-side classification where Haiku is too weak.
+export async function callClaudeSonnet(
+  systemPrompt: string,
+  messages: Array<{ role: "user" | "assistant"; content: string }>,
+  maxTokens = 2048,
+): Promise<ClaudeResult> {
+  return callWithRetry(SONNET_MODEL, systemPrompt, messages as Msg[], maxTokens);
+}
+
 export async function callClaudeSonnetVision(
   systemPrompt: string,
   userText: string,

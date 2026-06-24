@@ -9,6 +9,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { rawSqlite as db } from "../storage";
 import { copyToCatalog, getCatalogPdfPath, catalogPdfSize } from "./catalog-storage";
+import { enrichCatalog } from "./catalog-enrichment";
 
 function pdfText(pdfPath: string): string {
   return execFileSync("pdftotext", ["-layout", "-enc", "UTF-8", pdfPath, "-"], { maxBuffer: 512 * 1024 * 1024 }).toString("utf8");
@@ -155,9 +156,10 @@ export async function ingestCatalogPdf(opts: {
   pdfPath: string;
   uploadedBy: string;
   oem?: string;
+  chassisNo?: string;
   cleanupSrc?: boolean;
 }): Promise<IngestResult> {
-  const { pdfPath, uploadedBy, oem = "TATA", cleanupSrc = false } = opts;
+  const { pdfPath, uploadedBy, oem = "TATA", chassisNo, cleanupSrc = false } = opts;
   if (!fs.existsSync(pdfPath)) throw new Error(`PDF not found: ${pdfPath}`);
 
   const totalPages = pdfPageCount(pdfPath);
@@ -184,6 +186,16 @@ export async function ingestCatalogPdf(opts: {
       .run(finalPath, catalogPdfSize(catalogId), catalogId);
 
     const partsCount = parsePartsIntoCatalog(pages, catalogId);
+
+    // B1 — store the admin-provided chassis number (free-form alphanumeric).
+    if (chassisNo && chassisNo.trim()) {
+      db.prepare(`UPDATE partsetu_catalogs SET chassis_no = ? WHERE id = ?`).run(chassisNo.trim(), catalogId);
+    }
+
+    // B2/B3/B4/B5 — best-effort enrichment (OEM detect, profile, categories, specs).
+    try {
+      await enrichCatalog({ catalogId, coverText: pages[0] || "", firstPagesText: (pages[1] || "") + "\n" + (pages[2] || "") });
+    } catch (e: any) { console.warn("[catalog-ingester] enrichment failed:", e?.message || e); }
 
     db.prepare(`UPDATE partsetu_catalogs SET status = 'active', ingest_error = NULL WHERE id = ?`).run(catalogId);
     if (cleanupSrc) { try { fs.unlinkSync(pdfPath); } catch { /* non-fatal */ } }
@@ -215,6 +227,11 @@ export async function reingestCatalog(catalogId: number, uploadedBy: string): Pr
       .run(meta.model, meta.chassis, pdfPageCount(pdfPath) || pages.length, catalogPdfSize(catalogId), catalogId);
 
     const partsCount = parsePartsIntoCatalog(pages, catalogId);
+
+    // B2/B3/B4/B5 — re-run enrichment on re-ingest.
+    try {
+      await enrichCatalog({ catalogId, coverText: pages[0] || "", firstPagesText: (pages[1] || "") + "\n" + (pages[2] || "") });
+    } catch (e: any) { console.warn("[catalog-ingester] enrichment failed:", e?.message || e); }
 
     db.prepare(`UPDATE partsetu_catalogs SET status = 'active', ingest_error = NULL WHERE id = ?`).run(catalogId);
     return { catalogId, partsCount, vcNo: existing.vc_no, model: meta.model };

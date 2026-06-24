@@ -38,10 +38,42 @@ function writePersistent(key: string, terms: string[]): void {
   } catch { /* non-fatal */ }
 }
 
+// PartSetu v1.4 D3 — admin-taught synonyms override Claude expansion.
+// catalog-scoped entry (matching catalogId) wins over a global (NULL) one. When
+// a taught synonym exists we use it directly and skip the Claude call entirely
+// (the in-memory cache still applies on the next identical query).
+function readTaughtSynonym(key: string, catalogId?: number | null): string[] | null {
+  try {
+    const rows = db.prepare(
+      `SELECT expanded_terms_json, catalog_id FROM partsetu_synonyms WHERE LOWER(query_term) = ?`,
+    ).all(key) as Array<{ expanded_terms_json: string; catalog_id: number | null }>;
+    if (!rows.length) return null;
+    // Prefer the catalog-scoped match if a catalogId was supplied.
+    const scoped = catalogId != null ? rows.find((r) => r.catalog_id === catalogId) : undefined;
+    const chosen = scoped || rows.find((r) => r.catalog_id == null) || rows[0];
+    const arr = JSON.parse(chosen.expanded_terms_json);
+    if (Array.isArray(arr) && arr.length) {
+      return arr.filter((s: any) => typeof s === "string" && s.trim().length >= 1).map((s: string) => s.trim());
+    }
+  } catch { /* table may not exist on older DBs — fail open */ }
+  return null;
+}
+
 // Return the original query plus semantically-expanded catalogue phrasings.
-export async function expandPartQuery(query: string): Promise<string[]> {
+// catalogId (optional) lets catalog-scoped admin synonyms take precedence.
+export async function expandPartQuery(query: string, catalogId?: number | null): Promise<string[]> {
   const key = String(query || "").trim().toLowerCase();
   if (!key) return [];
+
+  // Admin-taught synonyms take highest precedence (catalog-scoped first).
+  const taught = readTaughtSynonym(key, catalogId);
+  if (taught) {
+    let terms = taught.slice();
+    if (!terms.some((t) => t.toLowerCase() === key)) terms.unshift(query.trim());
+    terms = Array.from(new Set(terms)).slice(0, 20);
+    return terms;
+  }
+
   if (memCache.has(key)) return memCache.get(key)!;
 
   const persisted = readPersistent(key);
