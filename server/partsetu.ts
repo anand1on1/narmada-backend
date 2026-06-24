@@ -303,17 +303,54 @@ export async function searchParts(query: string, limit = 5, catalogId?: number |
 }
 
 // Cross-reference lookup by either a source or a customer part number.
+// R27.20 — previously the entire user query (e.g. "264742300101 ka wabco number
+// kya hai") was normalized into one giant token and never matched. Now we
+// extract part-number-like tokens (≥6 alphanumeric chars) from the query and
+// look up each one. The whole-query normalize is kept as a final fallback.
 export function searchXref(query: string, limit = 5): XrefRow[] {
-  const pn = normalizePN(query);
-  if (pn.length < 4) return [];
-  return db.prepare(
+  const raw = String(query || "");
+  // Pull out part-number candidates: runs of alphanumerics ≥6 chars long.
+  // Tata/Leyland part numbers are typically 9-13 digits; Wabco is 9 digits.
+  const candidates = Array.from(
+    new Set(
+      (raw.toUpperCase().match(/[A-Z0-9][A-Z0-9\-]{5,}/g) || [])
+        .map((t) => t.replace(/[^A-Z0-9]/g, ""))
+        .filter((t) => t.length >= 6 && /\d/.test(t)),
+    ),
+  );
+  // Also include the fully-normalized whole-query (legacy behavior) as a
+  // last-resort match for short part numbers users may type bare.
+  const fullNorm = normalizePN(raw);
+  if (fullNorm.length >= 4 && fullNorm.length <= 20 && !candidates.includes(fullNorm)) {
+    candidates.push(fullNorm);
+  }
+  if (!candidates.length) return [];
+
+  const out: XrefRow[] = [];
+  const seenIds = new Set<number>();
+  const stmt = db.prepare(
     `SELECT * FROM partsetu_xref
      WHERE REPLACE(REPLACE(UPPER(source_part_no),'-',''),' ','') = ?
         OR REPLACE(REPLACE(UPPER(customer_part_no),'-',''),' ','') = ?
         OR REPLACE(REPLACE(UPPER(source_part_no),'-',''),' ','') LIKE ?
         OR REPLACE(REPLACE(UPPER(customer_part_no),'-',''),' ','') LIKE ?
      LIMIT ?`,
-  ).all(pn, pn, `%${pn}%`, `%${pn}%`, limit) as XrefRow[];
+  );
+  for (const cand of candidates) {
+    const rows = stmt.all(cand, cand, `%${cand}%`, `%${cand}%`, limit) as XrefRow[];
+    for (const r of rows) {
+      const id = (r as any).id as number;
+      if (id !== undefined && !seenIds.has(id)) {
+        seenIds.add(id);
+        out.push(r);
+        if (out.length >= limit) return out;
+      }
+    }
+  }
+  if (out.length) {
+    console.log(`[partsetu] xref_hits=${out.length} from candidates=[${candidates.join(",")}]`);
+  }
+  return out;
 }
 
 // ---- v1.4 D3: teaching integration (rules / answers) ----------------------
