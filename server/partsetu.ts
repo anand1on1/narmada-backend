@@ -81,7 +81,14 @@ export function setConversationChassis(conversationId: number, chassisNo: string
 // "VC: 51610568000R". Returns the captured token (uppercased) or null.
 export function extractChassisNo(text: string): string | null {
   const m = String(text || "").match(/\b(?:chassis|vc)\s*(?:no\.?|number|#)?\s*[:\-]?\s*([A-Za-z0-9]{4,})/i);
-  return m ? m[1].toUpperCase() : null;
+  if (m) return m[1].toUpperCase();
+  // Tata: 'MAT' + 6+ alphanumeric. Leyland: 'MB' + digits.
+  const t = String(text || "").toUpperCase();
+  const tata = t.match(/\bMAT[A-Z0-9]{6,}\b/);
+  if (tata) return tata[0];
+  const ley = t.match(/\bMB\d{6,}\b/);
+  if (ley) return ley[0];
+  return null;
 }
 
 // Resolve a catalogue from a model name mentioned in the user's text. We count
@@ -125,18 +132,47 @@ export function findCatalogByQuery(text: string): any {
 export function resolveCatalogFromChassis(chassisNo: string): any {
   const c = String(chassisNo || "").trim().toUpperCase().replace(/[^A-Z0-9]/g, "");
   if (c.length < 4) return null;
-  const exact = db.prepare(
+
+  // 1) Exact vc_no match.
+  const exactVc = db.prepare(
     `SELECT * FROM partsetu_catalogs WHERE REPLACE(REPLACE(UPPER(vc_no),'-',''),' ','') = ?`,
   ).get(c);
-  if (exact) return exact;
-  const like = `%${c}%`;
+  if (exactVc) return exactVc;
+
+  // 2) Exact chassis_no match (admin-provided during catalog upload).
+  const exactCh = db.prepare(
+    `SELECT * FROM partsetu_catalogs WHERE REPLACE(REPLACE(UPPER(chassis_no),'-',''),' ','') = ?`,
+  ).get(c);
+  if (exactCh) return exactCh;
+
+  // 3) Substring match: the user's chassis often CONTAINS the catalog's
+  // chassis_no as a suffix/middle (e.g. "MAT862011..." contains "862011"),
+  // OR the catalog's chassis_no contains the user's input.
+  const userInLike = `%${c}%`;
+  const subUserContainsCat = db.prepare(
+    `SELECT * FROM partsetu_catalogs
+     WHERE chassis_no IS NOT NULL
+       AND LENGTH(REPLACE(REPLACE(UPPER(chassis_no),'-',''),' ','')) >= 4
+       AND ? LIKE '%' || REPLACE(REPLACE(UPPER(chassis_no),'-',''),' ','') || '%'
+     LIMIT 1`,
+  ).get(c);
+  if (subUserContainsCat) return subUserContainsCat;
+
+  const subCatContainsUser = db.prepare(
+    `SELECT * FROM partsetu_catalogs
+     WHERE REPLACE(REPLACE(UPPER(chassis_no),'-',''),' ','') LIKE ?
+     LIMIT 1`,
+  ).get(userInLike);
+  if (subCatContainsUser) return subCatContainsUser;
+
+  // 4) Last resort: LIKE across vc_no / model / variant (current behavior).
   return db.prepare(
     `SELECT * FROM partsetu_catalogs
      WHERE REPLACE(REPLACE(UPPER(vc_no),'-',''),' ','') LIKE ?
         OR REPLACE(REPLACE(UPPER(model),'-',''),' ','') LIKE ?
         OR REPLACE(REPLACE(UPPER(variant),'-',''),' ','') LIKE ?
      LIMIT 1`,
-  ).get(like, like, like) || null;
+  ).get(userInLike, userInLike, userInLike) || null;
 }
 
 // Ensure a conversation is locked to a catalogue before we search. Order:
@@ -426,6 +462,10 @@ export async function buildContextBlock(
 
   const catalog = catalogContextId ? getCatalog(catalogContextId) : null;
 
+  console.log(
+    `[partsetu] catalog_resolved=${catalogContextId ?? "null"} chassis=${chassisNo ?? "-"} query="${query}"`,
+  );
+
   // v1.4 D3 — inject active teaching rules (highest authority) first.
   const rules = getActiveRules({ catalogId: catalogContextId ?? null, oem: catalog?.oem ?? null, category: null });
   if (rules.length) {
@@ -474,6 +514,11 @@ export async function buildContextBlock(
         ` | assembly: ${p.assembly_name || "-"} | group: ${p.group_code || "-"}` +
         ` | qty/assembly: ${p.qty ?? "-"}${p.remarks ? ` | remarks: ${p.remarks}` : ""}` +
         `${p.is_serviceable ? "" : " | NOT SERVICED"}`,
+      );
+    }
+    if (!catalogContextId) {
+      lines.push(
+        "NOTE: No vehicle is locked yet. The matches above are from across all catalogs. Present them and ASK the user to confirm the vehicle (chassis like 'MAT862011' / model like 'SIGNA 4232.TK') so we can narrow.",
       );
     }
   }
