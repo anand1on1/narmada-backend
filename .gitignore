@@ -7,3 +7,4 @@ uploads/
 .env
 *.log
 sessions.db
+scripts/test-xref-ingester.cjs
