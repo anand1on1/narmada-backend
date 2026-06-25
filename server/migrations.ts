@@ -3648,5 +3648,80 @@ export function runPartSetuMigrations() {
     }
   }
 
+  // ==================================================================
+  // R27.24a3 — Universal Vehicle Identifier (UVI) resolver backing store.
+  // Additive only: a side table of normalized identifier values (VC No, VDS,
+  // chassis prefix, OEM code, alias) keyed to a catalog, plus two optional
+  // columns on partsetu_catalogs. The table is auto-seeded from existing
+  // catalog columns so the resolver works on day one without any admin input.
+  // No existing table is dropped or renamed.
+  // ==================================================================
+  const r243 = (step: string, sql: string) => {
+    try { sqlite.exec(sql); console.log(`[migrations] R27.24a3: ${step} ok`); }
+    catch (e: any) {
+      const msg = String(e?.message || e);
+      if (/duplicate|already exists/i.test(msg)) console.log(`[migrations] R27.24a3: ${step} skip (${msg})`);
+      else console.log(`[migrations] R27.24a3: ${step} fail: ${msg}`);
+    }
+  };
+
+  r243("partsetu_vehicle_identifiers", `CREATE TABLE IF NOT EXISTS partsetu_vehicle_identifiers (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    catalog_id INTEGER NOT NULL,
+    identifier_type TEXT NOT NULL,
+    identifier_value TEXT NOT NULL,
+    normalized_value TEXT NOT NULL,
+    confidence REAL DEFAULT 1.0,
+    source TEXT DEFAULT 'admin',
+    created_at INTEGER NOT NULL,
+    FOREIGN KEY (catalog_id) REFERENCES partsetu_catalogs(id) ON DELETE CASCADE
+  )`);
+  r243("idx_pvi_value", `CREATE INDEX IF NOT EXISTS idx_pvi_value ON partsetu_vehicle_identifiers(identifier_value)`);
+  r243("idx_pvi_normalized", `CREATE INDEX IF NOT EXISTS idx_pvi_normalized ON partsetu_vehicle_identifiers(normalized_value)`);
+  r243("idx_pvi_catalog", `CREATE INDEX IF NOT EXISTS idx_pvi_catalog ON partsetu_vehicle_identifiers(catalog_id)`);
+  r243("idx_pvi_type_norm", `CREATE INDEX IF NOT EXISTS idx_pvi_type_norm ON partsetu_vehicle_identifiers(identifier_type, normalized_value)`);
+  // A unique key makes the auto-seed re-runnable (INSERT OR IGNORE no-ops on a
+  // second boot) without inventing a surrogate.
+  r243("idx_pvi_unique", `CREATE UNIQUE INDEX IF NOT EXISTS idx_pvi_unique ON partsetu_vehicle_identifiers(catalog_id, identifier_type, normalized_value)`);
+
+  // Optional additive columns (only added when missing).
+  const catCols = new Set((sqlite.prepare(`PRAGMA table_info(partsetu_catalogs)`).all() as any[]).map((c) => c.name));
+  if (catCols.has("chassis_prefix")) console.log("[migrations] R27.24a3: chassis_prefix already exists, skip");
+  else r243("partsetu_catalogs.chassis_prefix", `ALTER TABLE partsetu_catalogs ADD COLUMN chassis_prefix TEXT`);
+  if (catCols.has("vds_codes")) console.log("[migrations] R27.24a3: vds_codes already exists, skip");
+  else r243("partsetu_catalogs.vds_codes", `ALTER TABLE partsetu_catalogs ADD COLUMN vds_codes TEXT`);
+
+  // Auto-seed identifiers from existing catalog columns. Re-runnable via the
+  // unique index + INSERT OR IGNORE. Only seeds non-empty source values.
+  try {
+    const norm = (s: any) => String(s || "").toUpperCase().replace(/[\s\-._]/g, "");
+    const seedRows = sqlite.prepare(`SELECT id, vc_no, oem, chassis_no FROM partsetu_catalogs`).all() as any[];
+    const ins = sqlite.prepare(
+      `INSERT OR IGNORE INTO partsetu_vehicle_identifiers
+       (catalog_id, identifier_type, identifier_value, normalized_value, confidence, source, created_at)
+       VALUES (?, ?, ?, ?, 1.0, 'auto_seed', ?)`,
+    );
+    const now = Date.now();
+    let seeded = 0, catalogsTouched = 0;
+    for (const row of seedRows) {
+      let any = false;
+      const add = (type: string, value: any) => {
+        const v = String(value || "").trim();
+        if (!v) return;
+        const n = norm(v);
+        if (!n) return;
+        const info = ins.run(row.id, type, v, n, now);
+        if (info.changes) { seeded += info.changes; any = true; }
+      };
+      add("vc_no", row.vc_no);
+      add("oem_code", row.oem);
+      add("chassis_prefix", row.chassis_no);
+      if (any) catalogsTouched++;
+    }
+    console.log(`[migrations] R27.24a3: seeded ${seeded} identifiers from ${catalogsTouched} catalogs`);
+  } catch (e: any) {
+    console.log(`[migrations] R27.24a3: auto-seed fail: ${e?.message || e}`);
+  }
+
   console.log("[migrations] PartSetu: complete");
 }

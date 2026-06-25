@@ -8239,6 +8239,10 @@ function registerR8Routes(
   const claudeSvc = require("./services/claude") as typeof import("./services/claude");
   const partsetuIntent = require("./services/partsetu/intent") as typeof import("./services/partsetu/intent");
   const partsetuSearch = require("./services/partsetu/search") as typeof import("./services/partsetu/search");
+  const partsetuUvi = require("./services/partsetu/uvi-resolver") as typeof import("./services/partsetu/uvi-resolver");
+  // R27.24a3 — per-conversation disambiguation candidates, kept in-process so a
+  // numeric follow-up ("2") can resolve to the catalog offered last turn.
+  const uviDisambig = new Map<number, import("./services/partsetu/uvi-resolver").UviCandidate[]>();
 
   // R27.24a — citation guard. Strips any 8-14 digit number from the assistant
   // reply that was not present in the context we supplied (all DB-derived) and
@@ -8416,6 +8420,63 @@ ${contextBlock}`;
       }
 
       partsetuStore.addMessage({ conversationId: Number(conversationId), role: "user", content: String(content) });
+
+      // R27.24a3 — Universal Vehicle Identifier fast path. When the message is a
+      // vehicle identifier (MAT.., bare digits, or a registration prefix) we
+      // probe every identifier field in parallel and lock / disambiguate /
+      // ask BEFORE the part search. Non-identifier messages skip this entirely.
+      const uviInput = String(content).trim();
+      const uviSendReply = (text: string) => {
+        partsetuStore.addMessage({ conversationId: Number(conversationId), role: "assistant", content: text });
+        return res.json({ reply: text, requires_login: false, ai_available: true });
+      };
+      const circled = ["①", "②", "③", "④", "⑤"];
+      const candLabel = (c: import("./services/partsetu/uvi-resolver").UviCandidate) =>
+        [c.model, c.variant].filter(Boolean).join(" ") || `catalog #${c.catalog_id}`;
+
+      // (1) numeric follow-up to a prior disambiguation prompt.
+      const pendingCands = uviDisambig.get(Number(conversationId));
+      if (pendingCands && pendingCands.length && /^[1-9]\d?$/.test(uviInput)) {
+        const pick = Number(uviInput) - 1;
+        if (pick >= 0 && pick < pendingCands.length) {
+          const chosen = pendingCands[pick];
+          partsetuStore.setCatalogContext(Number(conversationId), chosen.catalog_id);
+          uviDisambig.delete(Number(conversationId));
+          return uviSendReply(`Locked to ${candLabel(chosen)}. What part are you looking for?`);
+        }
+      }
+
+      // (2) identifier-looking message and no catalog locked yet.
+      const looksLikeIdentifier = /^MAT/i.test(uviInput) || /^\d{4,17}$/.test(uviInput) || /^[A-Z]{2}\d{2}/i.test(uviInput);
+      if (!conv.catalog_context_id && looksLikeIdentifier) {
+        const uvi = await partsetuUvi.resolveVehicle(uviInput);
+        if (uvi.auto_lock) {
+          partsetuStore.setCatalogContext(Number(conversationId), uvi.auto_lock.catalog_id);
+          uviDisambig.delete(Number(conversationId));
+          return uviSendReply(`Locked to ${candLabel(uvi.auto_lock)} (matched on ${uvi.auto_lock.matched_strategies.join(", ")}). What part are you looking for?`);
+        }
+        if (uvi.candidates.length === 0) {
+          return uviSendReply(`I couldn't find a catalog matching '${uviInput}'. Could you share the model name (e.g. SIGNA 2823.K) or the full chassis number?`);
+        }
+        if (uvi.candidates.length >= 2 && uvi.needs_disambiguation) {
+          uviDisambig.set(Number(conversationId), uvi.candidates);
+          const lines = uvi.candidates.slice(0, 5).map((c, i) => `${circled[i] || `${i + 1}.`} ${candLabel(c)}`);
+          return uviSendReply(`I found multiple matches. Did you mean: ${lines.join(", ")}? Reply with the number.`);
+        }
+        const top = uvi.candidates[0];
+        const clearLead = uvi.candidates.length === 1 || (top.score - uvi.candidates[1].score) >= 15;
+        if (top.score >= 50 && clearLead) {
+          partsetuStore.setCatalogContext(Number(conversationId), top.catalog_id);
+          uviDisambig.delete(Number(conversationId));
+          return uviSendReply(`Locked to ${candLabel(top)} (matched on ${top.matched_strategies.join(", ")}). What part are you looking for?`);
+        }
+        if (uvi.candidates.length >= 2) {
+          uviDisambig.set(Number(conversationId), uvi.candidates);
+          const lines = uvi.candidates.slice(0, 5).map((c, i) => `${circled[i] || `${i + 1}.`} ${candLabel(c)}`);
+          return uviSendReply(`I found multiple matches. Did you mean: ${lines.join(", ")}? Reply with the number.`);
+        }
+        return uviSendReply(`I couldn't confidently match '${uviInput}'. Could you share the model name (e.g. SIGNA 2823.K) or the full chassis number?`);
+      }
 
       // R27.23 — chat-side resolver hierarchy: chassis → registration (VAHAN,
       // deferred) → model fuzzy. VC-number matching is no longer used on the
@@ -8687,6 +8748,67 @@ ${contextBlock}`;
          WHERE catalog_id = ? ORDER BY RANDOM() LIMIT ?`,
       ).all(catalogId, limit);
       res.json({ catalog_id: catalogId, catalog_label: label, total_parts: total, samples });
+    } catch (e: any) { res.status(500).json({ error: e?.message }); }
+  });
+
+  // R27.24a3 — Universal Vehicle Identifier resolver test endpoint. Returns the
+  // full ranked candidate list + auto-lock decision so an admin can probe any
+  // fragment (partial VC No, chassis prefix, model, OEM code) from a browser.
+  app.post("/api/admin/partsetu/uvi-resolve", requireDataCenterOrAdmin, async (req, res) => {
+    try {
+      const input = String(req.body?.input || "").trim();
+      if (!input) return res.status(400).json({ error: "input is required" });
+      const result = await partsetuUvi.resolveVehicle(input);
+      res.json(result);
+    } catch (e: any) { res.status(500).json({ error: e?.message }); }
+  });
+
+  // R27.24a3 — admin teaches the resolver a mapping (e.g. chassis '505409' →
+  // catalog 2). Future queries hit the identifier table instantly.
+  app.post("/api/admin/partsetu/identifiers/add", requireDataCenterOrAdmin, async (req, res) => {
+    try {
+      const catalogId = Number(req.body?.catalog_id);
+      const type = String(req.body?.identifier_type || "").trim();
+      const value = String(req.body?.identifier_value || "").trim();
+      if (!catalogId || !type || !value) {
+        return res.status(400).json({ error: "catalog_id, identifier_type and identifier_value are required" });
+      }
+      const cat = rawSqlite.prepare(`SELECT id FROM partsetu_catalogs WHERE id = ?`).get(catalogId);
+      if (!cat) return res.status(404).json({ error: "catalog not found" });
+      const normalized = value.toUpperCase().replace(/[\s\-._]/g, "");
+      const info = rawSqlite.prepare(
+        `INSERT OR IGNORE INTO partsetu_vehicle_identifiers
+         (catalog_id, identifier_type, identifier_value, normalized_value, confidence, source, created_at)
+         VALUES (?, ?, ?, ?, 1.0, 'user_confirmed', ?)`,
+      ).run(catalogId, type, value, normalized, Date.now());
+      if (!info.changes) {
+        const existing = rawSqlite.prepare(
+          `SELECT id FROM partsetu_vehicle_identifiers WHERE catalog_id = ? AND identifier_type = ? AND normalized_value = ?`,
+        ).get(catalogId, type, normalized) as any;
+        return res.json({ ok: true, id: existing?.id ?? null, existed: true });
+      }
+      res.json({ ok: true, id: Number(info.lastInsertRowid) });
+    } catch (e: any) { res.status(500).json({ error: e?.message }); }
+  });
+
+  app.get("/api/admin/partsetu/identifiers/list", requireDataCenterOrAdmin, async (req, res) => {
+    try {
+      const catalogId = Number(req.query.catalog_id);
+      if (!catalogId) return res.status(400).json({ error: "catalog_id is required" });
+      const rows = rawSqlite.prepare(
+        `SELECT id, catalog_id, identifier_type, identifier_value, normalized_value, confidence, source, created_at
+         FROM partsetu_vehicle_identifiers WHERE catalog_id = ? ORDER BY identifier_type, identifier_value`,
+      ).all(catalogId);
+      res.json({ catalog_id: catalogId, identifiers: rows });
+    } catch (e: any) { res.status(500).json({ error: e?.message }); }
+  });
+
+  app.delete("/api/admin/partsetu/identifiers/:id", requireDataCenterOrAdmin, async (req, res) => {
+    try {
+      const id = Number(req.params.id);
+      if (!id) return res.status(400).json({ error: "id is required" });
+      const info = rawSqlite.prepare(`DELETE FROM partsetu_vehicle_identifiers WHERE id = ?`).run(id);
+      res.json({ ok: true, deleted: info.changes });
     } catch (e: any) { res.status(500).json({ error: e?.message }); }
   });
 
