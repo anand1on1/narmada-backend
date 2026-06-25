@@ -2,6 +2,7 @@
 // Kept separate from storage-v2/storage-r27 so the chatbot feature is self-contained.
 import { rawSqlite as db } from "./storage";
 import { expandPartQuery } from "./services/keyword-expander";
+import { lookupVahanByRegistration } from "./services/vahan";
 
 export interface PartRow {
   id: number;
@@ -173,6 +174,197 @@ export function resolveCatalogFromChassis(chassisNo: string): any {
         OR REPLACE(REPLACE(UPPER(variant),'-',''),' ','') LIKE ?
      LIMIT 1`,
   ).get(userInLike, userInLike, userInLike) || null;
+}
+
+// ---- R27.23: chat-side resolver hierarchy ---------------------------------
+// The customer chat path must identify the vehicle through a strict ordered
+// hierarchy — chassis (strongest) → registration (VAHAN, deferred) → model
+// fuzzy match (weakest). VC-number matching from free text is REMOVED here:
+// VC numbers are an internal catalogue key, not something a customer types, and
+// matching on them produced false locks. (Admin endpoints may still use
+// resolveCatalogFromChassis / vc_no — this is the chat-only resolver.)
+
+export interface CatalogCandidate {
+  catalog_id: number;
+  model: string | null;
+  variant: string | null;
+  vc_no: string | null;
+  score: number;
+}
+export type ResolveResult =
+  | { kind: "exact"; catalog_id: number }
+  | { kind: "suggest"; candidates: CatalogCandidate[] }
+  | { kind: "none" };
+
+// Step 1 helper — pull chassis/VIN-like tokens (15-17 alphanumerics) out of the
+// text. Recognises Indian OEM prefixes plus any 17-char VIN.
+export function extractChassisTokens(text: string): string[] {
+  const up = String(text || "").toUpperCase();
+  const out = new Set<string>();
+  // OEM-prefixed chassis numbers (15-17 alphanumerics).
+  const prefixed = up.match(/\b(?:MAT|MB1|MB7|MA1|MEC)[A-Z0-9]{12,14}\b/g) || [];
+  for (const t of prefixed) out.add(t);
+  // Any 17-char VIN (excludes I, O, Q per ISO 3779).
+  const vins = up.match(/\b[A-HJ-NPR-Z0-9]{17}\b/g) || [];
+  for (const t of vins) out.add(t);
+  return Array.from(out);
+}
+
+// Step 2 helper — pull an Indian registration number out of the text.
+export function extractRegistrationNo(text: string): string | null {
+  const m = String(text || "").toUpperCase().match(/\b[A-Z]{2}\s*\d{1,2}\s*[A-Z]{1,3}\s*\d{1,4}\b/);
+  return m ? m[0].replace(/\s+/g, "") : null;
+}
+
+// Step 3 helper — pull a model-spec phrase out of the text (model code + optional
+// emission / drive / suffix). Returns a normalised query string or null.
+const MODEL_CODE_RE = /\b(LPK|LPS|LPT|SIGNA|PRIMA|ULTRA|INTRA|XENON|MAGIC|ACE|YODHA)\s*\d+(?:\.\d+)?(?:\.[A-Z]+)?/i;
+const EMISSION_TOKEN_RE = /\b(BS6-PH2|BS6-PH1|BS6|BS4|CNG|LNG|EV)\b/i;
+const DRIVE_TOKEN_RE = /\b\d+x\d+\b/i;
+const SUFFIX_TOKEN_RE = /\.(K|S|TK|HD)\b/i;
+
+export function extractModelQuery(text: string): string | null {
+  const raw = String(text || "");
+  const code = raw.match(MODEL_CODE_RE);
+  if (!code) return null;
+  const parts: string[] = [code[0]];
+  const emission = raw.match(EMISSION_TOKEN_RE);
+  if (emission) parts.push(emission[1]);
+  const drive = raw.match(DRIVE_TOKEN_RE);
+  if (drive) parts.push(drive[0]);
+  const suffix = raw.match(SUFFIX_TOKEN_RE);
+  if (suffix && !code[0].toUpperCase().includes(`.${suffix[1].toUpperCase()}`)) parts.push(`.${suffix[1]}`);
+  return parts.join(" ").replace(/\s+/g, " ").trim().toUpperCase();
+}
+
+function tokenizeModel(s: string): string[] {
+  return String(s || "")
+    .toUpperCase()
+    .split(/[\s,;/]+/)
+    .map((t) => t.replace(/[^A-Z0-9.]/g, "").trim())
+    .filter((t) => t.length >= 2 || /\d/.test(t));
+}
+
+// Score a model query against a catalog row: token-overlap (Jaccard-ish) plus
+// small bonuses when emission/drive tokens from the query appear in the catalog.
+function scoreModelMatch(queryTokens: string[], catalog: any): number {
+  const hay = `${catalog.model || ""} ${catalog.variant || ""} ${catalog.emission_stage || ""} ${catalog.drive_type || ""}`.toUpperCase();
+  if (!queryTokens.length) return 0;
+  let hits = 0;
+  for (const t of queryTokens) if (hay.includes(t)) hits += 1;
+  let score = hits / queryTokens.length;
+  // Emission / drive confirmation bonuses (capped at 1.0).
+  const em = queryTokens.find((t) => /^BS|CNG|LNG|EV/.test(t));
+  if (em && (catalog.emission_stage || "").toUpperCase().replace(/\s+/g, "").includes(em)) score += 0.1;
+  const dr = queryTokens.find((t) => /^\d+X\d+$/.test(t));
+  if (dr && (catalog.drive_type || "").toUpperCase().replace(/\s+/g, "").includes(dr)) score += 0.1;
+  return Math.min(score, 1);
+}
+
+// The chat-side resolver. Identifies the vehicle through the ordered hierarchy
+// and returns a discriminated union. `extra` lets the caller inject chassis/reg
+// values already extracted elsewhere (e.g. from an RC-book image).
+export async function resolveCatalog(
+  text: string,
+  extra?: { chassisNo?: string | null; registrationNo?: string | null },
+): Promise<ResolveResult> {
+  // Step 1 — chassis.
+  const chassisTokens = extractChassisTokens(text);
+  if (extra?.chassisNo) {
+    const c = String(extra.chassisNo).toUpperCase().replace(/[^A-Z0-9]/g, "");
+    if (c.length >= 6 && !chassisTokens.includes(c)) chassisTokens.unshift(c);
+  }
+  for (const tok of chassisTokens) {
+    const row = db.prepare(
+      `SELECT * FROM partsetu_catalogs
+       WHERE chassis_no = ? OR chassis_no LIKE ? || '%'
+       LIMIT 1`,
+    ).get(tok, tok) as any;
+    if (row) {
+      console.log(`[partsetu] resolve_chassis=${tok} → catalog_id=${row.id}`);
+      return { kind: "exact", catalog_id: row.id };
+    }
+    console.log(`[partsetu] resolve_chassis=${tok} → NO_MATCH`);
+  }
+
+  // Step 2 — registration (VAHAN, deferred stub).
+  const regNo = extra?.registrationNo
+    ? String(extra.registrationNo).toUpperCase().replace(/[^A-Z0-9]/g, "")
+    : extractRegistrationNo(text);
+  if (regNo) {
+    const vahan = await lookupVahanByRegistration(regNo);
+    if (vahan) {
+      // VAHAN resolved → try to lock the catalogue by its returned chassis or model.
+      if (vahan.chassis_no) {
+        const c = String(vahan.chassis_no).toUpperCase().replace(/[^A-Z0-9]/g, "");
+        const row = db.prepare(
+          `SELECT * FROM partsetu_catalogs WHERE chassis_no = ? OR chassis_no LIKE ? || '%' LIMIT 1`,
+        ).get(c, c) as any;
+        if (row) {
+          console.log(`[partsetu] resolve_registration=${regNo} → vahan chassis=${c} → catalog_id=${row.id}`);
+          return { kind: "exact", catalog_id: row.id };
+        }
+      }
+      if (vahan.model) {
+        const modelResult = resolveByModel(`${vahan.model} ${vahan.variant || ""}`.trim());
+        if (modelResult) return modelResult;
+      }
+    }
+    // Stub returns null today; vahan.ts already logs the DEFERRED line.
+  }
+
+  // Step 3 + 4 — model fuzzy match.
+  const modelQuery = extractModelQuery(text);
+  if (modelQuery) {
+    const result = resolveByModel(modelQuery);
+    if (result) return result;
+  }
+
+  return { kind: "none" };
+}
+
+// Shared model-resolution used by Step 3 (and by the VAHAN model fallback).
+// Scores all catalogs by token overlap and applies the Step-4 ambiguity rule.
+function resolveByModel(modelQuery: string): ResolveResult | null {
+  const q = String(modelQuery || "").toUpperCase().replace(/\s+/g, " ").trim();
+  if (!q) return null;
+  const tokens = tokenizeModel(q);
+  if (!tokens.length) return null;
+
+  // Pre-filter with a LIKE on the first (model-code) token to keep scoring cheap.
+  const codeTok = tokens[0];
+  const rows = db.prepare(
+    `SELECT * FROM partsetu_catalogs WHERE LOWER(model) LIKE LOWER('%' || ? || '%')`,
+  ).all(codeTok) as any[];
+  const pool = rows.length ? rows : (db.prepare(`SELECT * FROM partsetu_catalogs`).all() as any[]);
+
+  const scored = pool
+    .map((c) => ({ c, score: scoreModelMatch(tokens, c) }))
+    .filter((x) => x.score > 0)
+    .sort((a, b) => b.score - a.score);
+
+  if (!scored.length) {
+    console.log(`[partsetu] resolve_model="${q}" candidates=0 top=NO_MATCH`);
+    return null;
+  }
+
+  const top = scored[0];
+  console.log(`[partsetu] resolve_model="${q}" candidates=${scored.length} top=catalog_id=${top.c.id} score=${top.score.toFixed(3)}`);
+
+  // Step 4 — ambiguity: multiple near-equal scores OR a weak top score → suggest.
+  const runnerUp = scored[1];
+  const ambiguous = runnerUp != null && top.score - runnerUp.score < 0.1;
+  if (top.score < 0.65 || ambiguous) {
+    const candidates: CatalogCandidate[] = scored.slice(0, 5).map((x) => ({
+      catalog_id: x.c.id,
+      model: x.c.model ?? null,
+      variant: x.c.variant ?? null,
+      vc_no: x.c.vc_no ?? null,
+      score: Number(x.score.toFixed(3)),
+    }));
+    return { kind: "suggest", candidates };
+  }
+  return { kind: "exact", catalog_id: top.c.id };
 }
 
 // Ensure a conversation is locked to a catalogue before we search. Order:
@@ -483,6 +675,48 @@ export function detectLanguage(text: string): "Hindi" | "Urdu" | "Hinglish" | "E
   const hits = HINGLISH_WORDS.filter((w) => new RegExp(`\\b${w}\\b`).test(lc)).length;
   if (hits >= 1) return "Hinglish";
   return "English";
+}
+
+// ---- R27.23: last-mile banned-phrase guard ---------------------------------
+// Bandage over the model occasionally ignoring the no-pleasantries prompt rule:
+// strip canned opener/closer phrases at the very start or end of the reply.
+// Applied after Sonnet, before the reply is sent.
+const BANNED_LEADING = [
+  /^thank you for your query[!.]?\s*/i,
+  /^aapke sawal ke liye dhanyawad[!.]?\s*/i,
+  /^i'?d be happy to help[!.]?\s*/i,
+  /^of course[!.]?\s*/i,
+  /^sure[!.]?\s*/i,
+  /^absolutely[!.]?\s*/i,
+];
+const BANNED_TRAILING = [
+  /\s*let me know if you need[^.\n]*[.!]?\s*$/i,
+  /\s*feel free to ask[^.\n]*[.!]?\s*$/i,
+  /\s*would you like me to[^.\n]*[?.!]?\s*$/i,
+];
+export function stripBannedPhrases(reply: string): string {
+  let out = String(reply || "");
+  let count = 0;
+  // Leading openers — strip repeatedly in case several are stacked.
+  let changed = true;
+  while (changed) {
+    changed = false;
+    for (const re of BANNED_LEADING) {
+      const next = out.replace(re, "");
+      if (next !== out) { out = next.replace(/^\s+/, ""); count += 1; changed = true; }
+    }
+  }
+  // Trailing closers.
+  changed = true;
+  while (changed) {
+    changed = false;
+    for (const re of BANNED_TRAILING) {
+      const next = out.replace(re, "");
+      if (next !== out) { out = next.replace(/\s+$/, ""); count += 1; changed = true; }
+    }
+  }
+  if (count > 0) console.log(`[partsetu] stripped_banned_phrases=${count}`);
+  return out.trim();
 }
 
 // Build the context block injected into the Claude system prompt. Note: this

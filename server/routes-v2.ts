@@ -8283,6 +8283,28 @@ HARD RULES (highest priority — never break these):
 8. If the CONTEXT begins with "CHASSIS PROVIDED BUT UNRESOLVED", do NOT answer the part query yet — first ask the user to confirm the vehicle model (e.g. 'SIGNA 4232.TK'), since the chassis number could not be matched to a catalogue.
 9. Be concise and professional. Use 'seller' (not 'supplier') if you refer to the vendor side.
 
+A. IDENTIFICATION HIERARCHY ENFORCEMENT (R27.23):
+- You MUST identify the customer's vehicle before answering ANY part query. Identify in this order of strength: chassis number (strongest) → registration number (VAHAN — mention "VAHAN integration coming soon" ONLY if the customer insists on using the registration) → model + emission + drive + body (weakest).
+- If the CONTEXT shows "RESOLVER: NONE" (no vehicle identified yet), do NOT answer the part query. Ask, in the customer's language: "अपनी गाड़ी identify karne ke liye chassis number ya registration number bhejein."
+- If the CONTEXT shows "RESOLVER: SUGGEST" with a numbered candidate list, present those options (max 5) and ask the customer to pick: "Closest matches mile — kaun sa aap ka hai? 1. SIGNA 2818.K — TC ISBe5.6 BS6-PH2 AC 39W ... Select number bhejein." Use the exact models/variants from the list — do not invent any.
+- If the CONTEXT shows "RESOLVER: NONE" after the customer has given a chassis/model that simply isn't in our data, offer to forward: "Is chassis/model ka catalogue data nahi mila. Sales team ko forward kar doon? (Y/N)"
+- NEVER invent OEM / model / variant / chassis_no / vc_no / emission_stage / body_type / drive_type / tyre_count / fuel_type / engine_family. These come ONLY from the catalogs table data shown in CONTEXT.
+
+B. REPLY STYLE RULES (R27.23):
+- Max 4 short lines for simple queries. Use a table only for 3+ parts.
+- NEVER begin a reply with "Thank you" / "dhanyawad" / "Sure!" / "I'd be happy to" / "Of course".
+- NEVER restate the customer's question. NEVER use emoji headers.
+- NEVER end with "Let me know if..." / "Feel free to ask..." / "Would you like me to..." UNLESS you are offering a Catalog Request.
+- Mirror the customer's language EXACTLY (Hindi→Hindi, English→English, Hinglish→Hinglish).
+- Part-number format: "<Part Name> — <Part No>" then on the next line "(Catalog: <Model> <Variant>)".
+- When a vehicle is locked, confirm once: "Vehicle locked: <Model> <Variant> (<emission>)" then "Kaun sa part chahiye?".
+- No-match: "Is chassis/model ka catalog nahi mila. Sales team ko forward karoon? (Y/N)".
+- GOOD examples: "LPK 2821 5L BS6-PH2 ka catalog DB mein nahi mila. Sales team ko forward karoon? (Y/N)"; "Pehle vehicle identify karein — chassis number ya registration number bhejein."; "Clutch Plate — 264742300101\n(Catalog: SIGNA 2818.K)".
+
+C. HALLUCINATION GUARD (R27.23):
+- If there is no exact vehicle match (RESOLVER: NONE or SUGGEST), you MUST NOT invent OEM names, drive configs, tyre counts, emission stages, fuel types, body types, or part numbers.
+- The catalogs table is the ONLY source of truth for vehicle specs; the parts table is the ONLY source of truth for part numbers. If it is not in the CONTEXT, you do not know it.
+
 Response format when CATALOG MATCHES are present:
 - Lead with the best-fit part number(s) verbatim and the description, scoped to the locked vehicle (if any).
 - If multiple variants exist (e.g. BS6 vs BS6-PH2, standard vs PROLIFE), list them as separate lines and note the difference.
@@ -8344,26 +8366,42 @@ ${contextBlock}`;
 
       partsetuStore.addMessage({ conversationId: Number(conversationId), role: "user", content: String(content) });
 
-      // v1.2: lock the conversation to a vehicle catalogue (by model name in the
-      // text, then by chassis/VC number) before searching, so generic queries
-      // are scoped to one catalogue instead of matching noise across all OEMs.
-      const catalogId = partsetuStore.ensureCatalogContext(Number(conversationId), String(content));
+      // R27.23 — chat-side resolver hierarchy: chassis → registration (VAHAN,
+      // deferred) → model fuzzy. VC-number matching is no longer used on the
+      // chat path. An already-locked catalogue (from a prior turn) is kept.
+      let catalogId: number | null = conv.catalog_context_id || null;
+      let resolverNote = "";
+      if (!catalogId) {
+        const resolved = await partsetuStore.resolveCatalog(String(content));
+        if (resolved.kind === "exact") {
+          catalogId = resolved.catalog_id;
+          partsetuStore.setCatalogContext(Number(conversationId), catalogId);
+        } else if (resolved.kind === "suggest") {
+          const lines = resolved.candidates.map((c: any, i: number) =>
+            `${i + 1}. ${[c.model, c.variant].filter(Boolean).join(" ") || "(unnamed)"} — vc ${c.vc_no || "-"} (score ${c.score})`);
+          resolverNote = `RESOLVER: SUGGEST — closest catalogue matches (present these numbered, max 5, ask the customer to pick; invent nothing):\n${lines.join("\n")}\n`;
+        } else {
+          resolverNote = "RESOLVER: NONE — no vehicle identified yet. Do NOT answer the part query; ask the customer for a chassis or registration number (per HARD RULE A).\n";
+        }
+      }
       const convNow = partsetuStore.getConversation(Number(conversationId));
-      const contextBlock = await partsetuStore.buildContextBlock(String(content), catalogId, convNow?.chassis_no || null);
+      let contextBlock = await partsetuStore.buildContextBlock(String(content), catalogId, convNow?.chassis_no || null);
+      if (resolverNote) contextBlock = `${resolverNote}\n${contextBlock}`;
       const history = partsetuHistory(Number(conversationId));
       // R27.17 — upgrade chat model from Haiku to Sonnet. Haiku was missing
       // CATALOG MATCHES and falling back to "not available" boilerplate even
       // when the right part was sitting in the context block. Haiku continues
       // to be used for keyword expansion (fast, cheap, structured JSON only).
       const result = await claudeSvc.callClaudeSonnet(PARTSETU_SYSTEM(contextBlock), history);
+      const replyText = partsetuStore.stripBannedPhrases(result.text);
 
       partsetuStore.addMessage({
-        conversationId: Number(conversationId), role: "assistant", content: result.text,
+        conversationId: Number(conversationId), role: "assistant", content: replyText,
         aiModel: result.model, inputTokens: result.inputTokens, outputTokens: result.outputTokens,
         costUsd: result.costUsd, latencyMs: result.latencyMs,
       });
 
-      res.json({ reply: result.text, requires_login: false, ai_available: result.ok });
+      res.json({ reply: replyText, requires_login: false, ai_available: result.ok });
     } catch (e: any) { res.status(500).json({ error: e?.message || "Message failed" }); }
   });
 
@@ -8387,19 +8425,45 @@ ${contextBlock}`;
       const ext = path.extname(file.filename).toLowerCase();
       const mediaType: any = ext === ".png" ? "image/png" : ext === ".webp" ? "image/webp" : ext === ".gif" ? "image/gif" : "image/jpeg";
       const base64 = fs.readFileSync(file.path).toString("base64");
-      const imgCatalogId = partsetuStore.ensureCatalogContext(conversationId, userText);
+
+      // R27.23 — RC-book / owner's-manual extraction: when the attached image
+      // may carry vehicle identity AND the text has no chassis/reg, ask Haiku
+      // Vision for chassis/registration/model, then drive the resolver with it.
+      let imgCatalogId: number | null = convRow?.catalog_context_id || null;
+      if (!imgCatalogId && !partsetuStore.extractChassisTokens(userText).length && !partsetuStore.extractRegistrationNo(userText)) {
+        try {
+          const rcSystem = "You are extracting vehicle identity from an Indian vehicle RC book / owner's manual / registration document image. Return ONLY a JSON object with keys chassis (string|null), registration (string|null), model (string|null), variant (string|null), emission (string|null). Set a field null if not clearly visible. Do not guess.";
+          const rc = await claudeSvc.callClaudeHaikuVision(rcSystem, "Extract chassis number, registration number, model, variant, emission stage from this image as JSON.", base64, mediaType);
+          let parsed: any = null;
+          if (rc.ok && rc.text) { try { parsed = JSON.parse(rc.text.replace(/^```(?:json)?\s*|\s*```$/g, "").trim()); } catch { parsed = null; } }
+          const rcChassis = parsed?.chassis || null;
+          const rcReg = parsed?.registration || null;
+          console.log(`[partsetu] rc_book_extract chassis=${rcChassis || "null"} reg=${rcReg || "null"} model=${parsed?.model || "null"}`);
+          if (rcChassis || rcReg) {
+            const resolved = await partsetuStore.resolveCatalog(userText, { chassisNo: rcChassis, registrationNo: rcReg });
+            if (resolved.kind === "exact") {
+              imgCatalogId = resolved.catalog_id;
+              partsetuStore.setCatalogContext(conversationId, imgCatalogId);
+            }
+          }
+        } catch (e: any) {
+          console.warn(`[partsetu] rc_book_extract ERROR: ${e?.message || e}`);
+        }
+      }
+      if (!imgCatalogId) imgCatalogId = partsetuStore.ensureCatalogContext(conversationId, userText);
       const imgConvNow = partsetuStore.getConversation(conversationId);
       const imgContext = await partsetuStore.buildContextBlock(userText, imgCatalogId, imgConvNow?.chassis_no || null);
       const visionSystem = PARTSETU_SYSTEM(imgContext) +
         "\n\nThe user has attached a photo of a part. Describe the part you see and, using the CONTEXT, suggest likely matching part number(s). Never invent a number, and never mention price.";
       const result = await claudeSvc.callClaudeSonnetVision(visionSystem, userText, base64, mediaType);
+      const imgReply = partsetuStore.stripBannedPhrases(result.text);
 
       partsetuStore.addMessage({
-        conversationId, role: "assistant", content: result.text,
+        conversationId, role: "assistant", content: imgReply,
         aiModel: result.model, inputTokens: result.inputTokens, outputTokens: result.outputTokens,
         costUsd: result.costUsd, latencyMs: result.latencyMs,
       });
-      res.json({ reply: result.text, imageUrl, ai_available: result.ok });
+      res.json({ reply: imgReply, imageUrl, ai_available: result.ok });
     } catch (e: any) { res.status(500).json({ error: e?.message || "Image upload failed" }); }
   });
 
@@ -8547,9 +8611,53 @@ ${contextBlock}`;
       const id = Number(req.params.id);
       rawSqlite.prepare(`UPDATE partsetu_conversations SET catalog_context_id = NULL WHERE catalog_context_id = ?`).run(id);
       rawSqlite.prepare(`DELETE FROM partsetu_parts WHERE catalog_id = ?`).run(id);
+      rawSqlite.prepare(`DELETE FROM partsetu_catalog_images WHERE catalog_id = ?`).run(id);
       rawSqlite.prepare(`DELETE FROM partsetu_catalogs WHERE id = ?`).run(id);
       catalogStorage.deleteCatalogPdf(id);
       res.json({ deleted: true });
+    } catch (e: any) { res.status(500).json({ error: e?.message }); }
+  });
+
+  // R27.23 — serve an embedded catalog image for a page. Picks the lowest
+  // image_index for that page. Streams from local disk or redirects to a
+  // presigned R2 URL depending on where the image was stored at ingest.
+  async function servePartsetuImage(catalogId: number, pageNo: number, res: Response): Promise<void> {
+    const row = rawSqlite.prepare(
+      `SELECT * FROM partsetu_catalog_images WHERE catalog_id = ? AND page_no = ? ORDER BY image_index ASC LIMIT 1`,
+    ).get(catalogId, pageNo) as any;
+    if (!row) { res.status(404).json({ error: "Image not found" }); return; }
+    const fmt = (row.format || "png").toLowerCase();
+    const contentType = fmt === "jpg" || fmt === "jpeg" ? "image/jpeg" : fmt === "webp" ? "image/webp" : "image/png";
+    console.log(`[partsetu] serve_image catalog=${catalogId} page=${pageNo}`);
+    if (row.storage_type === "local" && row.local_path) {
+      if (!fs.existsSync(row.local_path)) { res.status(404).json({ error: "Image file missing on disk" }); return; }
+      res.setHeader("Content-Type", contentType);
+      res.sendFile(path.resolve(row.local_path));
+      return;
+    }
+    if (row.storage_type === "r2" && row.r2_key) {
+      const r2 = require("./services/r2-storage") as typeof import("./services/r2-storage");
+      const url = await r2.getStorageBackend().getFileUrl(row.r2_key, "r2");
+      res.redirect(url);
+      return;
+    }
+    res.status(404).json({ error: "Image has no resolvable storage location" });
+  }
+
+  app.get("/api/admin/partsetu/catalog-images/:catalogId/page-:page.:ext", requireDataCenterOrAdmin, async (req, res) => {
+    try {
+      await servePartsetuImage(Number(req.params.catalogId), Number(req.params.page), res);
+    } catch (e: any) { res.status(500).json({ error: e?.message }); }
+  });
+
+  // Public chat-side image: token must be a valid chat session id (partsetu_conversations).
+  app.get("/api/partsetu/catalog-images/:catalogId/page-:page.:ext", async (req, res) => {
+    try {
+      const token = String(req.query.token || "");
+      if (!token) return res.status(401).json({ error: "token required" });
+      const conv = rawSqlite.prepare(`SELECT id FROM partsetu_conversations WHERE id = ?`).get(Number(token)) as any;
+      if (!conv) return res.status(403).json({ error: "invalid session token" });
+      await servePartsetuImage(Number(req.params.catalogId), Number(req.params.page), res);
     } catch (e: any) { res.status(500).json({ error: e?.message }); }
   });
 

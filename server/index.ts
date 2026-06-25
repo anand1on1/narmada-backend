@@ -348,6 +348,17 @@ app.use((req, res, next) => {
     log(`[fx] Failed to start auto-refresh: ${e?.message}`);
   }
 
+  // ---- R27.23: PartSetu catalog ingest watchdog (sweep every 5 min) ----
+  // Started 30s after boot so the first sweep does not race startup migrations.
+  setTimeout(async () => {
+    try {
+      const { startCatalogWatchdog } = await import("./services/catalog-watchdog");
+      startCatalogWatchdog();
+    } catch (e: any) {
+      log(`[catalog-watchdog] Failed to start: ${e?.message}`);
+    }
+  }, 30_000);
+
   // ---- Session C: Nightly parts_master TATA sync placeholder ----
   const PARTS_SYNC_INTERVAL_MS = 24 * 60 * 60 * 1000; // 24 hours
   setInterval(async () => {

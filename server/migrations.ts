@@ -3455,5 +3455,39 @@ export function runPartSetuMigrations() {
   )`);
   run("R27.22: idx_catalog_meta_cache_fp", `CREATE INDEX IF NOT EXISTS idx_catalog_meta_cache_fp ON partsetu_catalog_metadata_cache(fingerprint)`);
 
+  // ==================================================================
+  // R27.23 — embedded catalog images + per-part source page tracking.
+  // Additive only. Images extracted from the PDF during ingest, stored on R2
+  // (when configured) or the local persistent disk otherwise.
+  // ==================================================================
+  run("R27.23: partsetu_catalog_images", `CREATE TABLE IF NOT EXISTS partsetu_catalog_images (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    catalog_id INTEGER NOT NULL,
+    page_no INTEGER NOT NULL,
+    image_index INTEGER NOT NULL,
+    storage_type TEXT NOT NULL,
+    r2_key TEXT,
+    local_path TEXT,
+    width INTEGER,
+    height INTEGER,
+    format TEXT,
+    size_bytes INTEGER,
+    created_at INTEGER NOT NULL,
+    FOREIGN KEY (catalog_id) REFERENCES partsetu_catalogs(id) ON DELETE CASCADE
+  )`);
+  run("R27.23: idx_partsetu_catalog_images_catalog", `CREATE INDEX IF NOT EXISTS idx_partsetu_catalog_images_catalog ON partsetu_catalog_images(catalog_id)`);
+  run("R27.23: idx_partsetu_catalog_images_page", `CREATE INDEX IF NOT EXISTS idx_partsetu_catalog_images_page ON partsetu_catalog_images(catalog_id, page_no)`);
+
+  // R27.23: per-part source page (which PDF page the row was parsed from).
+  run("R27.23: partsetu_parts.source_page_no", `ALTER TABLE partsetu_parts ADD COLUMN source_page_no INTEGER`);
+
+  // R27.23: registration→vehicle lookup cache (backs the deferred VAHAN stub;
+  // populated only once a live provider + key are wired).
+  run("R27.23: partsetu_vahan_cache", `CREATE TABLE IF NOT EXISTS partsetu_vahan_cache (
+    registration_no TEXT PRIMARY KEY,
+    value TEXT NOT NULL,
+    fetched_at INTEGER NOT NULL
+  )`);
+
   console.log("[migrations] PartSetu: complete");
 }

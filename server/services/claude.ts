@@ -122,3 +122,22 @@ export async function callClaudeSonnetVision(
   }];
   return callWithRetry(SONNET_MODEL, systemPrompt, messages, maxTokens);
 }
+
+// R27.23 — cheap Haiku vision caller for RC-book / owner's-manual extraction
+// (structured JSON only). Uses the env-configured Haiku model.
+export async function callClaudeHaikuVision(
+  systemPrompt: string,
+  userText: string,
+  imageBase64: string,
+  mediaType: "image/jpeg" | "image/png" | "image/gif" | "image/webp",
+  maxTokens = 512,
+): Promise<ClaudeResult> {
+  const messages: Msg[] = [{
+    role: "user",
+    content: [
+      { type: "image", source: { type: "base64", media_type: mediaType, data: imageBase64 } },
+      { type: "text", text: userText },
+    ],
+  }];
+  return callWithRetry(HAIKU_MODEL, systemPrompt, messages, maxTokens);
+}

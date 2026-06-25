@@ -10,6 +10,7 @@ import * as path from "node:path";
 import { rawSqlite as db } from "../storage";
 import { copyToCatalog, getCatalogPdfPath, catalogPdfSize } from "./catalog-storage";
 import { enrichCatalog } from "./catalog-enrichment";
+import { getStorageBackend } from "./r2-storage";
 
 function pdfText(pdfPath: string): string {
   return execFileSync("pdftotext", ["-layout", "-enc", "UTF-8", pdfPath, "-"], { maxBuffer: 512 * 1024 * 1024 }).toString("utf8");
@@ -77,8 +78,8 @@ function parsePartsIntoCatalog(pages: string[], catalogId: number): number {
   const insert = db.prepare(
     `INSERT INTO partsetu_parts
        (catalog_id, group_code, table_code, assembly_name, fig_no, part_number, description, qty, remarks,
-        is_kit_parent, parent_part_id, is_serviceable, page_no, diagram_path, created_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        is_kit_parent, parent_part_id, is_serviceable, page_no, source_page_no, diagram_path, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   );
   const markKitParent = db.prepare(`UPDATE partsetu_parts SET is_kit_parent = 1 WHERE id = ?`);
 
@@ -135,7 +136,7 @@ function parsePartsIntoCatalog(pages: string[], catalogId: number): number {
           catalogId, curGroup, curTable, curAssembly,
           row.fig === "-" ? null : row.fig,
           partNumber, row.desc, row.qty, row.remarks,
-          0, isChild ? kitParentId : null, serviceable ? 1 : 0, pageNo, diagram, Date.now(),
+          0, isChild ? kitParentId : null, serviceable ? 1 : 0, pageNo, pageNo, diagram, Date.now(),
         );
         count++;
         if (!isChild) lastRealPartId = Number(res.lastInsertRowid);
@@ -144,6 +145,68 @@ function parsePartsIntoCatalog(pages: string[], catalogId: number): number {
   });
   tx();
   return count;
+}
+
+// R27.23 — extract embedded images from the PDF after parts ingest and persist
+// them (R2 when configured, else local disk) with one partsetu_catalog_images
+// row per image. Best-effort: failures here never fail the parts ingest. The
+// catalog's existing image rows are cleared first so re-ingest is idempotent.
+async function extractCatalogImages(catalogId: number, pdfPath: string): Promise<number> {
+  const tmpDir = path.join("/tmp", "partsetu_imgs", String(catalogId));
+  try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch { /* ignore */ }
+  fs.mkdirSync(tmpDir, { recursive: true });
+
+  try {
+    execFileSync("pdfimages", ["-all", pdfPath, path.join(tmpDir, "page")], { maxBuffer: 512 * 1024 * 1024 });
+  } catch (e: any) {
+    console.warn(`[catalog-ingester] pdfimages failed catalog_id=${catalogId}: ${e?.message || e}`);
+    return 0;
+  }
+
+  const files = fs.readdirSync(tmpDir).filter((f) => /^page-\d+-\d+\.[a-z0-9]+$/i.test(f)).sort();
+  if (!files.length) return 0;
+
+  db.prepare(`DELETE FROM partsetu_catalog_images WHERE catalog_id = ?`).run(catalogId);
+  const backend = getStorageBackend();
+  const insert = db.prepare(
+    `INSERT INTO partsetu_catalog_images
+       (catalog_id, page_no, image_index, storage_type, r2_key, local_path, width, height, format, size_bytes, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+  );
+
+  let saved = 0;
+  for (const f of files) {
+    // pdfimages -all names files page-<NNN>-<NNN>.<ext> → page no + image idx.
+    const m = f.match(/^page-(\d+)-(\d+)\.([a-z0-9]+)$/i);
+    if (!m) continue;
+    const pageNo = parseInt(m[1], 10);
+    const idx = parseInt(m[2], 10);
+    const fmt = m[3].toLowerCase();
+    const srcPath = path.join(tmpDir, f);
+    let sizeBytes = 0;
+    try { sizeBytes = fs.statSync(srcPath).size; } catch { /* ignore */ }
+
+    const key = `catalog-images/${catalogId}/page-${pageNo}-img-${idx}.${fmt}`;
+    let storageType = "local";
+    let r2Key: string | null = null;
+    let localPath: string | null = null;
+    try {
+      const res = await backend.uploadFile(srcPath, key);
+      storageType = res.storage_type;
+      if (res.storage_type === "r2") r2Key = res.key_or_path;
+      else localPath = res.key_or_path;
+    } catch (e: any) {
+      console.warn(`[catalog-ingester] image upload failed catalog_id=${catalogId} page=${pageNo} idx=${idx}: ${e?.message || e}`);
+      continue;
+    }
+
+    insert.run(catalogId, pageNo, idx, storageType, r2Key, localPath, null, null, fmt, sizeBytes, Date.now());
+    console.log(`[catalog-ingester] image catalog_id=${catalogId} page=${pageNo} idx=${idx} size=${sizeBytes} destination=${storageType}`);
+    saved += 1;
+  }
+
+  try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch { /* ignore */ }
+  return saved;
 }
 
 export interface IngestResult { catalogId: number; partsCount: number; vcNo: string; model: string; }
@@ -243,6 +306,10 @@ export async function ingestCatalogPdf(opts: {
     // R27.22 — apply user-confirmed metadata last so it wins over parse + enrichment.
     if (override) applyCatalogMeta(catalogId, override);
 
+    // R27.23 — extract + persist embedded diagram images (best-effort).
+    try { await extractCatalogImages(catalogId, getCatalogPdfPath(catalogId)); }
+    catch (e: any) { console.warn(`[catalog-ingester] image extraction failed catalog_id=${catalogId}: ${e?.message || e}`); }
+
     db.prepare(`UPDATE partsetu_catalogs SET status = 'active', ingest_error = NULL WHERE id = ?`).run(catalogId);
     if (cleanupSrc) { try { fs.unlinkSync(pdfPath); } catch { /* non-fatal */ } }
     return { catalogId, partsCount, vcNo: effVcNo, model: effModel };
@@ -278,6 +345,10 @@ export async function reingestCatalog(catalogId: number, uploadedBy: string): Pr
     try {
       await enrichCatalog({ catalogId, coverText: pages[0] || "", firstPagesText: (pages[1] || "") + "\n" + (pages[2] || "") });
     } catch (e: any) { console.warn("[catalog-ingester] enrichment failed:", e?.message || e); }
+
+    // R27.23 — re-extract embedded images on re-ingest (best-effort).
+    try { await extractCatalogImages(catalogId, pdfPath); }
+    catch (e: any) { console.warn(`[catalog-ingester] image extraction failed catalog_id=${catalogId}: ${e?.message || e}`); }
 
     db.prepare(`UPDATE partsetu_catalogs SET status = 'active', ingest_error = NULL WHERE id = ?`).run(catalogId);
     return { catalogId, partsCount, vcNo: existing.vc_no, model: meta.model };
