@@ -16,7 +16,9 @@ export type IntentKind =
   | "image_request"
   | "price_query"
   | "multi_part_list"
-  | "disambiguation_reply";
+  | "disambiguation_reply"
+  | "parts_append"
+  | "part_disambiguation_reply";
 
 export interface PartListEntry {
   rawName: string;
@@ -215,28 +217,35 @@ export function isDisambiguationCancel(message: string): boolean {
   return false;
 }
 
-// Map a short reply to a 0-based candidate index, or null if no confident match.
-// Order: (1) paste-back of a candidate's identifier (input / vc_no / matched_value)
-// — allowed regardless of length because it's specific; (2) for SHORT replies
-// (<=4 tokens) bare digit / "option N" / ordinal / lone digit / word numeral.
-export function matchDisambiguationReply(
+// Generic short-reply → 0-based index matcher shared by vehicle (a8) and part
+// (a9) disambiguation. `perCandidateIds` is one paste-back identifier list per
+// candidate (already raw strings; normalized here). `selectorKeywords` is the
+// alternation used in "<keyword> N" (e.g. "option|vehicle|वाहन" or that + "part").
+// Order: (1) paste-back of a candidate identifier (allowed at any length — it's
+// specific); (2) for SHORT replies (<=4 tokens) bare digit / "<kw> N" / ordinal
+// / word numeral / lone digit.
+export function matchReplyToIndex(
   message: string,
-  candidates: PendingDisambiguationCandidate[],
+  perCandidateIds: string[][],
+  selectorKeywords: string,
 ): number | null {
-  if (!candidates?.length) return null;
-  const n = candidates.length;
+  const n = perCandidateIds.length;
+  if (!n) return null;
   const raw = String(message || "");
   const ascii = devanagariToAscii(raw);
   const inRange = (i: number) => i >= 1 && i <= n;
 
   // (1) paste-back of a candidate identifier (strip all whitespace, uppercase).
+  // Bidirectional substring: the customer may paste the full identifier
+  // ("505409" — message contains id) OR a shorter recognizable label
+  // ("clutch cover" → candidate "CLUTCH COVER ASSY" — id contains message).
+  // Both sides floored at 4 chars to avoid trivial collisions.
   const norm = (s: string | null | undefined) => String(s || "").toUpperCase().replace(/\s+/g, "");
   const msgNorm = norm(ascii);
   if (msgNorm.length >= 4) {
     for (let i = 0; i < n; i++) {
-      const c = candidates[i];
-      const ids = [c.input, c.lock?.vc_no, c.lock?.matched_value].map((x) => norm(x)).filter((x) => x.length >= 4);
-      if (ids.some((id) => msgNorm.includes(id))) return i;
+      const ids = perCandidateIds[i].map((x) => norm(x)).filter((x) => x.length >= 4);
+      if (ids.some((id) => msgNorm.includes(id) || id.includes(msgNorm))) return i;
     }
   }
 
@@ -249,8 +258,8 @@ export function matchDisambiguationReply(
   // bare digit only ("1", "2")
   let mm = lower.match(/^(\d{1,2})$/);
   if (mm) { const i = Number(mm[1]); if (inRange(i)) return i - 1; }
-  // "option N" / "vehicle N" / "वाहन N" (Devanagari already folded to ascii) / "no N"
-  mm = ascii.match(/(?:option|vehicle|gaadi|gadi|number|no|वाहन)\s*#?\s*(\d{1,2})/i);
+  // "<keyword> N" (Devanagari already folded to ascii) — e.g. "option 2", "part 2", "no. 2"
+  mm = ascii.match(new RegExp(`(?:${selectorKeywords})\\s*#?\\.?\\s*(\\d{1,2})`, "i"));
   if (mm) { const i = Number(mm[1]); if (inRange(i)) return i - 1; }
   // ordinal "1st" / "2nd" / "3rd"
   mm = lower.match(/\b(\d{1,2})(?:st|nd|rd|th)\b/);
@@ -267,6 +276,19 @@ export function matchDisambiguationReply(
   return null;
 }
 
+const VEHICLE_SELECTOR_KEYWORDS = "option|vehicle|gaadi|gadi|number|no|वाहन";
+const PART_SELECTOR_KEYWORDS = "option|part|number|no|पुर्जा|पार्ट";
+
+// Map a short reply to a 0-based candidate index, or null if no confident match.
+export function matchDisambiguationReply(
+  message: string,
+  candidates: PendingDisambiguationCandidate[],
+): number | null {
+  if (!candidates?.length) return null;
+  const ids = candidates.map((c) => [c.input, c.lock?.vc_no, c.lock?.matched_value].map((x) => String(x || "")));
+  return matchReplyToIndex(message, ids, VEHICLE_SELECTOR_KEYWORDS);
+}
+
 // High-level detector used by the chat handler. Returns the chosen candidate's
 // 1-based index + its auto-lock UVI candidate, or null when nothing matches.
 export function detectDisambiguationReply(
@@ -276,6 +298,70 @@ export function detectDisambiguationReply(
   const idx = matchDisambiguationReply(message, candidates);
   if (idx === null) return null;
   return { selectedCandidateIndex: idx + 1, selectedUvi: candidates[idx].lock };
+}
+
+// ---- R27.24a9 gap 4: PART-name disambiguation -----------------------------
+
+// One pending part candidate: the part name + its resolved OEM number. The
+// persisted JSON round-trips this shape unchanged.
+export interface PartDisambiguationCandidate {
+  part_name: string;
+  oem_number: string;
+}
+
+// Map a short reply to one of several pending PART candidates. Same matchers as
+// the vehicle path plus "part N" / "part #2"; paste-back of a part name (e.g.
+// "clutch cover") or an OEM number is accepted at any length.
+export function matchPartDisambiguationReply(
+  message: string,
+  candidates: PartDisambiguationCandidate[],
+): number | null {
+  if (!candidates?.length) return null;
+  const ids = candidates.map((c) => [c.part_name, c.oem_number].map((x) => String(x || "")));
+  return matchReplyToIndex(message, ids, PART_SELECTOR_KEYWORDS);
+}
+
+export function detectPartDisambiguationReply(
+  message: string,
+  candidates: PartDisambiguationCandidate[],
+): { selectedCandidateIndex: number; selectedPart: PartDisambiguationCandidate } | null {
+  const idx = matchPartDisambiguationReply(message, candidates);
+  if (idx === null) return null;
+  return { selectedCandidateIndex: idx + 1, selectedPart: candidates[idx] };
+}
+
+// ---- R27.24a9 gap 3: parts-append detection -------------------------------
+
+// "aur clutch bhi chahiye" / "और क्लच भी" — an additive request for ONE more
+// part on top of the running cart. Returns the single part name when the
+// message carries an append marker (aur/और/also/bhi) AND names exactly one
+// part, else null. The caller only treats this as parts_append when the
+// session already has a non-empty cart.
+const APPEND_MARKER = /\b(aur|also|bhi|plus)\b|और|भी/i;
+
+export function detectPartsAppend(message: string): string | null {
+  const raw = String(message || "");
+  if (!raw.trim()) return null;
+  if (!APPEND_MARKER.test(raw)) return null;
+  // A multi-part list ("aur X, Y, Z") is NOT a single append — let the
+  // multi_part_list path own it.
+  if (extractMultiPartList(raw)) return null;
+
+  // Strip append markers + common filler so the remainder is just the part name.
+  const cleaned = raw
+    .replace(/\b(aur|also|bhi|plus|chahiye|chaiye|ka|ki|ke|number|oem|part|please|plz|bhej|bhejo|do|de|dena)\b/gi, " ")
+    .replace(/और|भी|चाहिए|का|की|के|नंबर|पार्ट|पुर्जा/g, " ")
+    .replace(/[^\wऀ-ॿ\s]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (!cleaned) return null;
+
+  // Confirm the remainder actually names a part (known keyword or synonym set).
+  const toks = tokenizeSegment(cleaned);
+  if (!toks.length) return null;
+  const isPart = toks.some((t) => PART_KEYWORDS.has(t)) || expandPartName(cleaned).length > 1;
+  if (!isPart) return null;
+  return cleaned;
 }
 
 // Deterministic classifier — also the fallback when the LLM is unavailable.

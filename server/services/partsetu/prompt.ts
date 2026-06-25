@@ -99,6 +99,23 @@ export function buildDisambiguationBlock(
   ].join("\n");
 }
 
+// R27.24a9 gap 4 — when one part name resolves to several distinct catalog
+// parts, present them numbered and ask the user to choose. Mirrors the vehicle
+// disambiguation block.
+export function buildPartDisambiguationBlock(
+  matches: Array<{ part_name: string; oem_number: string }>,
+): string {
+  const lines = matches.map((m, i) => `${i + 1}. ${m.part_name} — ${m.oem_number}`);
+  return [
+    "=== MULTIPLE PART MATCHES — ASK USER TO CHOOSE ===",
+    "The part name matched more than one distinct part in this catalog:",
+    ...lines,
+    "Present them as the numbered options above and ask the user to reply with the number (or paste the part name) they want.",
+    "Do NOT pick one yourself and do NOT invent any other part number.",
+    "=== END MULTIPLE PART MATCHES ===",
+  ].join("\n");
+}
+
 const VEHICLE_ID_RULES = `RULES FOR VEHICLE IDENTIFIERS (apply always):
 1. A 5-8 digit number alone (like "505409" or "802502") is a CHASSIS TYPE CODE, never a model number.
 2. The model "Tata 407" does NOT exist in our catalog. Never invent it.

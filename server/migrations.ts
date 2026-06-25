@@ -3758,5 +3758,26 @@ export function runPartSetuMigrations() {
   r2438("partsetu_pending_disambiguation", `CREATE TABLE IF NOT EXISTS partsetu_pending_disambiguation (session_id TEXT PRIMARY KEY, candidates_json TEXT NOT NULL, original_query TEXT, created_at INTEGER NOT NULL, expires_at INTEGER NOT NULL)`);
   r2438("idx_partsetu_pending_disambiguation_expires", `CREATE INDEX IF NOT EXISTS idx_partsetu_pending_disambiguation_expires ON partsetu_pending_disambiguation(expires_at)`);
 
+  // ==================================================================
+  // R27.24a9 — close 4 conversational gaps. Two additive tables:
+  //  (1) partsetu_parts_cart — session-scoped running list of parts the
+  //      customer collected for the LOCKED vehicle (TTL 60 min). Purged
+  //      when the active vehicle re-locks to a different catalog.
+  //  (2) partsetu_pending_part_disambiguation — mirrors the a8 vehicle
+  //      disambiguation table for PART-name choices (TTL 10 min).
+  // ==================================================================
+  const r2439 = (step: string, sql: string) => {
+    try { sqlite.exec(sql); console.log(`[migrations] R27.24a9: ${step} ok`); }
+    catch (e: any) {
+      const msg = String(e?.message || e);
+      if (/duplicate|already exists/i.test(msg)) console.log(`[migrations] R27.24a9: ${step} skip (${msg})`);
+      else console.log(`[migrations] R27.24a9: ${step} fail: ${msg}`);
+    }
+  };
+  r2439("partsetu_parts_cart", `CREATE TABLE IF NOT EXISTS partsetu_parts_cart (session_id TEXT NOT NULL, catalog_id INTEGER, part_name TEXT, oem_number TEXT, added_at INTEGER NOT NULL, PRIMARY KEY (session_id, catalog_id, oem_number))`);
+  r2439("idx_partsetu_parts_cart_session", `CREATE INDEX IF NOT EXISTS idx_partsetu_parts_cart_session ON partsetu_parts_cart(session_id, catalog_id)`);
+  r2439("partsetu_pending_part_disambiguation", `CREATE TABLE IF NOT EXISTS partsetu_pending_part_disambiguation (session_id TEXT PRIMARY KEY, candidates_json TEXT NOT NULL, original_query TEXT, created_at INTEGER NOT NULL, expires_at INTEGER NOT NULL)`);
+  r2439("idx_partsetu_pending_part_disambiguation_expires", `CREATE INDEX IF NOT EXISTS idx_partsetu_pending_part_disambiguation_expires ON partsetu_pending_part_disambiguation(expires_at)`);
+
   console.log("[migrations] PartSetu: complete");
 }

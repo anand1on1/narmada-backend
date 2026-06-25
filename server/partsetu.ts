@@ -129,6 +129,84 @@ export function clearPendingDisambiguation(sessionId: string): void {
   db.prepare(`DELETE FROM partsetu_pending_disambiguation WHERE session_id = ?`).run(sessionId);
 }
 
+// ---- Parts cart (R27.24a9 gap 3) ------------------------------------------
+// Session-scoped running list of parts the customer has collected for the
+// LOCKED catalog. Lets "aur clutch bhi chahiye" append without re-searching the
+// prior parts. TTL 60 min (added_at). Purged when the vehicle re-locks to a
+// different catalog (see archivePartsCart).
+
+export interface CartItem { part_name: string; oem_number: string; added_at: number; }
+
+export function addToCart(sessionId: string, catalogId: number | null, partName: string, oemNumber: string): void {
+  if (!sessionId || !oemNumber) return;
+  db.prepare(
+    `INSERT INTO partsetu_parts_cart (session_id, catalog_id, part_name, oem_number, added_at)
+     VALUES (?, ?, ?, ?, ?)
+     ON CONFLICT(session_id, catalog_id, oem_number) DO UPDATE SET
+       part_name = excluded.part_name, added_at = excluded.added_at`,
+  ).run(sessionId, catalogId ?? null, String(partName || ""), String(oemNumber), now());
+}
+
+export function getCart(sessionId: string, catalogId: number | null, ttlMs = 3600000): CartItem[] {
+  if (!sessionId) return [];
+  const cutoff = now() - ttlMs;
+  const rows = db.prepare(
+    `SELECT part_name, oem_number, added_at FROM partsetu_parts_cart
+     WHERE session_id = ? AND catalog_id IS ? AND added_at >= ?
+     ORDER BY added_at ASC`,
+  ).all(sessionId, catalogId ?? null, cutoff) as any[];
+  return rows.map((r) => ({ part_name: r.part_name || "", oem_number: r.oem_number || "", added_at: Number(r.added_at) }));
+}
+
+// Purge the whole session's cart (used on re-lock). Returns rows removed.
+export function archivePartsCart(sessionId: string): number {
+  if (!sessionId) return 0;
+  return db.prepare(`DELETE FROM partsetu_parts_cart WHERE session_id = ?`).run(sessionId).changes;
+}
+
+// ---- Pending PART-name disambiguation (R27.24a9 gap 4) --------------------
+// Mirrors the a8 vehicle table for part choices. When "clutch" matches several
+// distinct parts we persist the candidate parts + original query so the next
+// short reply ("2" / "clutch cover") resolves to one. TTL 10 min.
+
+export function savePendingPartDisambiguation(
+  sessionId: string,
+  candidates: any[],
+  originalQuery: string,
+  ttlMs = 600000,
+): void {
+  const ts = now();
+  db.prepare(
+    `INSERT INTO partsetu_pending_part_disambiguation (session_id, candidates_json, original_query, created_at, expires_at)
+     VALUES (?, ?, ?, ?, ?)
+     ON CONFLICT(session_id) DO UPDATE SET
+       candidates_json = excluded.candidates_json,
+       original_query = excluded.original_query,
+       created_at = excluded.created_at,
+       expires_at = excluded.expires_at`,
+  ).run(sessionId, JSON.stringify(candidates ?? []), originalQuery ?? "", ts, ts + ttlMs);
+}
+
+export function getPendingPartDisambiguation(sessionId: string): PendingDisambiguation | null {
+  const row = db.prepare(
+    `SELECT candidates_json, original_query, created_at, expires_at
+       FROM partsetu_pending_part_disambiguation WHERE session_id = ?`,
+  ).get(sessionId) as any;
+  if (!row) return null;
+  let candidates: any[] = [];
+  try { candidates = JSON.parse(row.candidates_json || "[]"); } catch { candidates = []; }
+  return {
+    candidates,
+    original_query: row.original_query || "",
+    created_at: Number(row.created_at),
+    expires_at: Number(row.expires_at),
+  };
+}
+
+export function clearPendingPartDisambiguation(sessionId: string): void {
+  db.prepare(`DELETE FROM partsetu_pending_part_disambiguation WHERE session_id = ?`).run(sessionId);
+}
+
 // Pull a chassis / VC number out of free text, e.g. "chassis no 862011" or
 // "VC: 51610568000R". Returns the captured token (uppercased) or null.
 export function extractChassisNo(text: string): string | null {

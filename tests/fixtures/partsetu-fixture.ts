@@ -17,6 +17,8 @@ import {
   classifyIntentHeuristic,
   extractMultiPartList,
   detectDisambiguationReply,
+  detectPartDisambiguationReply,
+  detectPartsAppend,
   isDisambiguationCancel,
   type Intent,
   type SessionState,
@@ -245,6 +247,18 @@ export interface SimResult {
   disambiguationResolved: boolean;
   selectedCandidateIndex: number | null;
   replayedQuery: string | null;
+  // R27.24a9
+  vehicleRelocked: boolean;
+  sameCatalogNoOp: boolean;
+  relockArchivedItems: number;
+  cartCount: number;
+  isPartsAppend: boolean;
+  partNeedsDisambiguation: boolean;
+  partOptionsCount: number;
+  partDisambiguationResolved: boolean;
+  selectedPartIndex: number | null;
+  selectedPartName: string | null;
+  selectedPartOem: string | null;
 }
 
 // Run the production chat pipeline minus the Sonnet network call. Faithful to
@@ -286,7 +300,34 @@ export async function simulateChatMessage(
       }
     }
   }
-  const activeMessage = replayedQuery ?? message;
+  // R27.24a9 gap 4 — PART-name disambiguation reply routing (mirrors routes-v2).
+  let partDisambiguationResolved = false;
+  let selectedPartIndex: number | null = null;
+  let selectedPartName: string | null = null;
+  let selectedPartOem: string | null = null;
+  let partDisambiguationReplay: string | null = null;
+  if (sessionId) {
+    const pendingPart = partsetu.getPendingPartDisambiguation(sessionId);
+    if (pendingPart) {
+      if (Date.now() > pendingPart.expires_at) {
+        partsetu.clearPendingPartDisambiguation(sessionId);
+      } else {
+        const picked = detectPartDisambiguationReply(message, pendingPart.candidates as any);
+        if (picked) {
+          partsetu.clearPendingPartDisambiguation(sessionId);
+          partDisambiguationResolved = true;
+          selectedPartIndex = picked.selectedCandidateIndex;
+          selectedPartName = picked.selectedPart.part_name || null;
+          selectedPartOem = picked.selectedPart.oem_number || null;
+          partDisambiguationReplay = picked.selectedPart.part_name || pendingPart.original_query || null;
+        } else if (isDisambiguationCancel(message)) {
+          partsetu.clearPendingPartDisambiguation(sessionId);
+        }
+      }
+    }
+  }
+
+  let activeMessage = replayedQuery ?? partDisambiguationReplay ?? message;
   const effectiveLock = resolvedLock ?? priorLock;
 
   // 1) UVI probe across every identifier candidate in the message.
@@ -313,18 +354,43 @@ export async function simulateChatMessage(
   let verifiedVehicleBlock = "";
   let uviLockedCatalogId: number | null = null;
   let needsDisambiguation = false;
+  let vehicleRelocked = false;
+  let sameCatalogNoOp = false;
+  let relockArchivedItems = 0;
   if (distinctLocks.size >= 2 && !effectiveLock) {
     needsDisambiguation = true;
     const matches = Array.from(distinctLocks.values());
     verifiedVehicleBlock = prompt.buildDisambiguationBlock(matches);
     if (sessionId) partsetu.savePendingDisambiguation(sessionId, matches, message);
   } else if (bestUvi) {
-    if (bestUvi.auto_lock && !effectiveLock) uviLockedCatalogId = bestUvi.auto_lock.catalog_id;
-    verifiedVehicleBlock = prompt.buildVerifiedVehicleBlock(matchedInput, bestUvi.auto_lock, bestUvi.candidates);
+    if (bestUvi.auto_lock) {
+      const newCatalogId = bestUvi.auto_lock.catalog_id;
+      if (!effectiveLock) {
+        uviLockedCatalogId = newCatalogId;
+        verifiedVehicleBlock = prompt.buildVerifiedVehicleBlock(matchedInput, bestUvi.auto_lock, bestUvi.candidates);
+      } else if (effectiveLock === newCatalogId) {
+        // gap 5 — same-catalog high-confidence UVI: deliberate no-op.
+        sameCatalogNoOp = true;
+      } else {
+        // gap 1 + gap 5 — active vehicle changed: switch + purge prior state.
+        vehicleRelocked = true;
+        uviLockedCatalogId = newCatalogId;
+        if (sessionId) {
+          relockArchivedItems = partsetu.archivePartsCart(sessionId);
+          partsetu.clearPendingPartDisambiguation(sessionId);
+        }
+        verifiedVehicleBlock =
+          `ACTIVE VEHICLE CHANGED — switched to catalog #${newCatalogId}; ignore part numbers from catalog #${effectiveLock}.\n\n` +
+          prompt.buildVerifiedVehicleBlock(matchedInput, bestUvi.auto_lock, bestUvi.candidates);
+      }
+    } else {
+      verifiedVehicleBlock = prompt.buildVerifiedVehicleBlock(matchedInput, bestUvi.auto_lock, bestUvi.candidates);
+    }
   }
 
-  // 2) Catalog resolution (prior/resolved lock wins, then UVI auto-lock, then fuzzy).
-  let catalogId: number | null = effectiveLock || uviLockedCatalogId || null;
+  // 2) Catalog resolution. R27.24a9: a re-lock (uviLockedCatalogId) overrides the
+  // prior lock; otherwise prior/resolved lock wins, then UVI auto-lock, then fuzzy.
+  let catalogId: number | null = uviLockedCatalogId ?? effectiveLock ?? null;
   let resolverNote = "";
   if (!catalogId) {
     const resolved = await partsetu.resolveCatalog(message);
@@ -339,6 +405,13 @@ export async function simulateChatMessage(
     }
   }
 
+  // R27.24a9 gap 3 — parts-append: "aur clutch bhi chahiye" with a non-empty
+  // cart narrows the active query to that single part.
+  const cartBefore = (sessionId && catalogId) ? partsetu.getCart(sessionId, catalogId) : [];
+  const appendPart = detectPartsAppend(message);
+  const isPartsAppend = !!appendPart && cartBefore.length > 0 && !replayedQuery && !partDisambiguationReplay;
+  if (isPartsAppend) activeMessage = appendPart!;
+
   // 3) Deterministic intent + multi-strategy search.
   const lockedCatalog = catalogId ? partsetu.getCatalog(catalogId) : null;
   const lockedVehicle = lockedCatalog
@@ -346,6 +419,41 @@ export async function simulateChatMessage(
     : null;
   const intent = classifyIntentDeterministic(activeMessage, { lockedCatalogId: catalogId, lockedVehicle });
   const searchResult = await search.searchParts(intent, { lockedCatalogId: catalogId });
+
+  // R27.24a9 gap 4 — part-name disambiguation trigger (mirrors routes-v2): a
+  // single bare part token resolving to >=2 distinct catalog parts → persist the
+  // candidates + original query and flag for a follow-up choice.
+  let partNeedsDisambiguation = false;
+  let partOptionsCount = 0;
+  if (
+    sessionId && catalogId && !intent.bypassLock && intent.kind === "locked_vehicle_part" &&
+    !replayedQuery && !partDisambiguationReplay && !isPartsAppend &&
+    Object.keys(intent.specs).length === 0
+  ) {
+    const bareTokens = intent.partTokens.filter((t) => !/^\d+$/.test(t) && t.length >= 3);
+    const distinct: Array<{ part_name: string; oem_number: string }> = [];
+    const seenNums = new Set<string>();
+    for (const h of searchResult.hits) {
+      const num = String(h.part_number || "").trim();
+      if (!num || seenNums.has(num)) continue;
+      seenNums.add(num);
+      distinct.push({ part_name: h.description || activeMessage, oem_number: num });
+      if (distinct.length >= 5) break;
+    }
+    if (bareTokens.length === 1 && distinct.length >= 2) {
+      partsetu.savePendingPartDisambiguation(sessionId, distinct, activeMessage);
+      partNeedsDisambiguation = true;
+      partOptionsCount = distinct.length;
+    }
+  }
+
+  // R27.24a9 gap 3 — record found OEM numbers in the session cart.
+  if (sessionId && catalogId && !partNeedsDisambiguation && searchResult.hits.length) {
+    for (const h of searchResult.hits.slice(0, 12)) {
+      if (h.part_number) partsetu.addToCart(sessionId, catalogId, h.description || activeMessage, String(h.part_number));
+    }
+  }
+  const cartCount = (sessionId && catalogId) ? partsetu.getCart(sessionId, catalogId).length : 0;
 
   // 4) Context + prompt assembly (mirrors routes-v2).
   let verifiedBlock = "";
@@ -379,6 +487,9 @@ export async function simulateChatMessage(
     intent, uviResult: bestUvi, uviCandidates, catalogId, searchResult,
     verifiedVehicleBlock, contextBlock, systemPrompt, allowList, resolverNote,
     needsDisambiguation, disambiguationResolved, selectedCandidateIndex, replayedQuery,
+    vehicleRelocked, sameCatalogNoOp, relockArchivedItems, cartCount, isPartsAppend,
+    partNeedsDisambiguation, partOptionsCount,
+    partDisambiguationResolved, selectedPartIndex, selectedPartName, selectedPartOem,
   };
 }
 

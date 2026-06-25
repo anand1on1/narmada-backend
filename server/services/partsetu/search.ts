@@ -367,6 +367,7 @@ export function enforcePartCitations(
   hits: Array<{ part_number: string; catalog_label: string }>,
   contextBlock: string,
   permittedSet?: Set<string>,
+  lockedCatalogId?: number | null,
 ): string {
   if (!reply) return reply;
   const labelByNum = new Map<string, string>();
@@ -382,9 +383,28 @@ export function enforcePartCitations(
 
   // A number is OK if permitted OR carries an explicit citation within ~60 chars
   // after it (Sonnet did the attribution itself).
+  //
+  // R27.24a9 gap 1 (cross-catalog leakage): when `lockedCatalogId` is given, an
+  // inline citation is only honored if the catalog number it names equals the
+  // locked catalog. Sonnet was copying part numbers WITH their original
+  // "(from catalog #22 ...)" attribution out of prior history after the vehicle
+  // re-locked to a different catalog; the old guard saw a valid-looking citation
+  // and kept the foreign number. Now a citation that names a DIFFERENT catalog
+  // is treated as NOT cited, so the foreign number is stripped (unless it is
+  // genuinely permitted by the current turn's allow-list).
   const isCited = (text: string, idx: number, len: number): boolean => {
     const after = text.slice(idx + len, idx + len + 60).toLowerCase();
-    return after.includes("from catalog") || after.includes("(catalog") || after.includes("catalog #") || after.includes("(from ");
+    const hasCitation =
+      after.includes("from catalog") || after.includes("(catalog") ||
+      after.includes("catalog #") || after.includes("(from ");
+    if (!hasCitation) return false;
+    if (lockedCatalogId == null) return true;
+    // Validate the cited catalog number against the locked one.
+    const cm = after.match(/catalog\s*#?\s*(\d{1,6})/);
+    if (cm) return Number(cm[1]) === Number(lockedCatalogId);
+    // Citation present but no explicit catalog number (e.g. "(from SIGNA ...)").
+    // Can't prove it's foreign, so honor it.
+    return true;
   };
 
   // 1) Drop only sentences containing an 8-14 digit number that is BOTH not

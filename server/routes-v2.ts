@@ -8373,6 +8373,33 @@ function registerR8Routes(
         }
       }
 
+      // R27.24a9 gap 4 — DB-backed PART-name disambiguation reply routing. When
+      // a single part name resolved to several distinct catalog parts (below) we
+      // persisted the candidate parts + original query. A short follow-up
+      // ("2", "part 2", or a pasted-back part name) now resolves to one part and
+      // the original query is replayed (scoped to the still-locked catalog).
+      let partDisambiguationReplay: string | null = null;
+      {
+        const sessionId = String(conversationId);
+        const pendingPart = partsetuStore.getPendingPartDisambiguation(sessionId);
+        if (pendingPart) {
+          if (Date.now() > pendingPart.expires_at) {
+            partsetuStore.clearPendingPartDisambiguation(sessionId);
+            console.log(`[partsetu] part_disambiguation_expired session=${sessionId}`);
+          } else {
+            const picked = partsetuIntent.detectPartDisambiguationReply(uviInput, pendingPart.candidates as any);
+            if (picked) {
+              partsetuStore.clearPendingPartDisambiguation(sessionId);
+              partDisambiguationReplay = picked.selectedPart.part_name || pendingPart.original_query || null;
+              console.log(`[partsetu] part_disambiguation_resolved session=${sessionId} index=${picked.selectedCandidateIndex} part="${picked.selectedPart.part_name}"`);
+            } else if (partsetuIntent.isDisambiguationCancel(uviInput)) {
+              partsetuStore.clearPendingPartDisambiguation(sessionId);
+              console.log(`[partsetu] part_disambiguation_skipped session=${sessionId}`);
+            }
+          }
+        }
+      }
+
       // (1) numeric follow-up to a prior disambiguation prompt.
       const pendingCands = uviDisambig.get(Number(conversationId));
       if (pendingCands && pendingCands.length && /^[1-9]\d?$/.test(uviInput)) {
@@ -8427,6 +8454,7 @@ function registerR8Routes(
       console.log(`[partsetu] chat session_id=${conversationId} user_msg="${uviInput.slice(0, 80).replace(/\n/g, " ")}"`);
       let verifiedVehicleBlock = "";
       let uviLockedCatalogId: number | null = null;
+      let vehicleRelocked = false;
       {
         const uviCands = partsetuUvi.extractVehicleIdentifierCandidates(uviInput);
         let bestUvi: import("./services/partsetu/uvi-resolver").UviResult | null = null;
@@ -8457,11 +8485,41 @@ function registerR8Routes(
           partsetuStore.savePendingDisambiguation(String(conversationId), matches, String(content));
           console.log(`[partsetu] uvi multi_match_disambiguation catalogs=[${matches.map((m) => m.lock.catalog_id).join(",")}] pending_saved=1`);
         } else if (bestUvi) {
-          if (bestUvi.auto_lock && !conv.catalog_context_id) {
-            partsetuStore.setCatalogContext(Number(conversationId), bestUvi.auto_lock.catalog_id);
-            uviLockedCatalogId = bestUvi.auto_lock.catalog_id;
+          if (bestUvi.auto_lock) {
+            const newCatalogId = bestUvi.auto_lock.catalog_id;
+            const priorCatalogId = conv.catalog_context_id || null;
+            if (!priorCatalogId) {
+              // First lock.
+              partsetuStore.setCatalogContext(Number(conversationId), newCatalogId);
+              uviLockedCatalogId = newCatalogId;
+              verifiedVehicleBlock = partsetuPrompt.buildVerifiedVehicleBlock(matchedInput, bestUvi.auto_lock, bestUvi.candidates);
+            } else if (priorCatalogId === newCatalogId) {
+              // R27.24a9 gap 5 — same-catalog high-confidence UVI is deliberate;
+              // treat as a no-op. Do NOT re-emit the lock confirmation block.
+              uviLockedCatalogId = newCatalogId;
+              console.log(`[partsetu] uvi same_catalog no_op session=${conversationId}`);
+            } else {
+              // R27.24a9 gap 1 + gap 5 — the active vehicle CHANGED to a
+              // different catalog. Switch the lock and PURGE prior state so the
+              // old catalog's part numbers can never leak into this turn:
+              //  - archive the prior catalog's parts cart,
+              //  - clear any pending part-disambiguation,
+              //  - mark the relock so the citation guard / prompt drop history.
+              partsetuStore.setCatalogContext(Number(conversationId), newCatalogId);
+              conv.catalog_context_id = newCatalogId;
+              uviLockedCatalogId = newCatalogId;
+              vehicleRelocked = true;
+              const archivedItems = partsetuStore.archivePartsCart(String(conversationId));
+              partsetuStore.clearPendingPartDisambiguation(String(conversationId));
+              console.log(`[partsetu] vehicle_relock from_catalog=${priorCatalogId} to_catalog=${newCatalogId} permitted_set_purged=1`);
+              console.log(`[partsetu] cart archived_on_relock session=${conversationId} prior_catalog=${priorCatalogId} items=${archivedItems}`);
+              verifiedVehicleBlock =
+                `ACTIVE VEHICLE CHANGED — the customer switched to a NEW vehicle (catalog #${newCatalogId}). IGNORE every part number from earlier assistant messages; they belong to catalog #${priorCatalogId}. Cite ONLY part numbers from this turn's catalog #${newCatalogId} results.\n\n` +
+                partsetuPrompt.buildVerifiedVehicleBlock(matchedInput, bestUvi.auto_lock, bestUvi.candidates);
+            }
+          } else {
+            verifiedVehicleBlock = partsetuPrompt.buildVerifiedVehicleBlock(matchedInput, bestUvi.auto_lock, bestUvi.candidates);
           }
-          verifiedVehicleBlock = partsetuPrompt.buildVerifiedVehicleBlock(matchedInput, bestUvi.auto_lock, bestUvi.candidates);
         }
       }
 
@@ -8485,9 +8543,19 @@ function registerR8Routes(
       }
       const convNow = partsetuStore.getConversation(Number(conversationId));
 
-      // R27.24a8 — on a resolved disambiguation reply, the customer's ACTIVE
-      // query is their original (pre-disambiguation) message, not the bare "1".
-      const activeContent = disambiguationReplayQuery ?? String(content);
+      // R27.24a8 — on a resolved vehicle disambiguation reply, the customer's
+      // ACTIVE query is their original (pre-disambiguation) message, not "1".
+      // R27.24a9 gap 4 — a resolved PART disambiguation reply replaces the active
+      // query with the chosen part name. R27.24a9 gap 3 — an append request
+      // ("aur clutch bhi chahiye") with a non-empty cart narrows to that part.
+      let activeContent = disambiguationReplayQuery ?? partDisambiguationReplay ?? String(content);
+      const cartBefore = catalogId ? partsetuStore.getCart(String(conversationId), catalogId) : [];
+      const appendPart = partsetuIntent.detectPartsAppend(String(content));
+      const isPartsAppend = !!appendPart && cartBefore.length > 0 && !disambiguationReplayQuery && !partDisambiguationReplay;
+      if (isPartsAppend) {
+        activeContent = appendPart!;
+        console.log(`[partsetu] parts_append session=${conversationId} part="${appendPart}" cart_before=${cartBefore.length}`);
+      }
 
       // R27.24a — intent classification + multi-strategy search. The intent
       // decides whether the vehicle lock applies (exploratory / cross-reference
@@ -8498,6 +8566,43 @@ function registerR8Routes(
       console.log(`[partsetu] intent kind=${intent.kind} bypass_lock=${intent.bypassLock}`);
       const searchResult = await partsetuSearch.searchParts(intent, { lockedCatalogId: catalogId });
       console.log(`[partsetu] search strategies=${intent.kind} results=${searchResult.hits.length} locked=${catalogId ?? "null"}`);
+
+      // R27.24a9 gap 4 — part-name disambiguation. When a SINGLE bare part token
+      // (e.g. "clutch") resolves to >=2 distinct catalog part numbers in the
+      // locked catalog, do NOT pick one — persist the candidates + original query
+      // and ask the user to choose. A specific multi-word query ("clutch booster")
+      // has >1 token and is answered directly. Skipped on replays/append.
+      if (
+        catalogId && !intent.bypassLock && intent.kind === "locked_vehicle_part" &&
+        !disambiguationReplayQuery && !partDisambiguationReplay && !isPartsAppend &&
+        Object.keys(intent.specs).length === 0
+      ) {
+        const bareTokens = intent.partTokens.filter((t) => !/^\d+$/.test(t) && t.length >= 3);
+        const distinct: Array<{ part_name: string; oem_number: string }> = [];
+        const seenNums = new Set<string>();
+        for (const h of searchResult.hits) {
+          const num = String(h.part_number || "").trim();
+          if (!num || seenNums.has(num)) continue;
+          seenNums.add(num);
+          distinct.push({ part_name: h.description || activeContent, oem_number: num });
+          if (distinct.length >= 5) break;
+        }
+        if (bareTokens.length === 1 && distinct.length >= 2) {
+          partsetuStore.savePendingPartDisambiguation(String(conversationId), distinct, activeContent);
+          console.log(`[partsetu] part multi_match_disambiguation session=${conversationId} options=${distinct.length} pending_saved=1`);
+          return uviSendReply(partsetuPrompt.buildPartDisambiguationBlock(distinct));
+        }
+      }
+
+      // R27.24a9 gap 3 — record found OEM numbers in the session cart for the
+      // locked catalog so a later "aur X bhi chahiye" can append to a known list.
+      if (catalogId && searchResult.hits.length) {
+        for (const h of searchResult.hits.slice(0, 12)) {
+          if (h.part_number) partsetuStore.addToCart(String(conversationId), catalogId, h.description || activeContent, String(h.part_number));
+        }
+        const cartNow = partsetuStore.getCart(String(conversationId), catalogId);
+        console.log(`[partsetu] cart session=${conversationId} catalog=${catalogId} append=${isPartsAppend ? 1 : 0} items=${cartNow.length}`);
+      }
 
       let verifiedBlock = "";
       if (searchResult.hits.length) {
@@ -8537,7 +8642,7 @@ function registerR8Routes(
       // R27.24a — citation guard: strip hallucinated/unattributed part numbers.
       const beforeStrip = replyText;
       const permittedNums = partsetuSearch.collectPermittedPartNumbers(searchResult);
-      replyText = enforcePartCitations(replyText, searchResult.hits, contextBlock, permittedNums);
+      replyText = enforcePartCitations(replyText, searchResult.hits, contextBlock, permittedNums, catalogId);
       const citationStrips = beforeStrip !== replyText ? 1 : 0;
       console.log(`[partsetu] response chars=${replyText.length} citation_strips=${citationStrips}`);
 
