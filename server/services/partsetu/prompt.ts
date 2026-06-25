@@ -7,6 +7,34 @@
 // now resolve identifiers out of every message and prepend a high-priority,
 // non-overridable block stating the verified mapping.
 import type { UviCandidate } from "./uvi-resolver";
+import type { PerPartResult } from "./search";
+
+// R27.24a5 — structured per-part lookup block for multi-part-list queries. Lists
+// each requested part with its resolved part number(s) or an explicit NO MATCH,
+// so Sonnet answers honestly from the search results and never invents numbers.
+export function buildPartLookupBlock(perPart: PerPartResult[], catalogLabel: string): string {
+  if (!perPart?.length) return "";
+  const lines = perPart.map((pp, i) => {
+    if (!pp.parts.length) return `${i + 1}. ${pp.rawName} — NO MATCH`;
+    const top = pp.parts.slice(0, 3).map((h) => {
+      const desc = (h.description || "").trim();
+      return `${h.part_number}${desc ? ` (${desc})` : ""}`;
+    });
+    return `${i + 1}. ${pp.rawName} — ${top.join(" | ")}`;
+  });
+  return [
+    `=== PART LOOKUP RESULTS (${catalogLabel}) ===`,
+    "Each requested part was searched individually in the locked catalog. Results:",
+    ...lines,
+    "",
+    "CRITICAL RULES FOR THIS LIST:",
+    "- Quote ONLY the part numbers listed above, verbatim. Never invent or guess a number.",
+    "- For any part marked NO MATCH, say it was not found in this catalog — do NOT fabricate a number.",
+    `- Cite each found part as "(from ${catalogLabel})".`,
+    "- Present the answer as a clean numbered table in the customer's language, one row per requested part.",
+    "=== END PART LOOKUP RESULTS ===",
+  ].join("\n");
+}
 
 // Build the verified-vehicle block prepended to the system prompt. When `best`
 // auto-locked we assert the mapping and forbid contradiction; when only

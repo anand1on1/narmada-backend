@@ -4,6 +4,7 @@
 // regex classifier backs it up so the chat path never hard-depends on the LLM
 // (parse failure, no API key, timeout all fall through to the heuristic).
 import { callClaudeHaiku } from "../claude";
+import { expandPartName, PART_KEYWORDS } from "./part-synonyms";
 
 export type IntentKind =
   | "locked_vehicle_part"
@@ -12,7 +13,14 @@ export type IntentKind =
   | "spec_query"
   | "small_talk"
   | "image_request"
-  | "price_query";
+  | "price_query"
+  | "multi_part_list";
+
+export interface PartListEntry {
+  rawName: string;
+  tokens: string[];
+  expandedTokens: string[];
+}
 
 export interface Intent {
   kind: IntentKind;
@@ -20,6 +28,7 @@ export interface Intent {
   partNumbers: string[];
   specs: { dia_mm?: number; teeth?: number; voltage?: number; bore?: string };
   bypassLock: boolean;
+  partList?: PartListEntry[];
 }
 
 export interface SessionState {
@@ -108,6 +117,63 @@ function extractSpecs(message: string): Intent["specs"] {
   return specs;
 }
 
+// Tokenize a single part-name segment (keeps order, drops stopwords).
+function tokenizeSegment(seg: string): string[] {
+  return seg.toLowerCase()
+    .replace(/[^a-z0-9\s]/g, " ")
+    .split(/\s+/)
+    .map((t) => t.trim())
+    .filter((t) => t.length >= 2 && !STOPWORDS.has(t));
+}
+
+// Does a free-text segment name a part? True if any of its tokens is a known
+// part keyword, or expandPartName maps it to a synonym set (more than itself).
+function segmentIsPart(seg: string): boolean {
+  const toks = tokenizeSegment(seg);
+  if (!toks.length) return false;
+  if (toks.some((t) => PART_KEYWORDS.has(t))) return true;
+  const expanded = expandPartName(seg);
+  return expanded.length > 1;
+}
+
+// R27.24a5 — deterministic multi-part-list detector. Returns the parsed list of
+// distinct part queries when the message asks for 3+ parts, else null. No LLM.
+export function extractMultiPartList(message: string): PartListEntry[] | null {
+  const raw = String(message || "");
+  if (!raw.trim()) return null;
+
+  // Strip a leading lead-in clause before the first colon (e.g.
+  // "OEM part numbers chahiye for: oil filter, ...") so it doesn't pollute the
+  // first segment. Only if the colon is reasonably early.
+  let body = raw;
+  const colonIdx = raw.indexOf(":");
+  if (colonIdx >= 0 && colonIdx < 60) body = raw.slice(colonIdx + 1);
+
+  // Normalize list separators into commas: numbered "1." / "1)", " and ",
+  // newlines and semicolons.
+  const flattened = body
+    .replace(/\b\d+\s*[\.\)]\s*/g, ",")
+    .replace(/\s+and\s+/gi, ",")
+    .replace(/[\n;]+/g, ",");
+
+  const segments = flattened
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean);
+
+  const entries: PartListEntry[] = [];
+  const seen = new Set<string>();
+  for (const seg of segments) {
+    if (!segmentIsPart(seg)) continue;
+    const key = seg.toLowerCase().replace(/\s+/g, " ").trim();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    entries.push({ rawName: seg, tokens: tokenizeSegment(seg), expandedTokens: expandPartName(seg) });
+  }
+
+  return entries.length >= 3 ? entries : null;
+}
+
 // Deterministic classifier — also the fallback when the LLM is unavailable.
 export function classifyIntentHeuristic(message: string, state: SessionState): Intent {
   const m = String(message || "");
@@ -141,6 +207,24 @@ export function classifyIntentHeuristic(message: string, state: SessionState): I
 }
 
 export async function classifyIntent(message: string, sessionState: SessionState): Promise<Intent> {
+  // R27.24a5 — deterministic multi-part-list short-circuit (no LLM). When the
+  // user asks for 3+ distinct parts at once we route to a per-part search so
+  // recall doesn't collapse from one combined FTS soup. bypassLock stays false:
+  // the list is answered within the locked catalog.
+  const partList = extractMultiPartList(message);
+  if (partList) {
+    const intent: Intent = {
+      kind: "multi_part_list",
+      partTokens: Array.from(new Set(partList.flatMap((p) => p.tokens))),
+      partNumbers: extractPartNumbers(message),
+      specs: {},
+      bypassLock: false,
+      partList,
+    };
+    console.log(`[partsetu] intent=multi_part_list bypass_lock=false parts=${partList.length} (deterministic)`);
+    return intent;
+  }
+
   const heuristic = classifyIntentHeuristic(message, sessionState);
   try {
     const ctx = `Locked vehicle: ${sessionState.lockedVehicle || "none"} (catalog ${sessionState.lockedCatalogId ?? "none"}).\nMessage: ${message}`;

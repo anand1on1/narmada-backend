@@ -7,7 +7,7 @@
 // All rows come from partsetu_parts joined to partsetu_catalogs (or the xref
 // table for cross-reference) — never from the comparative/price sheets.
 import { rawSqlite as db } from "../../storage";
-import type { Intent } from "./intent";
+import type { Intent, PartListEntry } from "./intent";
 
 export interface SearchHit {
   id: number;
@@ -19,9 +19,17 @@ export interface SearchHit {
   strategies_matched: string[];
 }
 
+export interface PerPartResult {
+  rawName: string;
+  parts: SearchHit[];
+  strategiesMatched: string[];
+  tier: string;
+}
+
 export interface SearchResult {
   hits: SearchHit[];
   strategies: string[];
+  perPart?: PerPartResult[];
 }
 
 export interface SearchCtx {
@@ -302,8 +310,166 @@ function likeFallback(intent: Intent, restrictCatalog: number | null): SearchHit
   }
 }
 
+// ---- R27.24a5 per-part search (5-tier fallback) ----------------------------
+// Common words that don't discriminate between parts — dropped when picking a
+// single most-distinctive token (tier 3).
+const COMMON_PART_WORDS = new Set([
+  "filter", "assembly", "assy", "kit", "set", "part", "parts", "oil", "air",
+  "element", "cartridge", "spare", "spares", "no", "number", "oem",
+]);
+
+// Clean a phrase into FTS5-safe quoted phrase ("" if empty after cleaning).
+function ftsPhrase(phrase: string): string {
+  const toks = phrase.toLowerCase().replace(/[^a-z0-9 ]/g, " ").split(/\s+/).filter((t) => t.length >= 2);
+  return toks.length ? `"${toks.join(" ")}"` : "";
+}
+
+function rowsToHits(rows: any[], strategy: string, baseScore: number): SearchHit[] {
+  return rows.map((r, i) => ({
+    id: r.id,
+    part_number: r.part_number || "",
+    description: r.description || "",
+    catalog_id: r.catalog_id,
+    catalog_label: catalogLabel(r.catalog_id),
+    score: Math.max(1, baseScore - i),
+    strategies_matched: [strategy],
+  }));
+}
+
+// Run the 5-tier fallback for one part name. `restrict` scopes to the locked
+// catalog (multi_part_list never bypasses the lock). Stops at the first tier
+// that yields hits and logs which tier matched.
+function searchSinglePart(entry: PartListEntry, restrict: number | null): PerPartResult {
+  const scopeSql = restrict ? ` AND p.catalog_id = ${Number(restrict)}` : "";
+  const scopeSqlPlain = restrict ? ` AND catalog_id = ${Number(restrict)}` : "";
+  const rawTokens = Array.from(new Set(entry.tokens.map((t) => t.toLowerCase().trim()).filter((t) => t.length >= 2)));
+  const synonyms = entry.expandedTokens;
+  const hasFts = fts5Available();
+
+  const runFts = (expr: string, strategy: string, baseScore: number): SearchHit[] => {
+    if (!expr) return [];
+    try {
+      const rows = db.prepare(
+        `SELECT p.id, p.part_number, p.description, p.catalog_id, bm25(partsetu_parts_fts) AS rank
+         FROM partsetu_parts_fts JOIN partsetu_parts p ON p.id = partsetu_parts_fts.rowid
+         WHERE partsetu_parts_fts MATCH ?${scopeSql} ORDER BY rank ASC LIMIT 10`,
+      ).all(expr) as any[];
+      return rowsToHits(rows, strategy, baseScore);
+    } catch (e: any) {
+      console.warn(`[partsetu] subsearch fts (${strategy}) error: ${e?.message || e}`);
+      return [];
+    }
+  };
+
+  let hits: SearchHit[] = [];
+  let tier = "0_none";
+
+  // Tier 1 — FTS phrase match over all synonym phrases (OR-joined).
+  if (hasFts) {
+    const expr = Array.from(new Set(synonyms.map(ftsPhrase).filter(Boolean))).join(" OR ");
+    hits = runFts(expr, "fts_phrase", 45);
+    if (hits.length) tier = "1_fts";
+  }
+
+  // Tier 2 — prefix wildcards from the raw tokens (AND of prefixes).
+  if (!hits.length && hasFts && rawTokens.length) {
+    const expr = rawTokens.map((t) => `${t}*`).join(" ");
+    hits = runFts(expr, "fts_prefix", 40);
+    if (hits.length) tier = "2_prefix";
+  }
+
+  // Tier 3 — single most-distinctive token (drop common words), prefix match.
+  if (!hits.length && hasFts && rawTokens.length) {
+    const distinctive = rawTokens
+      .filter((t) => !COMMON_PART_WORDS.has(t))
+      .sort((a, b) => b.length - a.length)[0] || rawTokens.sort((a, b) => b.length - a.length)[0];
+    if (distinctive) {
+      hits = runFts(`${distinctive}*`, "fts_token", 35);
+      if (hits.length) tier = "3_token";
+    }
+  }
+
+  // Tier 4 — LIKE fallback: AND of %token% within the catalog.
+  if (!hits.length && rawTokens.length) {
+    const whereExpr = rawTokens.map(() => `UPPER(description) LIKE ?`).join(" AND ");
+    const params = rawTokens.map((t) => `%${t.toUpperCase()}%`);
+    try {
+      const rows = db.prepare(
+        `SELECT id, part_number, description, catalog_id FROM partsetu_parts
+         WHERE (${whereExpr})${scopeSqlPlain} ORDER BY LENGTH(description) ASC LIMIT 10`,
+      ).all(...params) as any[];
+      hits = rowsToHits(rows, "like", 30);
+      if (hits.length) tier = "4_like";
+    } catch (e: any) {
+      console.warn(`[partsetu] subsearch like error: ${e?.message || e}`);
+    }
+  }
+
+  // Tier 5 — JS token-overlap scoring over the whole catalog (cap 5000).
+  if (!hits.length) {
+    try {
+      const synTokens = Array.from(new Set(
+        synonyms.flatMap((s) => s.toLowerCase().replace(/[^a-z0-9 ]/g, " ").split(/\s+/)).filter((t) => t.length >= 2),
+      ));
+      if (synTokens.length) {
+        const rows = db.prepare(
+          `SELECT id, part_number, description, catalog_id FROM partsetu_parts
+           WHERE 1=1${scopeSqlPlain} LIMIT 5000`,
+        ).all() as any[];
+        const scored: SearchHit[] = [];
+        for (const r of rows) {
+          const desc = String(r.description || "").toLowerCase();
+          const present = synTokens.filter((t) => desc.includes(t)).length;
+          const pct = present / synTokens.length;
+          if (pct >= 0.3) {
+            scored.push({
+              id: r.id,
+              part_number: r.part_number || "",
+              description: r.description || "",
+              catalog_id: r.catalog_id,
+              catalog_label: catalogLabel(r.catalog_id),
+              score: Math.round(pct * 30),
+              strategies_matched: ["overlap"],
+            });
+          }
+        }
+        hits = scored.sort((a, b) => b.score - a.score).slice(0, 5);
+        if (hits.length) tier = "5_overlap";
+      }
+    } catch (e: any) {
+      console.warn(`[partsetu] subsearch overlap error: ${e?.message || e}`);
+    }
+  }
+
+  const strategiesMatched = Array.from(new Set(hits.flatMap((h) => h.strategies_matched)));
+  console.log(`[partsetu] subsearch part="${entry.rawName}" tokens=[${rawTokens.join(",")}] synonyms=${synonyms.length} tier=${tier} results=${hits.length}`);
+  return { rawName: entry.rawName, parts: hits, strategiesMatched, tier };
+}
+
 export async function searchParts(intent: Intent, ctx: SearchCtx): Promise<SearchResult> {
   const locked = ctx.lockedCatalogId ?? null;
+
+  // R27.24a5 — multi-part list: run each requested part through its own 5-tier
+  // search in parallel. bypassLock is false, so each search is scoped to the
+  // locked catalog. Returns the union of per-part hits (deduped) so the citation
+  // guard permits every found part number, plus a structured per-part breakdown.
+  if (intent.kind === "multi_part_list" && intent.partList?.length) {
+    const restrict = intent.bypassLock ? null : locked;
+    const perPart = await Promise.all(intent.partList.map((e) => Promise.resolve().then(() => searchSinglePart(e, restrict))));
+    const merged = new Map<number, SearchHit>();
+    for (const pp of perPart) {
+      for (const h of pp.parts) {
+        const existing = merged.get(h.id);
+        if (existing) { if (h.score > existing.score) existing.score = h.score; }
+        else merged.set(h.id, { ...h, strategies_matched: [...h.strategies_matched] });
+      }
+    }
+    const found = perPart.filter((p) => p.parts.length).length;
+    console.log(`[partsetu] multi_part_list parts_requested=${perPart.length} parts_found=${found} parts_missing=${perPart.length - found}`);
+    const hits = Array.from(merged.values()).sort((a, b) => b.score - a.score);
+    return { hits, strategies: ["multi_part_list"], perPart };
+  }
+
   // strategies 1,2,3 honor the lock unless the intent explicitly bypasses it;
   // strategy 4 (xref) is NEVER restricted — it walks across catalogs.
   const restrict = intent.bypassLock ? null : locked;

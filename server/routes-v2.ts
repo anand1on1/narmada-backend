@@ -8505,6 +8505,17 @@ function registerR8Routes(
 
       let contextBlock = await partsetuStore.buildContextBlock(String(content), catalogId, convNow?.chassis_no || null);
       if (verifiedBlock) contextBlock = `${verifiedBlock}\n${contextBlock}`;
+      // R27.24a5 — prepend the structured per-part lookup table for multi-part
+      // list queries so Sonnet answers each requested part honestly (number or
+      // NO MATCH) instead of collapsing into a single "not available".
+      if (intent.kind === "multi_part_list" && searchResult.perPart?.length) {
+        const lc = catalogId ? partsetuStore.getCatalog(catalogId) : null;
+        const label = lc
+          ? `catalog #${catalogId} — ${[lc.model, lc.variant].filter(Boolean).join(" ") || lc.oem || ""}`.trim()
+          : "the locked catalog";
+        const lookupBlock = partsetuPrompt.buildPartLookupBlock(searchResult.perPart, label);
+        if (lookupBlock) contextBlock = `${lookupBlock}\n\n${contextBlock}`;
+      }
       if (resolverNote) contextBlock = `${resolverNote}\n${contextBlock}`;
       const history = partsetuHistory(Number(conversationId));
       // R27.17 — upgrade chat model from Haiku to Sonnet. Haiku was missing
