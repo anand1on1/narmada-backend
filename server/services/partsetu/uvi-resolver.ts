@@ -45,7 +45,10 @@ export function alphanumOnly(s: string): string {
 
 // Auto-lock is only granted when the top hit came from a strategy that is an
 // exact, unambiguous identifier match.
-const EXACT_STRATEGIES = new Set(["exact_vc_no", "exact_vds", "identifier_table_exact"]);
+const EXACT_STRATEGIES = new Set([
+  "exact_vc_no", "exact_vds", "identifier_table_exact",
+  "chassis_type_exact", "vds_from_full_vin",
+]);
 
 interface CatRow {
   id: number;
@@ -56,6 +59,7 @@ interface CatRow {
   chassis_no: string | null;
   chassis_prefix: string | null;
   vds_codes: string | null;
+  chassis_type: string | null;
 }
 
 interface RawHit {
@@ -74,13 +78,12 @@ function loadCatalogs(): CatRow[] {
   const cols = new Set(
     (db.prepare(`PRAGMA table_info(partsetu_catalogs)`).all() as any[]).map((c) => c.name),
   );
-  const hasPrefix = cols.has("chassis_prefix");
-  const hasVds = cols.has("vds_codes");
   const sel = [
     "id", "oem", "model", "variant", "vc_no",
     cols.has("chassis_no") ? "chassis_no" : "NULL AS chassis_no",
-    hasPrefix ? "chassis_prefix" : "NULL AS chassis_prefix",
-    hasVds ? "vds_codes" : "NULL AS vds_codes",
+    cols.has("chassis_prefix") ? "chassis_prefix" : "NULL AS chassis_prefix",
+    cols.has("vds_codes") ? "vds_codes" : "NULL AS vds_codes",
+    cols.has("chassis_type") ? "chassis_type" : "NULL AS chassis_type",
   ].join(", ");
   try { return db.prepare(`SELECT ${sel} FROM partsetu_catalogs`).all() as CatRow[]; }
   catch { return []; }
@@ -147,7 +150,8 @@ function sIdentifierExact(input: string): RawHit[] {
   if (n.length < 3) return [];
   try {
     const rows = db.prepare(
-      `SELECT catalog_id, identifier_type, identifier_value FROM partsetu_vehicle_identifiers WHERE normalized_value = ?`,
+      `SELECT catalog_id, identifier_type, identifier_value FROM partsetu_vehicle_identifiers
+       WHERE normalized_value = ? AND identifier_type NOT IN ('chassis_type','vds')`,
     ).all(n) as any[];
     return rows.map((r) => ({
       catalog_id: r.catalog_id, strategy: "identifier_table_exact", score: 95,
@@ -163,7 +167,8 @@ function sIdentifierPrefix(input: string): RawHit[] {
   try {
     const rows = db.prepare(
       `SELECT catalog_id, identifier_type, identifier_value, normalized_value FROM partsetu_vehicle_identifiers
-       WHERE normalized_value LIKE ? || '%' AND LENGTH(normalized_value) >= LENGTH(?)`,
+       WHERE normalized_value LIKE ? || '%' AND LENGTH(normalized_value) >= LENGTH(?)
+         AND identifier_type NOT IN ('chassis_type','vds')`,
     ).all(n, n) as any[];
     return rows
       .filter((r) => r.normalized_value !== n) // exact handled elsewhere
@@ -258,6 +263,74 @@ function sDigitsFallback(input: string, cats: CatRow[]): RawHit[] {
   return out;
 }
 
+// ---- chassis-type helpers (R27.24a3.1) -------------------------------------
+// Strip a leading MAT (case-insensitive), drop non-alphanumerics, uppercase.
+function chassisCore(input: string): string {
+  return alphanumOnly(input).replace(/^MAT/, "");
+}
+
+function chassisTypeMatchesCatalogs(core: string, cats: CatRow[]): number[] {
+  const out: number[] = [];
+  for (const c of cats) {
+    if (c.chassis_type && alphanumOnly(c.chassis_type) === core) out.push(c.id);
+    // backwards-compat: R27.24a3's chassis_prefix column.
+    else if (c.chassis_prefix && alphanumOnly(c.chassis_prefix) === core) out.push(c.id);
+  }
+  return out;
+}
+
+function chassisTypeMatchesIdentifiers(core: string): number[] {
+  if (!identifierTableAvailable()) return [];
+  try {
+    const rows = db.prepare(
+      `SELECT DISTINCT catalog_id FROM partsetu_vehicle_identifiers
+       WHERE identifier_type IN ('chassis_type','vds') AND normalized_value = ?`,
+    ).all(core) as any[];
+    return rows.map((r) => r.catalog_id);
+  } catch { return []; }
+}
+
+// Strategy: exact chassis_type / VDS match (the happy path). Score 98.
+function sChassisTypeExact(input: string, cats: CatRow[]): RawHit[] {
+  const core = chassisCore(input);
+  if (core.length < 4 || core.length > 8) return [];
+  const ids = new Set<number>([...chassisTypeMatchesCatalogs(core, cats), ...chassisTypeMatchesIdentifiers(core)]);
+  return Array.from(ids).map((id) => ({ catalog_id: id, strategy: "chassis_type_exact", score: 98, matched_value: `chassis_type:${core}` }));
+}
+
+// Strategy: short chassis_type prefix. Score 75.
+function sChassisTypePrefix(input: string, cats: CatRow[]): RawHit[] {
+  const core = chassisCore(input);
+  if (core.length < 3 || core.length > 5) return [];
+  const ids = new Set<number>();
+  for (const c of cats) {
+    if (c.chassis_type && alphanumOnly(c.chassis_type).startsWith(core)) ids.add(c.id);
+    else if (c.chassis_prefix && alphanumOnly(c.chassis_prefix).startsWith(core)) ids.add(c.id);
+  }
+  if (identifierTableAvailable()) {
+    try {
+      const rows = db.prepare(
+        `SELECT DISTINCT catalog_id FROM partsetu_vehicle_identifiers
+         WHERE identifier_type IN ('chassis_type','vds') AND normalized_value LIKE ? || '%'`,
+      ).all(core) as any[];
+      for (const r of rows) ids.add(r.catalog_id);
+    } catch { /* ignore */ }
+  }
+  return Array.from(ids).map((id) => ({ catalog_id: id, strategy: "chassis_type_prefix", score: 75, matched_value: `chassis_type~${core}` }));
+}
+
+// Strategy: full 17-char MAT VIN → extract VDS (chars 4-9) → chassis_type_exact.
+function sVdsFromFullVin(input: string, cats: CatRow[]): RawHit[] {
+  const raw = String(input || "").trim();
+  // Real chassis numbers users paste are >=17 chars (some carry suffixes), so
+  // accept MAT + 14-or-more; we only need the 6 VDS digits at chars 4-9.
+  if (!/^MAT[A-Z0-9]{14,}$/i.test(raw)) return [];
+  const vds = alphanumOnly(raw.slice(3, 9));
+  if (vds.length < 4) return [];
+  const ids = new Set<number>([...chassisTypeMatchesCatalogs(vds, cats), ...chassisTypeMatchesIdentifiers(vds)]);
+  return Array.from(ids).map((id) => ({ catalog_id: id, strategy: "vds_from_full_vin", score: 95, matched_value: `vds:${vds}` }));
+}
+
 // ---- main resolver ---------------------------------------------------------
 export async function resolveVehicle(input: string): Promise<UviResult> {
   const raw = String(input || "");
@@ -266,6 +339,9 @@ export async function resolveVehicle(input: string): Promise<UviResult> {
   const catById = new Map<number, CatRow>(cats.map((c) => [c.id, c]));
 
   const tasks: Array<Promise<RawHit[]>> = [
+    Promise.resolve().then(() => sChassisTypeExact(raw, cats)),
+    Promise.resolve().then(() => sChassisTypePrefix(raw, cats)),
+    Promise.resolve().then(() => sVdsFromFullVin(raw, cats)),
     Promise.resolve().then(() => sExactVcNo(raw, cats)),
     Promise.resolve().then(() => sVcNoSubstring(raw, cats)),
     Promise.resolve().then(() => sIdentifierExact(raw)),

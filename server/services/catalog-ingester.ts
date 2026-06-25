@@ -11,6 +11,36 @@ import { rawSqlite as db } from "../storage";
 import { copyToCatalog, getCatalogPdfPath, catalogPdfSize } from "./catalog-storage";
 import { enrichCatalog } from "./catalog-enrichment";
 import { getStorageBackend } from "./r2-storage";
+import { extractChassisType } from "./partsetu/chassis-extractor";
+
+// R27.24a3.1 — pull the cover-page "Chassis Type" (6-char VDS) and persist it on
+// the catalog plus seed the UVI resolver identifiers (chassis_type + vds). Both
+// inserts are INSERT OR IGNORE so re-ingest is idempotent. Exported so the
+// backfill script reuses the exact same logic. Never throws.
+export function seedChassisType(catalogId: number, coverText: string): string | null {
+  try {
+    const { value } = extractChassisType(coverText);
+    if (!value) {
+      console.log(`[partsetu] ingest catalog_id=${catalogId} chassis_type=NOT_FOUND`);
+      return null;
+    }
+    const normalized = value.toUpperCase().replace(/[\s\-._]/g, "");
+    db.prepare(`UPDATE partsetu_catalogs SET chassis_type = ? WHERE id = ?`).run(value, catalogId);
+    const ins = db.prepare(
+      `INSERT OR IGNORE INTO partsetu_vehicle_identifiers
+       (catalog_id, identifier_type, identifier_value, normalized_value, confidence, source, created_at)
+       VALUES (?, ?, ?, ?, 1.0, 'pdf_extract', ?)`,
+    );
+    const now = Date.now();
+    ins.run(catalogId, "chassis_type", value, normalized, now);
+    ins.run(catalogId, "vds", value, normalized, now);
+    console.log(`[partsetu] ingest catalog_id=${catalogId} chassis_type=${value} (seeded vds+chassis_type identifiers)`);
+    return value;
+  } catch (e: any) {
+    console.warn(`[partsetu] ingest catalog_id=${catalogId} chassis_type seed failed: ${e?.message || e}`);
+    return null;
+  }
+}
 
 function pdfText(pdfPath: string): string {
   return execFileSync("pdftotext", ["-layout", "-enc", "UTF-8", pdfPath, "-"], { maxBuffer: 512 * 1024 * 1024 }).toString("utf8");
@@ -298,6 +328,10 @@ export async function ingestCatalogPdf(opts: {
       db.prepare(`UPDATE partsetu_catalogs SET chassis_no = ? WHERE id = ?`).run(chassisNo.trim(), catalogId);
     }
 
+    // R27.24a3.1 — extract the cover-page "Chassis Type" (6-char VDS) and seed
+    // the UVI resolver identifiers. Best-effort: a miss never fails ingest.
+    seedChassisType(catalogId, pages[0] || "");
+
     // B2/B3/B4/B5 — best-effort enrichment (OEM detect, profile, categories, specs).
     try {
       await enrichCatalog({ catalogId, coverText: pages[0] || "", firstPagesText: (pages[1] || "") + "\n" + (pages[2] || "") });
@@ -340,6 +374,9 @@ export async function reingestCatalog(catalogId: number, uploadedBy: string): Pr
       .run(meta.model, meta.chassis, pdfPageCount(pdfPath) || pages.length, catalogPdfSize(catalogId), catalogId);
 
     const partsCount = parsePartsIntoCatalog(pages, catalogId);
+
+    // R27.24a3.1 — re-extract chassis_type on re-ingest.
+    seedChassisType(catalogId, pages[0] || "");
 
     // B2/B3/B4/B5 — re-run enrichment on re-ingest.
     try {

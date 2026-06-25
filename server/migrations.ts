@@ -3723,5 +3723,23 @@ export function runPartSetuMigrations() {
     console.log(`[migrations] R27.24a3: auto-seed fail: ${e?.message || e}`);
   }
 
+  // ==================================================================
+  // R27.24a3.1 — Tata "Chassis Type" (6-char VDS) column. Additive: a new
+  // chassis_type column distinct from R27.24a3's chassis_prefix/vds_codes,
+  // populated by the cover-page extractor at ingest (and the backfill script).
+  // ==================================================================
+  const r2431 = (step: string, sql: string) => {
+    try { sqlite.exec(sql); console.log(`[migrations] R27.24a3.1: ${step} ok`); }
+    catch (e: any) {
+      const msg = String(e?.message || e);
+      if (/duplicate|already exists/i.test(msg)) console.log(`[migrations] R27.24a3.1: ${step} skip (${msg})`);
+      else console.log(`[migrations] R27.24a3.1: ${step} fail: ${msg}`);
+    }
+  };
+  const catCols2 = new Set((sqlite.prepare(`PRAGMA table_info(partsetu_catalogs)`).all() as any[]).map((c) => c.name));
+  if (catCols2.has("chassis_type")) console.log("[migrations] R27.24a3.1: chassis_type already exists, skip");
+  else r2431("partsetu_catalogs.chassis_type", `ALTER TABLE partsetu_catalogs ADD COLUMN chassis_type TEXT`);
+  r2431("idx_partsetu_catalogs_chassis_type", `CREATE INDEX IF NOT EXISTS idx_partsetu_catalogs_chassis_type ON partsetu_catalogs(chassis_type)`);
+
   console.log("[migrations] PartSetu: complete");
 }

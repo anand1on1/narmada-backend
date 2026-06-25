@@ -8,7 +8,8 @@
     "build": "tsx script/build.ts",
     "start": "NODE_ENV=production node dist/index.cjs",
     "check": "tsc",
-    "db:push": "drizzle-kit push"
+    "db:push": "drizzle-kit push",
+    "backfill-chassis-types": "tsx scripts/backfill-chassis-types.ts"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.104.1",
