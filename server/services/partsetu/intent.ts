@@ -5,6 +5,7 @@
 // (parse failure, no API key, timeout all fall through to the heuristic).
 import { callClaudeHaiku } from "../claude";
 import { expandPartName, PART_KEYWORDS } from "./part-synonyms";
+import type { UviCandidate } from "./uvi-resolver";
 
 export type IntentKind =
   | "locked_vehicle_part"
@@ -14,7 +15,8 @@ export type IntentKind =
   | "small_talk"
   | "image_request"
   | "price_query"
-  | "multi_part_list";
+  | "multi_part_list"
+  | "disambiguation_reply";
 
 export interface PartListEntry {
   rawName: string;
@@ -29,6 +31,18 @@ export interface Intent {
   specs: { dia_mm?: number; teeth?: number; voltage?: number; bore?: string };
   bypassLock: boolean;
   partList?: PartListEntry[];
+  // R27.24a8 — set only on a disambiguation_reply intent.
+  selectedCandidateIndex?: number; // 1-based index into the pending candidate set
+  selectedUvi?: UviCandidate;      // the chosen vehicle's auto-lock candidate
+  replayQuery?: string;            // the customer's original (pre-disambiguation) query
+}
+
+// R27.24a8 — one pending vehicle candidate: the identifier the customer typed
+// plus the resolved auto-lock candidate. Mirrors the routes-v2 a7 `distinctLocks`
+// value shape exactly so the persisted JSON round-trips unchanged.
+export interface PendingDisambiguationCandidate {
+  input: string;
+  lock: UviCandidate;
 }
 
 export interface SessionState {
@@ -175,6 +189,93 @@ export function extractMultiPartList(message: string): PartListEntry[] | null {
   }
 
   return entries.length >= 3 ? entries : null;
+}
+
+// ---- R27.24a8: disambiguation-reply detection -----------------------------
+
+// Map Devanagari digits (०-९) to ASCII so "वाहन २" and "2" match identically.
+export function devanagariToAscii(s: string): string {
+  return String(s || "").replace(/[०-९]/g, (d) => String(d.charCodeAt(0) - 0x0966));
+}
+
+// Word/ordinal numerals (English + Hinglish + Hindi). 1-based values.
+const WORD_NUMERALS: Record<string, number> = {
+  first: 1, second: 2, third: 3, fourth: 4, fifth: 5,
+  ek: 1, do: 2, teen: 3, char: 4, chaar: 4, paanch: 5, panch: 5,
+  pehla: 1, pehli: 1, doosra: 2, dusra: 2, teesra: 3, tisra: 3,
+};
+
+// Conservative cancel/skip detector. Matches explicit abandon words only — NOT
+// a bare "na" (too common inside ordinary text). Devanagari नहीं / रहने दो too.
+export function isDisambiguationCancel(message: string): boolean {
+  const m = String(message || "").toLowerCase().trim();
+  if (!m) return false;
+  if (/\b(cancel|skip|stop|never\s*mind|nevermind|forget\s*it|chhodo|chodo|rehne\s*do|rahne\s*do|nahi|nahin)\b/i.test(m)) return true;
+  if (/नहीं|रहने\s*दो|छोड़ो/.test(message)) return true;
+  return false;
+}
+
+// Map a short reply to a 0-based candidate index, or null if no confident match.
+// Order: (1) paste-back of a candidate's identifier (input / vc_no / matched_value)
+// — allowed regardless of length because it's specific; (2) for SHORT replies
+// (<=4 tokens) bare digit / "option N" / ordinal / lone digit / word numeral.
+export function matchDisambiguationReply(
+  message: string,
+  candidates: PendingDisambiguationCandidate[],
+): number | null {
+  if (!candidates?.length) return null;
+  const n = candidates.length;
+  const raw = String(message || "");
+  const ascii = devanagariToAscii(raw);
+  const inRange = (i: number) => i >= 1 && i <= n;
+
+  // (1) paste-back of a candidate identifier (strip all whitespace, uppercase).
+  const norm = (s: string | null | undefined) => String(s || "").toUpperCase().replace(/\s+/g, "");
+  const msgNorm = norm(ascii);
+  if (msgNorm.length >= 4) {
+    for (let i = 0; i < n; i++) {
+      const c = candidates[i];
+      const ids = [c.input, c.lock?.vc_no, c.lock?.matched_value].map((x) => norm(x)).filter((x) => x.length >= 4);
+      if (ids.some((id) => msgNorm.includes(id))) return i;
+    }
+  }
+
+  // (2) selector-style replies — guarded to short messages to avoid false hits
+  // on ordinary questions (e.g. Hindi "do" inside "do you have...").
+  const tokens = ascii.trim().split(/\s+/).filter(Boolean);
+  if (tokens.length > 4) return null;
+  const lower = ascii.toLowerCase().trim();
+
+  // bare digit only ("1", "2")
+  let mm = lower.match(/^(\d{1,2})$/);
+  if (mm) { const i = Number(mm[1]); if (inRange(i)) return i - 1; }
+  // "option N" / "vehicle N" / "वाहन N" (Devanagari already folded to ascii) / "no N"
+  mm = ascii.match(/(?:option|vehicle|gaadi|gadi|number|no|वाहन)\s*#?\s*(\d{1,2})/i);
+  if (mm) { const i = Number(mm[1]); if (inRange(i)) return i - 1; }
+  // ordinal "1st" / "2nd" / "3rd"
+  mm = lower.match(/\b(\d{1,2})(?:st|nd|rd|th)\b/);
+  if (mm) { const i = Number(mm[1]); if (inRange(i)) return i - 1; }
+  // word numerals (english + hinglish + hindi text)
+  for (const [w, v] of Object.entries(WORD_NUMERALS)) {
+    if (new RegExp(`\\b${w}\\b`, "i").test(lower) && inRange(v)) return v - 1;
+  }
+  // lone digit anywhere in the short reply ("vehicle 2 please" already caught;
+  // this covers "2 wala")
+  mm = lower.match(/\b(\d{1,2})\b/);
+  if (mm) { const i = Number(mm[1]); if (inRange(i)) return i - 1; }
+
+  return null;
+}
+
+// High-level detector used by the chat handler. Returns the chosen candidate's
+// 1-based index + its auto-lock UVI candidate, or null when nothing matches.
+export function detectDisambiguationReply(
+  message: string,
+  candidates: PendingDisambiguationCandidate[],
+): { selectedCandidateIndex: number; selectedUvi: UviCandidate } | null {
+  const idx = matchDisambiguationReply(message, candidates);
+  if (idx === null) return null;
+  return { selectedCandidateIndex: idx + 1, selectedUvi: candidates[idx].lock };
 }
 
 // Deterministic classifier — also the fallback when the LLM is unavailable.

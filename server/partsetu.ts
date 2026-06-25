@@ -78,6 +78,57 @@ export function setConversationChassis(conversationId: number, chassisNo: string
   db.prepare(`UPDATE partsetu_conversations SET chassis_no = ? WHERE id = ?`).run(chassisNo, conversationId);
 }
 
+// ---- Pending disambiguation state (R27.24a8) ------------------------------
+// When a message resolves to >=2 distinct vehicles we persist the candidate
+// set + the customer's original query so the next short reply ("1"/"2") can
+// lock the chosen vehicle and replay the query. Keyed by session_id (the
+// conversation id rendered as text). TTL is 10 minutes by default.
+
+export interface PendingDisambiguation {
+  candidates: any[];
+  original_query: string;
+  created_at: number;
+  expires_at: number;
+}
+
+export function savePendingDisambiguation(
+  sessionId: string,
+  candidates: any[],
+  originalQuery: string,
+  ttlMs = 600000,
+): void {
+  const ts = now();
+  db.prepare(
+    `INSERT INTO partsetu_pending_disambiguation (session_id, candidates_json, original_query, created_at, expires_at)
+     VALUES (?, ?, ?, ?, ?)
+     ON CONFLICT(session_id) DO UPDATE SET
+       candidates_json = excluded.candidates_json,
+       original_query = excluded.original_query,
+       created_at = excluded.created_at,
+       expires_at = excluded.expires_at`,
+  ).run(sessionId, JSON.stringify(candidates ?? []), originalQuery ?? "", ts, ts + ttlMs);
+}
+
+export function getPendingDisambiguation(sessionId: string): PendingDisambiguation | null {
+  const row = db.prepare(
+    `SELECT candidates_json, original_query, created_at, expires_at
+       FROM partsetu_pending_disambiguation WHERE session_id = ?`,
+  ).get(sessionId) as any;
+  if (!row) return null;
+  let candidates: any[] = [];
+  try { candidates = JSON.parse(row.candidates_json || "[]"); } catch { candidates = []; }
+  return {
+    candidates,
+    original_query: row.original_query || "",
+    created_at: Number(row.created_at),
+    expires_at: Number(row.expires_at),
+  };
+}
+
+export function clearPendingDisambiguation(sessionId: string): void {
+  db.prepare(`DELETE FROM partsetu_pending_disambiguation WHERE session_id = ?`).run(sessionId);
+}
+
 // Pull a chassis / VC number out of free text, e.g. "chassis no 862011" or
 // "VC: 51610568000R". Returns the captured token (uppercased) or null.
 export function extractChassisNo(text: string): string | null {

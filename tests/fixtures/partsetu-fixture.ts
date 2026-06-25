@@ -16,6 +16,8 @@ import * as prompt from "../../server/services/partsetu/prompt";
 import {
   classifyIntentHeuristic,
   extractMultiPartList,
+  detectDisambiguationReply,
+  isDisambiguationCancel,
   type Intent,
   type SessionState,
 } from "../../server/services/partsetu/intent";
@@ -225,6 +227,7 @@ export function classifyIntentDeterministic(message: string, state: SessionState
 export interface SimSessionState {
   lockedCatalogId?: number | null;
   chassisNo?: string | null;
+  sessionId?: string | null;
 }
 
 export interface SimResult {
@@ -239,6 +242,9 @@ export interface SimResult {
   allowList: Set<string>;
   resolverNote: string;
   needsDisambiguation: boolean;
+  disambiguationResolved: boolean;
+  selectedCandidateIndex: number | null;
+  replayedQuery: string | null;
 }
 
 // Run the production chat pipeline minus the Sonnet network call. Faithful to
@@ -251,6 +257,37 @@ export async function simulateChatMessage(
   sessionState: SimSessionState = {},
 ): Promise<SimResult> {
   const priorLock = sessionState.lockedCatalogId ?? null;
+  const sessionId = sessionState.sessionId ?? null;
+
+  // 0) R27.24a8 — DB-backed disambiguation reply routing (mirrors routes-v2).
+  // A pending candidate set from a prior turn + a short reply → lock chosen
+  // vehicle and replay the original query. Expiry 10 min; cancel clears.
+  let disambiguationResolved = false;
+  let selectedCandidateIndex: number | null = null;
+  let replayedQuery: string | null = null;
+  let resolvedLock: number | null = null;
+  if (sessionId) {
+    const pending = partsetu.getPendingDisambiguation(sessionId);
+    if (pending) {
+      if (Date.now() > pending.expires_at) {
+        partsetu.clearPendingDisambiguation(sessionId);
+      } else {
+        const picked = detectDisambiguationReply(message, pending.candidates);
+        if (picked) {
+          partsetu.clearPendingDisambiguation(sessionId);
+          resolvedLock = picked.selectedUvi.catalog_id;
+          selectedCandidateIndex = picked.selectedCandidateIndex;
+          replayedQuery = pending.original_query || null;
+          disambiguationResolved = true;
+        } else if (isDisambiguationCancel(message)) {
+          partsetu.clearPendingDisambiguation(sessionId);
+        }
+        // else keep pending, fall through.
+      }
+    }
+  }
+  const activeMessage = replayedQuery ?? message;
+  const effectiveLock = resolvedLock ?? priorLock;
 
   // 1) UVI probe across every identifier candidate in the message.
   const uviCandidates = uvi.extractVehicleIdentifierCandidates(message);
@@ -276,16 +313,18 @@ export async function simulateChatMessage(
   let verifiedVehicleBlock = "";
   let uviLockedCatalogId: number | null = null;
   let needsDisambiguation = false;
-  if (distinctLocks.size >= 2 && !priorLock) {
+  if (distinctLocks.size >= 2 && !effectiveLock) {
     needsDisambiguation = true;
-    verifiedVehicleBlock = prompt.buildDisambiguationBlock(Array.from(distinctLocks.values()));
+    const matches = Array.from(distinctLocks.values());
+    verifiedVehicleBlock = prompt.buildDisambiguationBlock(matches);
+    if (sessionId) partsetu.savePendingDisambiguation(sessionId, matches, message);
   } else if (bestUvi) {
-    if (bestUvi.auto_lock && !priorLock) uviLockedCatalogId = bestUvi.auto_lock.catalog_id;
+    if (bestUvi.auto_lock && !effectiveLock) uviLockedCatalogId = bestUvi.auto_lock.catalog_id;
     verifiedVehicleBlock = prompt.buildVerifiedVehicleBlock(matchedInput, bestUvi.auto_lock, bestUvi.candidates);
   }
 
-  // 2) Catalog resolution (prior lock wins, then UVI auto-lock, then fuzzy).
-  let catalogId: number | null = priorLock || uviLockedCatalogId || null;
+  // 2) Catalog resolution (prior/resolved lock wins, then UVI auto-lock, then fuzzy).
+  let catalogId: number | null = effectiveLock || uviLockedCatalogId || null;
   let resolverNote = "";
   if (!catalogId) {
     const resolved = await partsetu.resolveCatalog(message);
@@ -305,7 +344,7 @@ export async function simulateChatMessage(
   const lockedVehicle = lockedCatalog
     ? [lockedCatalog.model, lockedCatalog.variant].filter(Boolean).join(" ") || lockedCatalog.oem
     : null;
-  const intent = classifyIntentDeterministic(message, { lockedCatalogId: catalogId, lockedVehicle });
+  const intent = classifyIntentDeterministic(activeMessage, { lockedCatalogId: catalogId, lockedVehicle });
   const searchResult = await search.searchParts(intent, { lockedCatalogId: catalogId });
 
   // 4) Context + prompt assembly (mirrors routes-v2).
@@ -321,7 +360,7 @@ export async function simulateChatMessage(
     verifiedBlock = `NOTE: This is an exploratory / cross-reference query — you MAY suggest matching parts from OTHER catalogs (not just the locked vehicle), as long as you clearly state which catalog each part comes from.\n${verifiedBlock}`;
   }
 
-  let contextBlock = await partsetu.buildContextBlock(message, catalogId, sessionState.chassisNo || null);
+  let contextBlock = await partsetu.buildContextBlock(activeMessage, catalogId, sessionState.chassisNo || null);
   if (verifiedBlock) contextBlock = `${verifiedBlock}\n${contextBlock}`;
   if (intent.kind === "multi_part_list" && searchResult.perPart?.length) {
     const lc = catalogId ? partsetu.getCatalog(catalogId) : null;
@@ -339,7 +378,7 @@ export async function simulateChatMessage(
   return {
     intent, uviResult: bestUvi, uviCandidates, catalogId, searchResult,
     verifiedVehicleBlock, contextBlock, systemPrompt, allowList, resolverNote,
-    needsDisambiguation,
+    needsDisambiguation, disambiguationResolved, selectedCandidateIndex, replayedQuery,
   };
 }
 

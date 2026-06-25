@@ -8342,6 +8342,37 @@ function registerR8Routes(
       const candLabel = (c: import("./services/partsetu/uvi-resolver").UviCandidate) =>
         [c.model, c.variant].filter(Boolean).join(" ") || `catalog #${c.catalog_id}`;
 
+      // R27.24a8 — DB-backed disambiguation reply routing. The R27.24a7 block
+      // (below) persists the candidate set + the customer's original query when a
+      // message resolved to >=2 vehicles. A short follow-up ("1", "वाहन 2", or a
+      // pasted-back chassis) now locks the chosen vehicle and replays the
+      // original query. Expiry: 10 min. Non-matching replies keep the pending row
+      // (one more chance) unless the customer explicitly cancels.
+      let disambiguationReplayQuery: string | null = null;
+      {
+        const sessionId = String(conversationId);
+        const pending = partsetuStore.getPendingDisambiguation(sessionId);
+        if (pending) {
+          if (Date.now() > pending.expires_at) {
+            partsetuStore.clearPendingDisambiguation(sessionId);
+            console.log(`[partsetu] disambiguation_expired session=${sessionId}`);
+          } else {
+            const picked = partsetuIntent.detectDisambiguationReply(uviInput, pending.candidates);
+            if (picked) {
+              partsetuStore.clearPendingDisambiguation(sessionId);
+              partsetuStore.setCatalogContext(Number(conversationId), picked.selectedUvi.catalog_id);
+              conv.catalog_context_id = picked.selectedUvi.catalog_id;
+              disambiguationReplayQuery = pending.original_query || null;
+              console.log(`[partsetu] disambiguation_resolved session=${sessionId} index=${picked.selectedCandidateIndex} catalog_id=${picked.selectedUvi.catalog_id}`);
+            } else if (partsetuIntent.isDisambiguationCancel(uviInput)) {
+              partsetuStore.clearPendingDisambiguation(sessionId);
+              console.log(`[partsetu] disambiguation_skipped session=${sessionId}`);
+            }
+            // else: keep the pending row, fall through to normal classification.
+          }
+        }
+      }
+
       // (1) numeric follow-up to a prior disambiguation prompt.
       const pendingCands = uviDisambig.get(Number(conversationId));
       if (pendingCands && pendingCands.length && /^[1-9]\d?$/.test(uviInput)) {
@@ -8421,7 +8452,10 @@ function registerR8Routes(
         if (distinctLocks.size >= 2 && !conv.catalog_context_id) {
           const matches = Array.from(distinctLocks.values());
           verifiedVehicleBlock = partsetuPrompt.buildDisambiguationBlock(matches);
-          console.log(`[partsetu] uvi multi_match_disambiguation catalogs=[${matches.map((m) => m.lock.catalog_id).join(",")}]`);
+          // R27.24a8 — persist the candidate set + original query so the next
+          // short reply ("1"/"2"/pasted chassis) can lock + replay (see top block).
+          partsetuStore.savePendingDisambiguation(String(conversationId), matches, String(content));
+          console.log(`[partsetu] uvi multi_match_disambiguation catalogs=[${matches.map((m) => m.lock.catalog_id).join(",")}] pending_saved=1`);
         } else if (bestUvi) {
           if (bestUvi.auto_lock && !conv.catalog_context_id) {
             partsetuStore.setCatalogContext(Number(conversationId), bestUvi.auto_lock.catalog_id);
@@ -8451,12 +8485,16 @@ function registerR8Routes(
       }
       const convNow = partsetuStore.getConversation(Number(conversationId));
 
+      // R27.24a8 — on a resolved disambiguation reply, the customer's ACTIVE
+      // query is their original (pre-disambiguation) message, not the bare "1".
+      const activeContent = disambiguationReplayQuery ?? String(content);
+
       // R27.24a — intent classification + multi-strategy search. The intent
       // decides whether the vehicle lock applies (exploratory / cross-reference
       // queries bypass it so we can suggest from sibling catalogs).
       const lockedCatalog = catalogId ? partsetuStore.getCatalog(catalogId) : null;
       const lockedVehicle = lockedCatalog ? [lockedCatalog.model, lockedCatalog.variant].filter(Boolean).join(" ") || lockedCatalog.oem : null;
-      const intent = await partsetuIntent.classifyIntent(String(content), { lockedCatalogId: catalogId, lockedVehicle });
+      const intent = await partsetuIntent.classifyIntent(activeContent, { lockedCatalogId: catalogId, lockedVehicle });
       console.log(`[partsetu] intent kind=${intent.kind} bypass_lock=${intent.bypassLock}`);
       const searchResult = await partsetuSearch.searchParts(intent, { lockedCatalogId: catalogId });
       console.log(`[partsetu] search strategies=${intent.kind} results=${searchResult.hits.length} locked=${catalogId ?? "null"}`);
@@ -8473,7 +8511,7 @@ function registerR8Routes(
         verifiedBlock = `NOTE: This is an exploratory / cross-reference query — you MAY suggest matching parts from OTHER catalogs (not just the locked vehicle), as long as you clearly state which catalog each part comes from.\n${verifiedBlock}`;
       }
 
-      let contextBlock = await partsetuStore.buildContextBlock(String(content), catalogId, convNow?.chassis_no || null);
+      let contextBlock = await partsetuStore.buildContextBlock(activeContent, catalogId, convNow?.chassis_no || null);
       if (verifiedBlock) contextBlock = `${verifiedBlock}\n${contextBlock}`;
       // R27.24a5 — prepend the structured per-part lookup table for multi-part
       // list queries so Sonnet answers each requested part honestly (number or

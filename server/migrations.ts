@@ -3741,5 +3741,22 @@ export function runPartSetuMigrations() {
   else r2431("partsetu_catalogs.chassis_type", `ALTER TABLE partsetu_catalogs ADD COLUMN chassis_type TEXT`);
   r2431("idx_partsetu_catalogs_chassis_type", `CREATE INDEX IF NOT EXISTS idx_partsetu_catalogs_chassis_type ON partsetu_catalogs(chassis_type)`);
 
+  // ==================================================================
+  // R27.24a8 — pending disambiguation state. When a customer's message
+  // resolves to >=2 distinct vehicles, we persist the candidate set +
+  // their original query so a follow-up "1"/"2" reply can lock the chosen
+  // vehicle and replay the query. TTL 10 min (expires_at). Additive only.
+  // ==================================================================
+  const r2438 = (step: string, sql: string) => {
+    try { sqlite.exec(sql); console.log(`[migrations] R27.24a8: ${step} ok`); }
+    catch (e: any) {
+      const msg = String(e?.message || e);
+      if (/duplicate|already exists/i.test(msg)) console.log(`[migrations] R27.24a8: ${step} skip (${msg})`);
+      else console.log(`[migrations] R27.24a8: ${step} fail: ${msg}`);
+    }
+  };
+  r2438("partsetu_pending_disambiguation", `CREATE TABLE IF NOT EXISTS partsetu_pending_disambiguation (session_id TEXT PRIMARY KEY, candidates_json TEXT NOT NULL, original_query TEXT, created_at INTEGER NOT NULL, expires_at INTEGER NOT NULL)`);
+  r2438("idx_partsetu_pending_disambiguation_expires", `CREATE INDEX IF NOT EXISTS idx_partsetu_pending_disambiguation_expires ON partsetu_pending_disambiguation(expires_at)`);
+
   console.log("[migrations] PartSetu: complete");
 }
