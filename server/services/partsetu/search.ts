@@ -36,6 +36,30 @@ export interface SearchCtx {
   lockedCatalogId?: number | null;
 }
 
+// R27.24a6 — normalize a part number the same way everywhere the citation guard
+// compares them: uppercase, strip whitespace and dashes.
+export function normPartNumber(s: string): string {
+  return String(s || "").toUpperCase().replace(/[\s-]/g, "");
+}
+
+// R27.24a6 — unified permitted-part-number set. The citation guard regressed
+// because it only looked at the merged `hits` array; multi-part-list results
+// live in `perPart[].parts[]`. This collects every DB-derived part number from
+// ALL result shapes so a correctly-found number is never stripped as a
+// hallucination.
+export function collectPermittedPartNumbers(result: SearchResult): Set<string> {
+  const set = new Set<string>();
+  for (const p of result.hits || []) {
+    if (p.part_number) set.add(normPartNumber(p.part_number));
+  }
+  for (const group of result.perPart || []) {
+    for (const p of group.parts || []) {
+      if (p.part_number) set.add(normPartNumber(p.part_number));
+    }
+  }
+  return set;
+}
+
 // ---- FTS5 availability (memoized) -----------------------------------------
 let _fts5: boolean | null = null;
 export function fts5Available(): boolean {
@@ -308,6 +332,82 @@ function likeFallback(intent: Intent, restrictCatalog: number | null): SearchHit
     console.warn(`[partsetu] like_fallback error: ${e?.message || e}`);
     return [];
   }
+}
+
+// ---- R27.24a / a6 citation guard (pure, exported for testability) ----------
+// Strips any 8-14 digit number from the assistant reply that is neither a
+// DB-derived permitted part number NOR carries an explicit inline citation,
+// then injects "(from <label>)" after the first mention of each verified hit
+// that lacks attribution. R27.24a6 fixed the false-positive where a correctly
+// cited number was stripped because the allow-list ignored multi-part results
+// and the guard didn't honor inline "(Catalog: ...)" attributions.
+export function enforcePartCitations(
+  reply: string,
+  hits: Array<{ part_number: string; catalog_label: string }>,
+  contextBlock: string,
+  permittedSet?: Set<string>,
+): string {
+  if (!reply) return reply;
+  const labelByNum = new Map<string, string>();
+  for (const h of hits) {
+    const n = normPartNumber(h.part_number);
+    if (n.length >= 8 && !labelByNum.has(n)) labelByNum.set(n, h.catalog_label);
+  }
+  // Permitted = unified search allow-list ∪ hit numbers ∪ context numbers
+  // (everything in the context block is DB-derived).
+  const permitted = new Set<string>(permittedSet ? Array.from(permittedSet) : []);
+  for (const n of Array.from(labelByNum.keys())) permitted.add(n);
+  for (const n of (contextBlock.match(/\d{8,14}/g) || [])) permitted.add(normPartNumber(n));
+
+  // A number is OK if permitted OR carries an explicit citation within ~60 chars
+  // after it (Sonnet did the attribution itself).
+  const isCited = (text: string, idx: number, len: number): boolean => {
+    const after = text.slice(idx + len, idx + len + 60).toLowerCase();
+    return after.includes("from catalog") || after.includes("(catalog") || after.includes("catalog #") || after.includes("(from ");
+  };
+
+  // 1) Drop only sentences containing an 8-14 digit number that is BOTH not
+  //    permitted AND not explicitly cited. Short numbers (dims, voltages,
+  //    chassis like 505409) are never touched — the floor is 8 digits.
+  const numRe = /\b\d{8,14}\b/g;
+  const sentences = reply.split(/(?<=[.!?\n])\s+/);
+  let responseNumbers = 0, stripped = 0;
+  const strippedNums: string[] = [];
+  const kept = sentences.filter((sent) => {
+    let m: RegExpExecArray | null;
+    numRe.lastIndex = 0;
+    let bad = false;
+    while ((m = numRe.exec(sent)) !== null) {
+      responseNumbers++;
+      const n = normPartNumber(m[0]);
+      if (!permitted.has(n) && !isCited(sent, m.index, m[0].length)) {
+        bad = true;
+        strippedNums.push(m[0]);
+      }
+    }
+    if (bad) { stripped++; return false; }
+    return true;
+  });
+  let out = kept.join(" ").trim();
+  if (stripped > 0) {
+    out += (out ? "\n" : "") + "(part numbers were withheld — they did not come from a verified catalog row)";
+  }
+  console.log(`[partsetu] citation_guard permitted=${permitted.size} response_numbers_found=${responseNumbers} stripped=${stripped}`);
+  if (stripped > 0) {
+    const sample = Array.from(permitted).slice(0, 5);
+    console.log(`[partsetu] citation_guard stripped_numbers=[${strippedNums.join(",")}] permitted_sample=[${sample.join(",")}]`);
+  }
+
+  // 2) Inject "(from <label>)" after the first mention of each verified hit that
+  //    does not already carry an attribution nearby.
+  for (const [num, label] of Array.from(labelByNum.entries())) {
+    const idx = out.indexOf(num);
+    if (idx < 0) continue;
+    const after = out.slice(idx + num.length, idx + num.length + 60).toLowerCase();
+    if (after.includes("from ") || after.includes("catalog")) continue;
+    out = out.slice(0, idx + num.length) + ` (from ${label})` + out.slice(idx + num.length);
+  }
+  return out;
 }
 
 // ---- R27.24a5 per-part search (5-tier fallback) ----------------------------

@@ -8245,54 +8245,9 @@ function registerR8Routes(
   // numeric follow-up ("2") can resolve to the catalog offered last turn.
   const uviDisambig = new Map<number, import("./services/partsetu/uvi-resolver").UviCandidate[]>();
 
-  // R27.24a — citation guard. Strips any 8-14 digit number from the assistant
-  // reply that was not present in the context we supplied (all DB-derived) and
-  // was not a verified search hit, then injects "(from catalog #X — ...)" after
-  // the first mention of each verified part number that lacks attribution. This
-  // is a guardrail on top of the prompt — it stops cross-catalog hallucinated
-  // leaks (e.g. Wabco numbers the model invents) from reaching the customer.
-  function enforcePartCitations(
-    reply: string,
-    hits: Array<{ part_number: string; catalog_label: string }>,
-    contextBlock: string,
-  ): string {
-    if (!reply) return reply;
-    const norm = (s: string) => String(s || "").replace(/\D/g, "");
-    const labelByNum = new Map<string, string>();
-    for (const h of hits) {
-      const n = norm(h.part_number);
-      if (n.length >= 8 && !labelByNum.has(n)) labelByNum.set(n, h.catalog_label);
-    }
-    // Numbers present in the context we gave Claude are DB-derived → permitted.
-    const ctxNums = new Set((contextBlock.match(/\d{8,14}/g) || []).map((n) => n));
-    const permitted = (n: string) => labelByNum.has(n) || ctxNums.has(n);
-
-    // 1) Drop sentences that mention an un-permitted part number.
-    const sentences = reply.split(/(?<=[.!?\n])\s+/);
-    let stripped = 0;
-    const kept = sentences.filter((sent) => {
-      const nums = sent.match(/\b\d{8,14}\b/g) || [];
-      const bad = nums.some((n) => !permitted(n));
-      if (bad) { stripped++; return false; }
-      return true;
-    });
-    let out = kept.join(" ").trim();
-    if (stripped > 0) {
-      out += (out ? "\n" : "") + "(part numbers were withheld — they did not come from a verified catalog row)";
-      console.log(`[partsetu] citation_guard stripped_sentences=${stripped}`);
-    }
-
-    // 2) Inject "(from <label>)" after the first mention of each verified hit
-    //    that does not already carry an attribution nearby.
-    for (const [num, label] of Array.from(labelByNum.entries())) {
-      const idx = out.indexOf(num);
-      if (idx < 0) continue;
-      const after = out.slice(idx + num.length, idx + num.length + 40).toLowerCase();
-      if (after.includes("from ") || after.includes("catalog")) continue;
-      out = out.slice(0, idx + num.length) + ` (from ${label})` + out.slice(idx + num.length);
-    }
-    return out;
-  }
+  // R27.24a / a6 — citation guard now lives in services/partsetu/search.ts
+  // (pure + unit-tested). Thin wrapper keeps existing call sites unchanged.
+  const enforcePartCitations = partsetuSearch.enforcePartCitations;
   const catalogIngester = require("./services/catalog-ingester") as typeof import("./services/catalog-ingester");
   const catalogStorage = require("./services/catalog-storage") as typeof import("./services/catalog-storage");
 
@@ -8528,7 +8483,8 @@ function registerR8Routes(
       let replyText = partsetuStore.stripBannedPhrases(result.text);
       // R27.24a — citation guard: strip hallucinated/unattributed part numbers.
       const beforeStrip = replyText;
-      replyText = enforcePartCitations(replyText, searchResult.hits, contextBlock);
+      const permittedNums = partsetuSearch.collectPermittedPartNumbers(searchResult);
+      replyText = enforcePartCitations(replyText, searchResult.hits, contextBlock, permittedNums);
       const citationStrips = beforeStrip !== replyText ? 1 : 0;
       console.log(`[partsetu] response chars=${replyText.length} citation_strips=${citationStrips}`);
 
