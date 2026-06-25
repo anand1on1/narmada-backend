@@ -149,12 +149,15 @@ export function extractMultiPartList(message: string): PartListEntry[] | null {
   const colonIdx = raw.indexOf(":");
   if (colonIdx >= 0 && colonIdx < 60) body = raw.slice(colonIdx + 1);
 
-  // Normalize list separators into commas: numbered "1." / "1)", " and ",
-  // newlines and semicolons.
+  // Normalize list separators into commas: numbered "1." / "1)", English
+  // " and ", Hindi/Hinglish " aur " / "और" (whitespace-anchored so it never
+  // splits "aurangabad"), newlines, semicolons, pipes, slashes, ampersands.
   const flattened = body
     .replace(/\b\d+\s*[\.\)]\s*/g, ",")
     .replace(/\s+and\s+/gi, ",")
-    .replace(/[\n;]+/g, ",");
+    .replace(/\s+aur\s+/gi, ",")
+    .replace(/\s*और\s*/g, ",")
+    .replace(/[\n;|\/&]+/g, ",");
 
   const segments = flattened
     .split(",")

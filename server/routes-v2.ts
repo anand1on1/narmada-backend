@@ -8400,14 +8400,29 @@ function registerR8Routes(
         const uviCands = partsetuUvi.extractVehicleIdentifierCandidates(uviInput);
         let bestUvi: import("./services/partsetu/uvi-resolver").UviResult | null = null;
         let matchedInput = "";
+        let uviResults: import("./services/partsetu/uvi-resolver").UviResult[] = [];
         if (uviCands.length) {
-          const uviResults = await Promise.all(uviCands.map((c) => partsetuUvi.resolveVehicle(c)));
+          uviResults = await Promise.all(uviCands.map((c) => partsetuUvi.resolveVehicle(c)));
           bestUvi = partsetuUvi.pickBestUvi(uviResults);
           const bi = bestUvi ? uviResults.indexOf(bestUvi) : -1;
           matchedInput = bi >= 0 ? uviCands[bi] : (uviCands[0] || "");
         }
-        console.log(`[partsetu] uvi candidates_extracted=[${uviCands.join(",")}] uvi_resolved=${uviCands.length} auto_lock=${bestUvi?.auto_lock?.catalog_id ?? "null"}`);
-        if (bestUvi) {
+        // R27.24a7 (bug 3) — if the message resolved TWO OR MORE distinct
+        // catalogs at auto-lock confidence, do NOT silently pick one. Show a
+        // disambiguation block and leave the vehicle unlocked until the user
+        // chooses. Only fires when there is no prior locked catalog.
+        const distinctLocks = new Map<number, { input: string; lock: import("./services/partsetu/uvi-resolver").UviCandidate }>();
+        uviResults.forEach((r, idx) => {
+          if (r.auto_lock && !distinctLocks.has(r.auto_lock.catalog_id)) {
+            distinctLocks.set(r.auto_lock.catalog_id, { input: uviCands[idx], lock: r.auto_lock });
+          }
+        });
+        console.log(`[partsetu] uvi candidates_extracted=[${uviCands.join(",")}] uvi_resolved=${uviCands.length} distinct_locks=${distinctLocks.size} auto_lock=${bestUvi?.auto_lock?.catalog_id ?? "null"}`);
+        if (distinctLocks.size >= 2 && !conv.catalog_context_id) {
+          const matches = Array.from(distinctLocks.values());
+          verifiedVehicleBlock = partsetuPrompt.buildDisambiguationBlock(matches);
+          console.log(`[partsetu] uvi multi_match_disambiguation catalogs=[${matches.map((m) => m.lock.catalog_id).join(",")}]`);
+        } else if (bestUvi) {
           if (bestUvi.auto_lock && !conv.catalog_context_id) {
             partsetuStore.setCatalogContext(Number(conversationId), bestUvi.auto_lock.catalog_id);
             uviLockedCatalogId = bestUvi.auto_lock.catalog_id;

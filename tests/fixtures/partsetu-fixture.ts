@@ -238,6 +238,7 @@ export interface SimResult {
   systemPrompt: string;
   allowList: Set<string>;
   resolverNote: string;
+  needsDisambiguation: boolean;
 }
 
 // Run the production chat pipeline minus the Sonnet network call. Faithful to
@@ -255,16 +256,30 @@ export async function simulateChatMessage(
   const uviCandidates = uvi.extractVehicleIdentifierCandidates(message);
   let bestUvi: uvi.UviResult | null = null;
   let matchedInput = "";
+  let uviResults: uvi.UviResult[] = [];
   if (uviCandidates.length) {
-    const results = await Promise.all(uviCandidates.map((c) => uvi.resolveVehicle(c)));
-    bestUvi = uvi.pickBestUvi(results);
-    const bi = bestUvi ? results.indexOf(bestUvi) : -1;
+    uviResults = await Promise.all(uviCandidates.map((c) => uvi.resolveVehicle(c)));
+    bestUvi = uvi.pickBestUvi(uviResults);
+    const bi = bestUvi ? uviResults.indexOf(bestUvi) : -1;
     matchedInput = bi >= 0 ? uviCandidates[bi] : (uviCandidates[0] || "");
   }
 
+  // Mirror routes-v2 bug-3 disambiguation: ≥2 distinct auto-lock catalogs and
+  // no prior lock → emit the disambiguation block and do NOT lock.
+  const distinctLocks = new Map<number, { input: string; lock: uvi.UviCandidate }>();
+  uviResults.forEach((r, idx) => {
+    if (r.auto_lock && !distinctLocks.has(r.auto_lock.catalog_id)) {
+      distinctLocks.set(r.auto_lock.catalog_id, { input: uviCandidates[idx], lock: r.auto_lock });
+    }
+  });
+
   let verifiedVehicleBlock = "";
   let uviLockedCatalogId: number | null = null;
-  if (bestUvi) {
+  let needsDisambiguation = false;
+  if (distinctLocks.size >= 2 && !priorLock) {
+    needsDisambiguation = true;
+    verifiedVehicleBlock = prompt.buildDisambiguationBlock(Array.from(distinctLocks.values()));
+  } else if (bestUvi) {
     if (bestUvi.auto_lock && !priorLock) uviLockedCatalogId = bestUvi.auto_lock.catalog_id;
     verifiedVehicleBlock = prompt.buildVerifiedVehicleBlock(matchedInput, bestUvi.auto_lock, bestUvi.candidates);
   }
@@ -324,6 +339,7 @@ export async function simulateChatMessage(
   return {
     intent, uviResult: bestUvi, uviCandidates, catalogId, searchResult,
     verifiedVehicleBlock, contextBlock, systemPrompt, allowList, resolverNote,
+    needsDisambiguation,
   };
 }
 

@@ -79,6 +79,26 @@ export function buildVerifiedVehicleBlock(
   return "";
 }
 
+// R27.24a7 (bug 3) — when the message contains TWO OR MORE distinct vehicle
+// identifiers that each resolve (exactly) to a DIFFERENT catalog, we must NOT
+// silently auto-lock one. Emit a disambiguation block instructing the model to
+// list the matches and ask the user to choose by number. No lock is set.
+export function buildDisambiguationBlock(
+  matches: Array<{ input: string; lock: UviCandidate }>,
+): string {
+  const lines = matches.map((m, i) =>
+    `${i + 1}. "${m.input}" → ${[m.lock.model, m.lock.variant].filter(Boolean).join(" ") || `catalog #${m.lock.catalog_id}`} (catalog_id=${m.lock.catalog_id})`);
+  return [
+    "=== MULTIPLE VEHICLE MATCHES — ASK USER TO CHOOSE ===",
+    "The user's message contained more than one vehicle identifier, each resolving to a DIFFERENT catalog in our database:",
+    ...lines,
+    "These catalogs ARE in our database. Do NOT pick one yourself and do NOT lock any vehicle yet.",
+    "Present them as the numbered options above and ask the user to reply with the number of the vehicle they want.",
+    "Do NOT claim any are unavailable and do NOT invent any other model.",
+    "=== END MULTIPLE VEHICLE MATCHES ===",
+  ].join("\n");
+}
+
 const VEHICLE_ID_RULES = `RULES FOR VEHICLE IDENTIFIERS (apply always):
 1. A 5-8 digit number alone (like "505409" or "802502") is a CHASSIS TYPE CODE, never a model number.
 2. The model "Tata 407" does NOT exist in our catalog. Never invent it.

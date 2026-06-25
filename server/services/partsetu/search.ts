@@ -8,6 +8,27 @@
 // table for cross-reference) — never from the comparative/price sheets.
 import { rawSqlite as db } from "../../storage";
 import type { Intent, PartListEntry } from "./intent";
+import { expandPartName } from "./part-synonyms";
+
+// R27.24a7 (bug 1) — single-part synonym expansion. R27.24a5 added synonym
+// expansion only on the multi_part_list path, so single-part queries
+// ("tyre chahiye", "headlamp ka number", "alternator") never reached the OEM
+// phrasing in the catalog ("TIRE", "HEAD LIGHT", "GENERATOR"). Expand the
+// intent's part tokens through the same synonym map and search on the union.
+const SYNONYM_EXPAND_INTENTS = new Set<Intent["kind"]>([
+  "locked_vehicle_part", "exploratory_part_search", "spec_query",
+]);
+function expandSinglePartTokens(intent: Intent): string[] {
+  const base = (intent.partTokens || []).map((t) => t.toLowerCase()).filter(Boolean);
+  if (!base.length) return base;
+  const toks = new Set<string>(base);
+  for (const phrase of expandPartName(base.join(" "))) {
+    for (const w of phrase.toLowerCase().replace(/[^a-z0-9 ]/g, " ").split(/\s+/)) {
+      if (w.length >= 2) toks.add(w);
+    }
+  }
+  return Array.from(toks);
+}
 
 export interface SearchHit {
   id: number;
@@ -575,6 +596,18 @@ export async function searchParts(intent: Intent, ctx: SearchCtx): Promise<Searc
   const restrict = intent.bypassLock ? null : locked;
   const hasFts = fts5Available();
 
+  // R27.24a7 (bug 1) — expand single-part tokens through the synonym map so
+  // description-token strategies see OEM phrasing. exact/xref keep raw `intent`
+  // (they match on part numbers, not descriptions).
+  let effIntent = intent;
+  if (SYNONYM_EXPAND_INTENTS.has(intent.kind)) {
+    const expanded = expandSinglePartTokens(intent);
+    if (expanded.length !== (intent.partTokens?.length || 0)) {
+      console.log(`[partsetu] single_part_synonyms input=[${(intent.partTokens || []).join(",")}] expanded=[${expanded.join(",")}]`);
+    }
+    effIntent = { ...intent, partTokens: expanded };
+  }
+
   const tasks: Array<Promise<{ name: string; hits: SearchHit[] }>> = [];
   const wrap = (name: string, fn: () => SearchHit[]) =>
     tasks.push(Promise.resolve().then(() => ({ name, hits: fn() })).catch((e) => {
@@ -583,10 +616,10 @@ export async function searchParts(intent: Intent, ctx: SearchCtx): Promise<Searc
     }));
 
   if (hasFts) {
-    wrap("fts_desc", () => ftsDescription(intent, restrict));
-    wrap("fts_cat", () => ftsCatalog(intent, restrict));
+    wrap("fts_desc", () => ftsDescription(effIntent, restrict));
+    wrap("fts_cat", () => ftsCatalog(effIntent, restrict));
   } else {
-    wrap("like_fallback", () => likeFallback(intent, restrict));
+    wrap("like_fallback", () => likeFallback(effIntent, restrict));
   }
   wrap("exact", () => exactPartNumber(intent, restrict));
   if (intent.kind === "cross_reference_lookup" || intent.partNumbers.length > 0) {

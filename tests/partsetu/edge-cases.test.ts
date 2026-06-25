@@ -67,11 +67,12 @@ describe("Edge cases (10)", () => {
     expect(r.systemPrompt.length).toBeGreaterThan(0);
   });
 
-  it("E9 two distinct chassis numbers resolve to one of the two (no disambiguation yet)", async () => {
+  it("E9 two distinct chassis numbers trigger disambiguation (R27.24a7 bug 3) — no silent lock", async () => {
     const r = await simulateChatMessage("505409 aur 802502 dono hai");
-    const locked = r.uviResult?.auto_lock?.catalog_id ?? null;
-    expect(locked).not.toBeNull();
-    expect([1, 2]).toContain(locked);
+    expect(r.needsDisambiguation).toBe(true);
+    expect(r.catalogId).toBeNull();
+    expect(r.systemPrompt).toContain("MULTIPLE VEHICLE MATCHES");
+    expect(r.verifiedVehicleBlock).toContain("ASK USER TO CHOOSE");
   });
 
   it("E10 known-absent VC number must not hallucinate a lock", async () => {

@@ -54,12 +54,58 @@ export function extractVehicleIdentifierCandidates(msg: string): string[] {
     const m = s.match(re);
     if (m) for (const hit of m) { const t = hit.trim(); if (t) out.add(t); }
   };
+  // R27.24a7 (bug 4) — push a whitespace-stripped form of each match so spaced
+  // identifiers ("5161 0568 000R", "MAT 50540 9XY98 7ZW1") still probe. The
+  // resolver normalizes internally, so the stripped value resolves correctly.
+  const collectNormalized = (re: RegExp) => {
+    let m: RegExpExecArray | null;
+    const r = new RegExp(re.source, re.flags.includes("g") ? re.flags : re.flags + "g");
+    while ((m = r.exec(s)) !== null) {
+      const stripped = m[0].replace(/\s+/g, "").trim();
+      if (stripped) out.add(stripped);
+      if (m.index === r.lastIndex) r.lastIndex++;
+    }
+  };
   collect(/MAT[A-Z0-9]{14,17}/gi);             // full VIN
   collect(/MAT[A-Z0-9]{6,13}/gi);              // partial VIN
+  collectNormalized(/MAT(?:\s?[A-Z0-9]){14,17}/gi); // spaced full VIN
   collect(/\b[A-Z0-9]{11,12}R\b/gi);           // VC No (ends in R)
+  collectNormalized(/\b\d{4,5}\s?\d{4,5}\s?\d{3,4}R\b/gi); // spaced VC No
+  collectNormalized(/\b\d{2,4}\s?\d{2,4}\s?\d{2,4}\s?\d{1,4}R\b/gi); // spaced VC No (4-group)
   collect(/\b\d{5,8}\b/g);                      // bare numeric chassis-type code
   collect(/\b[A-Z]{2}\d{1,2}\s?[A-Z]{1,3}\s?\d{1,4}\b/gi); // Indian RTO registration
+  collectSpacedChassis(s, out);                // spaced chassis-type (DB-validated)
   return Array.from(out);
+}
+
+// R27.24a7 (bug 4) — spaced bare chassis numbers ("5054 09", "50 54 09") never
+// matched the \b\d{5,8}\b code. Pull every run of space-separated digit groups,
+// strip the spaces, and keep ONLY normalized forms (4-8 chars) that actually
+// exist as a chassis_type / VDS in the catalogs or identifier table, so we never
+// invent a false candidate from arbitrary spaced numbers.
+function collectSpacedChassis(s: string, out: Set<string>): void {
+  const known = new Set<string>();
+  try {
+    for (const c of loadCatalogs()) {
+      if (c.chassis_type) known.add(alphanumOnly(c.chassis_type));
+    }
+  } catch { /* ignore */ }
+  if (identifierTableAvailable()) {
+    try {
+      const rows = db.prepare(
+        `SELECT DISTINCT normalized_value FROM partsetu_vehicle_identifiers
+           WHERE identifier_type IN ('chassis_type','vds')`,
+      ).all() as Array<{ normalized_value: string }>;
+      for (const r of rows) if (r.normalized_value) known.add(alphanumOnly(r.normalized_value));
+    } catch { /* ignore */ }
+  }
+  if (!known.size) return;
+  let m: RegExpExecArray | null;
+  const re = /\b\d{1,4}(?:\s+\d{1,4}){1,3}\b/g;
+  while ((m = re.exec(s)) !== null) {
+    const stripped = m[0].replace(/\s+/g, "");
+    if (stripped.length >= 4 && stripped.length <= 8 && known.has(stripped)) out.add(stripped);
+  }
 }
 
 // Choose the strongest UVI result from several candidate probes: prefer one
