@@ -53,7 +53,7 @@ const UNAVAILABLE = "PartSetu AI is temporarily unavailable. Please try again sh
 type Msg = { role: "user" | "assistant"; content: any };
 
 // Single retry on 429 / 5xx with linear backoff — never an infinite loop.
-async function callWithRetry(model: string, system: string, messages: Msg[], maxTokens: number): Promise<ClaudeResult> {
+async function callWithRetry(model: string, system: string, messages: Msg[], maxTokens: number, temperature = 0.2): Promise<ClaudeResult> {
   const base: Omit<ClaudeResult, "ok" | "text"> = {
     model, inputTokens: 0, outputTokens: 0, costUsd: 0, latencyMs: 0,
   };
@@ -66,7 +66,7 @@ async function callWithRetry(model: string, system: string, messages: Msg[], max
     if (attempt > 0) await sleep(800);
     try {
       const resp = await getClient().messages.create({
-        model, max_tokens: maxTokens, temperature: 0.2, system, messages: messages as any,
+        model, max_tokens: maxTokens, temperature, system, messages: messages as any,
       });
       const text = resp.content?.[0]?.type === "text" ? (resp.content[0] as any).text : "";
       const inTok = resp.usage?.input_tokens ?? 0;
@@ -92,8 +92,9 @@ export async function callClaudeHaiku(
   systemPrompt: string,
   messages: Array<{ role: "user" | "assistant"; content: string }>,
   maxTokens = 1024,
+  temperature = 0.2,
 ): Promise<ClaudeResult> {
-  return callWithRetry(HAIKU_MODEL, systemPrompt, messages as Msg[], maxTokens);
+  return callWithRetry(HAIKU_MODEL, systemPrompt, messages as Msg[], maxTokens, temperature);
 }
 
 // PartSetu v1.4 — text-only Sonnet caller for ingest enrichment (profile/category/spec

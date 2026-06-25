@@ -13,6 +13,31 @@ const memCache = new Map<string, string[]>();
 
 const SYSTEM = `You are an automotive spare-parts terminology expander for Indian commercial trucks (Tata, Ashok Leyland, Eicher, BharatBenz, etc.). Given a user's generic part name, return a JSON array of 5-12 alternative phrases that would appear in OEM spare-parts catalogue descriptions. Include the original term, common synonyms, OEM naming patterns (often comma-separated like "PLATE,CLUTCH" or suffixed like "DISC ASSY"), and abbreviations. Same-family parts only — do not drift to unrelated components. Return ONLY a valid JSON array of strings — no prose, no markdown.`;
 
+// Tolerant JSON-array extractor: strips markdown fences and any prose around
+// the array, then parses the first balanced [...] block. Returns null on
+// failure so callers fall open to tokenization instead of throwing.
+function parseJsonArray(raw: string): string[] | null {
+  if (!raw) return null;
+  const text = raw.replace(/```(?:json)?\s*/gi, "").replace(/```/g, "").trim();
+  const start = text.indexOf("[");
+  if (start < 0) return null;
+  let depth = 0;
+  for (let i = start; i < text.length; i++) {
+    const ch = text[i];
+    if (ch === "[") depth++;
+    else if (ch === "]") {
+      depth--;
+      if (depth === 0) {
+        try {
+          const parsed = JSON.parse(text.slice(start, i + 1));
+          return Array.isArray(parsed) ? parsed : null;
+        } catch { return null; }
+      }
+    }
+  }
+  return null;
+}
+
 function tokenizeFallback(query: string): string[] {
   const toks = query.split(/[\s,;/\-]+/).map((t) => t.trim()).filter((t) => t.length >= 2);
   const out = [query.trim(), ...toks];
@@ -82,8 +107,11 @@ export async function expandPartQuery(query: string, catalogId?: number | null):
   try {
     const result = await callClaudeHaiku(SYSTEM, [{ role: "user", content: query }], 300);
     if (!result.ok) throw new Error(result.error || "claude unavailable");
-    const cleaned = result.text.replace(/^```(?:json)?/i, "").replace(/```$/, "").trim();
-    const arr = JSON.parse(cleaned);
+    // R27.24a — robust JSON-array extraction. Haiku occasionally appends prose
+    // after the array ("...] These are common phrasings."), which broke
+    // JSON.parse with "Unexpected non-whitespace character after JSON". Strip
+    // code fences, then slice from the first '[' to its matching ']'.
+    const arr = parseJsonArray(result.text);
     if (!Array.isArray(arr)) throw new Error("not an array");
     let terms = arr.filter((s: any) => typeof s === "string" && s.trim().length >= 2).map((s: string) => s.trim());
     if (!terms.some((t) => t.toLowerCase() === key)) terms.unshift(query.trim());

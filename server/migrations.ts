@@ -3489,5 +3489,75 @@ export function runPartSetuMigrations() {
     fetched_at INTEGER NOT NULL
   )`);
 
+  // ==================================================================
+  // R27.24a — FTS5 full-text search over parts descriptions and catalog
+  // model/variant, bidirectional cross-reference indexes. All additive and
+  // idempotent. If the SQLite build lacks FTS5 the virtual-table creates fail
+  // (swallowed by run()); the search dispatcher detects the missing tables at
+  // runtime and degrades to LIKE matching.
+  // ==================================================================
+  const r24 = (step: string, sql: string) => {
+    try { sqlite.exec(sql); console.log(`[migrations] R27.24a: ${step} ok`); }
+    catch (e: any) {
+      const msg = String(e?.message || e);
+      if (/duplicate|already exists/i.test(msg)) console.log(`[migrations] R27.24a: ${step} skip (${msg})`);
+      else console.log(`[migrations] R27.24a: ${step} fail: ${msg}`);
+    }
+  };
+
+  // 1) FTS5 over partsetu_parts.description (external-content table).
+  r24("partsetu_parts_fts", `CREATE VIRTUAL TABLE IF NOT EXISTS partsetu_parts_fts USING fts5(
+    description,
+    part_number UNINDEXED,
+    catalog_id UNINDEXED,
+    content='partsetu_parts',
+    content_rowid='id',
+    tokenize='unicode61 remove_diacritics 2'
+  )`);
+  r24("partsetu_parts_ai", `CREATE TRIGGER IF NOT EXISTS partsetu_parts_ai AFTER INSERT ON partsetu_parts BEGIN
+    INSERT INTO partsetu_parts_fts(rowid, description, part_number, catalog_id) VALUES (new.id, new.description, new.part_number, new.catalog_id);
+  END`);
+  r24("partsetu_parts_ad", `CREATE TRIGGER IF NOT EXISTS partsetu_parts_ad AFTER DELETE ON partsetu_parts BEGIN
+    INSERT INTO partsetu_parts_fts(partsetu_parts_fts, rowid, description, part_number, catalog_id) VALUES('delete', old.id, old.description, old.part_number, old.catalog_id);
+  END`);
+  r24("partsetu_parts_au", `CREATE TRIGGER IF NOT EXISTS partsetu_parts_au AFTER UPDATE ON partsetu_parts BEGIN
+    INSERT INTO partsetu_parts_fts(partsetu_parts_fts, rowid, description, part_number, catalog_id) VALUES('delete', old.id, old.description, old.part_number, old.catalog_id);
+    INSERT INTO partsetu_parts_fts(rowid, description, part_number, catalog_id) VALUES (new.id, new.description, new.part_number, new.catalog_id);
+  END`);
+
+  // 2) FTS5 over partsetu_catalogs model + variant (oem kept UNINDEXED for
+  //    retrieval; this table has no `brand`/`catalog_id` columns — rowid==id).
+  r24("partsetu_catalogs_fts", `CREATE VIRTUAL TABLE IF NOT EXISTS partsetu_catalogs_fts USING fts5(
+    model, variant, oem UNINDEXED,
+    content='partsetu_catalogs', content_rowid='id',
+    tokenize='unicode61 remove_diacritics 2'
+  )`);
+  r24("partsetu_catalogs_ai", `CREATE TRIGGER IF NOT EXISTS partsetu_catalogs_ai AFTER INSERT ON partsetu_catalogs BEGIN
+    INSERT INTO partsetu_catalogs_fts(rowid, model, variant, oem) VALUES (new.id, new.model, new.variant, new.oem);
+  END`);
+  r24("partsetu_catalogs_ad", `CREATE TRIGGER IF NOT EXISTS partsetu_catalogs_ad AFTER DELETE ON partsetu_catalogs BEGIN
+    INSERT INTO partsetu_catalogs_fts(partsetu_catalogs_fts, rowid, model, variant, oem) VALUES('delete', old.id, old.model, old.variant, old.oem);
+  END`);
+  r24("partsetu_catalogs_au", `CREATE TRIGGER IF NOT EXISTS partsetu_catalogs_au AFTER UPDATE ON partsetu_catalogs BEGIN
+    INSERT INTO partsetu_catalogs_fts(partsetu_catalogs_fts, rowid, model, variant, oem) VALUES('delete', old.id, old.model, old.variant, old.oem);
+    INSERT INTO partsetu_catalogs_fts(rowid, model, variant, oem) VALUES (new.id, new.model, new.variant, new.oem);
+  END`);
+
+  // 3) Cross-reference walk indexes (actual columns are source_part_no /
+  //    customer_part_no). Already partially covered by idx_xref_source_pn /
+  //    idx_xref_customer_pn; these spec-named aliases are idempotent no-ops.
+  r24("idx_partsetu_xref_from", `CREATE INDEX IF NOT EXISTS idx_partsetu_xref_from ON partsetu_xref(source_part_no)`);
+  r24("idx_partsetu_xref_to", `CREATE INDEX IF NOT EXISTS idx_partsetu_xref_to ON partsetu_xref(customer_part_no)`);
+
+  // Populate / rebuild the FTS indexes from the base tables. 'rebuild' is itself
+  // idempotent. Only attempt when the virtual tables actually exist.
+  const ftsParts = sqlite.prepare(`SELECT name FROM sqlite_master WHERE type='table' AND name='partsetu_parts_fts'`).get();
+  const ftsCatalogs = sqlite.prepare(`SELECT name FROM sqlite_master WHERE type='table' AND name='partsetu_catalogs_fts'`).get();
+  if (ftsParts) r24("partsetu_parts_fts rebuild", `INSERT INTO partsetu_parts_fts(partsetu_parts_fts) VALUES('rebuild')`);
+  if (ftsCatalogs) r24("partsetu_catalogs_fts rebuild", `INSERT INTO partsetu_catalogs_fts(partsetu_catalogs_fts) VALUES('rebuild')`);
+  if (!ftsParts || !ftsCatalogs) {
+    console.log("[migrations] R27.24a: fts5 unavailable, falling back to LIKE");
+  }
+
   console.log("[migrations] PartSetu: complete");
 }

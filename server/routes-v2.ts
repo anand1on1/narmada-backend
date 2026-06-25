@@ -8237,6 +8237,57 @@ function registerR8Routes(
   // ==================================================================
   const partsetuStore = require("./partsetu") as typeof import("./partsetu");
   const claudeSvc = require("./services/claude") as typeof import("./services/claude");
+  const partsetuIntent = require("./services/partsetu/intent") as typeof import("./services/partsetu/intent");
+  const partsetuSearch = require("./services/partsetu/search") as typeof import("./services/partsetu/search");
+
+  // R27.24a — citation guard. Strips any 8-14 digit number from the assistant
+  // reply that was not present in the context we supplied (all DB-derived) and
+  // was not a verified search hit, then injects "(from catalog #X — ...)" after
+  // the first mention of each verified part number that lacks attribution. This
+  // is a guardrail on top of the prompt — it stops cross-catalog hallucinated
+  // leaks (e.g. Wabco numbers the model invents) from reaching the customer.
+  function enforcePartCitations(
+    reply: string,
+    hits: Array<{ part_number: string; catalog_label: string }>,
+    contextBlock: string,
+  ): string {
+    if (!reply) return reply;
+    const norm = (s: string) => String(s || "").replace(/\D/g, "");
+    const labelByNum = new Map<string, string>();
+    for (const h of hits) {
+      const n = norm(h.part_number);
+      if (n.length >= 8 && !labelByNum.has(n)) labelByNum.set(n, h.catalog_label);
+    }
+    // Numbers present in the context we gave Claude are DB-derived → permitted.
+    const ctxNums = new Set((contextBlock.match(/\d{8,14}/g) || []).map((n) => n));
+    const permitted = (n: string) => labelByNum.has(n) || ctxNums.has(n);
+
+    // 1) Drop sentences that mention an un-permitted part number.
+    const sentences = reply.split(/(?<=[.!?\n])\s+/);
+    let stripped = 0;
+    const kept = sentences.filter((sent) => {
+      const nums = sent.match(/\b\d{8,14}\b/g) || [];
+      const bad = nums.some((n) => !permitted(n));
+      if (bad) { stripped++; return false; }
+      return true;
+    });
+    let out = kept.join(" ").trim();
+    if (stripped > 0) {
+      out += (out ? "\n" : "") + "(part numbers were withheld — they did not come from a verified catalog row)";
+      console.log(`[partsetu] citation_guard stripped_sentences=${stripped}`);
+    }
+
+    // 2) Inject "(from <label>)" after the first mention of each verified hit
+    //    that does not already carry an attribution nearby.
+    for (const [num, label] of Array.from(labelByNum.entries())) {
+      const idx = out.indexOf(num);
+      if (idx < 0) continue;
+      const after = out.slice(idx + num.length, idx + num.length + 40).toLowerCase();
+      if (after.includes("from ") || after.includes("catalog")) continue;
+      out = out.slice(0, idx + num.length) + ` (from ${label})` + out.slice(idx + num.length);
+    }
+    return out;
+  }
   const catalogIngester = require("./services/catalog-ingester") as typeof import("./services/catalog-ingester");
   const catalogStorage = require("./services/catalog-storage") as typeof import("./services/catalog-storage");
 
@@ -8385,7 +8436,29 @@ ${contextBlock}`;
         }
       }
       const convNow = partsetuStore.getConversation(Number(conversationId));
+
+      // R27.24a — intent classification + multi-strategy search. The intent
+      // decides whether the vehicle lock applies (exploratory / cross-reference
+      // queries bypass it so we can suggest from sibling catalogs).
+      const lockedCatalog = catalogId ? partsetuStore.getCatalog(catalogId) : null;
+      const lockedVehicle = lockedCatalog ? [lockedCatalog.model, lockedCatalog.variant].filter(Boolean).join(" ") || lockedCatalog.oem : null;
+      const intent = await partsetuIntent.classifyIntent(String(content), { lockedCatalogId: catalogId, lockedVehicle });
+      const searchResult = await partsetuSearch.searchParts(intent, { lockedCatalogId: catalogId });
+
+      let verifiedBlock = "";
+      if (searchResult.hits.length) {
+        const lines = searchResult.hits.slice(0, 12).map((h) =>
+          `- ${h.part_number || "(no number)"}: ${h.description || ""} (from ${h.catalog_label}) [${h.strategies_matched.join("+")}]`);
+        verifiedBlock =
+          "VERIFIED CATALOG SEARCH (R27.24a — these rows come from partsetu_parts joined to partsetu_catalogs; you MUST cite the '(from catalog #X ...)' source for every part number you quote, and NEVER state a part number that is not in this list or the context below):\n" +
+          lines.join("\n") + "\n";
+      }
+      if (intent.bypassLock && catalogId) {
+        verifiedBlock = `NOTE: This is an exploratory / cross-reference query — you MAY suggest matching parts from OTHER catalogs (not just the locked vehicle), as long as you clearly state which catalog each part comes from.\n${verifiedBlock}`;
+      }
+
       let contextBlock = await partsetuStore.buildContextBlock(String(content), catalogId, convNow?.chassis_no || null);
+      if (verifiedBlock) contextBlock = `${verifiedBlock}\n${contextBlock}`;
       if (resolverNote) contextBlock = `${resolverNote}\n${contextBlock}`;
       const history = partsetuHistory(Number(conversationId));
       // R27.17 — upgrade chat model from Haiku to Sonnet. Haiku was missing
@@ -8393,7 +8466,9 @@ ${contextBlock}`;
       // when the right part was sitting in the context block. Haiku continues
       // to be used for keyword expansion (fast, cheap, structured JSON only).
       const result = await claudeSvc.callClaudeSonnet(PARTSETU_SYSTEM(contextBlock), history);
-      const replyText = partsetuStore.stripBannedPhrases(result.text);
+      let replyText = partsetuStore.stripBannedPhrases(result.text);
+      // R27.24a — citation guard: strip hallucinated/unattributed part numbers.
+      replyText = enforcePartCitations(replyText, searchResult.hits, contextBlock);
 
       partsetuStore.addMessage({
         conversationId: Number(conversationId), role: "assistant", content: replyText,
@@ -8593,6 +8668,25 @@ ${contextBlock}`;
          ORDER BY COALESCE(c.uploaded_at, c.ingested_at) DESC, c.id DESC`,
       ).all();
       res.json(rows);
+    } catch (e: any) { res.status(500).json({ error: e?.message }); }
+  });
+
+  // R27.24a — diagnostic: random sample of a catalog's actual parts so the
+  // team can inspect real partsetu_parts.description text after deploy.
+  app.get("/api/admin/partsetu/diag/sample-parts", requireDataCenterOrAdmin, async (req, res) => {
+    try {
+      const catalogId = Number(req.query.catalog_id);
+      if (!catalogId) return res.status(400).json({ error: "catalog_id is required" });
+      const limit = Math.min(100, Math.max(1, Number(req.query.limit) || 15));
+      const cat = rawSqlite.prepare(`SELECT id, oem, model, variant FROM partsetu_catalogs WHERE id = ?`).get(catalogId) as any;
+      if (!cat) return res.status(404).json({ error: "catalog not found" });
+      const label = [cat.model, cat.variant].filter(Boolean).join(" ").trim() || cat.oem || `#${catalogId}`;
+      const total = (rawSqlite.prepare(`SELECT COUNT(*) AS n FROM partsetu_parts WHERE catalog_id = ?`).get(catalogId) as any)?.n || 0;
+      const samples = rawSqlite.prepare(
+        `SELECT id, part_number, description, source_page_no FROM partsetu_parts
+         WHERE catalog_id = ? ORDER BY RANDOM() LIMIT ?`,
+      ).all(catalogId, limit);
+      res.json({ catalog_id: catalogId, catalog_label: label, total_parts: total, samples });
     } catch (e: any) { res.status(500).json({ error: e?.message }); }
   });
 
