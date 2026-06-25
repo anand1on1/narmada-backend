@@ -3512,7 +3512,7 @@ export function runPartSetuMigrations() {
     catalog_id UNINDEXED,
     content='partsetu_parts',
     content_rowid='id',
-    tokenize='unicode61 remove_diacritics 2'
+    tokenize="unicode61 remove_diacritics 2 separators ' ,;:()[]/.-_""'"
   )`);
   r24("partsetu_parts_ai", `CREATE TRIGGER IF NOT EXISTS partsetu_parts_ai AFTER INSERT ON partsetu_parts BEGIN
     INSERT INTO partsetu_parts_fts(rowid, description, part_number, catalog_id) VALUES (new.id, new.description, new.part_number, new.catalog_id);
@@ -3530,7 +3530,7 @@ export function runPartSetuMigrations() {
   r24("partsetu_catalogs_fts", `CREATE VIRTUAL TABLE IF NOT EXISTS partsetu_catalogs_fts USING fts5(
     model, variant, oem UNINDEXED,
     content='partsetu_catalogs', content_rowid='id',
-    tokenize='unicode61 remove_diacritics 2'
+    tokenize="unicode61 remove_diacritics 2 separators ' ,;:()[]/.-_""'"
   )`);
   r24("partsetu_catalogs_ai", `CREATE TRIGGER IF NOT EXISTS partsetu_catalogs_ai AFTER INSERT ON partsetu_catalogs BEGIN
     INSERT INTO partsetu_catalogs_fts(rowid, model, variant, oem) VALUES (new.id, new.model, new.variant, new.oem);
@@ -3557,6 +3557,95 @@ export function runPartSetuMigrations() {
   if (ftsCatalogs) r24("partsetu_catalogs_fts rebuild", `INSERT INTO partsetu_catalogs_fts(partsetu_catalogs_fts) VALUES('rebuild')`);
   if (!ftsParts || !ftsCatalogs) {
     console.log("[migrations] R27.24a: fts5 unavailable, falling back to LIKE");
+  }
+
+  // ==================================================================
+  // R27.24a2 — FTS5 tokenizer separators fix. R27.24a created the FTS tables
+  // with the bare `unicode61 remove_diacritics 2` tokenizer. We now pin an
+  // explicit `separators` set (space + , ; : ( ) [ ] / . - _ ") so OEM
+  // descriptions like `PLUG,THREADED`, `RING,COMPRESSION PISTON`,
+  // `PRESSURE LINE;SM TO DM`, `SHIM (OUTPUT BEARING PRELOAD),0.25 THK`, and
+  // catalog variants like `DIA.430 MM CLUTCH` tokenize on those characters
+  // regardless of the host SQLite's default category rules.
+  //
+  // Each FTS table is dropped + recreated + rebuilt ONLY when it still carries
+  // the old tokenizer (detected via its sqlite_master DDL), so the expensive
+  // rebuild does not run on every boot. The base tables are untouched — the
+  // FTS index is fully regeneratable from them.
+  // ==================================================================
+  const r242 = (step: string, sql: string) => {
+    try { sqlite.exec(sql); console.log(`[migrations] R27.24a2: ${step} ok`); }
+    catch (e: any) {
+      const msg = String(e?.message || e);
+      if (/duplicate|already exists/i.test(msg)) console.log(`[migrations] R27.24a2: ${step} skip (${msg})`);
+      else console.log(`[migrations] R27.24a2: ${step} fail: ${msg}`);
+    }
+  };
+  const ftsTokenize = `tokenize="unicode61 remove_diacritics 2 separators ' ,;:()[]/.-_""'"`;
+  const ddlOf = (name: string): string | null => {
+    try { const r = sqlite.prepare(`SELECT sql FROM sqlite_master WHERE name = ?`).get(name) as any; return r?.sql || null; }
+    catch { return null; }
+  };
+
+  if (!ftsParts || !ftsCatalogs) {
+    console.log("[migrations] R27.24a2: fts5 unavailable, skip");
+  } else {
+    // --- partsetu_parts_fts ---
+    const partsDdl = ddlOf("partsetu_parts_fts");
+    if (partsDdl && /separators/i.test(partsDdl)) {
+      console.log("[migrations] R27.24a2: partsetu_parts_fts already patched, skip");
+    } else {
+      r242("drop partsetu_parts_ai", `DROP TRIGGER IF EXISTS partsetu_parts_ai`);
+      r242("drop partsetu_parts_ad", `DROP TRIGGER IF EXISTS partsetu_parts_ad`);
+      r242("drop partsetu_parts_au", `DROP TRIGGER IF EXISTS partsetu_parts_au`);
+      r242("drop partsetu_parts_fts", `DROP TABLE IF EXISTS partsetu_parts_fts`);
+      r242("create partsetu_parts_fts", `CREATE VIRTUAL TABLE IF NOT EXISTS partsetu_parts_fts USING fts5(
+        description,
+        part_number UNINDEXED,
+        catalog_id UNINDEXED,
+        content='partsetu_parts',
+        content_rowid='id',
+        ${ftsTokenize}
+      )`);
+      r242("create partsetu_parts_ai", `CREATE TRIGGER IF NOT EXISTS partsetu_parts_ai AFTER INSERT ON partsetu_parts BEGIN
+        INSERT INTO partsetu_parts_fts(rowid, description, part_number, catalog_id) VALUES (new.id, new.description, new.part_number, new.catalog_id);
+      END`);
+      r242("create partsetu_parts_ad", `CREATE TRIGGER IF NOT EXISTS partsetu_parts_ad AFTER DELETE ON partsetu_parts BEGIN
+        INSERT INTO partsetu_parts_fts(partsetu_parts_fts, rowid, description, part_number, catalog_id) VALUES('delete', old.id, old.description, old.part_number, old.catalog_id);
+      END`);
+      r242("create partsetu_parts_au", `CREATE TRIGGER IF NOT EXISTS partsetu_parts_au AFTER UPDATE ON partsetu_parts BEGIN
+        INSERT INTO partsetu_parts_fts(partsetu_parts_fts, rowid, description, part_number, catalog_id) VALUES('delete', old.id, old.description, old.part_number, old.catalog_id);
+        INSERT INTO partsetu_parts_fts(rowid, description, part_number, catalog_id) VALUES (new.id, new.description, new.part_number, new.catalog_id);
+      END`);
+      r242("partsetu_parts_fts rebuild", `INSERT INTO partsetu_parts_fts(partsetu_parts_fts) VALUES('rebuild')`);
+    }
+
+    // --- partsetu_catalogs_fts (columns: model, variant indexed; oem UNINDEXED) ---
+    const catDdl = ddlOf("partsetu_catalogs_fts");
+    if (catDdl && /separators/i.test(catDdl)) {
+      console.log("[migrations] R27.24a2: partsetu_catalogs_fts already patched, skip");
+    } else {
+      r242("drop partsetu_catalogs_ai", `DROP TRIGGER IF EXISTS partsetu_catalogs_ai`);
+      r242("drop partsetu_catalogs_ad", `DROP TRIGGER IF EXISTS partsetu_catalogs_ad`);
+      r242("drop partsetu_catalogs_au", `DROP TRIGGER IF EXISTS partsetu_catalogs_au`);
+      r242("drop partsetu_catalogs_fts", `DROP TABLE IF EXISTS partsetu_catalogs_fts`);
+      r242("create partsetu_catalogs_fts", `CREATE VIRTUAL TABLE IF NOT EXISTS partsetu_catalogs_fts USING fts5(
+        model, variant, oem UNINDEXED,
+        content='partsetu_catalogs', content_rowid='id',
+        ${ftsTokenize}
+      )`);
+      r242("create partsetu_catalogs_ai", `CREATE TRIGGER IF NOT EXISTS partsetu_catalogs_ai AFTER INSERT ON partsetu_catalogs BEGIN
+        INSERT INTO partsetu_catalogs_fts(rowid, model, variant, oem) VALUES (new.id, new.model, new.variant, new.oem);
+      END`);
+      r242("create partsetu_catalogs_ad", `CREATE TRIGGER IF NOT EXISTS partsetu_catalogs_ad AFTER DELETE ON partsetu_catalogs BEGIN
+        INSERT INTO partsetu_catalogs_fts(partsetu_catalogs_fts, rowid, model, variant, oem) VALUES('delete', old.id, old.model, old.variant, old.oem);
+      END`);
+      r242("create partsetu_catalogs_au", `CREATE TRIGGER IF NOT EXISTS partsetu_catalogs_au AFTER UPDATE ON partsetu_catalogs BEGIN
+        INSERT INTO partsetu_catalogs_fts(partsetu_catalogs_fts, rowid, model, variant, oem) VALUES('delete', old.id, old.model, old.variant, old.oem);
+        INSERT INTO partsetu_catalogs_fts(rowid, model, variant, oem) VALUES (new.id, new.model, new.variant, new.oem);
+      END`);
+      r242("partsetu_catalogs_fts rebuild", `INSERT INTO partsetu_catalogs_fts(partsetu_catalogs_fts) VALUES('rebuild')`);
+    }
   }
 
   console.log("[migrations] PartSetu: complete");
