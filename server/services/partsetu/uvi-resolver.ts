@@ -43,6 +43,38 @@ export function alphanumOnly(s: string): string {
   return String(s || "").toUpperCase().replace(/[^A-Z0-9]/g, "");
 }
 
+// R27.24a4 — pull every vehicle-identifier candidate OUT of a free-text chat
+// message (the old chat gate only fired when the WHOLE message was an
+// identifier, so "tata ka chassis no hai 505409" slipped past). Each regex
+// targets one identifier shape; results are deduped. Empty array == no probe.
+export function extractVehicleIdentifierCandidates(msg: string): string[] {
+  const s = String(msg || "");
+  const out = new Set<string>();
+  const collect = (re: RegExp) => {
+    const m = s.match(re);
+    if (m) for (const hit of m) { const t = hit.trim(); if (t) out.add(t); }
+  };
+  collect(/MAT[A-Z0-9]{14,17}/gi);             // full VIN
+  collect(/MAT[A-Z0-9]{6,13}/gi);              // partial VIN
+  collect(/\b[A-Z0-9]{11,12}R\b/gi);           // VC No (ends in R)
+  collect(/\b\d{5,8}\b/g);                      // bare numeric chassis-type code
+  collect(/\b[A-Z]{2}\d{1,2}\s?[A-Z]{1,3}\s?\d{1,4}\b/gi); // Indian RTO registration
+  return Array.from(out);
+}
+
+// Choose the strongest UVI result from several candidate probes: prefer one
+// that auto-locked (highest auto-lock score), else the highest top-candidate
+// score. Returns null when nothing matched anywhere.
+export function pickBestUvi(results: UviResult[]): UviResult | null {
+  const locked = results.filter((r) => r.auto_lock);
+  if (locked.length) {
+    return locked.sort((a, b) => (b.auto_lock!.score) - (a.auto_lock!.score))[0];
+  }
+  const withCands = results.filter((r) => r.candidates.length > 0);
+  if (!withCands.length) return null;
+  return withCands.sort((a, b) => (b.candidates[0].score) - (a.candidates[0].score))[0];
+}
+
 // Auto-lock is only granted when the top hit came from a strategy that is an
 // exact, unambiguous identifier match.
 const EXACT_STRATEGIES = new Set([

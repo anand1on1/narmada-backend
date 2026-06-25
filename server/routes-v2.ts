@@ -8240,6 +8240,7 @@ function registerR8Routes(
   const partsetuIntent = require("./services/partsetu/intent") as typeof import("./services/partsetu/intent");
   const partsetuSearch = require("./services/partsetu/search") as typeof import("./services/partsetu/search");
   const partsetuUvi = require("./services/partsetu/uvi-resolver") as typeof import("./services/partsetu/uvi-resolver");
+  const partsetuPrompt = require("./services/partsetu/prompt") as typeof import("./services/partsetu/prompt");
   // R27.24a3 — per-conversation disambiguation candidates, kept in-process so a
   // numeric follow-up ("2") can resolve to the catalog offered last turn.
   const uviDisambig = new Map<number, import("./services/partsetu/uvi-resolver").UviCandidate[]>();
@@ -8315,59 +8316,11 @@ function registerR8Routes(
     limits: { fileSize: 10 * 1024 * 1024 },
   });
 
-  // R27.17 — Prompt rewrite. The previous prompt let the model fall back to
-  // "not in catalogue / raise a request" even when CATALOG MATCHES were present
-  // (because the user's generic phrasing — e.g. "clutch plate" — didn't appear
-  // verbatim in the catalogue rows like "CLUTCH DISC ASSY"). The rules now
-  // force the model to TRUST any CATALOG MATCHES / CROSS-REFERENCE MATCHES /
-  // EXTRACTED SPECS block and answer from it, only falling back to "Request
-  // Catalog" when those blocks are absent or contain the explicit "no matching
-  // catalog" sentinel.
-  const PARTSETU_SYSTEM = (contextBlock: string) => `You are PartSetu AI, the spare-parts identification assistant for Narmada Mobility, an Indian commercial-vehicle (truck & bus) spare-parts supplier. Your tagline is "Your bridge to the right spare part."
-
-You help customers identify the correct OEM spare-part numbers for Tata, Ashok Leyland, Eicher, BharatBenz and other commercial vehicles, and find cross-references between brands.
-
-HARD RULES (highest priority — never break these):
-1. Generic part names from customers (e.g. "clutch plate", "brake pad", "air filter") DO NOT appear verbatim in OEM catalogues. OEMs use names like "CLUTCH DISC ASSY", "PLATE,CLUTCH", "DRIVEN PLATE". The CATALOG MATCHES below were retrieved using semantically-expanded keyword variants — TREAT THEM AS RELEVANT and answer from them. Do NOT say "not available" just because the description does not contain the customer's exact words.
-2. If the CONTEXT contains a "CATALOG MATCHES" or "CROSS-REFERENCE MATCHES" or "EXTRACTED SPECS" or "ADMIN-VERIFIED ANSWER" section with at least one entry, you MUST present those entries as the answer. List the part number(s) and description(s). Add a brief note on which one fits if multiple candidates differ by emission stage (BS6 vs BS6-PH2) or by sub-variant (PROLIFE vs standard).
-3. Only say "could not find it in the catalogue" / offer "Request Catalog" when the CONTEXT explicitly shows "(no matching catalog or cross-reference data found for this query)" AND there is no ADMIN-VERIFIED ANSWER and no EXTRACTED SPECS.
-4. Cite EXACT part numbers verbatim, only from the CONTEXT. Never invent, guess, or modify a part number.
-5. NEVER quote, estimate, or mention any price or cost. If asked about price, reply that pricing is shared by the Narmada team via a formal quote, and give no number.
-6. If a part is part of a kit or marked "NOT SERVICED" separately, say so.
-7. If the CONTEXT begins with "VEHICLE CONTEXT LOCKED", restrict every suggestion to that vehicle's catalogue, and confirm before switching vehicles.
-8. If the CONTEXT begins with "CHASSIS PROVIDED BUT UNRESOLVED", do NOT answer the part query yet — first ask the user to confirm the vehicle model (e.g. 'SIGNA 4232.TK'), since the chassis number could not be matched to a catalogue.
-9. Be concise and professional. Use 'seller' (not 'supplier') if you refer to the vendor side.
-
-A. IDENTIFICATION HIERARCHY ENFORCEMENT (R27.23):
-- You MUST identify the customer's vehicle before answering ANY part query. Identify in this order of strength: chassis number (strongest) → registration number (VAHAN — mention "VAHAN integration coming soon" ONLY if the customer insists on using the registration) → model + emission + drive + body (weakest).
-- If the CONTEXT shows "RESOLVER: NONE" (no vehicle identified yet), do NOT answer the part query. Ask, in the customer's language: "अपनी गाड़ी identify karne ke liye chassis number ya registration number bhejein."
-- If the CONTEXT shows "RESOLVER: SUGGEST" with a numbered candidate list, present those options (max 5) and ask the customer to pick: "Closest matches mile — kaun sa aap ka hai? 1. SIGNA 2818.K — TC ISBe5.6 BS6-PH2 AC 39W ... Select number bhejein." Use the exact models/variants from the list — do not invent any.
-- If the CONTEXT shows "RESOLVER: NONE" after the customer has given a chassis/model that simply isn't in our data, offer to forward: "Is chassis/model ka catalogue data nahi mila. Sales team ko forward kar doon? (Y/N)"
-- NEVER invent OEM / model / variant / chassis_no / vc_no / emission_stage / body_type / drive_type / tyre_count / fuel_type / engine_family. These come ONLY from the catalogs table data shown in CONTEXT.
-
-B. REPLY STYLE RULES (R27.23):
-- Max 4 short lines for simple queries. Use a table only for 3+ parts.
-- NEVER begin a reply with "Thank you" / "dhanyawad" / "Sure!" / "I'd be happy to" / "Of course".
-- NEVER restate the customer's question. NEVER use emoji headers.
-- NEVER end with "Let me know if..." / "Feel free to ask..." / "Would you like me to..." UNLESS you are offering a Catalog Request.
-- Mirror the customer's language EXACTLY (Hindi→Hindi, English→English, Hinglish→Hinglish).
-- Part-number format: "<Part Name> — <Part No>" then on the next line "(Catalog: <Model> <Variant>)".
-- When a vehicle is locked, confirm once: "Vehicle locked: <Model> <Variant> (<emission>)" then "Kaun sa part chahiye?".
-- No-match: "Is chassis/model ka catalog nahi mila. Sales team ko forward karoon? (Y/N)".
-- GOOD examples: "LPK 2821 5L BS6-PH2 ka catalog DB mein nahi mila. Sales team ko forward karoon? (Y/N)"; "Pehle vehicle identify karein — chassis number ya registration number bhejein."; "Clutch Plate — 264742300101\n(Catalog: SIGNA 2818.K)".
-
-C. HALLUCINATION GUARD (R27.23):
-- If there is no exact vehicle match (RESOLVER: NONE or SUGGEST), you MUST NOT invent OEM names, drive configs, tyre counts, emission stages, fuel types, body types, or part numbers.
-- The catalogs table is the ONLY source of truth for vehicle specs; the parts table is the ONLY source of truth for part numbers. If it is not in the CONTEXT, you do not know it.
-
-Response format when CATALOG MATCHES are present:
-- Lead with the best-fit part number(s) verbatim and the description, scoped to the locked vehicle (if any).
-- If multiple variants exist (e.g. BS6 vs BS6-PH2, standard vs PROLIFE), list them as separate lines and note the difference.
-- If a cross-reference exists (CROSS-REFERENCE MATCHES block), include the source brand→OEM mapping.
-- Keep it to 3-6 short lines. Use the customer's language (Hindi/English/Hinglish — see REPLY LANGUAGE).
-
-CONTEXT (catalogue + cross-reference matches for this query):
-${contextBlock}`;
+  // R27.24a4 — the chat system prompt now lives in services/partsetu/prompt.ts
+  // (directly unit-testable + forced VERIFIED VEHICLE CONTEXT injection). This
+  // thin wrapper keeps the existing call sites unchanged.
+  const PARTSETU_SYSTEM = (contextBlock: string, verifiedVehicleBlock = "") =>
+    partsetuPrompt.buildPartsetuSystemPrompt(contextBlock, verifiedVehicleBlock);
 
   // Resolve an optional shop session from the x-shop-token header (no error if absent).
   function partsetuOptionalShopUser(req: Request): number | null {
@@ -8478,10 +8431,40 @@ ${contextBlock}`;
         return uviSendReply(`I couldn't confidently match '${uviInput}'. Could you share the model name (e.g. SIGNA 2823.K) or the full chassis number?`);
       }
 
+      // R27.24a4 — UNCONDITIONAL UVI probe. The fast-path above only fires when
+      // the WHOLE message is an identifier; a natural-language message that
+      // EMBEDS a chassis number ("tata ka chassis no hai 505409") slipped past
+      // it, so resolveVehicle was never called and Sonnet freelanced (it
+      // hallucinated "Tata 407 discontinued" while catalog #22 sat in the DB).
+      // We now scan EVERY message for identifier candidates, resolve each, and
+      // on a hit lock the catalog + inject a VERIFIED VEHICLE CONTEXT block.
+      console.log(`[partsetu] chat session_id=${conversationId} user_msg="${uviInput.slice(0, 80).replace(/\n/g, " ")}"`);
+      let verifiedVehicleBlock = "";
+      let uviLockedCatalogId: number | null = null;
+      {
+        const uviCands = partsetuUvi.extractVehicleIdentifierCandidates(uviInput);
+        let bestUvi: import("./services/partsetu/uvi-resolver").UviResult | null = null;
+        let matchedInput = "";
+        if (uviCands.length) {
+          const uviResults = await Promise.all(uviCands.map((c) => partsetuUvi.resolveVehicle(c)));
+          bestUvi = partsetuUvi.pickBestUvi(uviResults);
+          const bi = bestUvi ? uviResults.indexOf(bestUvi) : -1;
+          matchedInput = bi >= 0 ? uviCands[bi] : (uviCands[0] || "");
+        }
+        console.log(`[partsetu] uvi candidates_extracted=[${uviCands.join(",")}] uvi_resolved=${uviCands.length} auto_lock=${bestUvi?.auto_lock?.catalog_id ?? "null"}`);
+        if (bestUvi) {
+          if (bestUvi.auto_lock && !conv.catalog_context_id) {
+            partsetuStore.setCatalogContext(Number(conversationId), bestUvi.auto_lock.catalog_id);
+            uviLockedCatalogId = bestUvi.auto_lock.catalog_id;
+          }
+          verifiedVehicleBlock = partsetuPrompt.buildVerifiedVehicleBlock(matchedInput, bestUvi.auto_lock, bestUvi.candidates);
+        }
+      }
+
       // R27.23 — chat-side resolver hierarchy: chassis → registration (VAHAN,
       // deferred) → model fuzzy. VC-number matching is no longer used on the
       // chat path. An already-locked catalogue (from a prior turn) is kept.
-      let catalogId: number | null = conv.catalog_context_id || null;
+      let catalogId: number | null = conv.catalog_context_id || uviLockedCatalogId || null;
       let resolverNote = "";
       if (!catalogId) {
         const resolved = await partsetuStore.resolveCatalog(String(content));
@@ -8504,7 +8487,9 @@ ${contextBlock}`;
       const lockedCatalog = catalogId ? partsetuStore.getCatalog(catalogId) : null;
       const lockedVehicle = lockedCatalog ? [lockedCatalog.model, lockedCatalog.variant].filter(Boolean).join(" ") || lockedCatalog.oem : null;
       const intent = await partsetuIntent.classifyIntent(String(content), { lockedCatalogId: catalogId, lockedVehicle });
+      console.log(`[partsetu] intent kind=${intent.kind} bypass_lock=${intent.bypassLock}`);
       const searchResult = await partsetuSearch.searchParts(intent, { lockedCatalogId: catalogId });
+      console.log(`[partsetu] search strategies=${intent.kind} results=${searchResult.hits.length} locked=${catalogId ?? "null"}`);
 
       let verifiedBlock = "";
       if (searchResult.hits.length) {
@@ -8526,10 +8511,15 @@ ${contextBlock}`;
       // CATALOG MATCHES and falling back to "not available" boilerplate even
       // when the right part was sitting in the context block. Haiku continues
       // to be used for keyword expansion (fast, cheap, structured JSON only).
-      const result = await claudeSvc.callClaudeSonnet(PARTSETU_SYSTEM(contextBlock), history);
+      const systemPrompt = PARTSETU_SYSTEM(contextBlock, verifiedVehicleBlock);
+      console.log(`[partsetu] sonnet system_prompt_chars=${systemPrompt.length} includes_uvi_context=${verifiedVehicleBlock.length > 0}`);
+      const result = await claudeSvc.callClaudeSonnet(systemPrompt, history);
       let replyText = partsetuStore.stripBannedPhrases(result.text);
       // R27.24a — citation guard: strip hallucinated/unattributed part numbers.
+      const beforeStrip = replyText;
       replyText = enforcePartCitations(replyText, searchResult.hits, contextBlock);
+      const citationStrips = beforeStrip !== replyText ? 1 : 0;
+      console.log(`[partsetu] response chars=${replyText.length} citation_strips=${citationStrips}`);
 
       partsetuStore.addMessage({
         conversationId: Number(conversationId), role: "assistant", content: replyText,
