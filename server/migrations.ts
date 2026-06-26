@@ -3781,3 +3781,46 @@ export function runPartSetuMigrations() {
 
   console.log("[migrations] PartSetu: complete");
 }
+
+// =====================================================================
+// R27.25 — Admin Command Center perf. Additive indexes only. The Phase-4
+// (consignments/customers/rfqs/quotes/purchase_orders) and Session-C
+// (quotations) tables carried NO indexes on their filter/sort columns, so
+// every admin list paid a full scan + filesort. These back the WHERE/ORDER BY
+// observed in storage-v2 (status filters, customer_id lookups, created_at desc
+// ordering) and the KPI counts in getSessionBCounts (open rfqs / pending pos).
+// All CREATE INDEX IF NOT EXISTS — idempotent, no table drops/renames.
+// =====================================================================
+export function runR27_25Migrations() {
+  console.log("[migrations] R27.25: start");
+  const r2725 = (step: string, sql: string) => {
+    try { sqlite.exec(sql); console.log(`[migrations] R27.25: ${step} ok`); }
+    catch (e: any) {
+      const msg = String(e?.message || e);
+      if (/duplicate|already exists/i.test(msg)) console.log(`[migrations] R27.25: ${step} skip (${msg})`);
+      else console.log(`[migrations] R27.25: ${step} fail: ${msg}`);
+    }
+  };
+  // consignments — listConsignments filters status, orders by created_at desc;
+  // getCustomerConsignmentCount COUNTs by customer_id (was an N+1 hot path).
+  r2725("idx_consignments_customer_id", `CREATE INDEX IF NOT EXISTS idx_consignments_customer_id ON consignments(customer_id)`);
+  r2725("idx_consignments_status", `CREATE INDEX IF NOT EXISTS idx_consignments_status ON consignments(status)`);
+  r2725("idx_consignments_created_at", `CREATE INDEX IF NOT EXISTS idx_consignments_created_at ON consignments(created_at)`);
+  // customers — getCustomers orders by created_at desc on every list.
+  r2725("idx_customers_created_at", `CREATE INDEX IF NOT EXISTS idx_customers_created_at ON customers(created_at)`);
+  // quotations — listQuotations filters status/customer_id, orders created_at desc.
+  r2725("idx_quotations_status", `CREATE INDEX IF NOT EXISTS idx_quotations_status ON quotations(status)`);
+  r2725("idx_quotations_customer_id", `CREATE INDEX IF NOT EXISTS idx_quotations_customer_id ON quotations(customer_id)`);
+  r2725("idx_quotations_created_at", `CREATE INDEX IF NOT EXISTS idx_quotations_created_at ON quotations(created_at)`);
+  // rfqs — getSessionBCounts open count + listRfqs status filter + customer lookup.
+  r2725("idx_rfqs_status", `CREATE INDEX IF NOT EXISTS idx_rfqs_status ON rfqs(status)`);
+  r2725("idx_rfqs_customer_id", `CREATE INDEX IF NOT EXISTS idx_rfqs_customer_id ON rfqs(customer_id)`);
+  // quotes — listQuotes filters customer_id/status/rfq_id.
+  r2725("idx_quotes_customer_id", `CREATE INDEX IF NOT EXISTS idx_quotes_customer_id ON quotes(customer_id)`);
+  r2725("idx_quotes_status", `CREATE INDEX IF NOT EXISTS idx_quotes_status ON quotes(status)`);
+  r2725("idx_quotes_rfq_id", `CREATE INDEX IF NOT EXISTS idx_quotes_rfq_id ON quotes(rfq_id)`);
+  // purchase_orders — getSessionBCounts pending count + listPurchaseOrders filters.
+  r2725("idx_purchase_orders_status", `CREATE INDEX IF NOT EXISTS idx_purchase_orders_status ON purchase_orders(status)`);
+  r2725("idx_purchase_orders_customer_id", `CREATE INDEX IF NOT EXISTS idx_purchase_orders_customer_id ON purchase_orders(customer_id)`);
+  console.log("[migrations] R27.25: complete");
+}

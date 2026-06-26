@@ -16,7 +16,7 @@ import type {
   PurchaseOrder, InsertPurchaseOrder, PaymentRecord, InsertPaymentRecord,
   FileUpload, BankDetails, InsertBankDetails,
 } from "@shared/schema";
-import { eq, desc, and, like, or, sql, gte, lte } from "drizzle-orm";
+import { eq, desc, and, like, or, sql, gte, lte, inArray } from "drizzle-orm";
 import { randomBytes, createHash } from "node:crypto";
 import Database from "better-sqlite3";
 import { join } from "node:path";
@@ -255,6 +255,26 @@ export async function deleteCustomer(id: number): Promise<void> {
 export async function getCustomerConsignmentCount(id: number): Promise<number> {
   const row = sqlite.prepare("SELECT COUNT(*) AS c FROM consignments WHERE customer_id = ?").get(id) as any;
   return row?.c ?? 0;
+}
+// R27.25 — batch replacement for the per-customer N+1 in GET /api/admin/customers.
+// One grouped scan returns counts for every customer; callers look up by id.
+export async function getCustomerConsignmentCounts(): Promise<Map<number, number>> {
+  const rows = sqlite.prepare(
+    "SELECT customer_id AS id, COUNT(*) AS c FROM consignments WHERE customer_id IS NOT NULL GROUP BY customer_id",
+  ).all() as Array<{ id: number; c: number }>;
+  const m = new Map<number, number>();
+  for (const r of rows) m.set(r.id, r.c);
+  return m;
+}
+// R27.25 — batch customer fetch for the per-row getCustomer N+1 in the
+// quotations list. One IN(...) query instead of one SELECT per customerId.
+export async function getCustomersByIds(ids: number[]): Promise<Map<number, Customer>> {
+  const m = new Map<number, Customer>();
+  const clean = Array.from(new Set(ids.filter((n) => Number.isInteger(n) && n > 0)));
+  if (!clean.length) return m;
+  const rows = db.select().from(customers).where(inArray(customers.id, clean)).all();
+  for (const c of rows) m.set(c.id, c);
+  return m;
 }
 
 // -------- NOTIFICATION TEMPLATES (Phase 4) --------

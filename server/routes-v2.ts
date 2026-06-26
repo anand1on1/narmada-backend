@@ -551,10 +551,21 @@ export function registerV2Routes(app: Express, ctx: V2Context) {
 
   // Admin — list (both admin + logistics can read)
   app.get("/api/admin/consignments", requireAuth, async (req, res) => {
+    const t0 = Date.now();
     const status = req.query.status as string | undefined;
     const q = req.query.q as string | undefined;
     const list = await v2.listConsignments({ status, q });
-    res.json(list);
+    // R27.25 — opt-in pagination, backward compatible: with no ?limit the full
+    // array is returned exactly as before. status/q now index-backed.
+    res.setHeader("X-Total-Count", String(list.length));
+    let out = list;
+    if (req.query.limit != null) {
+      const limit = Math.min(200, Math.max(1, parseInt(req.query.limit as string, 10) || 50));
+      const offset = Math.max(0, parseInt((req.query.offset as string) || "0", 10) || 0);
+      out = list.slice(offset, offset + limit);
+    }
+    console.log(`[admin] perf endpoint=/api/admin/consignments queries=1 rows_returned=${out.length} total=${Date.now() - t0}ms`);
+    res.json(out);
   });
 
   // R10 — consignment document uploads (invoice + docket). Stored under
@@ -866,15 +877,25 @@ export function registerV2Routes(app: Express, ctx: V2Context) {
 
   // ============== CUSTOMERS (Phase 4) ==============
   app.get("/api/admin/customers", requireAuth, async (req, res) => {
+    const t0 = Date.now();
     try {
       const q = req.query.q as string | undefined;
       const list = await v2.getCustomers(q);
-      // Augment with consignment count
-      const withCount = await Promise.all(list.map(async (c) => ({
-        ...c,
-        consignmentCount: await v2.getCustomerConsignmentCount(c.id),
-      })));
-      res.json(withCount);
+      // R27.25 — single grouped count query replaces the per-customer N+1
+      // (was 1 + N queries; now 2 total regardless of customer count).
+      const counts = await v2.getCustomerConsignmentCounts();
+      const withCount = list.map((c) => ({ ...c, consignmentCount: counts.get(c.id) ?? 0 }));
+      // R27.25 — opt-in pagination, backward compatible: with no ?limit the full
+      // array is returned exactly as before (GoDaddy frontend unaffected).
+      res.setHeader("X-Total-Count", String(withCount.length));
+      let out = withCount;
+      if (req.query.limit != null) {
+        const limit = Math.min(200, Math.max(1, parseInt(req.query.limit as string, 10) || 50));
+        const offset = Math.max(0, parseInt((req.query.offset as string) || "0", 10) || 0);
+        out = withCount.slice(offset, offset + limit);
+      }
+      console.log(`[admin] perf endpoint=/api/admin/customers queries=2 rows_returned=${out.length} total=${Date.now() - t0}ms`);
+      res.json(out);
     } catch (e: any) { res.status(500).json({ error: e.message }); }
   });
 
@@ -1833,19 +1854,19 @@ export function registerV2Routes(app: Express, ctx: V2Context) {
 
   // -------- ADMIN: V2 QUOTATIONS (read-only mirror) --------
   app.get("/api/admin/quotations", requireAuth, async (req, res) => {
+    const t0 = Date.now();
     try {
       const status = (req.query.status as string) || undefined;
       const customerId = req.query.customer_id ? parseInt(req.query.customer_id as string, 10) : undefined;
       const page = req.query.page ? parseInt(req.query.page as string, 10) : 1;
       const limit = 20;
       const { rows, total } = await v2.listQuotations({ status, customerId, page, limit });
-      const custIds = Array.from(new Set(rows.map((r: any) => r.customerId).filter(Boolean)));
-      const custMap: Record<number, string> = {};
-      for (const cid of custIds) {
-        const c = await v2.getCustomer(cid as number);
-        if (c) custMap[cid as number] = c.name;
-      }
-      const quotations = rows.map((r: any) => ({ ...r, customerName: custMap[r.customerId] || null }));
+      // R27.25 — batch customer name resolution replaces the per-row getCustomer
+      // N+1 (was 1 + 1 + up-to-20 queries; now 2 + 1 = 3 total).
+      const custIds = rows.map((r: any) => r.customerId).filter(Boolean) as number[];
+      const custMap = await v2.getCustomersByIds(custIds);
+      const quotations = rows.map((r: any) => ({ ...r, customerName: custMap.get(r.customerId)?.name || null }));
+      console.log(`[admin] perf endpoint=/api/admin/quotations queries=3 rows_returned=${quotations.length} total=${Date.now() - t0}ms`);
       res.json({ quotations, total, pages: Math.ceil(total / limit) });
     } catch (e: any) { res.status(500).json({ error: e.message }); }
   });
