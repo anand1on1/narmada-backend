@@ -477,6 +477,54 @@ function rowsToHits(rows: any[], strategy: string, baseScore: number): SearchHit
   }));
 }
 
+// R27.24a10 bug 4 — when a vehicle IS locked but the part search returns zero
+// hits, the bot must NOT say "catalogue data available nahi hai". Instead we
+// surface the closest part names that DO exist in the locked catalog plus the
+// total part count, so the customer sees we have the catalog and can refine.
+// A loose FTS prefix over the part's distinctive tokens, else the first N parts.
+export function closestPartsInCatalog(
+  catalogId: number,
+  partName: string,
+  limit = 3,
+): { closest: SearchHit[]; totalParts: number } {
+  let totalParts = 0;
+  try {
+    const row = db.prepare(`SELECT COUNT(*) AS c FROM partsetu_parts WHERE catalog_id = ?`).get(catalogId) as any;
+    totalParts = Number(row?.c || 0);
+  } catch { totalParts = 0; }
+  if (!totalParts) return { closest: [], totalParts: 0 };
+
+  const tokens = Array.from(new Set(
+    String(partName || "").toLowerCase().replace(/[^a-z0-9 ]/g, " ").split(/\s+/)
+      .filter((t) => t.length >= 3 && !COMMON_PART_WORDS.has(t)),
+  ));
+  let closest: SearchHit[] = [];
+
+  if (tokens.length && fts5Available()) {
+    const expr = tokens.map((t) => `${t}*`).join(" OR ");
+    try {
+      const rows = db.prepare(
+        `SELECT p.id, p.part_number, p.description, p.catalog_id, bm25(partsetu_parts_fts) AS rank
+         FROM partsetu_parts_fts JOIN partsetu_parts p ON p.id = partsetu_parts_fts.rowid
+         WHERE partsetu_parts_fts MATCH ? AND p.catalog_id = ? ORDER BY rank ASC LIMIT ?`,
+      ).all(expr, catalogId, limit) as any[];
+      closest = rowsToHits(rows, "closest_fts", 20);
+    } catch { closest = []; }
+  }
+
+  if (!closest.length) {
+    try {
+      const rows = db.prepare(
+        `SELECT id, part_number, description, catalog_id FROM partsetu_parts WHERE catalog_id = ? ORDER BY id ASC LIMIT ?`,
+      ).all(catalogId, limit) as any[];
+      closest = rowsToHits(rows, "closest_first", 15);
+    } catch { closest = []; }
+  }
+
+  console.log(`[partsetu] closest_parts catalog=${catalogId} part="${partName}" total=${totalParts} closest=${closest.length}`);
+  return { closest, totalParts };
+}
+
 // Run the 5-tier fallback for one part name. `restrict` scopes to the locked
 // catalog (multi_part_list never bypasses the lock). Stops at the first tier
 // that yields hits and logs which tier matched.

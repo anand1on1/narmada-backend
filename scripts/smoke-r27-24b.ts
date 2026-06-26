@@ -76,7 +76,9 @@ async function main() {
   check("11 prompt: 5-8 digit = chassis rule", /5-8 digit number .* is a CHASSIS TYPE CODE/i.test(sysEmpty), "");
   check("12 prompt: never invent part numbers", /NEVER invent.*part number/i.test(sysEmpty), "");
   check("13 prompt: chassis few-shot example", sysEmpty.includes("EXAMPLES") && /chassis number MAT/i.test(sysEmpty), "");
-  check("14 prompt static body < 8000 chars", sysEmpty.length < 8000, `len=${sysEmpty.length}`);
+  // R27.24a10 — cap raised from 8000 to 8600 to admit anti-hallucination HARD
+  // RULE 11 (forbids inventing variants/part numbers/chassis from training data).
+  check("14 prompt static body < 8600 chars", sysEmpty.length < 8600, `len=${sysEmpty.length}`);
 
   // a4 contract still honored (regression-critical tokens)
   const vblock = prompt.buildVerifiedVehicleBlock("505409", {

@@ -70,6 +70,31 @@ export function getCatalog(id: number): any {
   return db.prepare(`SELECT * FROM partsetu_catalogs WHERE id = ?`).get(id);
 }
 
+// R27.24a10 bug 1 — given a free-text model query ("signa 2821 bs6"), return the
+// REAL catalog rows whose model/variant contains the model number, optionally
+// filtered by emission stage. The handler uses this to offer genuine variants
+// (or honestly say the model is not in our DB) instead of letting Sonnet invent
+// variant names from training data.
+export function findCatalogsByModelName(query: string): Array<{
+  id: number; model: string | null; variant: string | null;
+  chassis_type: string | null; vc_no: string | null;
+}> {
+  const raw = String(query || "");
+  const numM = raw.match(/\b(\d{3,4})\b/);
+  const modelNum = numM ? numM[1] : null;
+  if (!modelNum) return [];
+  const emM = raw.match(/\bbs\s*-?\s*([3456])\b/i);
+  const bs = emM ? emM[1] : null;
+  let sql = `SELECT id, model, variant, chassis_type, vc_no FROM partsetu_catalogs WHERE (model LIKE ? OR variant LIKE ?)`;
+  const params: any[] = [`%${modelNum}%`, `%${modelNum}%`];
+  if (bs) {
+    sql += ` AND REPLACE(REPLACE(UPPER(IFNULL(model,'')||IFNULL(variant,'')||IFNULL(emission_stage,'')),' ',''),'-','') LIKE ?`;
+    params.push(`%BS${bs}%`);
+  }
+  sql += ` ORDER BY id ASC LIMIT 10`;
+  try { return db.prepare(sql).all(...params) as any[]; } catch { return []; }
+}
+
 export function setCatalogContext(conversationId: number, catalogId: number): void {
   db.prepare(`UPDATE partsetu_conversations SET catalog_context_id = ? WHERE id = ?`).run(catalogId, conversationId);
 }

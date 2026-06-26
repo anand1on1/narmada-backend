@@ -19,6 +19,7 @@ import {
   detectDisambiguationReply,
   detectPartDisambiguationReply,
   detectPartsAppend,
+  detectVariantQuery,
   isDisambiguationCancel,
   type Intent,
   type SessionState,
@@ -44,6 +45,11 @@ export const SEED_CATALOGS: SeedCatalog[] = [
   { id: 3, oem: "Tata", model: "SFC 407CNG", variant: "EX 31WB", vc_no: "40712309000R", chassis_type: "835401", emission_stage: "BS6" },
   { id: 4, oem: "Tata", model: "YODHA 1700", variant: "4x2 Pickup", vc_no: "46477912000R", chassis_type: "464779", emission_stage: "BS6" },
   { id: 5, oem: "Eicher", model: "PRO 2049", variant: "BS6 Cargo", vc_no: "56705934000R", chassis_type: "567059", emission_stage: "BS6" },
+  // R27.24a10 — "2821" variants for the variant_query trace. "2821" matches #6
+  // and #7 (BS6 keeps both); #8 ("2823") never matches "2821". "2 no" → #7.
+  { id: 6, oem: "Tata", model: "LPK 2821", variant: "BS6 Cowl", vc_no: "68282131000R", chassis_type: "682821", emission_stage: "BS6" },
+  { id: 7, oem: "Tata", model: "SIGNA 2821.K", variant: "5L BS6", vc_no: "83535531000R", chassis_type: "835355", emission_stage: "BS6" },
+  { id: 8, oem: "Tata", model: "SIGNA 2823.K", variant: "BS6 Tractor", vc_no: "88282331000R", chassis_type: "882823", emission_stage: "BS6" },
 ];
 
 // Known parts pinned with the realistic OEM numbers from the reference docs so
@@ -259,6 +265,13 @@ export interface SimResult {
   selectedPartIndex: number | null;
   selectedPartName: string | null;
   selectedPartOem: string | null;
+  // R27.24a10
+  variantModelQuery: string | null;
+  variantOptionsCount: number;
+  variantNoMatch: boolean;
+  variantAutoLockedCatalogId: number | null;
+  closestParts: search.SearchHit[];
+  lockedTotalParts: number;
 }
 
 // Run the production chat pipeline minus the Sonnet network call. Faithful to
@@ -388,11 +401,57 @@ export async function simulateChatMessage(
     }
   }
 
+  // R27.24a10 bug 1 — variant query (mirrors routes-v2): the customer named a
+  // MODEL with no chassis and the UVI probe found nothing. Query the catalogs
+  // table for REAL rows: 0 → honest not-in-DB; 1 → auto-lock; 2+ → persist the
+  // real rows as pending disambiguation + present a numbered list of REAL rows.
+  let variantHandled = false;
+  let variantModelQuery: string | null = null;
+  let variantOptionsCount = 0;
+  let variantNoMatch = false;
+  let variantAutoLockedCatalogId: number | null = null;
+  if (!effectiveLock && !uviLockedCatalogId && verifiedVehicleBlock === "") {
+    const variantQuery = detectVariantQuery(message);
+    if (variantQuery) {
+      variantModelQuery = variantQuery;
+      const rows = partsetu.findCatalogsByModelName(variantQuery);
+      if (rows.length === 0) {
+        verifiedVehicleBlock = prompt.buildVariantNotFoundBlock(variantQuery);
+        variantHandled = true;
+        variantNoMatch = true;
+      } else if (rows.length === 1) {
+        const r = rows[0];
+        uviLockedCatalogId = r.id;
+        variantAutoLockedCatalogId = r.id;
+        const lock: uvi.UviCandidate = {
+          catalog_id: r.id, model: r.model || "", variant: r.variant || "", vc_no: r.vc_no,
+          matched_strategies: ["variant_query"], score: 100, confidence: "high",
+          matched_value: r.chassis_type || r.vc_no || String(r.id),
+        };
+        verifiedVehicleBlock = prompt.buildVerifiedVehicleBlock(variantQuery, lock, []);
+        variantHandled = true;
+      } else {
+        variantOptionsCount = rows.length;
+        const matches = rows.map((r) => ({
+          input: variantQuery,
+          lock: {
+            catalog_id: r.id, model: r.model || "", variant: r.variant || "", vc_no: r.vc_no,
+            matched_strategies: ["variant_query"], score: 100, confidence: "high" as const,
+            matched_value: r.chassis_type || r.vc_no || String(r.id),
+          },
+        }));
+        if (sessionId) partsetu.savePendingDisambiguation(sessionId, matches, message);
+        verifiedVehicleBlock = prompt.buildVariantOptionsBlock(rows);
+        variantHandled = true;
+      }
+    }
+  }
+
   // 2) Catalog resolution. R27.24a9: a re-lock (uviLockedCatalogId) overrides the
   // prior lock; otherwise prior/resolved lock wins, then UVI auto-lock, then fuzzy.
   let catalogId: number | null = uviLockedCatalogId ?? effectiveLock ?? null;
   let resolverNote = "";
-  if (!catalogId) {
+  if (!catalogId && !variantHandled) {
     const resolved = await partsetu.resolveCatalog(message);
     if (resolved.kind === "exact") {
       catalogId = resolved.catalog_id;
@@ -478,6 +537,21 @@ export async function simulateChatMessage(
     const lookupBlock = prompt.buildPartLookupBlock(searchResult.perPart, label);
     if (lookupBlock) contextBlock = `${lookupBlock}\n\n${contextBlock}`;
   }
+  // R27.24a10 bug 4 — locked catalog but zero hits: surface closest real parts.
+  let closestParts: search.SearchHit[] = [];
+  let lockedTotalParts = 0;
+  if (catalogId && !searchResult.hits.length && !intent.bypassLock && intent.kind !== "multi_part_list") {
+    const res = search.closestPartsInCatalog(catalogId, activeMessage);
+    closestParts = res.closest;
+    lockedTotalParts = res.totalParts;
+    if (res.totalParts > 0) {
+      const lc = partsetu.getCatalog(catalogId);
+      const label = lc
+        ? `catalog #${catalogId} — ${[lc.model, lc.variant].filter(Boolean).join(" ") || lc.oem || ""}`.trim()
+        : `catalog #${catalogId}`;
+      contextBlock = `${prompt.buildClosestPartsBlock(activeMessage, label, res.closest, res.totalParts)}\n\n${contextBlock}`;
+    }
+  }
   if (resolverNote) contextBlock = `${resolverNote}\n${contextBlock}`;
 
   const systemPrompt = prompt.buildPartsetuSystemPrompt(contextBlock, verifiedVehicleBlock);
@@ -490,6 +564,8 @@ export async function simulateChatMessage(
     vehicleRelocked, sameCatalogNoOp, relockArchivedItems, cartCount, isPartsAppend,
     partNeedsDisambiguation, partOptionsCount,
     partDisambiguationResolved, selectedPartIndex, selectedPartName, selectedPartOem,
+    variantModelQuery, variantOptionsCount, variantNoMatch, variantAutoLockedCatalogId,
+    closestParts, lockedTotalParts,
   };
 }
 

@@ -18,7 +18,8 @@ export type IntentKind =
   | "multi_part_list"
   | "disambiguation_reply"
   | "parts_append"
-  | "part_disambiguation_reply";
+  | "part_disambiguation_reply"
+  | "variant_query";
 
 export interface PartListEntry {
   rawName: string;
@@ -261,6 +262,9 @@ export function matchReplyToIndex(
   // "<keyword> N" (Devanagari already folded to ascii) — e.g. "option 2", "part 2", "no. 2"
   mm = ascii.match(new RegExp(`(?:${selectorKeywords})\\s*#?\\.?\\s*(\\d{1,2})`, "i"));
   if (mm) { const i = Number(mm[1]); if (inRange(i)) return i - 1; }
+  // "<N> no" / "<N> number" — the digit precedes the selector word, e.g. "2 no".
+  mm = ascii.match(new RegExp(`(\\d{1,2})\\s*(?:${selectorKeywords})\\b`, "i"));
+  if (mm) { const i = Number(mm[1]); if (inRange(i)) return i - 1; }
   // ordinal "1st" / "2nd" / "3rd"
   mm = lower.match(/\b(\d{1,2})(?:st|nd|rd|th)\b/);
   if (mm) { const i = Number(mm[1]); if (inRange(i)) return i - 1; }
@@ -364,6 +368,33 @@ export function detectPartsAppend(message: string): string | null {
   return cleaned;
 }
 
+// ---- R27.24a10 bug 1: variant query (model named WITHOUT a chassis) ---------
+
+// A vehicle model code with a 3-4 digit suffix (e.g. "SIGNA 2821", "LPK 2518").
+const MODEL_CODE_RE = /\b(signa|prima|ultra|intra|xenon|magic|ace|yodha|lpk|lps|lpt|lpo|ecomet|pro)\s*\d{3,4}/i;
+// A vehicle brand name.
+const VEHICLE_BRAND_RE = /\b(tata|ashok\s*leyland|leyland|eicher|bharat\s*benz|bharatbenz|mahindra)\b/i;
+// A bare 4-digit model number (e.g. "2821"). Bare 5-8 digit codes are chassis
+// types handled by the UVI resolver, so they are explicitly excluded below.
+const MODEL_NUMBER_RE = /\b(\d{4})\b/;
+const VQ_EMISSION_RE = /\bbs\s*-?\s*[3456]\b/i;
+
+// Detect a "what variants do you have for <model>" style message — a model name
+// or number stated WITHOUT a chassis number. Returns the trimmed query when it
+// looks like a variant question, else null. The handler then queries the
+// catalogs table for REAL rows instead of letting Sonnet invent variants.
+export function detectVariantQuery(message: string): string | null {
+  const raw = String(message || "");
+  if (!raw.trim()) return null;
+  if (/\bMAT[A-Z0-9]{6,}\b/i.test(raw)) return null;   // a real chassis number → UVI handles it
+  if (/\b\d{5,8}\b/.test(raw)) return null;            // bare chassis-type code → UVI handles it
+  const hasCode = MODEL_CODE_RE.test(raw);
+  const hasBrandNum = VEHICLE_BRAND_RE.test(raw) && MODEL_NUMBER_RE.test(raw);
+  const hasNumEmission = MODEL_NUMBER_RE.test(raw) && VQ_EMISSION_RE.test(raw);
+  if (!hasCode && !hasBrandNum && !hasNumEmission) return null;
+  return raw.trim();
+}
+
 // Deterministic classifier — also the fallback when the LLM is unavailable.
 export function classifyIntentHeuristic(message: string, state: SessionState): Intent {
   const m = String(message || "");
@@ -390,6 +421,8 @@ export function classifyIntentHeuristic(message: string, state: SessionState): I
     kind = "small_talk";
   } else if (state.lockedCatalogId) {
     kind = "locked_vehicle_part";
+  } else if (detectVariantQuery(m)) {
+    kind = "variant_query";
   } else {
     kind = "exploratory_part_search";
   }

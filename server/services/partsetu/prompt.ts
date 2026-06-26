@@ -116,6 +116,66 @@ export function buildPartDisambiguationBlock(
   ].join("\n");
 }
 
+// R27.24a10 bug 1 — when a customer names a model (e.g. "signa 2821 bs6")
+// WITHOUT a chassis number and the catalogs table has 2+ real rows for it, list
+// the REAL rows and ask the user to choose. Never let Sonnet invent variants.
+export function buildVariantOptionsBlock(
+  catalogs: Array<{ id: number; model: string | null; variant: string | null; chassis_type: string | null }>,
+): string {
+  const lines = catalogs.map((c, i) => {
+    const name = [c.model, c.variant].filter(Boolean).join(" ").trim() || `catalog #${c.id}`;
+    const ct = c.chassis_type ? `, chassis type ${c.chassis_type}` : "";
+    return `${i + 1}. ${name} (catalog #${c.id}${ct})`;
+  });
+  return [
+    "=== MODEL VARIANTS IN OUR DATABASE — ASK USER TO CHOOSE ===",
+    "These are the ONLY variants for this model in our database. They are REAL catalog rows:",
+    ...lines,
+    "Present EXACTLY these numbered options, verbatim, and ask the user to reply with the number they want.",
+    "Do NOT invent any other variant, emission stage, body type, or drive configuration that is not listed above.",
+    "Do NOT ask the user for a chassis number — we already have these catalogs; just have them pick a number.",
+    "=== END MODEL VARIANTS ===",
+  ].join("\n");
+}
+
+// R27.24a10 bug 1 — the model query matched ZERO catalog rows. Be honest, ask
+// for chassis/registration, and never claim the model is "discontinued".
+export function buildVariantNotFoundBlock(query: string): string {
+  return [
+    "=== MODEL NOT IN DATABASE ===",
+    `The customer asked about "${query}". This model is NOT present in our catalog database right now.`,
+    "Say honestly, in the customer's language, that this model's catalog is not in our database yet.",
+    "Ask for the full chassis number or registration number so we can identify the exact vehicle.",
+    'Do NOT invent variants, part numbers, or specs, and do NOT claim the model is "discontinued".',
+    "=== END MODEL NOT IN DATABASE ===",
+  ].join("\n");
+}
+
+// R27.24a10 bug 4 — a vehicle IS locked but the part search returned zero exact
+// matches. FORBID "catalogue data available nahi hai"; instead surface the
+// closest real parts in the locked catalog plus the total part count.
+export function buildClosestPartsBlock(
+  partName: string,
+  catalogLabel: string,
+  closest: Array<{ part_number: string; description: string }>,
+  totalParts: number,
+): string {
+  const lines = closest.map((h, i) => {
+    const desc = (h.description || "").trim();
+    return `${i + 1}. ${h.part_number}${desc ? ` (${desc})` : ""}`;
+  });
+  return [
+    `=== NO EXACT MATCH — CLOSEST PARTS IN ${catalogLabel} ===`,
+    `The vehicle is locked to ${catalogLabel}, which contains ${totalParts} parts in our database.`,
+    `No part exactly matching "${partName}" was found, but these are the closest real parts in this catalog:`,
+    ...lines,
+    `Tell the customer: "Is catalog mein '${partName}' ka exact match nahi mila" and offer the closest parts above.`,
+    'NEVER say "catalogue data available nahi hai" — the catalog IS locked and has parts. Ask the customer to confirm the exact part name or share the part number.',
+    "Quote ONLY the part numbers listed above, verbatim. Never invent a number.",
+    "=== END CLOSEST PARTS ===",
+  ].join("\n");
+}
+
 const VEHICLE_ID_RULES = `RULES FOR VEHICLE IDENTIFIERS (apply always):
 1. A 5-8 digit number alone (like "505409" or "802502") is a CHASSIS TYPE CODE, never a model number.
 2. The model "Tata 407" does NOT exist in our catalog. Never invent it.
@@ -181,6 +241,7 @@ HARD RULES (highest priority — never break these):
 8. If the CONTEXT begins with "CHASSIS PROVIDED BUT UNRESOLVED", do NOT answer the part query yet — first ask the customer to confirm the vehicle model (e.g. 'SIGNA 4232.TK').
 9. Be concise. Use 'seller' (not 'supplier') for the vendor side.
 10. If a "VERIFIED VEHICLE CONTEXT" block appears at the very top, it is DB-verified ground truth and OVERRIDES your own assumptions: never claim that vehicle/catalog is unavailable, discontinued, or a different model.
+11. NEVER generate vehicle variants, model names, part numbers, chassis types, or VC numbers from training data. Use ONLY values present in the provided context blocks (VERIFIED VEHICLE CONTEXT, MODEL VARIANTS, PART LOOKUP RESULTS, CLOSEST PARTS, etc.). If the relevant block is absent or empty, say the data is not in our DB and ask for the chassis/registration number — never substitute an invented value. When a vehicle is locked and a CLOSEST PARTS block is present, never say "catalogue data available nahi hai".
 
 ${VEHICLE_ID_RULES}
 

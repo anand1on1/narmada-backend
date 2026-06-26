@@ -8523,12 +8523,57 @@ function registerR8Routes(
         }
       }
 
+      // R27.24a10 bug 1 — variant query. The customer named a MODEL (e.g.
+      // "signa 2821 bs6 ka knowledge hai") with NO chassis number, and the UVI
+      // probe above found nothing to lock. Previously Sonnet freelanced an
+      // invented variant list. Now we query the catalogs table for the REAL
+      // rows: 0 → honest "not in DB"; 1 → auto-lock; 2+ → persist the real rows
+      // as pending disambiguation and present a numbered list of REAL variants.
+      let variantHandled = false;
+      if (!conv.catalog_context_id && !uviLockedCatalogId && verifiedVehicleBlock === "") {
+        const variantQuery = partsetuIntent.detectVariantQuery(uviInput);
+        if (variantQuery) {
+          const rows = partsetuStore.findCatalogsByModelName(variantQuery);
+          if (rows.length === 0) {
+            verifiedVehicleBlock = partsetuPrompt.buildVariantNotFoundBlock(variantQuery);
+            variantHandled = true;
+            console.log(`[partsetu] variant_query model="${variantQuery}" options=0 not_in_db=1`);
+          } else if (rows.length === 1) {
+            const r = rows[0];
+            partsetuStore.setCatalogContext(Number(conversationId), r.id);
+            conv.catalog_context_id = r.id;
+            uviLockedCatalogId = r.id;
+            const lock: import("./services/partsetu/uvi-resolver").UviCandidate = {
+              catalog_id: r.id, model: r.model || "", variant: r.variant || "", vc_no: r.vc_no,
+              matched_strategies: ["variant_query"], score: 100, confidence: "high",
+              matched_value: r.chassis_type || r.vc_no || String(r.id),
+            };
+            verifiedVehicleBlock = partsetuPrompt.buildVerifiedVehicleBlock(variantQuery, lock, []);
+            variantHandled = true;
+            console.log(`[partsetu] variant_query model="${variantQuery}" options=1 auto_locked=${r.id}`);
+          } else {
+            const matches = rows.map((r) => ({
+              input: variantQuery,
+              lock: {
+                catalog_id: r.id, model: r.model || "", variant: r.variant || "", vc_no: r.vc_no,
+                matched_strategies: ["variant_query"], score: 100, confidence: "high" as const,
+                matched_value: r.chassis_type || r.vc_no || String(r.id),
+              },
+            }));
+            partsetuStore.savePendingDisambiguation(String(conversationId), matches, String(content));
+            verifiedVehicleBlock = partsetuPrompt.buildVariantOptionsBlock(rows);
+            variantHandled = true;
+            console.log(`[partsetu] variant_query model="${variantQuery}" options=${rows.length} pending_saved=1`);
+          }
+        }
+      }
+
       // R27.23 — chat-side resolver hierarchy: chassis → registration (VAHAN,
       // deferred) → model fuzzy. VC-number matching is no longer used on the
       // chat path. An already-locked catalogue (from a prior turn) is kept.
       let catalogId: number | null = conv.catalog_context_id || uviLockedCatalogId || null;
       let resolverNote = "";
-      if (!catalogId) {
+      if (!catalogId && !variantHandled) {
         const resolved = await partsetuStore.resolveCatalog(String(content));
         if (resolved.kind === "exact") {
           catalogId = resolved.catalog_id;
@@ -8628,6 +8673,20 @@ function registerR8Routes(
           : "the locked catalog";
         const lookupBlock = partsetuPrompt.buildPartLookupBlock(searchResult.perPart, label);
         if (lookupBlock) contextBlock = `${lookupBlock}\n\n${contextBlock}`;
+      }
+      // R27.24a10 bug 4 — a vehicle IS locked but the part search returned zero
+      // hits. Never let Sonnet say "catalogue data available nahi hai". Surface
+      // the closest REAL parts in the locked catalog + the total count so the
+      // reply stays DB-grounded and the customer can refine.
+      if (catalogId && !searchResult.hits.length && !intent.bypassLock && intent.kind !== "multi_part_list") {
+        const { closest, totalParts } = partsetuSearch.closestPartsInCatalog(catalogId, activeContent);
+        if (totalParts > 0) {
+          const lc = partsetuStore.getCatalog(catalogId);
+          const label = lc
+            ? `catalog #${catalogId} — ${[lc.model, lc.variant].filter(Boolean).join(" ") || lc.oem || ""}`.trim()
+            : `catalog #${catalogId}`;
+          contextBlock = `${partsetuPrompt.buildClosestPartsBlock(activeContent, label, closest, totalParts)}\n\n${contextBlock}`;
+        }
       }
       if (resolverNote) contextBlock = `${resolverNote}\n${contextBlock}`;
       const history = partsetuHistory(Number(conversationId));
