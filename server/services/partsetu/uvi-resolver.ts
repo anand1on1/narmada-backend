@@ -150,33 +150,54 @@ interface RawHit {
 // catalogs is a small table (dozens of rows in production); pulling it once and
 // running the textual strategies in JS keeps the logic obvious. The two FTS5
 // strategies and the identifier-table strategies stay in SQL.
-function loadCatalogs(): CatRow[] {
-  // chassis_prefix / vds_codes are R27.24a3 additive columns — they may be
-  // absent on an un-migrated DB, so select defensively.
-  const cols = new Set(
-    (db.prepare(`PRAGMA table_info(partsetu_catalogs)`).all() as any[]).map((c) => c.name),
-  );
-  const sel = [
+// R27.24a11 (perf) — the catalog column set is fixed once migrations finish at
+// boot, so the per-call `PRAGMA table_info` was pure waste. `resolveVehicle`
+// runs once per extracted identifier candidate and `loadCatalogs` was hit on
+// every one (plus once inside `collectSpacedChassis`), so a single chat turn
+// could fire the PRAGMA a dozen times. Memoize the resolved SELECT column list.
+let _catSelCols: string | null = null;
+function catalogSelectCols(): string {
+  if (_catSelCols !== null) return _catSelCols;
+  let cols = new Set<string>();
+  try { cols = new Set((db.prepare(`PRAGMA table_info(partsetu_catalogs)`).all() as any[]).map((c) => c.name)); }
+  catch { cols = new Set(); }
+  _catSelCols = [
     "id", "oem", "model", "variant", "vc_no",
     cols.has("chassis_no") ? "chassis_no" : "NULL AS chassis_no",
     cols.has("chassis_prefix") ? "chassis_prefix" : "NULL AS chassis_prefix",
     cols.has("vds_codes") ? "vds_codes" : "NULL AS vds_codes",
     cols.has("chassis_type") ? "chassis_type" : "NULL AS chassis_type",
   ].join(", ");
-  try { return db.prepare(`SELECT ${sel} FROM partsetu_catalogs`).all() as CatRow[]; }
+  return _catSelCols;
+}
+
+function loadCatalogs(): CatRow[] {
+  // chassis_prefix / vds_codes are R27.24a3 additive columns — they may be
+  // absent on an un-migrated DB, so select defensively (column list memoized).
+  try { return db.prepare(`SELECT ${catalogSelectCols()} FROM partsetu_catalogs`).all() as CatRow[]; }
   catch { return []; }
 }
 
+// R27.24a11 (perf) — table-existence is immutable after boot; memoize the
+// sqlite_master probes. Each was previously re-run ~8x per resolveVehicle
+// (every identifier-table / FTS strategy re-checked availability). Mirrors the
+// `fts5Available` memo already used in search.ts.
+let _ftsCats: boolean | null = null;
 function ftsCatalogsAvailable(): boolean {
+  if (_ftsCats !== null) return _ftsCats;
   try {
-    return !!db.prepare(`SELECT name FROM sqlite_master WHERE type='table' AND name='partsetu_catalogs_fts'`).get();
-  } catch { return false; }
+    _ftsCats = !!db.prepare(`SELECT name FROM sqlite_master WHERE type='table' AND name='partsetu_catalogs_fts'`).get();
+  } catch { _ftsCats = false; }
+  return _ftsCats;
 }
 
+let _identTable: boolean | null = null;
 function identifierTableAvailable(): boolean {
+  if (_identTable !== null) return _identTable;
   try {
-    return !!db.prepare(`SELECT name FROM sqlite_master WHERE type='table' AND name='partsetu_vehicle_identifiers'`).get();
-  } catch { return false; }
+    _identTable = !!db.prepare(`SELECT name FROM sqlite_master WHERE type='table' AND name='partsetu_vehicle_identifiers'`).get();
+  } catch { _identTable = false; }
+  return _identTable;
 }
 
 // FTS5 MATCH expression from free text: alnum tokens, lowercased, prefix-wild.

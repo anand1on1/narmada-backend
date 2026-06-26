@@ -8334,6 +8334,12 @@ function registerR8Routes(
       // probe every identifier field in parallel and lock / disambiguate /
       // ask BEFORE the part search. Non-identifier messages skip this entirely.
       const uviInput = String(content).trim();
+      // R27.24a11 (perf) — per-stage latency markers. Logged on the full Sonnet
+      // path as "[partsetu] perf ..." so Render logs show where a slow turn went
+      // (intent / uvi / search / prompt-build / sonnet). Sonnet is external — it
+      // dominates and is reported separately so our own code can be judged alone.
+      const tTurnStart = Date.now();
+      const perf = { uvi: 0, intent: 0, search: 0, prompt: 0, sonnet: 0 };
       const uviSendReply = (text: string) => {
         partsetuStore.addMessage({ conversationId: Number(conversationId), role: "assistant", content: text });
         return res.json({ reply: text, requires_login: false, ai_available: true });
@@ -8455,6 +8461,7 @@ function registerR8Routes(
       let verifiedVehicleBlock = "";
       let uviLockedCatalogId: number | null = null;
       let vehicleRelocked = false;
+      const tUviStart = Date.now();
       {
         const uviCands = partsetuUvi.extractVehicleIdentifierCandidates(uviInput);
         let bestUvi: import("./services/partsetu/uvi-resolver").UviResult | null = null;
@@ -8522,6 +8529,7 @@ function registerR8Routes(
           }
         }
       }
+      perf.uvi = Date.now() - tUviStart;
 
       // R27.24a10 bug 1 — variant query. The customer named a MODEL (e.g.
       // "signa 2821 bs6 ka knowledge hai") with NO chassis number, and the UVI
@@ -8607,9 +8615,13 @@ function registerR8Routes(
       // queries bypass it so we can suggest from sibling catalogs).
       const lockedCatalog = catalogId ? partsetuStore.getCatalog(catalogId) : null;
       const lockedVehicle = lockedCatalog ? [lockedCatalog.model, lockedCatalog.variant].filter(Boolean).join(" ") || lockedCatalog.oem : null;
+      const tIntentStart = Date.now();
       const intent = await partsetuIntent.classifyIntent(activeContent, { lockedCatalogId: catalogId, lockedVehicle });
+      perf.intent = Date.now() - tIntentStart;
       console.log(`[partsetu] intent kind=${intent.kind} bypass_lock=${intent.bypassLock}`);
+      const tSearchStart = Date.now();
       const searchResult = await partsetuSearch.searchParts(intent, { lockedCatalogId: catalogId });
+      perf.search = Date.now() - tSearchStart;
       console.log(`[partsetu] search strategies=${intent.kind} results=${searchResult.hits.length} locked=${catalogId ?? "null"}`);
 
       // R27.24a9 gap 4 — part-name disambiguation. When a SINGLE bare part token
@@ -8694,9 +8706,14 @@ function registerR8Routes(
       // CATALOG MATCHES and falling back to "not available" boilerplate even
       // when the right part was sitting in the context block. Haiku continues
       // to be used for keyword expansion (fast, cheap, structured JSON only).
+      const tPromptStart = Date.now();
       const systemPrompt = PARTSETU_SYSTEM(contextBlock, verifiedVehicleBlock);
+      perf.prompt = Date.now() - tPromptStart;
       console.log(`[partsetu] sonnet system_prompt_chars=${systemPrompt.length} includes_uvi_context=${verifiedVehicleBlock.length > 0}`);
+      const tSonnetStart = Date.now();
       const result = await claudeSvc.callClaudeSonnet(systemPrompt, history);
+      perf.sonnet = Date.now() - tSonnetStart;
+      console.log(`[partsetu] perf uvi=${perf.uvi}ms intent=${perf.intent}ms search=${perf.search}ms prompt=${perf.prompt}ms sonnet=${perf.sonnet}ms total=${Date.now() - tTurnStart}ms`);
       let replyText = partsetuStore.stripBannedPhrases(result.text);
       // R27.24a — citation guard: strip hallucinated/unattributed part numbers.
       const beforeStrip = replyText;

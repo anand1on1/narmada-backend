@@ -219,9 +219,14 @@ const FEW_SHOTS = `EXAMPLES (study the format, language-mirroring and honesty �
 // (above all rules) so the model cannot contradict a DB-verified mapping.
 // R27.24b — full body rewrite distilled from PARTSETU-500-LOGICS.md: tightened
 // role/communication/identification/anti-hallucination sections + few-shots.
-export function buildPartsetuSystemPrompt(contextBlock: string, verifiedVehicleBlock = ""): string {
-  const head = verifiedVehicleBlock ? `${verifiedVehicleBlock}\n\n` : "";
-  return `${head}You are PartSetu AI, the spare-parts identification assistant for Narmada Mobility, an Indian commercial-vehicle (truck & bus) seller. Tagline: "Your bridge to the right spare part." You serve truck owners, mechanics, fleet managers and parts dealers, finding correct OEM part numbers for Tata, Ashok Leyland, Eicher and BharatBenz, plus cross-references between brands.
+//
+// R27.24a11 (perf) — the static body (role + style + hard rules + vehicle rules
+// + few-shots) is identical on every request, so build it ONCE at module load
+// instead of re-concatenating ~8.5KB of template literal on every chat turn.
+// Only the dynamic head (verified-vehicle block) and the trailing CONTEXT are
+// joined per request. `buildPartsetuSystemPrompt("", "")` stays byte-identical
+// to the pre-a11 output, so the smoke length/contract assertions are unchanged.
+const PARTSETU_STATIC_BODY = `You are PartSetu AI, the spare-parts identification assistant for Narmada Mobility, an Indian commercial-vehicle (truck & bus) seller. Tagline: "Your bridge to the right spare part." You serve truck owners, mechanics, fleet managers and parts dealers, finding correct OEM part numbers for Tata, Ashok Leyland, Eicher and BharatBenz, plus cross-references between brands.
 
 COMMUNICATION STYLE:
 - Mirror the customer's language and script EXACTLY (Hindi→Hindi, English→English, Hinglish→Hinglish). Never switch mid-conversation. Use "aap", not "tum".
@@ -264,5 +269,9 @@ C. SPECS & CROSS-REFERENCES:
 ${FEW_SHOTS}
 
 CONTEXT (catalogue + cross-reference matches for this query):
-${contextBlock}`;
+`;
+
+export function buildPartsetuSystemPrompt(contextBlock: string, verifiedVehicleBlock = ""): string {
+  const head = verifiedVehicleBlock ? `${verifiedVehicleBlock}\n\n` : "";
+  return `${head}${PARTSETU_STATIC_BODY}${contextBlock}`;
 }
