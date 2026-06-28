@@ -9,8 +9,8 @@ import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-if (!process.env.DATA_DIR || !process.env.DATA_DIR.includes("partsetu-vitest-")) {
-  process.env.DATA_DIR = mkdtempSync(join(tmpdir(), "partsetu-vitest-"));
+if (!process.env.DATA_DIR || !process.env.DATA_DIR.includes("narmada-vitest-")) {
+  process.env.DATA_DIR = mkdtempSync(join(tmpdir(), "narmada-vitest-"));
 }
 
 // Force the offline/deterministic path everywhere.

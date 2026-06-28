@@ -1,5 +1,5 @@
 // v1.4a — Data Center shell. Standalone chrome (does NOT import AdminLayout) with the
-// same Narmada Mobility branding. Sidebar is limited to PartSetu + the public Products
+// same Narmada Mobility branding. Sidebar is limited to the public Products
 // page. No admin links, ever.
 import { ReactNode, useEffect } from "react";
 import { Link, useLocation } from "wouter";
@@ -12,16 +12,9 @@ import {
 
 const NAV = [
   { href: "/datacenter/dashboard", label: "Dashboard", icon: LayoutDashboard, group: "Overview" },
-  { href: "/datacenter/partsetu/catalogs", label: "Catalogs", icon: BookOpen, group: "PartSetu" },
-  { href: "/datacenter/partsetu/xrefs", label: "Comparative Sheets", icon: Link2, group: "PartSetu" },
-  { href: "/datacenter/partsetu/prices", label: "Price Lists", icon: Tag, group: "PartSetu" },
-  { href: "/datacenter/partsetu/consumption", label: "Consumption", icon: FileSpreadsheet, group: "PartSetu" },
-  { href: "/datacenter/partsetu/teach", label: "Teach", icon: Sparkles, group: "PartSetu" },
-  { href: "/datacenter/partsetu/conversations", label: "Conversations", icon: MessageSquare, group: "PartSetu" },
-  { href: "/datacenter/partsetu/requests", label: "Requests", icon: FileQuestion, group: "PartSetu" },
   { href: "/datacenter/products", label: "Products", icon: Package, group: "Products" },
 ];
-const GROUP_ORDER = ["Overview", "PartSetu", "Products"];
+const GROUP_ORDER = ["Overview", "Products"];
 
 export function DataCenterLayout({ children, title }: { children: ReactNode; title: string }) {
   const { token, username, displayName, clear, ready } = useDataCenterAuth();

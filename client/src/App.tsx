@@ -177,14 +177,6 @@ import AdminShopCustomers from "@/pages/admin/AdminShopCustomers";
 import AdminShopCustomerDetail from "@/pages/admin/AdminShopCustomerDetail";
 import AdminFreight from "@/pages/admin/AdminFreight";
 import AdminStock from "@/pages/admin/AdminStock";
-import AdminCatalogRequests from "@/pages/admin/AdminCatalogRequests";
-import AdminPartSetuCatalogs from "@/pages/admin/AdminPartSetuCatalogs";
-import AdminPartSetuXrefs from "@/pages/admin/AdminPartSetuXrefs";
-import AdminPartSetuPrices from "@/pages/admin/AdminPartSetuPrices";
-import AdminPartSetuConsumption from "@/pages/admin/AdminPartSetuConsumption";
-import AdminPartSetuTeach from "@/pages/admin/AdminPartSetuTeach";
-import AdminPartSetuConversations from "@/pages/admin/AdminPartSetuConversations";
-import AdminDataCenterDashboard from "@/pages/admin/AdminDataCenterDashboard";
 // v1.4a — separate Data Center app (own login, own shell, own routes)
 import { DataCenterAuthProvider } from "@/hooks/useDataCenterAuth";
 import { ShellProvider } from "@/lib/shell";
@@ -348,13 +340,6 @@ function AppRouter() {
         <Route path="/admin/web-customers/:id" component={AdminShopCustomerDetail} />
         <Route path="/admin/customer-users/:id" component={AdminShopCustomerDetail} />
         <Route path="/admin/web-customers" component={AdminShopCustomers} />
-        <Route path="/admin/catalog-requests" component={AdminCatalogRequests} />
-        <Route path="/admin/partsetu/catalogs" component={AdminPartSetuCatalogs} />
-        <Route path="/admin/partsetu/xrefs" component={AdminPartSetuXrefs} />
-        <Route path="/admin/partsetu/prices" component={AdminPartSetuPrices} />
-        <Route path="/admin/partsetu/consumption" component={AdminPartSetuConsumption} />
-        <Route path="/admin/partsetu/teach" component={AdminPartSetuTeach} />
-        <Route path="/admin/partsetu/conversations" component={AdminPartSetuConversations} />
         <Route path="/admin/freight" component={AdminFreight} />
         <Route path="/admin/stock" component={AdminStock} />
         {/* R23.1 — owner Command Center */}
@@ -384,7 +369,7 @@ function AppRouter() {
     );
   }
   // v1.4a — Data Center: a fully separate app. Own login, own shell, own routes.
-  // Reuses the SAME PartSetu/Products page components, made shell-aware via
+  // Reuses the Products page component, made shell-aware via
   // ShellProvider shell="datacenter" + useShellAuth (x-datacenter-token, no delete).
   if (location.startsWith("/datacenter")) {
     return (
@@ -396,13 +381,6 @@ function AppRouter() {
               <Route path="/datacenter/login" component={DataCenterLogin} />
               <Route path="/datacenter/dashboard" component={DataCenterDashboard} />
               <Route path="/datacenter/products" component={AdminProducts} />
-              <Route path="/datacenter/partsetu/catalogs" component={AdminPartSetuCatalogs} />
-              <Route path="/datacenter/partsetu/xrefs" component={AdminPartSetuXrefs} />
-              <Route path="/datacenter/partsetu/prices" component={AdminPartSetuPrices} />
-              <Route path="/datacenter/partsetu/consumption" component={AdminPartSetuConsumption} />
-              <Route path="/datacenter/partsetu/teach" component={AdminPartSetuTeach} />
-              <Route path="/datacenter/partsetu/conversations" component={AdminPartSetuConversations} />
-              <Route path="/datacenter/partsetu/requests" component={AdminCatalogRequests} />
               <Route component={NotFound} />
             </Switch>
           </ShellProvider>

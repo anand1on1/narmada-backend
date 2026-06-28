@@ -34,14 +34,9 @@ const ROLE_PAGES: Record<AdminRole, Set<string>> = {
     "/admin/webhook-events",
     "/admin/orders", "/admin/web-customers", "/admin/freight", "/admin/stock",
     "/admin/accounts",
-    // PartSetu v1.4 — these must be in the admin set so they're searchable (A1 fix)
-    "/admin/partsetu/catalogs", "/admin/partsetu/xrefs", "/admin/partsetu/prices",
-    "/admin/partsetu/consumption", "/admin/partsetu/teach",
   ]),
-  // PartSetu v1.4 — Data Center role: only PartSetu + public Products, no delete (enforced backend + UI).
+  // Data Center role: public Products only, no delete (enforced backend + UI).
   data_center: new Set([
-    "/admin/partsetu/catalogs", "/admin/partsetu/xrefs", "/admin/partsetu/prices",
-    "/admin/partsetu/consumption", "/admin/partsetu/teach",
     "/admin/products",
   ]),
   logistics: new Set(["/admin/consignments"]),
@@ -144,12 +139,6 @@ export function AdminLayout({ children, title }: { children: ReactNode; title: s
 
     { href: "/admin/orders", label: "Web Orders", icon: ShoppingBag, group: "Web Shop" },
     { href: "/admin/web-customers", label: "Web Customers", icon: UserSquare, group: "Web Shop" },
-    { href: "/admin/catalog-requests", label: "Catalog Requests", icon: FileQuestion, group: "Web Shop" },
-    { href: "/admin/partsetu/catalogs", label: "PartSetu Catalogs", icon: BookOpen, group: "Web Shop" },
-    { href: "/admin/partsetu/xrefs", label: "PartSetu Comparative Sheets", icon: Link2, group: "Web Shop" },
-    { href: "/admin/partsetu/prices", label: "PartSetu Price Lists", icon: Tag, group: "Web Shop" },
-    { href: "/admin/partsetu/consumption", label: "PartSetu Consumption Reports", icon: FileSpreadsheet, group: "Web Shop" },
-    { href: "/admin/partsetu/teach", label: "PartSetu Teach", icon: Sparkles, group: "Web Shop" },
     { href: "/admin/chats", label: "Chats", icon: MessageSquare, badge: unreadChats, group: "Web Shop" },
     { href: "/admin/contacts", label: "Enquiries", icon: MessageSquare, group: "Web Shop" },
     { href: "/admin/blog", label: "Blog", icon: FileText, group: "Web Shop" },

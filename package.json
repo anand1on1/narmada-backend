@@ -9,9 +9,7 @@
     "start": "NODE_ENV=production node dist/index.cjs",
     "check": "tsc",
     "test": "vitest run",
-    "test:partsetu": "vitest run tests/partsetu",
-    "db:push": "drizzle-kit push",
-    "backfill-chassis-types": "tsx scripts/backfill-chassis-types.ts"
+    "db:push": "drizzle-kit push"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.104.1",
