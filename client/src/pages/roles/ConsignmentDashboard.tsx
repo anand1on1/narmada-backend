@@ -15,7 +15,7 @@ interface Consignment {
   bundlesCount: number | null; invoiceNumber: string | null; invoiceAmount: number | null;
   status: string; dispatchDate: number | null; etaDate: number | null; deliveredDate: number | null;
   notes?: string | null; invoiceUrl?: string | null; docketUrl?: string | null;
-  dispatchOrigin?: string | null;
+  dispatchOrigin?: string | null; interBranchTransfer?: number;
 }
 interface FromDelhiPO {
   id: number; poNumber: string; customerName: string | null; customerPhone: string | null;
@@ -58,7 +58,7 @@ const emptyConsignment: any = {
   docketNumber: "", carrier: "", origin: "Patna", destination: "",
   customerId: null, customerName: "", customerPhone: "", customerEmail: "", bundlesCount: 1,
   invoiceNumber: "", invoiceAmount: 0, dispatchDate: "", etaDate: "", deliveredDate: "",
-  status: "pending", notes: "",
+  status: "pending", notes: "", interBranchTransfer: 0,
 };
 const emptyCustomer: any = { name: "", phone: "", email: "", city: "", state: "", gstNumber: "", contactPerson: "" };
 
@@ -200,11 +200,22 @@ function ConsignmentsTab({ token }: { token: string | null }) {
 
       {open && (
         <Modal title={open.id ? "Edit Consignment" : "Create Consignment (From Patna)"} onClose={() => setOpen(null)}>
+          <label className="col-span-2 flex items-center gap-2 rounded-lg border bg-muted/30 px-3 py-2 mb-3 cursor-pointer" data-testid="chk-inter-branch-wrap">
+            <input type="checkbox" checked={!!open.interBranchTransfer}
+              onChange={(e) => {
+                const on = e.target.checked;
+                setOpen({ ...open, interBranchTransfer: on ? 1 : 0,
+                  ...(on ? { destination: "Patna", customerId: null, customerName: "", customerPhone: "", customerEmail: "" } : {}) });
+              }} data-testid="chk-inter-branch" />
+            <span className="text-sm font-medium">Inter-branch transfer (Delhi → Patna)</span>
+            <span className="text-xs text-muted-foreground">— no client; appears in Patna's incoming list</span>
+          </label>
           <div className="grid grid-cols-2 gap-3">
             <Field label="Docket Number *"><input value={open.docketNumber || ""} onChange={(e) => setOpen({ ...open, docketNumber: e.target.value })} className={INP} data-testid="inp-docket" /></Field>
             <Field label="Carrier"><input value={open.carrier || ""} onChange={(e) => setOpen({ ...open, carrier: e.target.value })} className={INP} /></Field>
             <Field label="Origin"><input value={open.origin || ""} onChange={(e) => setOpen({ ...open, origin: e.target.value })} className={INP} /></Field>
             <Field label="Destination *"><input value={open.destination || ""} onChange={(e) => setOpen({ ...open, destination: e.target.value })} className={INP} /></Field>
+            {!open.interBranchTransfer && (<>
             <Field label="Customer">
               <select value={open.customerId ?? ""} onChange={(e) => {
                 const cid = e.target.value ? Number(e.target.value) : null;
@@ -216,6 +227,7 @@ function ConsignmentsTab({ token }: { token: string | null }) {
               </select>
             </Field>
             <Field label="Customer Phone"><input value={open.customerPhone || ""} onChange={(e) => setOpen({ ...open, customerPhone: e.target.value })} className={INP} /></Field>
+            </>)}
             <Field label="Invoice Number"><input value={open.invoiceNumber || ""} onChange={(e) => setOpen({ ...open, invoiceNumber: e.target.value })} className={INP} /></Field>
             <Field label="Invoice Amount"><input type="number" value={open.invoiceAmount ?? ""} onChange={(e) => setOpen({ ...open, invoiceAmount: e.target.value })} className={INP} /></Field>
             <Field label="Bundles"><input type="number" value={open.bundlesCount ?? ""} onChange={(e) => setOpen({ ...open, bundlesCount: e.target.value })} className={INP} /></Field>

@@ -298,12 +298,19 @@ export function listTransfers(opts: { status?: string } = {}) {
   let consignmentRows: any[] = [];
   try {
     const cutoffMs = Date.now() - 4 * 24 * 60 * 60 * 1000;
+    // R27.27 Bug 1 — only true Delhi→Patna BRANCH transfers belong in the store's
+    // incoming list. A consignment delivered to a CLIENT (customer_id/customer_name
+    // populated) must NOT surface here. New rows set inter_branch_transfer=1 when the
+    // create-form checkbox is ticked; legacy rows (default 0) fall back to the
+    // "no customer linked" guard so genuine old branch transfers still appear.
     consignmentRows = (sqlite.prepare(
       `SELECT id, docket_number, carrier, origin, destination, status,
               dispatch_date, eta_date, bundles_count, invoice_number
        FROM consignments
        WHERE LOWER(TRIM(destination)) = 'patna'
          AND LOWER(TRIM(COALESCE(status,''))) NOT IN ('received','delivered','cancelled')
+         AND (inter_branch_transfer = 1
+              OR (customer_id IS NULL AND (customer_name IS NULL OR TRIM(customer_name) = '')))
        ORDER BY dispatch_date DESC`,
     ).all() as any[])
       .filter((c) => {
@@ -454,10 +461,14 @@ export function listDispatchStockItems() {
   // + PO + customer for context, and the dispatch_invoice_items row (if assigned)
   // to surface the assignment + tick state. processed invoices drop out of the
   // assignable pool but their items still show (read-only, marked processed).
+  // R27.27 Bug 4 — itemName is resolved with a correlated subquery in the single
+  // query below instead of a per-row SELECT (the old N+1 ran one extra query per
+  // received line, which scaled badly once Patna held hundreds of items).
   const rows = sqlite.prepare(
     `SELECT ri.id AS transfer_item_id, ri.transfer_id, ri.part_number AS partNo, ri.received_qty AS quantity,
             t.po_id AS po_id, po.po_number AS poNumber, po.customer_po_number AS customerPoNumber,
             c.name AS clientName,
+            (SELECT pi.description FROM po_items pi WHERE pi.po_id = t.po_id AND pi.part_number = ri.part_number LIMIT 1) AS itemName,
             dii.id AS dispatch_invoice_item_id, dii.dispatch_invoice_id AS dispatchInvoiceId,
             dii.ticked_at AS tickedAt, di.invoice_no AS invoiceNo, di.status AS invoiceStatus
      FROM branch_received_items ri
@@ -469,16 +480,10 @@ export function listDispatchStockItems() {
      WHERE ri.received_qty > 0
      ORDER BY ri.id DESC`,
   ).all() as any[];
-  // Attach item name from po_items by part number (best-effort).
   rows.forEach((r) => {
     r.poNumber = r.poNumber || r.customerPoNumber || (r.po_id ? String(r.po_id) : null);
     r.clientName = r.clientName || "Internal Transfer";
-    if (r.partNo && r.po_id) {
-      try {
-        const it = sqlite.prepare(`SELECT description AS name FROM po_items WHERE po_id = ? AND part_number = ? LIMIT 1`).get(r.po_id, r.partNo) as any;
-        r.itemName = it?.name || null;
-      } catch { r.itemName = null; }
-    } else r.itemName = null;
+    r.itemName = r.itemName || null;
   });
   return rows;
 }
@@ -1443,14 +1448,14 @@ export function listExpenses(opts: { from?: string; to?: string; type?: string; 
 }
 
 // Create a DIRECT expense (no advance). Posts to person ledger if staff tagged.
-export function createDirectExpense(body: { amount: number; expense_header_id?: number; payment_mode?: string; description?: string; proof_url?: string; expense_date: string; branch_id?: string; staff_id?: number }, by?: number) {
+export function createDirectExpense(body: { amount: number; expense_header_id?: number; payment_mode?: string; description?: string; proof_url?: string; reference_number?: string; expense_date: string; branch_id?: string; staff_id?: number }, by?: number) {
   const amount = Number(body.amount) || 0;
   if (amount <= 0) throw new Error("amount must be > 0");
   if (!body.expense_date) throw new Error("expense_date required");
   const info = sqlite.prepare(
-    `INSERT INTO expenses (expense_type, advance_id, staff_id, branch_id, expense_header_id, amount, payment_mode, description, proof_url, expense_date, created_by, created_at)
-     VALUES ('direct', NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-  ).run(body.staff_id ?? null, body.branch_id ?? null, body.expense_header_id ?? null, amount, body.payment_mode ?? "cash", body.description ?? null, body.proof_url ?? null, body.expense_date, by ?? null, nowIso());
+    `INSERT INTO expenses (expense_type, advance_id, staff_id, branch_id, expense_header_id, amount, payment_mode, description, proof_url, reference_number, expense_date, created_by, created_at)
+     VALUES ('direct', NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+  ).run(body.staff_id ?? null, body.branch_id ?? null, body.expense_header_id ?? null, amount, body.payment_mode ?? "cash", body.description ?? null, body.proof_url ?? null, body.reference_number ?? null, body.expense_date, by ?? null, nowIso());
   const id = Number(info.lastInsertRowid);
   // R27.7 #2 — a cash-paid direct expense leaves the branch till.
   if (String(body.payment_mode ?? "cash").toLowerCase() === "cash") {
@@ -1459,9 +1464,38 @@ export function createDirectExpense(body: { amount: number; expense_header_id?: 
   return sqlite.prepare(`SELECT * FROM expenses WHERE id = ?`).get(id);
 }
 
+// R27.27 Bug 3c — Bus expense (net-new 3rd mode). Like a direct expense but with
+// mandatory bus_* trip fields (enforced here AND in the client). expense_type='bus'.
+export function createBusExpense(body: { amount: number; expense_header_id?: number; payment_mode?: string; description?: string; proof_url?: string; reference_number?: string; expense_date: string; branch_id?: string; staff_id?: number; bus_number?: string; bus_name?: string; bus_contact?: string; bus_from?: string }, by?: number) {
+  const amount = Number(body.amount) || 0;
+  if (amount <= 0) throw new Error("amount must be > 0");
+  if (!body.expense_date) throw new Error("expense_date required");
+  const reqd: [string, string | undefined][] = [
+    ["bus_number", body.bus_number], ["bus_name", body.bus_name],
+    ["bus_contact", body.bus_contact], ["bus_from", body.bus_from],
+  ];
+  for (const [field, val] of reqd) {
+    if (!val || !String(val).trim()) throw new Error(`${field} is required for a bus expense`);
+  }
+  const info = sqlite.prepare(
+    `INSERT INTO expenses (expense_type, advance_id, staff_id, branch_id, expense_header_id, amount, payment_mode, description, proof_url, reference_number, bus_number, bus_name, bus_contact, bus_from, expense_date, created_by, created_at)
+     VALUES ('bus', NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+  ).run(
+    body.staff_id ?? null, body.branch_id ?? null, body.expense_header_id ?? null, amount,
+    body.payment_mode ?? "cash", body.description ?? null, body.proof_url ?? null, body.reference_number ?? null,
+    String(body.bus_number).trim(), String(body.bus_name).trim(), String(body.bus_contact).trim(), String(body.bus_from).trim(),
+    body.expense_date, by ?? null, nowIso(),
+  );
+  const id = Number(info.lastInsertRowid);
+  if (String(body.payment_mode ?? "cash").toLowerCase() === "cash") {
+    addCashMovement({ branch: body.branch_id, direction: "out", amount, source: "bus_expense", reference_id: id, reference_table: "expenses", notes: body.description ?? null, by });
+  }
+  return sqlite.prepare(`SELECT * FROM expenses WHERE id = ?`).get(id);
+}
+
 // Settle an expense AGAINST an advance. Decrements the advance balance and
 // auto-settles the advance when the balance hits 0.
-export function createAdvanceExpense(body: { advance_id: number; amount: number; expense_header_id?: number; description?: string; proof_url?: string; expense_date: string }, by?: number) {
+export function createAdvanceExpense(body: { advance_id: number; amount: number; expense_header_id?: number; description?: string; proof_url?: string; reference_number?: string; expense_date: string }, by?: number) {
   const amount = Number(body.amount) || 0;
   if (amount <= 0) throw new Error("amount must be > 0");
   const adv = sqlite.prepare(`SELECT * FROM expense_advances WHERE id = ?`).get(body.advance_id) as any;
@@ -1469,9 +1503,9 @@ export function createAdvanceExpense(body: { advance_id: number; amount: number;
   if (adv.status === "settled") throw new Error("advance already settled");
   if (amount > Number(adv.balance) + 0.001) throw new Error(`amount exceeds advance balance (₹${adv.balance})`);
   const info = sqlite.prepare(
-    `INSERT INTO expenses (expense_type, advance_id, staff_id, branch_id, expense_header_id, amount, payment_mode, description, proof_url, expense_date, created_by, created_at)
-     VALUES ('advance', ?, ?, ?, ?, ?, 'advance', ?, ?, ?, ?, ?)`,
-  ).run(body.advance_id, adv.staff_id, adv.branch_id ?? null, body.expense_header_id ?? null, amount, body.description ?? null, body.proof_url ?? null, body.expense_date, by ?? null, nowIso());
+    `INSERT INTO expenses (expense_type, advance_id, staff_id, branch_id, expense_header_id, amount, payment_mode, description, proof_url, reference_number, expense_date, created_by, created_at)
+     VALUES ('advance', ?, ?, ?, ?, ?, 'advance', ?, ?, ?, ?, ?, ?)`,
+  ).run(body.advance_id, adv.staff_id, adv.branch_id ?? null, body.expense_header_id ?? null, amount, body.description ?? null, body.proof_url ?? null, body.reference_number ?? null, body.expense_date, by ?? null, nowIso());
   const newBalance = Math.round((Number(adv.balance) - amount) * 100) / 100;
   const settled = newBalance <= 0.001;
   sqlite.prepare(`UPDATE expense_advances SET balance = ?, status = ? WHERE id = ?`).run(Math.max(0, newBalance), settled ? "settled" : "open", body.advance_id);

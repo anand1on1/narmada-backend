@@ -611,13 +611,22 @@ export function registerV2Routes(app: Express, ctx: V2Context) {
       const user = (req as any).user as TokenInfo;
       const body = normalizeDateFields(req.body || {});
 
-      // If customerId provided, look up customer and fill denormalized fields
-      if (body.customerId) {
-        const customer = await v2.getCustomer(parseInt(body.customerId, 10));
-        if (customer) {
-          if (!body.customerName) body.customerName = customer.name;
-          if (!body.customerPhone) body.customerPhone = customer.phone || null;
-          if (!body.customerEmail) body.customerEmail = customer.email || null;
+      // R27.27 Bug 1 — an inter-branch transfer (Delhi→Patna) has NO client; clear
+      // any customer fields so it can never be mistaken for a client delivery.
+      if (body.interBranchTransfer) {
+        body.interBranchTransfer = 1;
+        body.customerId = null; body.customerName = null;
+        body.customerPhone = null; body.customerEmail = null;
+      } else {
+        body.interBranchTransfer = 0;
+        // If customerId provided, look up customer and fill denormalized fields
+        if (body.customerId) {
+          const customer = await v2.getCustomer(parseInt(body.customerId, 10));
+          if (customer) {
+            if (!body.customerName) body.customerName = customer.name;
+            if (!body.customerPhone) body.customerPhone = customer.phone || null;
+            if (!body.customerEmail) body.customerEmail = customer.email || null;
+          }
         }
       }
 
@@ -6819,12 +6828,20 @@ function registerR8Routes(
     try {
       const teamUser = req.teamUser;
       const body = normalizeDateFields(req.body || {});
-      if (body.customerId) {
-        const customer = await v2.getCustomer(parseInt(body.customerId, 10));
-        if (customer) {
-          if (!body.customerName) body.customerName = customer.name;
-          if (!body.customerPhone) body.customerPhone = customer.phone || null;
-          if (!body.customerEmail) body.customerEmail = customer.email || null;
+      // R27.27 Bug 1 — inter-branch transfer carries no client; clear customer fields.
+      if (body.interBranchTransfer) {
+        body.interBranchTransfer = 1;
+        body.customerId = null; body.customerName = null;
+        body.customerPhone = null; body.customerEmail = null;
+      } else {
+        body.interBranchTransfer = 0;
+        if (body.customerId) {
+          const customer = await v2.getCustomer(parseInt(body.customerId, 10));
+          if (customer) {
+            if (!body.customerName) body.customerName = customer.name;
+            if (!body.customerPhone) body.customerPhone = customer.phone || null;
+            if (!body.customerEmail) body.customerEmail = customer.email || null;
+          }
         }
       }
       const parsed = insertConsignmentSchema.parse(body);
@@ -7717,14 +7734,27 @@ function registerR8Routes(
       advanceId: req.query.advance_id ? parseInt(req.query.advance_id as string, 10) : undefined,
     }));
   });
-  // Direct expense (no advance).
-  app.post("/api/finance/expenses/direct", acctAuth, async (req: any, res) => {
-    try { const s = await r27(); res.json(s.createDirectExpense(req.body || {}, req.teamUser?.id)); }
+  // R27.27 Bug 3a — build a public /uploads URL for an attached expense receipt.
+  // Reuses the same multerExpense disk store + /uploads static mount as sales expenses.
+  const expenseProofUrl = (req: any): string | undefined => {
+    if (!req.file) return undefined;
+    const proto = req.protocol || "https";
+    const host = req.get("host") || "narmada-backend.onrender.com";
+    return `${proto}://${host}/uploads/expenses/${req.file.filename}`;
+  };
+  // Direct expense (no advance). R27.27 — optional receipt upload + reference_number.
+  app.post("/api/finance/expenses/direct", acctAuth, multerExpense.single("proof"), async (req: any, res) => {
+    try { const s = await r27(); const proof_url = expenseProofUrl(req); res.json(s.createDirectExpense({ ...req.body, ...(proof_url ? { proof_url } : {}) }, req.teamUser?.id)); }
     catch (e: any) { res.status(400).json({ error: e.message }); }
   });
   // Advance settlement expense (decrements advance balance, auto-settles at 0).
-  app.post("/api/finance/expenses/advance", acctAuth, async (req: any, res) => {
-    try { const s = await r27(); res.json(s.createAdvanceExpense(req.body || {}, req.teamUser?.id)); }
+  app.post("/api/finance/expenses/advance", acctAuth, multerExpense.single("proof"), async (req: any, res) => {
+    try { const s = await r27(); const proof_url = expenseProofUrl(req); res.json(s.createAdvanceExpense({ ...req.body, ...(proof_url ? { proof_url } : {}) }, req.teamUser?.id)); }
+    catch (e: any) { res.status(400).json({ error: e.message }); }
+  });
+  // R27.27 Bug 3c — Bus expense (net-new). Required bus_* fields enforced in storage.
+  app.post("/api/finance/expenses/bus", acctAuth, multerExpense.single("proof"), async (req: any, res) => {
+    try { const s = await r27(); const proof_url = expenseProofUrl(req); res.json(s.createBusExpense({ ...req.body, ...(proof_url ? { proof_url } : {}) }, req.teamUser?.id)); }
     catch (e: any) { res.status(400).json({ error: e.message }); }
   });
   // Manual backfill: sync ALL approved sales expenses into the accounts ledger.

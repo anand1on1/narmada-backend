@@ -3824,3 +3824,29 @@ export function runR27_25Migrations() {
   r2725("idx_purchase_orders_customer_id", `CREATE INDEX IF NOT EXISTS idx_purchase_orders_customer_id ON purchase_orders(customer_id)`);
   console.log("[migrations] R27.25: complete");
 }
+
+// R27.27 — additive columns for the consignment-leak flag (Bug 1), expense
+// reference number + bus-expense fields (Bug 3b/3c). All idempotent: a repeated
+// ADD COLUMN throws "duplicate column name", which is swallowed as a skip.
+export function runR27_27Migrations() {
+  console.log("[migrations] R27.27: start");
+  const addCol = (table: string, col: string, type: string) => {
+    const step = `${table}.${col}`;
+    try { sqlite.exec(`ALTER TABLE ${table} ADD COLUMN ${col} ${type}`); console.log(`[migrations] R27.27: ${step} added`); }
+    catch (e: any) {
+      const msg = String(e?.message || e);
+      if (/duplicate column|already exists/i.test(msg)) console.log(`[migrations] R27.27: ${step} skipped (exists)`);
+      else console.log(`[migrations] R27.27: ${step} fail: ${msg}`);
+    }
+  };
+  // Bug 1 — distinguish a genuine Delhi→Patna branch transfer from a client delivery.
+  addCol("consignments", "inter_branch_transfer", "INTEGER DEFAULT 0");
+  // Bug 3b — reference number on Direct/Advance/Bus expenses.
+  addCol("expenses", "reference_number", "TEXT");
+  // Bug 3c — Bus-expense fields (nullable in DB; required enforced in app layer).
+  addCol("expenses", "bus_number", "TEXT");
+  addCol("expenses", "bus_name", "TEXT");
+  addCol("expenses", "bus_contact", "TEXT");
+  addCol("expenses", "bus_from", "TEXT");
+  console.log("[migrations] R27.27: complete");
+}

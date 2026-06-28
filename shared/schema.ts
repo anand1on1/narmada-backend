@@ -157,6 +157,9 @@ export const consignments = sqliteTable("consignments", {
   docketUrl: text("docket_url"),
   // R27.13 T5 — where the consignment was dispatched from (e.g. "Delhi").
   dispatchOrigin: text("dispatch_origin"),
+  // R27.27 Bug 1 — 1 = genuine Delhi→Patna inter-branch transfer (belongs in the
+  // store's incoming list); 0 = delivery to a client (must NOT surface there).
+  interBranchTransfer: integer("inter_branch_transfer").default(0),
 });
 export const insertConsignmentSchema = createInsertSchema(consignments).omit({
   id: true,

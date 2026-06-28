@@ -38,6 +38,9 @@ export default function DispatchDashboard() {
   const [tab, setTab] = useState<"stock" | "invoices">("stock");
   const [stock, setStock] = useState<StockItem[]>([]);
   const [invoices, setInvoices] = useState<DispatchInvoice[]>([]);
+  // R27.27 Bug 4 — pending invoices for the assign dropdown, loaded independently of
+  // the table's status filter so filtering to "processed" no longer empties it.
+  const [assignable, setAssignable] = useState<DispatchInvoice[]>([]);
   const [companies, setCompanies] = useState<Company[]>([]);
   const [clients, setClients] = useState<Client[]>([]);
   const [statusFilter, setStatusFilter] = useState<"all" | "pending" | "processed">("all");
@@ -54,27 +57,36 @@ export default function DispatchDashboard() {
 
   function flash(t: string) { setMsg(t); setTimeout(() => setMsg(null), 4500); }
 
+  // R27.27 Bug 4 — surface server/network failures instead of silently leaving the
+  // list empty (a 500 on a JOIN previously looked identical to "no data").
   async function loadStock() {
     const r = await DispatchAuth.roleFetch(token, "/api/dispatch/stock-items");
     if (r.ok) setStock(await r.json());
+    else flash((await r.json().catch(() => ({}))).error || `Failed to load stock (${r.status}).`);
   }
   async function loadInvoices() {
     const url = statusFilter === "all" ? "/api/dispatch/invoices" : `/api/dispatch/invoices?status=${statusFilter}`;
     const r = await DispatchAuth.roleFetch(token, url);
     if (r.ok) setInvoices(await r.json());
+    else flash((await r.json().catch(() => ({}))).error || `Failed to load invoices (${r.status}).`);
+  }
+  async function loadAssignable() {
+    const r = await DispatchAuth.roleFetch(token, "/api/dispatch/invoices?status=pending");
+    if (r.ok) setAssignable(await r.json());
   }
   async function loadMeta() {
     const rc = await DispatchAuth.roleFetch(token, "/api/dispatch/companies");
-    if (rc.ok) setCompanies(await rc.json());
+    if (rc.ok) setCompanies(await rc.json()); else flash(`Failed to load companies (${rc.status}).`);
     const rl = await DispatchAuth.roleFetch(token, "/api/dispatch/clients");
-    if (rl.ok) setClients(await rl.json());
+    if (rl.ok) setClients(await rl.json()); else flash(`Failed to load clients (${rl.status}).`);
   }
 
-  useEffect(() => { if (token) { loadStock(); loadInvoices(); loadMeta(); } }, [token]); // eslint-disable-line
+  // Mount loads everything except the filtered invoice list, which the statusFilter
+  // effect owns (avoids a duplicate /invoices fetch firing twice on first render).
+  useEffect(() => { if (token) { loadStock(); loadMeta(); loadAssignable(); } }, [token]); // eslint-disable-line
   useEffect(() => { if (token) loadInvoices(); }, [statusFilter]); // eslint-disable-line
 
-  // Only PENDING invoices are assignable (processed invoices leave the dropdown).
-  const pendingInvoices = invoices.filter((i) => i.status === "pending");
+  const pendingInvoices = assignable;
 
   async function createInvoice() {
     if (!formInvoiceNo.trim()) { flash("Invoice number is required."); return; }
@@ -85,7 +97,7 @@ export default function DispatchDashboard() {
     if (r.ok) {
       flash(`Invoice ${formInvoiceNo.trim()} created (pending).`);
       setShowCreate(false); setFormCompany(""); setFormClient(""); setFormInvoiceNo("");
-      loadInvoices();
+      loadInvoices(); loadAssignable();
     } else { const j = await r.json().catch(() => ({})); flash(j.error || "Create failed"); }
   }
 
@@ -108,12 +120,12 @@ export default function DispatchDashboard() {
   }
   async function markProcessed(id: number) {
     const r = await DispatchAuth.roleFetch(token, `/api/dispatch/invoices/${id}/process`, { method: "POST", body: JSON.stringify({}) });
-    if (r.ok) { flash("Invoice marked processed."); setDetail(null); loadInvoices(); loadStock(); }
+    if (r.ok) { flash("Invoice marked processed."); setDetail(null); loadInvoices(); loadStock(); loadAssignable(); }
     else { const j = await r.json().catch(() => ({})); flash(j.error || "Process failed"); }
   }
   async function unlock(id: number) {
     const r = await DispatchAuth.roleFetch(token, `/api/dispatch/invoices/${id}/unlock`, { method: "POST", body: JSON.stringify({}) });
-    if (r.ok) { flash("Invoice unlocked — back to pending."); setDetail(null); loadInvoices(); loadStock(); }
+    if (r.ok) { flash("Invoice unlocked — back to pending."); setDetail(null); loadInvoices(); loadStock(); loadAssignable(); }
     else { const j = await r.json().catch(() => ({})); flash(j.error || "Unlock failed"); }
   }
 

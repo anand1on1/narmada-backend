@@ -23,6 +23,7 @@ interface Consignment {
   etaDate: string | null;
   deliveredDate: string | null;
   status: "pending" | "in_transit" | "out_for_delivery" | "delivered" | "cancelled";
+  interBranchTransfer?: number;
   notes: string | null;
   invoiceUrl?: string | null;
   docketUrl?: string | null;
@@ -54,7 +55,7 @@ const emptyConsignment: Partial<Consignment> = {
   docketNumber: "", carrier: "", origin: "Patna", destination: "",
   customerName: "", customerPhone: "", customerEmail: "", bundlesCount: 1,
   invoiceNumber: "", invoiceAmount: 0, dispatchDate: "", etaDate: "",
-  deliveredDate: "", status: "pending", notes: "",
+  deliveredDate: "", status: "pending", notes: "", interBranchTransfer: 0,
 };
 
 interface CustomerOption {
@@ -404,6 +405,23 @@ export default function AdminConsignments() {
               <button onClick={() => { setOpen(null); setPickerOpen(false); }} className="px-3 py-1.5 hover:bg-muted rounded text-sm">Close</button>
             </div>
             <div className="p-6 space-y-4">
+              <label className="sm:col-span-2 flex items-center gap-2 rounded-lg border bg-muted/30 px-3 py-2 cursor-pointer" data-testid="checkbox-inter-branch-wrap">
+                <input
+                  type="checkbox"
+                  checked={!!open.interBranchTransfer}
+                  onChange={(e) => {
+                    const on = e.target.checked;
+                    setOpen({
+                      ...open,
+                      interBranchTransfer: on ? 1 : 0,
+                      ...(on ? { destination: "Patna", customerId: null, customerName: "", customerPhone: "", customerEmail: "" } : {}),
+                    });
+                  }}
+                  data-testid="checkbox-inter-branch"
+                />
+                <span className="text-sm font-medium">Inter-branch transfer (Delhi → Patna)</span>
+                <span className="text-xs text-muted-foreground">— no client; appears in Patna's incoming list</span>
+              </label>
               <div className="grid sm:grid-cols-2 gap-4">
                 <Field label="Docket Number *">
                   <input value={open.docketNumber || ""} onChange={(e) => setOpen({ ...open, docketNumber: e.target.value })}
@@ -421,6 +439,7 @@ export default function AdminConsignments() {
                   <input value={open.destination || ""} onChange={(e) => setOpen({ ...open, destination: e.target.value })}
                     className="w-full border rounded-lg px-3 py-2 bg-background" data-testid="input-destination" />
                 </Field>
+                {!open.interBranchTransfer && (<>
                 <Field label="Customer">
                   <div className="relative">
                     <div className="flex items-center gap-2">
@@ -490,6 +509,7 @@ export default function AdminConsignments() {
                   <input value={open.customerEmail || ""} onChange={(e) => setOpen({ ...open, customerEmail: e.target.value })}
                     className="w-full border rounded-lg px-3 py-2 bg-background" data-testid="input-customer-email" />
                 </Field>
+                </>)}
                 <Field label="Bundles">
                   <input type="number" value={open.bundlesCount ?? ""} onChange={(e) => setOpen({ ...open, bundlesCount: parseInt(e.target.value) || 0 })}
                     className="w-full border rounded-lg px-3 py-2 bg-background" data-testid="input-bundles" />

@@ -189,16 +189,31 @@ function HeadersTab({ token }: { token: string | null }) {
 const PAYMENT_MODES = ["cash", "upi", "bank", "card", "cheque"];
 function ExpensesTab({ token }: { token: string | null }) {
   const f = useF();
-  const [mode, setMode] = useState<"direct" | "advance">("direct");
+  const [mode, setMode] = useState<"direct" | "advance" | "bus">("direct");
   const [expenses, setExpenses] = useState<any[]>([]);
   const [advances, setAdvances] = useState<any[]>([]);
   const [emps, setEmps] = useState<any[]>([]);
   const [headers, setHeaders] = useState<any[]>([]);
   const [msg, setMsg] = useState<string | null>(null);
+  const [detail, setDetail] = useState<any | null>(null);
   const today = new Date().toISOString().slice(0, 10);
-  const [direct, setDirect] = useState({ amount: "", payment_mode: "cash", expense_header_id: "", branch_id: "Delhi", description: "", expense_date: today });
+  // R27.27 Bug 3 — reference_number + proof attachment on direct/advance/bus.
+  const [direct, setDirect] = useState({ amount: "", payment_mode: "cash", expense_header_id: "", branch_id: "Delhi", description: "", expense_date: today, reference_number: "" });
+  const [directProof, setDirectProof] = useState<File | null>(null);
   const [advForm, setAdvForm] = useState({ staff_id: "", amount: "", purpose: "", branch_id: "Delhi" });
-  const [settle, setSettle] = useState({ advance_id: "", amount: "", expense_header_id: "", description: "", expense_date: today });
+  const [settle, setSettle] = useState({ advance_id: "", amount: "", expense_header_id: "", description: "", expense_date: today, reference_number: "" });
+  const [settleProof, setSettleProof] = useState<File | null>(null);
+  // R27.27 Bug 3c — net-new Bus expense mode (bus_number/name/contact/from required).
+  const [bus, setBus] = useState({ amount: "", payment_mode: "cash", expense_header_id: "", branch_id: "Delhi", description: "", expense_date: today, reference_number: "", bus_number: "", bus_name: "", bus_contact: "", bus_from: "" });
+  const [busProof, setBusProof] = useState<File | null>(null);
+
+  // Build multipart body so a proof file (PDF/JPG/PNG) rides along with the fields.
+  function buildFD(obj: Record<string, any>, file?: File | null) {
+    const fd = new FormData();
+    Object.entries(obj).forEach(([k, v]) => { if (v !== undefined && v !== null && v !== "") fd.append(k, String(v)); });
+    if (file) fd.append("proof", file);
+    return fd;
+  }
 
   async function load() {
     const [x, a, e, h] = await Promise.all([
@@ -215,8 +230,9 @@ function ExpensesTab({ token }: { token: string | null }) {
 
   async function addDirect() {
     if (!direct.amount) return;
-    const r = await f(token, "/api/finance/expenses/direct", { method: "POST", body: JSON.stringify({ ...direct, amount: Number(direct.amount), expense_header_id: direct.expense_header_id ? Number(direct.expense_header_id) : undefined }) });
-    if (r.ok) { setDirect({ ...direct, amount: "", description: "" }); flash("Direct expense posted."); load(); }
+    const fd = buildFD({ ...direct, amount: Number(direct.amount), expense_header_id: direct.expense_header_id ? Number(direct.expense_header_id) : "" }, directProof);
+    const r = await f(token, "/api/finance/expenses/direct", { method: "POST", body: fd });
+    if (r.ok) { setDirect({ ...direct, amount: "", description: "", reference_number: "" }); setDirectProof(null); flash("Direct expense posted."); load(); }
     else flash((await r.json().catch(() => ({}))).error || "Failed");
   }
   async function issueAdvance() {
@@ -227,10 +243,22 @@ function ExpensesTab({ token }: { token: string | null }) {
   }
   async function settleExpense() {
     if (!settle.advance_id || !settle.amount) return;
-    const r = await f(token, "/api/finance/expenses/advance", { method: "POST", body: JSON.stringify({ advance_id: Number(settle.advance_id), amount: Number(settle.amount), expense_header_id: settle.expense_header_id ? Number(settle.expense_header_id) : undefined, description: settle.description, expense_date: settle.expense_date }) });
+    const fd = buildFD({ advance_id: Number(settle.advance_id), amount: Number(settle.amount), expense_header_id: settle.expense_header_id ? Number(settle.expense_header_id) : "", description: settle.description, expense_date: settle.expense_date, reference_number: settle.reference_number }, settleProof);
+    const r = await f(token, "/api/finance/expenses/advance", { method: "POST", body: fd });
     const j = await r.json().catch(() => ({}));
-    if (r.ok) { setSettle({ ...settle, amount: "", description: "" }); flash(j.advanceStatus === "settled" ? "Expense settled — advance fully settled." : `Expense settled. Balance ₹${j.advanceBalance}.`); load(); }
+    if (r.ok) { setSettle({ ...settle, amount: "", description: "", reference_number: "" }); setSettleProof(null); flash(j.advanceStatus === "settled" ? "Expense settled — advance fully settled." : `Expense settled. Balance ₹${j.advanceBalance}.`); load(); }
     else flash(j.error || "Failed");
+  }
+  async function addBus() {
+    // R27.27 Bug 3c — client-side required validation mirrors the server (400 otherwise).
+    if (!bus.amount) return flash("Amount is required for a bus expense.");
+    for (const [field, label] of [["bus_number", "Bus Number"], ["bus_name", "Bus Name"], ["bus_contact", "Contact No"], ["bus_from", "From"]] as [keyof typeof bus, string][]) {
+      if (!String(bus[field]).trim()) return flash(`${label} is required for a bus expense.`);
+    }
+    const fd = buildFD({ ...bus, amount: Number(bus.amount), expense_header_id: bus.expense_header_id ? Number(bus.expense_header_id) : "" }, busProof);
+    const r = await f(token, "/api/finance/expenses/bus", { method: "POST", body: fd });
+    if (r.ok) { setBus({ ...bus, amount: "", description: "", reference_number: "", bus_number: "", bus_name: "", bus_contact: "", bus_from: "" }); setBusProof(null); flash("Bus expense posted."); load(); }
+    else flash((await r.json().catch(() => ({}))).error || "Failed");
   }
   async function returnCash(id: number) {
     if (!confirm("Return remaining advance cash and settle this advance?")) return;
@@ -271,6 +299,7 @@ function ExpensesTab({ token }: { token: string | null }) {
       <div className="flex gap-2 mb-4 items-center flex-wrap">
         <button onClick={() => setMode("direct")} data-testid="expense-mode-direct" className={`px-3 py-1.5 rounded-lg text-sm font-semibold ${mode === "direct" ? "bg-accent text-accent-foreground" : "border hover:bg-muted"}`}>Direct Expense</button>
         <button onClick={() => setMode("advance")} data-testid="expense-mode-advance" className={`px-3 py-1.5 rounded-lg text-sm font-semibold ${mode === "advance" ? "bg-accent text-accent-foreground" : "border hover:bg-muted"}`}>Advance Expense</button>
+        <button onClick={() => setMode("bus")} data-testid="expense-mode-bus" className={`px-3 py-1.5 rounded-lg text-sm font-semibold ${mode === "bus" ? "bg-accent text-accent-foreground" : "border hover:bg-muted"}`}>Bus Expense</button>
         <button onClick={syncSales} data-testid="expense-sync-sales" className="ml-auto px-3 py-1.5 rounded-lg border text-sm font-semibold hover:bg-muted">Sync Sales Expenses</button>
       </div>
       {/* R27.7 #1 — staff-wise & day-wise expense exports */}
@@ -290,9 +319,11 @@ function ExpensesTab({ token }: { token: string | null }) {
           <div><label className="text-xs text-muted-foreground">Branch</label><select value={direct.branch_id} onChange={(e) => setDirect({ ...direct, branch_id: e.target.value })} className="block px-3 py-1.5 rounded-lg border bg-background text-sm w-28">{BRANCHES.map((b) => <option key={b} value={b}>{b}</option>)}</select></div>
           <div><label className="text-xs text-muted-foreground">Description</label><input value={direct.description} onChange={(e) => setDirect({ ...direct, description: e.target.value })} className="block px-3 py-1.5 rounded-lg border bg-background text-sm w-44" /></div>
           <div><label className="text-xs text-muted-foreground">Date</label><input type="date" value={direct.expense_date} onChange={(e) => setDirect({ ...direct, expense_date: e.target.value })} className="block px-3 py-1.5 rounded-lg border bg-background text-sm" /></div>
+          <div><label className="text-xs text-muted-foreground">Reference No</label><input value={direct.reference_number} onChange={(e) => setDirect({ ...direct, reference_number: e.target.value })} className="block px-3 py-1.5 rounded-lg border bg-background text-sm w-36" data-testid="direct-reference" /></div>
+          <div><label className="text-xs text-muted-foreground">Proof (PDF/JPG/PNG)</label><input type="file" accept=".pdf,.jpg,.jpeg,.png" onChange={(e) => setDirectProof(e.target.files?.[0] || null)} className="block text-xs w-48" data-testid="direct-proof" /></div>
           <button onClick={addDirect} className="px-3 py-1.5 rounded-lg bg-accent text-accent-foreground text-sm font-semibold" data-testid="direct-submit">Post Direct</button>
         </div>
-      ) : (
+      ) : mode === "advance" ? (
         <div className="space-y-4 mb-5">
           <div className="bg-card border rounded-xl p-4">
             <h4 className="text-sm font-bold mb-3">1 · Issue advance (staff receives cash first)</h4>
@@ -311,6 +342,8 @@ function ExpensesTab({ token }: { token: string | null }) {
               <div><label className="text-xs text-muted-foreground">Amount (₹)</label><input type="number" value={settle.amount} onChange={(e) => setSettle({ ...settle, amount: e.target.value })} className="block px-3 py-1.5 rounded-lg border bg-background text-sm w-32" data-testid="settle-amount" /></div>
               <div><label className="text-xs text-muted-foreground">Header</label><select value={settle.expense_header_id} onChange={(e) => setSettle({ ...settle, expense_header_id: e.target.value })} className="block px-3 py-1.5 rounded-lg border bg-background text-sm w-40"><option value="">—</option>{headers.map((h) => <option key={h.id} value={h.id}>{h.name}</option>)}</select></div>
               <div><label className="text-xs text-muted-foreground">Description</label><input value={settle.description} onChange={(e) => setSettle({ ...settle, description: e.target.value })} className="block px-3 py-1.5 rounded-lg border bg-background text-sm w-40" /></div>
+              <div><label className="text-xs text-muted-foreground">Reference No</label><input value={settle.reference_number} onChange={(e) => setSettle({ ...settle, reference_number: e.target.value })} className="block px-3 py-1.5 rounded-lg border bg-background text-sm w-32" data-testid="settle-reference" /></div>
+              <div><label className="text-xs text-muted-foreground">Proof</label><input type="file" accept=".pdf,.jpg,.jpeg,.png" onChange={(e) => setSettleProof(e.target.files?.[0] || null)} className="block text-xs w-44" data-testid="settle-proof" /></div>
               <button onClick={settleExpense} className="px-3 py-1.5 rounded-lg bg-accent text-accent-foreground text-sm font-semibold" data-testid="settle-submit">Settle</button>
             </div>
             <div className="mt-4">
@@ -322,13 +355,53 @@ function ExpensesTab({ token }: { token: string | null }) {
             </div>
           </div>
         </div>
+      ) : (
+        <div className="flex gap-2 mb-5 bg-card border rounded-xl p-4 items-end flex-wrap" data-testid="bus-form">
+          <div><label className="text-xs text-muted-foreground">Amount (₹)</label><input type="number" value={bus.amount} onChange={(e) => setBus({ ...bus, amount: e.target.value })} className="block px-3 py-1.5 rounded-lg border bg-background text-sm w-28" data-testid="bus-amount" /></div>
+          <div><label className="text-xs text-muted-foreground">Bus Number *</label><input value={bus.bus_number} onChange={(e) => setBus({ ...bus, bus_number: e.target.value })} className="block px-3 py-1.5 rounded-lg border bg-background text-sm w-32" data-testid="bus-number" /></div>
+          <div><label className="text-xs text-muted-foreground">Bus Name *</label><input value={bus.bus_name} onChange={(e) => setBus({ ...bus, bus_name: e.target.value })} className="block px-3 py-1.5 rounded-lg border bg-background text-sm w-36" data-testid="bus-name" /></div>
+          <div><label className="text-xs text-muted-foreground">Contact No *</label><input value={bus.bus_contact} onChange={(e) => setBus({ ...bus, bus_contact: e.target.value })} className="block px-3 py-1.5 rounded-lg border bg-background text-sm w-32" data-testid="bus-contact" /></div>
+          <div><label className="text-xs text-muted-foreground">From *</label><input value={bus.bus_from} onChange={(e) => setBus({ ...bus, bus_from: e.target.value })} className="block px-3 py-1.5 rounded-lg border bg-background text-sm w-32" data-testid="bus-from" /></div>
+          <div><label className="text-xs text-muted-foreground">Payment mode</label><select value={bus.payment_mode} onChange={(e) => setBus({ ...bus, payment_mode: e.target.value })} className="block px-3 py-1.5 rounded-lg border bg-background text-sm w-28">{PAYMENT_MODES.map((p) => <option key={p} value={p}>{p}</option>)}</select></div>
+          <div><label className="text-xs text-muted-foreground">Header</label><select value={bus.expense_header_id} onChange={(e) => setBus({ ...bus, expense_header_id: e.target.value })} className="block px-3 py-1.5 rounded-lg border bg-background text-sm w-36"><option value="">—</option>{headers.map((h) => <option key={h.id} value={h.id}>{h.name}</option>)}</select></div>
+          <div><label className="text-xs text-muted-foreground">Branch</label><select value={bus.branch_id} onChange={(e) => setBus({ ...bus, branch_id: e.target.value })} className="block px-3 py-1.5 rounded-lg border bg-background text-sm w-28">{BRANCHES.map((b) => <option key={b} value={b}>{b}</option>)}</select></div>
+          <div><label className="text-xs text-muted-foreground">Description</label><input value={bus.description} onChange={(e) => setBus({ ...bus, description: e.target.value })} className="block px-3 py-1.5 rounded-lg border bg-background text-sm w-40" /></div>
+          <div><label className="text-xs text-muted-foreground">Date</label><input type="date" value={bus.expense_date} onChange={(e) => setBus({ ...bus, expense_date: e.target.value })} className="block px-3 py-1.5 rounded-lg border bg-background text-sm" /></div>
+          <div><label className="text-xs text-muted-foreground">Reference No</label><input value={bus.reference_number} onChange={(e) => setBus({ ...bus, reference_number: e.target.value })} className="block px-3 py-1.5 rounded-lg border bg-background text-sm w-32" data-testid="bus-reference" /></div>
+          <div><label className="text-xs text-muted-foreground">Proof (PDF/JPG/PNG)</label><input type="file" accept=".pdf,.jpg,.jpeg,.png" onChange={(e) => setBusProof(e.target.files?.[0] || null)} className="block text-xs w-48" data-testid="bus-proof" /></div>
+          <button onClick={addBus} className="px-3 py-1.5 rounded-lg bg-accent text-accent-foreground text-sm font-semibold" data-testid="bus-submit">Post Bus Expense</button>
+        </div>
       )}
 
       <h4 className="text-sm font-bold mb-2">All expenses</h4>
-      <Table cols={["Date", "Type", "Header", "Staff", "Mode", "Amount", "Description"]} rows={expenses.map((x) => [
+      <Table cols={["Date", "Type", "Header", "Staff", "Mode", "Amount", "Reference", "Doc", "Description", ""]} rows={expenses.map((x) => [
         x.expense_date, x.source === "sales_expense" ? "sales" : x.expense_type, x.headerName || "—", x.staffName || "—",
-        x.payment_mode || "—", `₹${Number(x.amount).toLocaleString("en-IN")}`, x.description || "—",
+        x.payment_mode || "—", `₹${Number(x.amount).toLocaleString("en-IN")}`, x.reference_number || "—",
+        x.proof_url ? <a key="d" href={x.proof_url} target="_blank" rel="noreferrer" className="text-accent text-xs font-semibold hover:underline">View</a> : "—",
+        x.description || "—",
+        <button key="det" onClick={() => setDetail(x)} className="text-accent text-xs font-semibold hover:underline" data-testid={`expense-details-${x.id}`}>Details</button>,
       ])} />
+
+      {detail && (
+        <div className="fixed inset-0 z-50 bg-black/40 flex items-center justify-center p-4" onClick={() => setDetail(null)}>
+          <div className="bg-card rounded-xl shadow-xl max-w-lg w-full p-6 max-h-[85vh] overflow-y-auto" onClick={(e) => e.stopPropagation()} data-testid="expense-detail-modal">
+            <h3 className="text-lg font-bold mb-3">Expense details</h3>
+            <dl className="text-sm space-y-1">
+              {([
+                ["Date", detail.expense_date], ["Type", detail.source === "sales_expense" ? "sales" : detail.expense_type],
+                ["Header", detail.headerName], ["Staff", detail.staffName], ["Payment mode", detail.payment_mode],
+                ["Amount", `₹${Number(detail.amount).toLocaleString("en-IN")}`], ["Branch", detail.branch_id],
+                ["Reference No", detail.reference_number], ["Description", detail.description],
+                ["Bus Number", detail.bus_number], ["Bus Name", detail.bus_name], ["Contact No", detail.bus_contact], ["From", detail.bus_from],
+              ] as [string, any][]).filter(([, v]) => v != null && v !== "").map(([k, v]) => (
+                <div key={k} className="flex justify-between gap-4"><dt className="text-muted-foreground">{k}</dt><dd className="font-medium text-right">{v}</dd></div>
+              ))}
+            </dl>
+            {detail.proof_url && <div className="mt-3"><a href={detail.proof_url} target="_blank" rel="noreferrer" className="px-3 py-1.5 rounded-lg border text-xs font-semibold hover:bg-muted inline-block">Open attachment</a></div>}
+            <div className="flex justify-end mt-4"><button onClick={() => setDetail(null)} className="px-4 py-2 rounded-lg text-sm font-semibold hover:bg-muted">Close</button></div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

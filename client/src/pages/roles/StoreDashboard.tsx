@@ -47,18 +47,21 @@ export default function StoreDashboard() {
     if (r.ok) {
       const d = await r.json();
       setDetail(d);
+      // R27.27 Bug 2 — key received-qty by ROW INDEX, not part number. Two line
+      // items with a missing/duplicate part number both coerce to key "" and would
+      // otherwise share one state slot, making their qty inputs move in lockstep.
       const init: Record<string, number> = {};
-      (d.expected || []).forEach((it: ExpectedItem) => { init[it.partNumber || ""] = it.expectedQty; });
+      (d.expected || []).forEach((it: ExpectedItem, i: number) => { init[i] = it.expectedQty; });
       setRecv(init);
     }
   }
 
   async function submitReceive() {
     if (!detail) return;
-    const items = (detail.expected || []).map((it: ExpectedItem) => ({
+    const items = (detail.expected || []).map((it: ExpectedItem, i: number) => ({
       part_number: it.partNumber || "",
       expected_qty: it.expectedQty,
-      received_qty: Number(recv[it.partNumber || ""] ?? it.expectedQty) || 0,
+      received_qty: Number(recv[i] ?? it.expectedQty) || 0,
       rate: it.rate ?? undefined,
     }));
     const r = await StoreAuth.roleFetch(token, `/api/store/transfers/${detail.id}/receive`, { method: "POST", body: JSON.stringify({ items }) });
@@ -148,7 +151,7 @@ export default function StoreDashboard() {
                     <td className="p-2 font-mono">{it.partNumber || "—"}</td>
                     <td className="p-2">{it.name || "—"}</td>
                     <td className="p-2 text-right">{it.expectedQty}</td>
-                    <td className="p-2 text-right"><input type="number" value={recv[it.partNumber || ""] ?? it.expectedQty} onChange={(e) => setRecv((r) => ({ ...r, [it.partNumber || ""]: Number(e.target.value) }))} className="w-20 px-2 py-1 rounded border bg-background text-right" /></td>
+                    <td className="p-2 text-right"><input type="number" value={recv[i] ?? it.expectedQty} onChange={(e) => setRecv((r) => ({ ...r, [i]: Number(e.target.value) }))} className="w-20 px-2 py-1 rounded border bg-background text-right" /></td>
                   </tr>
                 ))}
               </tbody>

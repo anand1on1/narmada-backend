@@ -28,7 +28,7 @@ beforeAll(() => {
   // Ensure the Phase-4 consignments columns the Drizzle schema selects exist.
   for (const decl of [
     "customer_id INTEGER", "customer_email TEXT", "invoice_url TEXT",
-    "docket_url TEXT", "dispatch_origin TEXT",
+    "docket_url TEXT", "dispatch_origin TEXT", "inter_branch_transfer INTEGER DEFAULT 0",
   ]) {
     try { db.exec(`ALTER TABLE consignments ADD COLUMN ${decl}`); } catch { /* already added */ }
   }
