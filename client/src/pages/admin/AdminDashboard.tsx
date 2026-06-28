@@ -1,8 +1,19 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, useCallback } from "react";
 import { AdminLayout } from "./AdminLayout";
 import { adminFetch, useAdminAuth } from "@/lib/admin-auth";
-import { Package, MessageSquare, Map, DollarSign } from "lucide-react";
+import { Package, MessageSquare, Map, DollarSign, AlertTriangle, Check, Loader2 } from "lucide-react";
 import { Link } from "wouter";
+
+// R27.28 — a procurement decision that proceeded with a higher-than-historical rate.
+interface RateIrregularity {
+  id: number;
+  part_number: string; part_name: string | null; new_brand: string | null;
+  new_rate: number; new_vendor: string | null;
+  previous_min_rate: number; previous_vendor: string | null; previous_brand: string | null;
+  previous_date: string | null; previous_po_id: number | null;
+  deviation_pct: number | null; decided_by: string | null; decided_at: string;
+  po_id: number | null;
+}
 
 interface Stats {
   products: number;
@@ -77,6 +88,8 @@ export default function AdminDashboard() {
         ))}
       </div>
 
+      <RateIrregularities token={token} />
+
       <div className="grid lg:grid-cols-2 gap-6 mt-8">
         <div className="p-6 bg-white border border-slate-200 rounded-2xl shadow-sm">
           <h2 className="font-display text-lg font-bold mb-4">Quick Actions</h2>
@@ -105,5 +118,113 @@ export default function AdminDashboard() {
         </div>
       </div>
     </AdminLayout>
+  );
+}
+
+// R27.28 — Rate Irregularities feed: unseen 'proceeded' higher-rate decisions. Each row
+// shows the new-vs-previous comparison side by side; "Mark Seen" acknowledges & removes it.
+function RateIrregularities({ token }: { token: string | null }) {
+  const [rows, setRows] = useState<RateIrregularity[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [marking, setMarking] = useState<number | null>(null);
+
+  const refresh = useCallback(async () => {
+    if (!token) return;
+    try {
+      const r = await adminFetch(token, "/api/admin/rate-irregularities");
+      setRows(r.ok ? await r.json() : []);
+    } catch { setRows([]); }
+    finally { setLoading(false); }
+  }, [token]);
+
+  useEffect(() => {
+    refresh();
+    const id = setInterval(refresh, 30000);
+    return () => clearInterval(id);
+  }, [refresh]);
+
+  async function markSeen(rid: number) {
+    setMarking(rid);
+    try {
+      const r = await adminFetch(token, `/api/admin/rate-irregularities/${rid}/mark-seen`, { method: "POST" });
+      if (r.ok) setRows((cur) => cur.filter((x) => x.id !== rid));
+    } catch { /* leave row in place on failure */ }
+    finally { setMarking(null); }
+  }
+
+  const fmt = (n: number | null | undefined) => (n != null ? `₹${Number(n).toLocaleString("en-IN")}` : "—");
+  const fmtDate = (d: string | null | undefined) => (d ? new Date(d).toLocaleDateString("en-IN") : "—");
+
+  return (
+    <div className="mt-8 p-6 bg-white border border-slate-200 rounded-2xl shadow-sm" data-testid="rate-irregularities">
+      <div className="flex items-center gap-2 mb-4">
+        <div className="w-9 h-9 bg-red-500/10 text-red-600 border border-red-500/30 rounded-lg flex items-center justify-center">
+          <AlertTriangle className="w-5 h-5" />
+        </div>
+        <h2 className="font-display text-lg font-bold">Rate Irregularities</h2>
+        {rows.length > 0 && (
+          <span className="ml-1 inline-flex items-center justify-center min-w-[1.5rem] h-6 px-2 rounded-full bg-red-600 text-white text-xs font-bold" data-testid="rate-irregularities-badge">
+            {rows.length}
+          </span>
+        )}
+      </div>
+
+      {loading ? (
+        <div className="text-sm text-muted-foreground py-6 text-center"><Loader2 className="w-4 h-4 animate-spin inline" /></div>
+      ) : rows.length === 0 ? (
+        <div className="text-sm text-muted-foreground py-6 text-center">No unseen rate irregularities. Sellers locked at or below the historical low.</div>
+      ) : (
+        <div className="space-y-3">
+          {rows.map((r) => (
+            <div key={r.id} className="border border-orange-200 bg-orange-50/50 rounded-xl p-4" data-testid={`irregularity-${r.id}`}>
+              <div className="flex items-start justify-between gap-3 mb-2">
+                <div>
+                  <div className="font-mono font-semibold text-sm">
+                    {r.part_number}{r.new_brand ? ` · ${r.new_brand}` : ""}
+                  </div>
+                  {r.part_name && <div className="text-xs text-muted-foreground">{r.part_name}</div>}
+                </div>
+                <div className="text-right">
+                  {r.deviation_pct != null && (
+                    <span className={`text-sm font-bold ${r.deviation_pct >= 20 ? "text-red-600" : "text-orange-600"}`}>
+                      +{Number(r.deviation_pct).toFixed(1)}%
+                    </span>
+                  )}
+                </div>
+              </div>
+              <div className="grid grid-cols-2 gap-3 text-xs mb-3">
+                <div className="border border-orange-200 bg-white rounded-lg p-2">
+                  <div className="text-[11px] font-semibold text-orange-700">Locked (higher)</div>
+                  <div className="font-bold text-sm">{fmt(r.new_rate)}</div>
+                  <div className="text-muted-foreground">{r.new_vendor || "—"}</div>
+                </div>
+                <div className="border bg-white rounded-lg p-2">
+                  <div className="text-[11px] font-semibold text-muted-foreground">Previous lowest</div>
+                  <div className="font-bold text-sm">{fmt(r.previous_min_rate)}</div>
+                  <div className="text-muted-foreground">
+                    {r.previous_vendor || "—"}{r.previous_brand ? ` · ${r.previous_brand}` : ""}{r.previous_date ? ` · ${fmtDate(r.previous_date)}` : ""}
+                  </div>
+                </div>
+              </div>
+              <div className="flex items-center justify-between text-[11px] text-muted-foreground">
+                <span>
+                  By {r.decided_by || "—"} · {fmtDate(r.decided_at)}
+                  {r.po_id != null && <> · PO #{r.po_id}</>}
+                  {r.previous_po_id != null && <> · prev PO #{r.previous_po_id}</>}
+                </span>
+                <button
+                  onClick={() => markSeen(r.id)}
+                  disabled={marking === r.id}
+                  data-testid={`mark-seen-${r.id}`}
+                  className="px-3 py-1.5 bg-emerald-600 text-white rounded-lg text-xs font-semibold inline-flex items-center gap-1 disabled:opacity-50"
+                >
+                  {marking === r.id ? <Loader2 className="w-3 h-3 animate-spin" /> : <Check className="w-3 h-3" />} Mark Seen
+                </button>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
   );
 }

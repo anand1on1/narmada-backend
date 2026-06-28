@@ -7287,6 +7287,48 @@ function registerR8Routes(
     catch (e: any) { res.status(500).json({ error: e.message }); }
   });
 
+  // ---- R27.28 Procurement Rate Alert + Admin Irregularity Feed ----
+  // The PO line-item rate is entered/locked from the Data-Team PO detail page, so the
+  // two procurement-facing endpoints sit under requireDataTeam; the admin feed sits
+  // under requireAuth (admin token) like the rest of /api/admin/*. (There is no separate
+  // "procurement" role in this codebase — PO management is the data_team's job.)
+  app.post("/api/procurement/rate-check", requireDataTeam, async (req: any, res) => {
+    try {
+      const { part_number, new_rate } = req.body || {};
+      if (!part_number || new_rate == null) { res.status(400).json({ error: "part_number and new_rate required" }); return; }
+      const s = await r27();
+      res.json(s.checkRateAgainstHistory(String(part_number), parseFloat(new_rate)));
+    } catch (e: any) { res.status(500).json({ error: e.message }); }
+  });
+  app.post("/api/procurement/rate-alert/log", requireDataTeam, async (req: any, res) => {
+    try {
+      const s = await r27();
+      const decidedBy = (req as any).teamUser?.username || (req as any).teamUser?.name;
+      res.json(s.logRateAlertDecision(req.body || {}, decidedBy));
+    } catch (e: any) { res.status(400).json({ error: e.message }); }
+  });
+  app.get("/api/admin/rate-irregularities", requireAuth, async (_req, res) => {
+    try { const s = await r27(); res.json(s.getUnseenRateIrregularities(100)); }
+    catch (e: any) { res.status(500).json({ error: e.message }); }
+  });
+  app.post("/api/admin/rate-irregularities/:id/mark-seen", requireAuth, async (req: any, res) => {
+    try {
+      const s = await r27();
+      const adminBy = req.user?.username || (req.user?.id != null ? String(req.user.id) : undefined);
+      const ok = s.markRateIrregularitySeen(parseInt(req.params.id as string, 10), adminBy);
+      if (!ok) { res.status(404).json({ error: "Alert not found" }); return; }
+      res.json({ ok: true });
+    } catch (e: any) { res.status(500).json({ error: e.message }); }
+  });
+  app.get("/api/admin/rate-irregularities/all", requireAuth, async (req, res) => {
+    try {
+      const s = await r27();
+      const limit = Math.min(200, Math.max(1, parseInt(req.query.limit as string, 10) || 50));
+      const offset = Math.max(0, parseInt(req.query.offset as string, 10) || 0);
+      res.json(s.getAllRateIrregularities(limit, offset));
+    } catch (e: any) { res.status(500).json({ error: e.message }); }
+  });
+
   // ---- R27.2-4 Deviation engine (admin token; procurement mirror reuses same data) ----
   app.get("/api/admin/deviations", requireAuth, async (req, res) => {
     try {

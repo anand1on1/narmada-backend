@@ -3850,3 +3850,50 @@ export function runR27_27Migrations() {
   addCol("expenses", "bus_from", "TEXT");
   console.log("[migrations] R27.27: complete");
 }
+
+// R27.28 — Procurement Rate Alert + Admin Irregularity Feed. Additive: a new
+// procurement_rate_alerts table (logs every higher-than-historical rate decision)
+// plus indexes. Each statement is wrapped so a re-run on an existing DB is a no-op.
+export function runR27_28Migrations() {
+  console.log("[migrations] R27.28: start");
+  const run = (label: string, sql: string) => {
+    try { sqlite.exec(sql); console.log(`[migrations] R27.28: ${label} ok`); }
+    catch (e: any) {
+      const msg = String(e?.message || e);
+      if (/already exists|duplicate column/i.test(msg)) console.log(`[migrations] R27.28: ${label} skipped (exists)`);
+      else console.log(`[migrations] R27.28: ${label} fail: ${msg}`);
+    }
+  };
+  run("procurement_rate_alerts table", `
+    CREATE TABLE IF NOT EXISTS procurement_rate_alerts (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      part_number TEXT NOT NULL,
+      part_name TEXT,
+      new_rate REAL NOT NULL,
+      new_vendor TEXT,
+      new_vendor_id INTEGER,
+      new_brand TEXT,
+      previous_min_rate REAL NOT NULL,
+      previous_vendor TEXT,
+      previous_vendor_id INTEGER,
+      previous_brand TEXT,
+      previous_date TEXT,
+      previous_po_id INTEGER,
+      deviation_pct REAL,
+      decision TEXT NOT NULL,
+      decided_by TEXT,
+      decided_at TEXT NOT NULL,
+      po_id INTEGER,
+      admin_seen INTEGER NOT NULL DEFAULT 0,
+      admin_seen_at TEXT,
+      admin_seen_by TEXT,
+      created_at TEXT NOT NULL
+    )`);
+  run("idx_procurement_rate_alerts_admin_seen",
+    `CREATE INDEX IF NOT EXISTS idx_procurement_rate_alerts_admin_seen ON procurement_rate_alerts(admin_seen, created_at DESC)`);
+  run("idx_procurement_rate_alerts_part",
+    `CREATE INDEX IF NOT EXISTS idx_procurement_rate_alerts_part ON procurement_rate_alerts(part_number)`);
+  run("idx_po_items_part_number",
+    `CREATE INDEX IF NOT EXISTS idx_po_items_part_number ON po_items(part_number)`);
+  console.log("[migrations] R27.28: complete");
+}

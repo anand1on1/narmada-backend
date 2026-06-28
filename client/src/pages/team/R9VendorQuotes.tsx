@@ -47,18 +47,35 @@ const STATUS_LABEL: Record<string, string> = {
 // ─────────────────────────────────────────────
 // Per-line multi-seller quote panel
 // ─────────────────────────────────────────────
+// R27.28 — shape returned by POST /api/procurement/rate-check.
+interface RateCheck {
+  alert: boolean;
+  previous?: { rate: number; vendor: string | null; vendor_id: number | null; brand: string | null; date: string | null; po_id: number | null };
+  deviation_pct?: number;
+  last_3_purchases?: Array<{ rate: number; vendor: string | null; brand: string | null; date: string | null; po_id: number | null }>;
+}
+
 export function LineQuotesPanel({
   itemId,
   itemContext,
   vendors,
   token,
   onChanged,
+  partNumber,
+  partName,
+  brand,
+  poId,
 }: {
   itemId: number;
   itemContext: string;
   vendors: VendorMin[];
   token: string | null;
   onChanged: () => void;
+  // R27.28 — context for the higher-rate check fired when a vendor is locked.
+  partNumber?: string | null;
+  partName?: string | null;
+  brand?: string | null;
+  poId?: number | null;
 }) {
   const { toast } = useToast();
   const [adding, setAdding] = useState(false);
@@ -73,6 +90,9 @@ export function LineQuotesPanel({
   const [confirmFor, setConfirmFor] = useState<Quote | null>(null);
   // R20.6: create a brand-new vendor inline, then auto-assign it to this line.
   const [showNewVendor, setShowNewVendor] = useState(false);
+  // R27.28 — higher-than-historical rate gate before a lock is committed.
+  const [rateAlert, setRateAlert] = useState<{ check: RateCheck; quote: Quote } | null>(null);
+  const [checkingRate, setCheckingRate] = useState(false);
   const queryClient = useQueryClient();
 
   const { data: quotes = [], refetch } = useQuery<Quote[]>({
@@ -147,6 +167,41 @@ export function LineQuotesPanel({
     onSuccess: () => { setConfirmFor(null); refetch(); onChanged(); toast({ title: "Vendor locked for this item" }); },
     onError: (e: any) => toast({ title: "Error", description: e.message, variant: "destructive" }),
   });
+
+  // R27.28 — log a higher-rate decision ('proceeded' | 'modified'). Best-effort.
+  async function logRateDecision(check: RateCheck, q: Quote, decision: "proceeded" | "modified") {
+    const p = check.previous;
+    try {
+      await teamFetch(token, `/api/procurement/rate-alert/log`, {
+        method: "POST",
+        body: JSON.stringify({
+          part_number: partNumber, part_name: partName ?? null,
+          new_rate: q.rate, new_vendor: q.vendor_name ?? null, new_vendor_id: q.vendor_id ?? null, new_brand: brand ?? null,
+          previous_min_rate: p?.rate, previous_vendor: p?.vendor ?? null, previous_vendor_id: p?.vendor_id ?? null,
+          previous_brand: p?.brand ?? null, previous_date: p?.date ?? null, previous_po_id: p?.po_id ?? null,
+          deviation_pct: check.deviation_pct ?? null, decision,
+          po_id: decision === "proceeded" ? (poId ?? null) : null,
+        }),
+      });
+    } catch { /* logging must never block the lock */ }
+  }
+
+  // R27.28 — before locking a vendor, compare its rate against the lowest historical
+  // rate for this part. If higher (beyond ₹1), surface the gate modal; else lock now.
+  async function gatedLock(q: Quote) {
+    if (!partNumber || q.rate == null) { confirmLock.mutate(q); return; }
+    setCheckingRate(true);
+    try {
+      const r = await teamFetch(token, `/api/procurement/rate-check`, {
+        method: "POST", body: JSON.stringify({ part_number: partNumber, new_rate: q.rate }),
+      });
+      const j: RateCheck = r.ok ? await r.json() : { alert: false };
+      if (j.alert) { setConfirmFor(null); setRateAlert({ check: j, quote: q }); }
+      else confirmLock.mutate(q);
+    } catch {
+      confirmLock.mutate(q); // never block a lock on a check failure
+    } finally { setCheckingRate(false); }
+  }
 
   const unapprove = useMutation({
     mutationFn: async () => {
@@ -334,9 +389,30 @@ export function LineQuotesPanel({
         <ConfirmLockDialog
           quote={confirmFor}
           current={approved || null}
-          pending={confirmLock.isPending}
+          pending={confirmLock.isPending || checkingRate}
           onCancel={() => setConfirmFor(null)}
-          onConfirm={() => confirmLock.mutate(confirmFor)}
+          onConfirm={() => gatedLock(confirmFor)}
+        />
+      )}
+
+      {rateAlert && (
+        <RateAlertModal
+          check={rateAlert.check}
+          quote={rateAlert.quote}
+          partNumber={partNumber || ""}
+          brand={brand || rateAlert.quote.vendor_name || ""}
+          pending={confirmLock.isPending}
+          onProceed={async () => {
+            await logRateDecision(rateAlert.check, rateAlert.quote, "proceeded");
+            const q = rateAlert.quote;
+            setRateAlert(null);
+            confirmLock.mutate(q);
+          }}
+          onModify={async () => {
+            await logRateDecision(rateAlert.check, rateAlert.quote, "modified");
+            setRateAlert(null);
+            setManualFor(rateAlert.quote.id); // reopen the manual rate editor for this line
+          }}
         />
       )}
 
@@ -387,6 +463,81 @@ function ConfirmLockDialog({
           <button onClick={onConfirm} disabled={pending}
             className="px-3 py-1.5 bg-emerald-600 text-white rounded-lg text-sm font-semibold inline-flex items-center gap-1 disabled:opacity-50">
             {pending ? <Loader2 className="w-3 h-3 animate-spin" /> : <Check className="w-3 h-3" />} Yes
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// R27.28 — higher-rate gate. Blocks the lock until the buyer chooses Proceed or Modify.
+function RateAlertModal({
+  check, quote, partNumber, brand, pending, onProceed, onModify,
+}: {
+  check: RateCheck; quote: Quote; partNumber: string; brand: string;
+  pending: boolean; onProceed: () => void; onModify: () => void;
+}) {
+  const prev = check.previous;
+  const dev = check.deviation_pct ?? 0;
+  const fmt = (n: number | null | undefined) => (n != null ? `₹${Number(n).toLocaleString("en-IN")}` : "—");
+  const fmtDate = (d: string | null | undefined) => (d ? new Date(d).toLocaleDateString("en-IN") : "—");
+  return (
+    <div className="fixed inset-0 z-[70] flex items-center justify-center p-4">
+      <div className="absolute inset-0 bg-black/50" />
+      <div className="relative bg-background rounded-xl shadow-xl w-full max-w-lg p-5" onClick={(e) => e.stopPropagation()}>
+        <div className="font-bold text-base mb-1 text-orange-700">Higher Rate Detected — Review Before Proceeding</div>
+        <div className="text-xs text-muted-foreground mb-3">
+          {partNumber}{brand ? ` · ${brand}` : ""}
+        </div>
+
+        <div className="grid grid-cols-2 gap-3 mb-3">
+          <div className="border border-orange-200 bg-orange-50 rounded-lg p-3">
+            <div className="text-[11px] font-semibold text-orange-700 mb-1">You are entering</div>
+            <div className="text-lg font-bold">{fmt(quote.rate)}</div>
+            <div className="text-[11px] text-muted-foreground">{quote.vendor_name || "Seller"}</div>
+          </div>
+          <div className="border rounded-lg p-3">
+            <div className="text-[11px] font-semibold text-muted-foreground mb-1">Previous lowest</div>
+            <div className="text-lg font-bold">{fmt(prev?.rate)}</div>
+            <div className="text-[11px] text-muted-foreground">
+              {prev?.vendor || "Seller"}{prev?.date ? ` · ${fmtDate(prev.date)}` : ""}
+            </div>
+          </div>
+        </div>
+
+        <div className={`text-sm font-bold mb-3 ${dev >= 20 ? "text-red-600" : "text-orange-600"}`}>
+          +{dev.toFixed(1)}% above lowest historical rate
+        </div>
+
+        {check.last_3_purchases && check.last_3_purchases.length > 0 && (
+          <div className="mb-4">
+            <div className="text-[11px] font-semibold text-muted-foreground mb-1">Last {check.last_3_purchases.length} purchase(s)</div>
+            <table className="w-full text-xs border rounded-lg overflow-hidden">
+              <thead className="bg-muted/40">
+                <tr><th className="px-2 py-1 text-left">Date</th><th className="px-2 py-1 text-left">Seller</th><th className="px-2 py-1 text-left">Brand</th><th className="px-2 py-1 text-right">Rate</th></tr>
+              </thead>
+              <tbody className="divide-y">
+                {check.last_3_purchases.map((p, i) => (
+                  <tr key={i}>
+                    <td className="px-2 py-1">{fmtDate(p.date)}</td>
+                    <td className="px-2 py-1">{p.vendor || "—"}</td>
+                    <td className="px-2 py-1">{p.brand || "—"}</td>
+                    <td className="px-2 py-1 text-right font-semibold">{fmt(p.rate)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+
+        <div className="flex justify-end gap-2">
+          <button onClick={onModify} disabled={pending}
+            className="px-3 py-1.5 bg-accent text-accent-foreground rounded-lg text-sm font-semibold disabled:opacity-50">
+            Modify rate
+          </button>
+          <button onClick={onProceed} disabled={pending}
+            className="px-3 py-1.5 bg-orange-600 text-white rounded-lg text-sm font-semibold inline-flex items-center gap-1 disabled:opacity-50">
+            {pending ? <Loader2 className="w-3 h-3 animate-spin" /> : null} Proceed with higher rate
           </button>
         </div>
       </div>

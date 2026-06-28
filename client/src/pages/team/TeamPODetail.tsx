@@ -686,6 +686,10 @@ export default function TeamPODetail() {
                 vendors={vendors}
                 token={token}
                 onChanged={refresh}
+                partNumber={item.partNumber}
+                partName={item.description}
+                brand={item.brand}
+                poId={poId}
               />
             </div>
           </div>

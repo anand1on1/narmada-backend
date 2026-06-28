@@ -1940,3 +1940,134 @@ export function aiBarHistory(limit = 20) {
 }
 
 function safeParse(s: any): any { try { return s ? JSON.parse(s) : (Array.isArray(s) ? s : []); } catch { return []; } }
+
+// ===========================================================================
+// R27.28 — Procurement Rate Alert + Admin Irregularity Feed
+// ---------------------------------------------------------------------------
+// Baseline = lowest-ever historical vendor rate for the same part_number across
+// po_items. The spec named columns poi.rate / poi.created_at; this codebase has
+// neither — the vendor rate lives in po_items.vendor_rate (fallback purchase_cost)
+// and the date lives on the PO header (purchase_orders_v2.created_at, epoch-ms).
+// We therefore COALESCE the rate and read the PO header date, converting epoch-ms
+// to an ISO string for previous_date. Tolerance: a new rate within ₹1 of the
+// historical minimum is NOT flagged (rounding / paise noise).
+// ===========================================================================
+
+const RATE_TOLERANCE_INR = 1;
+
+// Effective historical rate per line: prefer the locked vendor_rate, else purchase_cost.
+const HIST_RATE_EXPR = "COALESCE(poi.vendor_rate, poi.purchase_cost)";
+
+function epochMsToIso(v: any): string | null {
+  if (v == null) return null;
+  const n = Number(v);
+  if (!Number.isFinite(n) || n <= 0) return null;
+  try { return new Date(n).toISOString(); } catch { return null; }
+}
+
+export interface RateCheckResult {
+  alert: boolean;
+  previous?: { rate: number; vendor: string | null; vendor_id: number | null; brand: string | null; date: string | null; po_id: number | null };
+  deviation_pct?: number;
+  last_3_purchases?: Array<{ rate: number; vendor: string | null; brand: string | null; date: string | null; po_id: number | null }>;
+}
+
+// Pre-save check. Reads only — never writes. Returns {alert:false} when there is
+// no prior purchase or the new rate is at/below the historical minimum (+₹1).
+export function checkRateAgainstHistory(partNumber: string, newRate: number): RateCheckResult {
+  const pn = String(partNumber || "").trim();
+  const rate = Number(newRate);
+  if (!pn || !Number.isFinite(rate) || rate <= 0) return { alert: false };
+
+  const min = sqlite.prepare(
+    `SELECT ${HIST_RATE_EXPR} AS rate, poi.vendor_name AS vendor, poi.vendor_id AS vendor_id,
+            poi.brand AS brand, poi.po_id AS po_id, po.created_at AS po_date
+       FROM po_items poi
+       LEFT JOIN purchase_orders_v2 po ON po.id = poi.po_id
+      WHERE poi.part_number = ? AND ${HIST_RATE_EXPR} IS NOT NULL AND ${HIST_RATE_EXPR} > 0
+      ORDER BY rate ASC
+      LIMIT 1`,
+  ).get(pn) as any;
+
+  if (!min || min.rate == null) return { alert: false };
+  const prevMin = Number(min.rate);
+  if (rate <= prevMin + RATE_TOLERANCE_INR) return { alert: false };
+
+  const last3 = sqlite.prepare(
+    `SELECT ${HIST_RATE_EXPR} AS rate, poi.vendor_name AS vendor, poi.brand AS brand,
+            poi.po_id AS po_id, po.created_at AS po_date
+       FROM po_items poi
+       LEFT JOIN purchase_orders_v2 po ON po.id = poi.po_id
+      WHERE poi.part_number = ? AND ${HIST_RATE_EXPR} IS NOT NULL AND ${HIST_RATE_EXPR} > 0
+      ORDER BY po.created_at DESC, poi.id DESC
+      LIMIT 3`,
+  ).all(pn) as any[];
+
+  const deviation_pct = prevMin > 0 ? ((rate - prevMin) / prevMin) * 100 : 0;
+  return {
+    alert: true,
+    previous: {
+      rate: prevMin, vendor: min.vendor ?? null, vendor_id: min.vendor_id ?? null,
+      brand: min.brand ?? null, date: epochMsToIso(min.po_date), po_id: min.po_id ?? null,
+    },
+    deviation_pct: Math.round(deviation_pct * 10) / 10,
+    last_3_purchases: last3.map((r) => ({
+      rate: Number(r.rate), vendor: r.vendor ?? null, brand: r.brand ?? null,
+      date: epochMsToIso(r.po_date), po_id: r.po_id ?? null,
+    })),
+  };
+}
+
+export interface RateAlertLogPayload {
+  part_number: string; part_name?: string | null;
+  new_rate: number; new_vendor?: string | null; new_vendor_id?: number | null; new_brand?: string | null;
+  previous_min_rate: number; previous_vendor?: string | null; previous_vendor_id?: number | null;
+  previous_brand?: string | null; previous_date?: string | null; previous_po_id?: number | null;
+  deviation_pct?: number | null; decision: string; po_id?: number | null;
+}
+
+// Persist a procurement decision ('proceeded' | 'modified'). admin_seen starts 0.
+export function logRateAlertDecision(payload: RateAlertLogPayload, decidedBy?: string): { id: number } {
+  const decision = String(payload.decision || "").trim();
+  if (decision !== "proceeded" && decision !== "modified") {
+    throw new Error("decision must be 'proceeded' or 'modified'");
+  }
+  if (!String(payload.part_number || "").trim()) throw new Error("part_number is required");
+  const now = nowIso();
+  const info = sqlite.prepare(
+    `INSERT INTO procurement_rate_alerts
+       (part_number, part_name, new_rate, new_vendor, new_vendor_id, new_brand,
+        previous_min_rate, previous_vendor, previous_vendor_id, previous_brand, previous_date, previous_po_id,
+        deviation_pct, decision, decided_by, decided_at, po_id, admin_seen, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?)`,
+  ).run(
+    String(payload.part_number).trim(), payload.part_name ?? null,
+    Number(payload.new_rate), payload.new_vendor ?? null, payload.new_vendor_id ?? null, payload.new_brand ?? null,
+    Number(payload.previous_min_rate), payload.previous_vendor ?? null, payload.previous_vendor_id ?? null,
+    payload.previous_brand ?? null, payload.previous_date ?? null, payload.previous_po_id ?? null,
+    payload.deviation_pct ?? null, decision, decidedBy ?? null, now, payload.po_id ?? null, now,
+  );
+  return { id: Number(info.lastInsertRowid) };
+}
+
+// Admin feed: only 'proceeded' alerts the admin has not yet acknowledged.
+export function getUnseenRateIrregularities(limit = 100) {
+  return sqlite.prepare(
+    `SELECT * FROM procurement_rate_alerts
+      WHERE decision = 'proceeded' AND admin_seen = 0
+      ORDER BY created_at DESC LIMIT ?`,
+  ).all(limit);
+}
+
+export function markRateIrregularitySeen(id: number, adminBy?: string): boolean {
+  const info = sqlite.prepare(
+    `UPDATE procurement_rate_alerts SET admin_seen = 1, admin_seen_at = ?, admin_seen_by = ? WHERE id = ?`,
+  ).run(nowIso(), adminBy ?? null, id);
+  return info.changes > 0;
+}
+
+export function getAllRateIrregularities(limit = 50, offset = 0) {
+  return sqlite.prepare(
+    `SELECT * FROM procurement_rate_alerts ORDER BY created_at DESC LIMIT ? OFFSET ?`,
+  ).all(limit, offset);
+}
