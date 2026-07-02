@@ -7329,6 +7329,55 @@ function registerR8Routes(
     } catch (e: any) { res.status(500).json({ error: e.message }); }
   });
 
+  // ================= R27.29 — Sales target progress + digest =================
+  const salesProgress = () => import("./sales-progress");
+  const nowYm = () => { const d = new Date(); return { year: d.getUTCFullYear(), month: d.getUTCMonth() + 1 }; };
+
+  // Admin: every salesperson's progress for the current (or ?year&?month) cycle.
+  app.get("/api/admin/sales-targets/progress", requireAuth, async (req, res) => {
+    try {
+      const sp = await salesProgress();
+      const { year, month } = nowYm();
+      const y = parseInt(req.query.year as string, 10) || year;
+      const m = parseInt(req.query.month as string, 10) || month;
+      res.json({ year: y, month: m, month_name: sp.fmtMonth(y, m), rows: sp.getAllSalespersonProgress(y, m), team: sp.getTeamAggregateProgress(y, m) });
+    } catch (e: any) { res.status(500).json({ error: e.message }); }
+  });
+
+  // Sales (data-team) user: own monthly progress.
+  app.get("/api/sales/my-progress", requireDataTeam, async (req: any, res) => {
+    try {
+      const sp = await salesProgress();
+      const { year, month } = nowYm();
+      const y = parseInt(req.query.year as string, 10) || year;
+      const m = parseInt(req.query.month as string, 10) || month;
+      const repId = req.teamUser?.id;
+      if (!repId) return res.status(401).json({ error: "Unauthorized" });
+      res.json({ year: y, month: m, month_name: sp.fmtMonth(y, m), progress: sp.getMonthlyTargetProgress(repId, y, m) });
+    } catch (e: any) { res.status(500).json({ error: e.message }); }
+  });
+
+  // Admin: digest send log for a given date (default today).
+  app.get("/api/admin/sales-targets/digest-log", requireAuth, async (req, res) => {
+    try {
+      const sp = await salesProgress();
+      const date = (req.query.date as string) || new Date().toISOString().slice(0, 10);
+      res.json({ date, log: sp.getDigestLog(date) });
+    } catch (e: any) { res.status(500).json({ error: e.message }); }
+  });
+
+  // Admin: manually trigger the digest now (gated by ENABLE_MANUAL_DIGEST=true).
+  app.post("/api/admin/sales-targets/send-digest-now", requireAuth, async (_req, res) => {
+    try {
+      if (String(process.env.ENABLE_MANUAL_DIGEST || "").toLowerCase() !== "true") {
+        return res.status(403).json({ error: "Manual digest disabled (set ENABLE_MANUAL_DIGEST=true)" });
+      }
+      const { runSalesDigest } = await import("./sales-digest");
+      const summary = await runSalesDigest();
+      res.json({ ok: true, ...summary });
+    } catch (e: any) { res.status(500).json({ error: e.message }); }
+  });
+
   // ---- R27.2-4 Deviation engine (admin token; procurement mirror reuses same data) ----
   app.get("/api/admin/deviations", requireAuth, async (req, res) => {
     try {

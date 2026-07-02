@@ -1,7 +1,7 @@
 import { useEffect, useState, useCallback } from "react";
 import { AdminLayout } from "./AdminLayout";
 import { adminFetch, useAdminAuth } from "@/lib/admin-auth";
-import { Package, MessageSquare, Map, DollarSign, AlertTriangle, Check, Loader2 } from "lucide-react";
+import { Package, MessageSquare, Map, DollarSign, AlertTriangle, Check, Loader2, Target, Send, X } from "lucide-react";
 import { Link } from "wouter";
 
 // R27.28 — a procurement decision that proceeded with a higher-than-historical rate.
@@ -89,6 +89,8 @@ export default function AdminDashboard() {
       </div>
 
       <RateIrregularities token={token} />
+
+      <SalesTargetProgress token={token} />
 
       <div className="grid lg:grid-cols-2 gap-6 mt-8">
         <div className="p-6 bg-white border border-slate-200 rounded-2xl shadow-sm">
@@ -225,6 +227,179 @@ function RateIrregularities({ token }: { token: string | null }) {
           ))}
         </div>
       )}
+    </div>
+  );
+}
+
+// R27.29 — Sales Team Target Progress: all salespeople × 3 categories for the current
+// calendar month. Each cell shows achieved/target (X%) with a mini progress bar; a
+// days-left + status column; a manual "Send digest now" button (behind ENABLE_MANUAL_DIGEST,
+// which surfaces as a 403), and a digest-log modal. Polls every 5 minutes.
+interface Cat { target: number; achieved: number; remaining: number; pct: number; }
+interface SPRow {
+  salesperson: { id: number; name: string; email: string | null; mobile: string | null };
+  payments: Cat; purchase_orders: Cat; onboarding: Cat; days_left: number; status: "on_track" | "behind";
+}
+interface TeamAgg { payments: Cat; purchase_orders: Cat; onboarding: Cat; days_left: number; behind: { id: number; name: string }[]; count: number; }
+
+function SalesTargetProgress({ token }: { token: string | null }) {
+  const [rows, setRows] = useState<SPRow[]>([]);
+  const [team, setTeam] = useState<TeamAgg | null>(null);
+  const [monthName, setMonthName] = useState("");
+  const [loading, setLoading] = useState(true);
+  const [sending, setSending] = useState(false);
+  const [msg, setMsg] = useState<string | null>(null);
+  const [showLog, setShowLog] = useState(false);
+
+  const refresh = useCallback(async () => {
+    if (!token) return;
+    try {
+      const r = await adminFetch(token, "/api/admin/sales-targets/progress");
+      if (r.ok) {
+        const d = await r.json();
+        setRows(d.rows || []); setTeam(d.team || null); setMonthName(d.month_name || "");
+      }
+    } catch { /* keep last data */ }
+    finally { setLoading(false); }
+  }, [token]);
+
+  useEffect(() => {
+    refresh();
+    const id = setInterval(refresh, 300000); // 5 min
+    return () => clearInterval(id);
+  }, [refresh]);
+
+  async function sendNow() {
+    setSending(true); setMsg(null);
+    try {
+      const r = await adminFetch(token, "/api/admin/sales-targets/send-digest-now", { method: "POST" });
+      const d = await r.json().catch(() => ({}));
+      if (r.status === 403) setMsg("Manual digest is disabled (set ENABLE_MANUAL_DIGEST=true).");
+      else if (r.ok) setMsg(`Digest run: ${d.salespeople} salespeople · sent ${d.sent}, simulated ${d.simulated}, failed ${d.failed}.`);
+      else setMsg(d.error || "Failed to send digest.");
+    } catch { setMsg("Failed to send digest."); }
+    finally { setSending(false); }
+  }
+
+  const fmt = (n: number) => `₹${Number(n || 0).toLocaleString("en-IN")}`;
+  const bar = (pct: number) => (
+    <div className="bg-slate-100 rounded-full h-1.5 mt-1 overflow-hidden">
+      <div className={`h-1.5 ${pct >= 90 ? "bg-emerald-500" : "bg-amber-500"}`} style={{ width: `${Math.min(100, Math.max(0, pct))}%` }} />
+    </div>
+  );
+  const cell = (c: Cat, isCount = false) => (
+    <td className="px-3 py-2 align-top">
+      <div className="text-xs font-semibold">{isCount ? c.achieved : fmt(c.achieved)} <span className="text-muted-foreground font-normal">/ {isCount ? c.target : fmt(c.target)} ({c.pct}%)</span></div>
+      {bar(c.pct)}
+    </td>
+  );
+
+  return (
+    <div className="mt-8 p-6 bg-white border border-slate-200 rounded-2xl shadow-sm" data-testid="sales-target-progress">
+      <div className="flex items-center gap-2 mb-4 flex-wrap">
+        <div className="w-9 h-9 bg-indigo-500/10 text-indigo-600 border border-indigo-500/30 rounded-lg flex items-center justify-center">
+          <Target className="w-5 h-5" />
+        </div>
+        <h2 className="font-display text-lg font-bold">Sales Team Target Progress{monthName ? ` — ${monthName}` : ""}</h2>
+        <div className="ml-auto flex items-center gap-2">
+          <button onClick={() => setShowLog(true)} className="px-3 py-1.5 border border-slate-200 rounded-lg text-xs font-semibold hover:bg-slate-50" data-testid="button-digest-log">Digest log</button>
+          <button onClick={sendNow} disabled={sending} className="px-3 py-1.5 bg-indigo-600 text-white rounded-lg text-xs font-semibold inline-flex items-center gap-1 disabled:opacity-50" data-testid="button-send-digest">
+            {sending ? <Loader2 className="w-3 h-3 animate-spin" /> : <Send className="w-3 h-3" />} Send digest now
+          </button>
+        </div>
+      </div>
+
+      {msg && <div className="mb-3 text-xs p-2 rounded-lg bg-slate-50 border border-slate-200 text-slate-700" data-testid="digest-msg">{msg}</div>}
+
+      {loading ? (
+        <div className="text-sm text-muted-foreground py-6 text-center"><Loader2 className="w-4 h-4 animate-spin inline" /></div>
+      ) : rows.length === 0 ? (
+        <div className="text-sm text-muted-foreground py-6 text-center">No active salespeople with targets this month.</div>
+      ) : (
+        <div className="overflow-x-auto">
+          <table className="w-full text-sm">
+            <thead>
+              <tr className="text-left text-xs text-muted-foreground border-b border-slate-200">
+                <th className="px-3 py-2">Salesperson</th>
+                <th className="px-3 py-2">Payments</th>
+                <th className="px-3 py-2">Purchase Orders</th>
+                <th className="px-3 py-2">Onboarding</th>
+                <th className="px-3 py-2">Days left</th>
+                <th className="px-3 py-2">Status</th>
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map((p) => (
+                <tr key={p.salesperson.id} className="border-b border-slate-100" data-testid={`sp-row-${p.salesperson.id}`}>
+                  <td className="px-3 py-2 font-semibold">{p.salesperson.name}</td>
+                  {cell(p.payments)}
+                  {cell(p.purchase_orders)}
+                  {cell(p.onboarding, true)}
+                  <td className="px-3 py-2">{p.days_left}</td>
+                  <td className="px-3 py-2">
+                    <span className={`text-xs font-bold px-2 py-0.5 rounded-full ${p.status === "on_track" ? "bg-emerald-100 text-emerald-700" : "bg-red-100 text-red-700"}`}>
+                      {p.status === "on_track" ? "On track" : "Behind"}
+                    </span>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+          {team && (
+            <div className="mt-3 text-xs text-muted-foreground">
+              Team totals — Payments {fmt(team.payments.achieved)}/{fmt(team.payments.target)} · PO {fmt(team.purchase_orders.achieved)}/{fmt(team.purchase_orders.target)} · Onboarding {team.onboarding.achieved}/{team.onboarding.target}
+              {team.behind.length > 0 && <> · Behind: {team.behind.map((b) => b.name).join(", ")}</>}
+            </div>
+          )}
+        </div>
+      )}
+
+      {showLog && <DigestLogModal token={token} onClose={() => setShowLog(false)} />}
+    </div>
+  );
+}
+
+function DigestLogModal({ token, onClose }: { token: string | null; onClose: () => void }) {
+  const [log, setLog] = useState<any[]>([]);
+  const [loading, setLoading] = useState(true);
+  useEffect(() => {
+    (async () => {
+      try {
+        const r = await adminFetch(token, "/api/admin/sales-targets/digest-log");
+        if (r.ok) { const d = await r.json(); setLog(d.log || []); }
+      } catch { /* empty */ }
+      finally { setLoading(false); }
+    })();
+  }, [token]);
+  return (
+    <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50 p-4" onClick={onClose}>
+      <div className="bg-white rounded-2xl shadow-xl max-w-2xl w-full max-h-[80vh] overflow-auto p-6" onClick={(e) => e.stopPropagation()} data-testid="digest-log-modal">
+        <div className="flex items-center justify-between mb-4">
+          <h3 className="font-display text-lg font-bold">Digest Log — Today</h3>
+          <button onClick={onClose} className="text-muted-foreground hover:text-foreground"><X className="w-5 h-5" /></button>
+        </div>
+        {loading ? (
+          <div className="text-sm text-muted-foreground py-6 text-center"><Loader2 className="w-4 h-4 animate-spin inline" /></div>
+        ) : log.length === 0 ? (
+          <div className="text-sm text-muted-foreground py-6 text-center">No digest sent today yet.</div>
+        ) : (
+          <table className="w-full text-xs">
+            <thead><tr className="text-left text-muted-foreground border-b border-slate-200">
+              <th className="px-2 py-1.5">Recipient</th><th className="px-2 py-1.5">Channel</th><th className="px-2 py-1.5">Status</th><th className="px-2 py-1.5">Detail</th>
+            </tr></thead>
+            <tbody>
+              {log.map((r) => (
+                <tr key={r.id} className="border-b border-slate-100">
+                  <td className="px-2 py-1.5">{r.recipient_type}{r.recipient_email ? ` · ${r.recipient_email}` : r.recipient_mobile ? ` · ${r.recipient_mobile}` : ""}</td>
+                  <td className="px-2 py-1.5">{r.channel}</td>
+                  <td className="px-2 py-1.5">{r.status}</td>
+                  <td className="px-2 py-1.5 text-muted-foreground">{r.error || r.payload_summary || "—"}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+      </div>
     </div>
   );
 }

@@ -753,3 +753,96 @@ export async function sendMarketingMessage(
     return { status: "failed" };
   }
 }
+
+// ============================================================
+// R27.30 — Admin login OTP (super-admin only).
+//   OTP_MODE=simulate (default) → no AiSensy hit, logs the code, returns ok.
+//   OTP_MODE=live → sends via AiSensy campaign AISENSY_OTP_CAMPAIGN.
+//   Fire-and-forget contract: returns {ok} — never throws.
+// ============================================================
+export async function sendAdminOtpWhatsApp(
+  mobile: string,
+  otp: string,
+): Promise<{ ok: boolean; error?: string }> {
+  const mode = (process.env.OTP_MODE || "simulate").toLowerCase();
+  const campaignName = process.env.AISENSY_OTP_CAMPAIGN || "admin_login_otp_campaign";
+  const normalized = normalizePhone(mobile);
+  if (mode !== "live") {
+    console.log(`[R27.30 otp] SIMULATE mode — would send OTP ${otp} to ${normalized} via ${campaignName}`);
+    return { ok: true };
+  }
+  try {
+    const raw = await postAisensy({
+      campaignName,
+      destination: normalized,
+      userName: "Narmada Mobility",
+      templateParams: [otp],
+      source: "narmada-backend",
+      media: {}, carouselCards: [], location: {}, attributes: {},
+      paramsFallbackValue: { FirstName: "Admin" },
+    });
+    logAisensyResult(normalized, campaignName, `AdminOTP: ${otp}`, raw);
+    return { ok: true };
+  } catch (e: any) {
+    console.error(`[R27.30 otp] sendAdminOtpWhatsApp failed for ${normalized}:`, e?.message);
+    logNotification("whatsapp", normalized, campaignName, `AdminOTP: ${otp}`, "failed", e?.message);
+    return { ok: false, error: e?.message || "send failed" };
+  }
+}
+
+// ============================================================
+// R27.29 — Sales target daily digest (WhatsApp).
+//   DIGEST_MODE=simulate (default) → no AiSensy hit, returns 'simulated'.
+//   DIGEST_MODE=live → sends via AiSensy campaign. Fire-and-forget.
+// ============================================================
+export async function sendSalesDigestWhatsApp(
+  mobile: string,
+  templateParams: string[],
+): Promise<{ status: "simulated" | "sent" | "failed"; error?: string }> {
+  const mode = (process.env.DIGEST_MODE || "simulate").toLowerCase();
+  const campaignName = process.env.AISENSY_SALES_DIGEST_CAMPAIGN || "sales_daily_progress_campaign";
+  const normalized = normalizePhone(mobile);
+  if (mode !== "live") {
+    console.log(`[R27.29 digest] SIMULATE — sales WA to ${normalized} via ${campaignName} params=${JSON.stringify(templateParams)}`);
+    return { status: "simulated" };
+  }
+  try {
+    const raw = await postAisensy({
+      campaignName, destination: normalized, userName: "Narmada Mobility",
+      templateParams: templateParams.map(String),
+      source: "narmada-backend", media: {}, carouselCards: [], location: {}, attributes: {},
+      paramsFallbackValue: { FirstName: "Salesperson" },
+    });
+    const status = logAisensyResult(normalized, campaignName, `salesDigest`, raw);
+    return { status: status === "failed" ? "failed" : "sent" };
+  } catch (e: any) {
+    console.error(`[R27.29 digest] sendSalesDigestWhatsApp failed for ${normalized}:`, e?.message);
+    return { status: "failed", error: e?.message || "send failed" };
+  }
+}
+
+export async function sendAdminDigestWhatsApp(
+  mobile: string,
+  templateParams: string[],
+): Promise<{ status: "simulated" | "sent" | "failed"; error?: string }> {
+  const mode = (process.env.DIGEST_MODE || "simulate").toLowerCase();
+  const campaignName = process.env.AISENSY_ADMIN_DIGEST_CAMPAIGN || "admin_daily_progress_summary_campaign";
+  const normalized = normalizePhone(mobile);
+  if (mode !== "live") {
+    console.log(`[R27.29 digest] SIMULATE — admin WA to ${normalized} via ${campaignName} params=${JSON.stringify(templateParams)}`);
+    return { status: "simulated" };
+  }
+  try {
+    const raw = await postAisensy({
+      campaignName, destination: normalized, userName: "Narmada Mobility",
+      templateParams: templateParams.map(String),
+      source: "narmada-backend", media: {}, carouselCards: [], location: {}, attributes: {},
+      paramsFallbackValue: { FirstName: "Admin" },
+    });
+    const status = logAisensyResult(normalized, campaignName, `adminDigest`, raw);
+    return { status: status === "failed" ? "failed" : "sent" };
+  } catch (e: any) {
+    console.error(`[R27.29 digest] sendAdminDigestWhatsApp failed for ${normalized}:`, e?.message);
+    return { status: "failed", error: e?.message || "send failed" };
+  }
+}

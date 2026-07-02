@@ -3897,3 +3897,75 @@ export function runR27_28Migrations() {
     `CREATE INDEX IF NOT EXISTS idx_po_items_part_number ON po_items(part_number)`);
   console.log("[migrations] R27.28: complete");
 }
+
+// R27.29 — Sales Target Progress + Daily Digest. Additive: a LOG-only table that
+// records every digest send attempt (per recipient + channel). No new target
+// tables — progress is computed live from the existing sales_targets/payment/PO/
+// customer data. Each statement wrapped so a re-run on an existing DB is a no-op.
+export function runR27_29Migrations() {
+  console.log("[migrations] R27.29: start");
+  const run = (label: string, sql: string) => {
+    try { sqlite.exec(sql); console.log(`[migrations] R27.29: ${label} ok`); }
+    catch (e: any) {
+      const msg = String(e?.message || e);
+      if (/already exists|duplicate column/i.test(msg)) console.log(`[migrations] R27.29: ${label} skipped (exists)`);
+      else console.log(`[migrations] R27.29: ${label} fail: ${msg}`);
+    }
+  };
+  run("sales_target_digest_log table", `
+    CREATE TABLE IF NOT EXISTS sales_target_digest_log (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      digest_date TEXT NOT NULL,
+      recipient_type TEXT NOT NULL,
+      recipient_user_id INTEGER,
+      recipient_email TEXT,
+      recipient_mobile TEXT,
+      channel TEXT NOT NULL,
+      status TEXT NOT NULL,
+      error TEXT,
+      payload_summary TEXT,
+      sent_at TEXT NOT NULL
+    )`);
+  run("idx_sales_digest_log_date",
+    `CREATE INDEX IF NOT EXISTS idx_sales_digest_log_date ON sales_target_digest_log(digest_date DESC, recipient_type)`);
+  console.log("[migrations] R27.29: complete");
+}
+
+// R27.30 — Admin OTP Login (super-admin only). Additive: OTP challenge table +
+// indexes and a lockout table. Each statement wrapped so a re-run is a no-op.
+export function runR27_30Migrations() {
+  console.log("[migrations] R27.30: start");
+  const run = (label: string, sql: string) => {
+    try { sqlite.exec(sql); console.log(`[migrations] R27.30: ${label} ok`); }
+    catch (e: any) {
+      const msg = String(e?.message || e);
+      if (/already exists|duplicate column/i.test(msg)) console.log(`[migrations] R27.30: ${label} skipped (exists)`);
+      else console.log(`[migrations] R27.30: ${label} fail: ${msg}`);
+    }
+  };
+  run("admin_otp_challenges table", `
+    CREATE TABLE IF NOT EXISTS admin_otp_challenges (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      username TEXT NOT NULL,
+      otp_hash TEXT NOT NULL,
+      mobile TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      expires_at TEXT NOT NULL,
+      attempts INTEGER NOT NULL DEFAULT 0,
+      verified_at TEXT,
+      challenge_token TEXT NOT NULL UNIQUE,
+      ip TEXT,
+      user_agent TEXT
+    )`);
+  run("idx_admin_otp_username_created",
+    `CREATE INDEX IF NOT EXISTS idx_admin_otp_username_created ON admin_otp_challenges(username, created_at DESC)`);
+  run("idx_admin_otp_token",
+    `CREATE INDEX IF NOT EXISTS idx_admin_otp_token ON admin_otp_challenges(challenge_token)`);
+  run("admin_otp_lockouts table", `
+    CREATE TABLE IF NOT EXISTS admin_otp_lockouts (
+      username TEXT PRIMARY KEY,
+      locked_until TEXT NOT NULL,
+      reason TEXT
+    )`);
+  console.log("[migrations] R27.30: complete");
+}

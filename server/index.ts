@@ -108,7 +108,7 @@ app.use((req, res, next) => {
   // ---- R4.4→R7: ensure additive tables + seed defaults on boot ----
   console.log("[boot] step: pre-migrations");
   try {
-    const { runR4toR7Migrations, runR8Migrations, runR9Migrations, runR10Migrations, runR11Migrations, runR11_1Migrations, runR12Migrations, runR13Migrations, runR13_4Migrations, runR18Migrations, runR20Migrations, runR21Migrations, runR22Migrations, runR23Migrations, runR24Migrations, runR25Migrations, runR26Migrations, runR26_2Migrations, runR26_2bMigrations, runR26_2fCleanup, runR26_2gBackfill, runR26_2hBackfill, runR26_3Migrations, runR26_4Migrations, runR26_4bMigrations, runR26_5Migrations, runR26_6aMigrations, runR26_6bMigrations, runR26_6cMigrations, runR26_6dMigrations, runR26_6eMigrations, runR26_6gMigrations, runR26_6iMigrations, runR26_6jMigrations, runR26_6kMigrations, runR26_6lMigrations, runR27_0Migrations, runR27_1Migrations, runR27_1aMigrations, runR27_2Migrations, runR27_3Migrations, runR27_4Migrations, runR27_5Migrations, runR27_6Migrations, runR27_7Migrations, runR27_8Migrations, runR27_9Migrations, runR27_10Migrations, runR27_11Migrations, runR27_12Migrations, runR27_13Migrations, runR27_14Migrations, runR27_25Migrations, runR27_27Migrations, runR27_28Migrations } = await import("./migrations");
+    const { runR4toR7Migrations, runR8Migrations, runR9Migrations, runR10Migrations, runR11Migrations, runR11_1Migrations, runR12Migrations, runR13Migrations, runR13_4Migrations, runR18Migrations, runR20Migrations, runR21Migrations, runR22Migrations, runR23Migrations, runR24Migrations, runR25Migrations, runR26Migrations, runR26_2Migrations, runR26_2bMigrations, runR26_2fCleanup, runR26_2gBackfill, runR26_2hBackfill, runR26_3Migrations, runR26_4Migrations, runR26_4bMigrations, runR26_5Migrations, runR26_6aMigrations, runR26_6bMigrations, runR26_6cMigrations, runR26_6dMigrations, runR26_6eMigrations, runR26_6gMigrations, runR26_6iMigrations, runR26_6jMigrations, runR26_6kMigrations, runR26_6lMigrations, runR27_0Migrations, runR27_1Migrations, runR27_1aMigrations, runR27_2Migrations, runR27_3Migrations, runR27_4Migrations, runR27_5Migrations, runR27_6Migrations, runR27_7Migrations, runR27_8Migrations, runR27_9Migrations, runR27_10Migrations, runR27_11Migrations, runR27_12Migrations, runR27_13Migrations, runR27_14Migrations, runR27_25Migrations, runR27_27Migrations, runR27_28Migrations, runR27_29Migrations, runR27_30Migrations } = await import("./migrations");
     runR4toR7Migrations();
     console.log("[boot] step: post-R4-R7 migrations");
     runR8Migrations();
@@ -225,6 +225,10 @@ app.use((req, res, next) => {
     console.log("[boot] step: post-R27.27 additive columns");
     runR27_28Migrations();
     console.log("[boot] step: post-R27.28 rate-alert table");
+    runR27_29Migrations();
+    console.log("[boot] step: post-R27.29 sales-digest-log table");
+    runR27_30Migrations();
+    console.log("[boot] step: post-R27.30 admin-otp tables");
     const { seedR5Defaults } = await import("./seed-r5");
     await seedR5Defaults();
     console.log("[boot] step: post-seed");
@@ -429,4 +433,42 @@ ${rows.join("\n")}
   }
   setTimeout(runDelhiReminderCheck, 90_000);
   setInterval(runDelhiReminderCheck, DELHI_REMINDER_INTERVAL_MS);
+
+  // ---- R27.29 Sales target daily digest — 10:00 AM IST (cron 30 4 * * * UTC) ----
+  // No node-cron in this repo, so we self-schedule: compute ms until the next
+  // 10:00 IST (= 04:30 UTC), fire once, then repeat every 24h. A per-day guard in
+  // the digest log prevents a double-send if the process restarts near 10 AM.
+  const SALES_DIGEST_INTERVAL_MS = 24 * 60 * 60 * 1000;
+  const IST_OFFSET_MS = 5.5 * 60 * 60 * 1000; // IST = UTC+5:30
+  const DIGEST_HOUR_IST = 10;
+  function msUntilNextDigest(): number {
+    const nowUtc = Date.now();
+    const nowIst = nowUtc + IST_OFFSET_MS;
+    const d = new Date(nowIst);
+    const target = new Date(nowIst);
+    target.setUTCHours(DIGEST_HOUR_IST, 0, 0, 0);
+    if (target.getTime() <= d.getTime()) target.setUTCDate(target.getUTCDate() + 1);
+    return target.getTime() - d.getTime();
+  }
+  async function runSalesDigestJob() {
+    try {
+      const { runSalesDigest } = await import("./sales-digest");
+      const { digestAlreadySentToday } = await import("./sales-progress");
+      const today = new Date().toISOString().slice(0, 10);
+      if (digestAlreadySentToday(today)) {
+        log(`[sales-digest] already sent for ${today} — skipping`);
+        return;
+      }
+      const summary = await runSalesDigest();
+      log(`[sales-digest] done: ${JSON.stringify(summary)}`);
+    } catch (e: any) {
+      log(`[sales-digest] Error: ${e?.message || e}`);
+    }
+  }
+  const firstDelay = msUntilNextDigest();
+  log(`[sales-digest] first run in ~${Math.round(firstDelay / 60000)} min (10:00 IST)`);
+  setTimeout(() => {
+    runSalesDigestJob();
+    setInterval(runSalesDigestJob, SALES_DIGEST_INTERVAL_MS);
+  }, firstDelay);
 })();

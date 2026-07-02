@@ -180,8 +180,31 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
       p => p.trim() === trimmedPassword
     );
     if (usernameMatch && passwordMatch) {
-      const token = issueToken(ADMIN_USERNAME, "admin");
-      return res.json({ token, username: ADMIN_USERNAME, role: "admin" });
+      // R27.30 — super-admin must clear a WhatsApp OTP challenge before a session
+      // is issued. Every other admin/DB user (below) logs in unchanged.
+      try {
+        const otp = await import("./otp-store");
+        const wa = await import("./whatsapp");
+        const uname = otp.SUPER_ADMIN_USERNAME;
+        const lock = otp.getLockout(uname);
+        if (lock) return res.status(429).json({ locked_until: lock.locked_until, reason: lock.reason });
+        const { challenge, otp: code } = otp.createOrReuseChallenge(uname, otp.SUPER_ADMIN_MOBILE, {
+          ip: req.ip, userAgent: req.headers["user-agent"] as string,
+        });
+        if (code) {
+          const sent = await wa.sendAdminOtpWhatsApp(otp.SUPER_ADMIN_MOBILE, code);
+          if (!sent.ok) return res.status(502).json({ error: "OTP send failed" });
+        }
+        return res.json({
+          requires_otp: true,
+          challenge_token: challenge.challenge_token,
+          mobile_masked: otp.SUPER_ADMIN_MOBILE_MASKED,
+          expires_in_seconds: otp.OTP_CONSTANTS.OTP_TTL_SECONDS,
+        });
+      } catch (e: any) {
+        console.error("[R27.30] OTP challenge failed:", e?.message || e);
+        return res.status(500).json({ error: "OTP challenge failed" });
+      }
     }
     // Try DB users via v2 helpers
     try {
@@ -202,6 +225,50 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
     } catch (e) { console.error("DB user check failed:", e); }
     return res.status(401).json({ error: "Invalid credentials" });
   });
+
+  // R27.30 — verify the 6-digit OTP; on success issue the real super-admin session.
+  app.post("/api/admin/verify-otp", async (req, res) => {
+    try {
+      const { challenge_token, otp } = req.body || {};
+      if (!challenge_token || !otp) return res.status(400).json({ error: "challenge_token and otp required" });
+      const store = await import("./otp-store");
+      const uname = store.SUPER_ADMIN_USERNAME;
+
+      const lock = store.getLockout(uname);
+      if (lock) return res.status(429).json({ locked_until: lock.locked_until, reason: lock.reason });
+
+      const challenge = store.getChallengeByToken(String(challenge_token));
+      if (!challenge || challenge.verified_at || new Date(challenge.expires_at).getTime() <= Date.now()) {
+        return res.status(400).json({ error: "Invalid or expired code" });
+      }
+
+      if (challenge.attempts >= store.OTP_CONSTANTS.MAX_ATTEMPTS) {
+        const lockedUntil = store.setLockout(uname);
+        store.invalidateChallenge(challenge.id);
+        return res.status(429).json({ locked_until: lockedUntil, reason: "too_many_otp_attempts" });
+      }
+
+      if (!store.verifyOtp(String(otp), challenge.otp_hash)) {
+        const attempts = store.incrementAttempts(challenge.id);
+        const remaining = store.OTP_CONSTANTS.MAX_ATTEMPTS - attempts;
+        if (attempts >= store.OTP_CONSTANTS.MAX_ATTEMPTS) {
+          const lockedUntil = store.setLockout(uname);
+          store.invalidateChallenge(challenge.id);
+          return res.status(429).json({ locked_until: lockedUntil, reason: "too_many_otp_attempts", remaining_attempts: 0 });
+        }
+        return res.status(400).json({ error: "Invalid code", remaining_attempts: Math.max(0, remaining) });
+      }
+
+      store.markChallengeVerified(challenge.id);
+      store.invalidateOtherChallenges(uname, challenge.id);
+      const token = issueToken(ADMIN_USERNAME, "admin");
+      return res.json({ token, username: ADMIN_USERNAME, role: "admin" });
+    } catch (e: any) {
+      console.error("[R27.30] verify-otp failed:", e?.message || e);
+      return res.status(500).json({ error: e?.message || "verify failed" });
+    }
+  });
+
   app.post("/api/admin/logout", (req, res) => {
     const token = req.headers["x-admin-token"] as string;
     if (token) {

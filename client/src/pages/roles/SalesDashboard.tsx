@@ -48,6 +48,64 @@ export default function SalesDashboard() {
 
 const inr = (n: any) => `₹${Number(n || 0).toLocaleString("en-IN")}`;
 
+// ---- R27.29 My Monthly Progress card ----
+interface CatProg { target: number; achieved: number; remaining: number; pct: number; }
+interface MyProgress {
+  salesperson: { id: number; name: string };
+  payments: CatProg; purchase_orders: CatProg; onboarding: CatProg;
+  days_left: number; status: "on_track" | "behind";
+  month_name?: string;
+}
+function ProgressTile({ title, c, isCount = false }: { title: string; c: CatProg; isCount?: boolean }) {
+  const val = (n: number) => (isCount ? String(n) : inr(n));
+  const barPct = Math.min(100, Math.max(0, c.pct));
+  return (
+    <div className="bg-card border rounded-xl p-4">
+      <div className="text-xs uppercase font-bold text-muted-foreground mb-1">{title}</div>
+      <div className="text-lg font-bold">{val(c.achieved)} <span className="text-sm font-normal text-muted-foreground">/ {val(c.target)}</span></div>
+      <div className="h-2 bg-muted rounded-full mt-2 overflow-hidden"><div className={`h-full ${barPct >= 90 ? "bg-emerald-500" : "bg-amber-500"}`} style={{ width: `${barPct}%` }} /></div>
+      <div className="text-xs text-muted-foreground mt-1">{c.pct}% · remaining {val(c.remaining)}</div>
+    </div>
+  );
+}
+function MyProgressCard() {
+  const { token } = SalesAuth.useAuth();
+  const [p, setP] = useState<MyProgress | null>(null);
+  const [loaded, setLoaded] = useState(false);
+  useEffect(() => {
+    if (!token) return;
+    (async () => {
+      try {
+        const r = await SalesAuth.roleFetch(token, "/api/sales/my-progress");
+        if (r.ok) {
+          const j = await r.json();
+          if (j?.progress) setP({ ...j.progress, month_name: j.month_name });
+        }
+      } finally { setLoaded(true); }
+    })();
+  }, [token]);
+  if (!loaded || !p) return null;
+  const monthName = p.month_name || new Date().toLocaleDateString("en-IN", { month: "long", year: "numeric" });
+  return (
+    <div className="border rounded-xl p-4 bg-muted/20 mb-6" data-testid="my-progress-card">
+      <div className="flex items-center justify-between mb-3 flex-wrap gap-2">
+        <div className="font-bold text-sm">My Monthly Progress — {monthName}</div>
+        <div className="flex items-center gap-2">
+          <span className="text-xs text-muted-foreground"><b>{p.days_left}</b> day(s) left</span>
+          <span className={`text-[10px] uppercase font-bold px-2 py-0.5 rounded ${p.status === "on_track" ? "bg-emerald-500/15 text-emerald-700" : "bg-red-500/15 text-red-700"}`} data-testid="my-progress-status">
+            {p.status === "on_track" ? "On track" : "Behind"}
+          </span>
+        </div>
+      </div>
+      <div className="grid sm:grid-cols-3 gap-3">
+        <ProgressTile title="Payments Collected" c={p.payments} />
+        <ProgressTile title="Purchase Orders" c={p.purchase_orders} />
+        <ProgressTile title="Onboarding" c={p.onboarding} isCount />
+      </div>
+    </div>
+  );
+}
+
 // ---- Targets ----
 interface Achievement { id: number; po_id: number; amount: number; admin_approved: number; }
 interface SalesTarget {
@@ -152,9 +210,15 @@ function TargetsTab() {
   }
   const groupKeys = Object.keys(groups);
 
-  if (targets.length === 0) return <div className="p-12 text-center text-muted-foreground bg-card border rounded-xl">No active targets.</div>;
+  if (targets.length === 0) return (
+    <div className="space-y-6">
+      <MyProgressCard />
+      <div className="p-12 text-center text-muted-foreground bg-card border rounded-xl">No active targets.</div>
+    </div>
+  );
   return (
     <div className="space-y-6">
+      <MyProgressCard />
       {groupKeys.map((g) => (
         <div key={g} className="border rounded-xl p-4 bg-muted/20">
           <div className="font-bold text-sm mb-3">{g}</div>
