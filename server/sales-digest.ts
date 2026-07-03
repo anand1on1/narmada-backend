@@ -20,21 +20,23 @@ function esc(s: string): string {
 
 // Table 1: Payments — Client Breakdown. Rows with any collected or pending only,
 // sorted pending desc then collected desc; amber if pending>0, green if paid-only.
+// R27.29b: the table structure (headers + tbody) is ALWAYS rendered; when there are
+// no qualifying rows the tbody holds a single empty-state row instead of hiding the
+// table, so a rep with no activity still sees proof the section rendered.
 function paymentsTableHtml(clients: ClientBreakdownRow[]): string {
   const rows = clients
     .filter((c) => c.paymentsCollected > 0 || c.paymentsPending > 0)
     .sort((a, b) => (b.paymentsPending - a.paymentsPending) || (b.paymentsCollected - a.paymentsCollected));
-  if (!rows.length) {
-    return `<p style="font-size:13px;color:#94a3b8;margin:4px 0 16px">No client payment activity this month</p>`;
-  }
-  const body = rows.map((c) => {
-    const bg = c.paymentsPending > 0 ? "#fff8e1" : (c.paymentsCollected > 0 ? "#e8f5e9" : "#ffffff");
-    return `<tr style="background:${bg}">
+  const body = rows.length
+    ? rows.map((c) => {
+        const bg = c.paymentsPending > 0 ? "#fff8e1" : (c.paymentsCollected > 0 ? "#e8f5e9" : "#ffffff");
+        return `<tr style="background:${bg}">
       <td style="padding:8px;border-bottom:1px solid #e2e8f0">${esc(c.customerName)}</td>
       <td style="padding:8px;border-bottom:1px solid #e2e8f0;text-align:right">${fmtMoney(c.paymentsCollected)}</td>
       <td style="padding:8px;border-bottom:1px solid #e2e8f0;text-align:right">${fmtMoney(c.paymentsPending)}</td>
     </tr>`;
-  }).join("");
+      }).join("")
+    : `<tr><td colspan="3" style="text-align:center; color:#666; padding:16px;">No client payment activity this month</td></tr>`;
   return `<table style="width:100%;border-collapse:collapse;font-size:12px;margin:4px 0 16px">
     <thead><tr style="text-align:left;color:#64748b">
       <th style="padding:8px">Client</th>
@@ -45,21 +47,21 @@ function paymentsTableHtml(clients: ClientBreakdownRow[]): string {
 
 // Table 2: Purchase Orders — Client Breakdown. Rows with any PO activity only,
 // sorted openPosValue desc then posThisMonthValue desc; amber if open POs exist.
+// R27.29b: same always-render contract as the payments table above.
 function posTableHtml(clients: ClientBreakdownRow[]): string {
   const rows = clients
     .filter((c) => c.posThisMonthCount > 0 || c.openPosCount > 0)
     .sort((a, b) => (b.openPosValue - a.openPosValue) || (b.posThisMonthValue - a.posThisMonthValue));
-  if (!rows.length) {
-    return `<p style="font-size:13px;color:#94a3b8;margin:4px 0 16px">No client PO activity this month</p>`;
-  }
-  const body = rows.map((c) => {
-    const bg = c.openPosCount > 0 ? "#fff8e1" : "#ffffff";
-    return `<tr style="background:${bg}">
+  const body = rows.length
+    ? rows.map((c) => {
+        const bg = c.openPosCount > 0 ? "#fff8e1" : "#ffffff";
+        return `<tr style="background:${bg}">
       <td style="padding:8px;border-bottom:1px solid #e2e8f0">${esc(c.customerName)}</td>
       <td style="padding:8px;border-bottom:1px solid #e2e8f0;text-align:right">${c.posThisMonthCount} / ${fmtMoney(c.posThisMonthValue)}</td>
       <td style="padding:8px;border-bottom:1px solid #e2e8f0;text-align:right">${c.openPosCount} / ${fmtMoney(c.openPosValue)}</td>
     </tr>`;
-  }).join("");
+      }).join("")
+    : `<tr><td colspan="3" style="text-align:center; color:#666; padding:16px;">No client PO activity this month</td></tr>`;
   return `<table style="width:100%;border-collapse:collapse;font-size:12px;margin:4px 0 16px">
     <thead><tr style="text-align:left;color:#64748b">
       <th style="padding:8px">Client</th>
@@ -137,6 +139,24 @@ function teamClientActivityHtml(breakdowns: AdminBreakdown[], monthName: string)
   return `<h1 style="font-size:18px;color:#0f172a;margin:28px 0 4px">Team Client Activity — ${monthName}</h1>${sections}`;
 }
 
+// R27.29b: the admin email ALWAYS renders the "Team Client Activity" section header
+// plus one block per salesperson (in the same order as the aggregate table above),
+// each with both tables shown via the always-render empty-state pattern — so the
+// admin sees concrete proof the section rendered even in a zero-activity month.
+function teamClientActivityAllHtml(breakdowns: AdminBreakdown[], monthName: string): string {
+  const header = `<h1 style="font-size:18px;color:#0f172a;margin:28px 0 4px">Team Client Activity — ${monthName}</h1>`;
+  if (!breakdowns.length) {
+    return `${header}<p style="font-size:13px;color:#64748b;margin:4px 0 16px">No client activity across the team yet this month</p>`;
+  }
+  const sections = breakdowns.map((b) => `
+    <h2 style="font-size:16px;color:#0f172a;margin:24px 0 4px">${esc(b.salespersonName)}</h2>
+    <div style="font-size:13px;color:#334155;font-weight:600;margin:8px 0 2px">Payments — Client Breakdown</div>
+    ${paymentsTableHtml(b.clients)}
+    <div style="font-size:13px;color:#334155;font-weight:600;margin:8px 0 2px">Purchase Orders — Client Breakdown</div>
+    ${posTableHtml(b.clients)}`).join("");
+  return `${header}${sections}`;
+}
+
 function adminEmailHtml(agg: TeamAggregate, rows: SalespersonProgress[], breakdowns: AdminBreakdown[], monthName: string, today: string): string {
   const tr = rows.map((p) => `
     <tr>
@@ -162,7 +182,7 @@ function adminEmailHtml(agg: TeamAggregate, rows: SalespersonProgress[], breakdo
       </tr></thead>
       <tbody>${tr}</tbody>
     </table>
-    ${teamClientActivityHtml(breakdowns, monthName)}
+    ${teamClientActivityAllHtml(breakdowns, monthName)}
     <p style="font-size:12px;color:#94a3b8;margin-top:16px">Narmada Mobility internal report.</p>
   </div></body></html>`;
 }
@@ -285,5 +305,5 @@ export async function runSalesDigest(opts: { year?: number; month?: number; now?
 export { getMonthlyTargetProgress, getActiveSalespeople };
 export {
   salespersonEmailHtml, adminEmailHtml, paymentsTableHtml, posTableHtml,
-  teamClientActivityHtml, fmtMoney, getSalespersonClientBreakdown,
+  teamClientActivityHtml, teamClientActivityAllHtml, fmtMoney, getSalespersonClientBreakdown,
 };

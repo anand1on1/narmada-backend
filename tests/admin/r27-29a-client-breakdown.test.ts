@@ -15,7 +15,7 @@ import {
 } from "../../server/sales-progress";
 import {
   paymentsTableHtml, posTableHtml, salespersonEmailHtml, adminEmailHtml,
-  teamClientActivityHtml, fmtMoney,
+  teamClientActivityHtml, teamClientActivityAllHtml, fmtMoney,
 } from "../../server/sales-digest";
 
 const YEAR = 2026, MONTH = 6;
@@ -332,5 +332,79 @@ describe("R27.29a — full email HTML smoke", () => {
     const admHtml = adminEmailHtml(agg, rows, breakdowns, "June 2026", "15 Jun 2026");
     expect(admHtml).toContain("Team Client Activity — June 2026");
     expect(admHtml).toContain("SmokeCo");
+  });
+});
+
+// R27.29b — client section is ALWAYS rendered; empty state lives INSIDE the tbody
+// (single colspan row) rather than hiding the table, so a zero-activity rep still
+// gets visible proof the new rendering shipped.
+describe("R27.29b — always-render client section", () => {
+  it("(b1) salesperson with zero clients renders BOTH tables with headers + empty-state row inside tbody", () => {
+    const rep = seedRep();
+    const prog = getMonthlyTargetProgress(rep, YEAR, MONTH, NOW);
+    const html = salespersonEmailHtml(prog, [], "June 2026", "15 Jun 2026");
+    // Both section headers present
+    expect(html).toContain("Payments — Client Breakdown");
+    expect(html).toContain("Purchase Orders — Client Breakdown");
+    // Both tables still rendered (structure not replaced by a bare <p>)
+    expect(html).toContain(`<th style="padding:8px;text-align:right">Collected (₹)</th>`);
+    expect(html).toContain(`<th style="padding:8px;text-align:right">Open POs (# / ₹)</th>`);
+    // Empty-state is a colspan=3 row sitting INSIDE the tbody, for both tables
+    expect(html).toContain(
+      `<tbody><tr><td colspan="3" style="text-align:center; color:#666; padding:16px;">No client payment activity this month</td></tr></tbody>`,
+    );
+    expect(html).toContain(
+      `<tbody><tr><td colspan="3" style="text-align:center; color:#666; padding:16px;">No client PO activity this month</td></tr></tbody>`,
+    );
+  });
+
+  it("(b2) 1 client with payments only → payments table has data, POs table shows empty-state row", () => {
+    const rep = seedRep();
+    const c = seedCustomer(rep, "PayOnlyCo");
+    seedPayment(c, 40000); // collected>0, no PO → no open/this-month PO activity
+    const { clients } = getSalespersonClientBreakdown(rep, monthStart, monthEnd);
+
+    const payHtml = paymentsTableHtml(clients);
+    expect(payHtml).toContain("PayOnlyCo");
+    expect(payHtml).toContain("₹ 40,000");
+    expect(payHtml).not.toContain("No client payment activity this month");
+
+    const poHtml = posTableHtml(clients);
+    expect(poHtml).toContain(
+      `<tbody><tr><td colspan="3" style="text-align:center; color:#666; padding:16px;">No client PO activity this month</td></tr></tbody>`,
+    );
+    expect(poHtml).not.toContain("PayOnlyCo");
+  });
+
+  it("(b3) admin email ALWAYS renders the 'Team Client Activity' section header", () => {
+    const rep = seedRep();
+    const prog = getMonthlyTargetProgress(rep, YEAR, MONTH, NOW);
+    const agg = getTeamAggregateProgress(YEAR, MONTH, NOW);
+    // Even with an empty breakdowns list the header (and a team-level fallback) render.
+    const html = adminEmailHtml(agg, [prog], [], "June 2026", "15 Jun 2026");
+    expect(html).toContain("Team Client Activity — June 2026");
+    expect(html).toContain("No client activity across the team yet this month");
+    // Direct helper contract
+    expect(teamClientActivityAllHtml([], "June 2026")).toContain("Team Client Activity — June 2026");
+  });
+
+  it("(b4) admin email with all reps idle renders one block per rep, each with two empty-state tables", () => {
+    const r1 = seedRep(); const r2 = seedRep(); const r3 = seedRep();
+    const reps = [r1, r2, r3];
+    const rows = reps.map((id) => getMonthlyTargetProgress(id, YEAR, MONTH, NOW));
+    const breakdowns = reps.map((id) => ({
+      salespersonId: id,
+      salespersonName: `Rep ${id}`,
+      clients: getSalespersonClientBreakdown(id, monthStart, monthEnd).clients, // all empty
+    }));
+    const agg = getTeamAggregateProgress(YEAR, MONTH, NOW);
+    const html = adminEmailHtml(agg, rows, breakdowns, "June 2026", "15 Jun 2026");
+
+    // One block header per rep
+    for (const id of reps) expect(html).toContain(`Rep ${id}`);
+    // Two empty-state tables per rep → 3 of each message
+    const count = (h: string, needle: string) => h.split(needle).length - 1;
+    expect(count(html, "No client payment activity this month")).toBe(3);
+    expect(count(html, "No client PO activity this month")).toBe(3);
   });
 });
