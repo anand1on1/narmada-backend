@@ -14,6 +14,7 @@ import {
   getActiveChallenge, getChallengeByToken, createOrReuseChallenge,
   incrementAttempts, markChallengeVerified, invalidateOtherChallenges, invalidateChallenge,
 } from "../../server/otp-store";
+import { buildSitemapUrls, renderSitemapXml, sitemapCanonicalBase, ROBOTS_TXT } from "../../server/routes";
 
 beforeAll(() => {
   for (const [name, fn] of Object.entries(migrations)) {
@@ -156,5 +157,48 @@ describe("R27.30 — lockouts", () => {
     const rows = db.prepare(`SELECT * FROM admin_otp_lockouts WHERE username = ?`).all(SUPER_ADMIN_USERNAME) as any[];
     expect(rows.length).toBe(1);
     expect(rows[0].reason).toBe("again");
+  });
+});
+
+// R27.31 — dynamic sitemap.xml + robots.txt served from the backend. These pin the
+// pure builders that the public GET /sitemap.xml + GET /robots.txt routes reuse (the
+// same builder powers the /admin "Sitemap & SEO" URL count), so the served document
+// always matches the dashboard and always advertises the canonical domain.
+describe("R27.31 dynamic sitemap + robots", () => {
+  const anyProduct = (o: any) => o as Awaited<ReturnType<typeof import("../../server/storage").storage.listProducts>>[number];
+
+  it("(1) sitemap XML wraps the canonical URL set in a <urlset> root", () => {
+    expect(sitemapCanonicalBase()).toBe("https://narmadamobility.com");
+    const urls = buildSitemapUrls([], sitemapCanonicalBase());
+    const xml = renderSitemapXml(urls);
+    expect(xml.startsWith('<?xml version="1.0" encoding="UTF-8"?>')).toBe(true);
+    expect(xml).toContain('<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">');
+    expect(xml.trimEnd().endsWith("</urlset>")).toBe(true);
+    expect(xml).toContain("<loc>https://narmadamobility.com/</loc>");
+    expect(xml).toContain("<loc>https://narmadamobility.com/products</loc>");
+    // Static (product-independent) URL count is stable: 10 fixed pages + 5 brands +
+    // 15 categories + 5 brands × (37 states + 60 countries) = 515.
+    expect(urls.length).toBe(515);
+  });
+
+  it("(2) product URLs are part-number-first, hash-routed, and skip inactive rows", () => {
+    const base = buildSitemapUrls([], "https://narmadamobility.com").length;
+    const products = [
+      anyProduct({ active: true, slug: "brake-pad", partNumber: "BP 100/A" }),
+      anyProduct({ active: true, slug: "oil-filter", part_number: null }),
+      anyProduct({ active: false, slug: "hidden-part", partNumber: "ZZ9" }),
+    ];
+    const urls = buildSitemapUrls(products, "https://narmadamobility.com");
+    expect(urls.length).toBe(base + 2); // inactive skipped
+    expect(urls.some((u) => u.includes("/#/product/BP%20100%2FA/brake-pad"))).toBe(true);
+    expect(urls.some((u) => u.includes("/#/product/oil-filter"))).toBe(true);
+    expect(urls.some((u) => u.includes("hidden-part"))).toBe(false);
+  });
+
+  it("(3) robots.txt is a plain-text body advertising the canonical sitemap", () => {
+    expect(ROBOTS_TXT.startsWith("User-agent: *")).toBe(true);
+    expect(ROBOTS_TXT).toContain("Allow: /");
+    expect(ROBOTS_TXT).toContain("Sitemap: https://narmadamobility.com/sitemap.xml");
+    expect(ROBOTS_TXT).not.toContain("onrender.com");
   });
 });

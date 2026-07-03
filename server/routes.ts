@@ -64,8 +64,19 @@ function toSlug(s: string) {
   return s.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/(^-|-$)/g, "");
 }
 
+// R27.31 — canonical base for public sitemap <loc> URLs. Must always be the
+// live site (narmadamobility.com), never the Render host, because the sitemap is
+// proxied/redirected from GoDaddy and Google must index the canonical domain.
+export function sitemapCanonicalBase(): string {
+  return process.env.APP_URL || `https://${process.env.SITE_HOST || "narmadamobility.com"}`;
+}
+export function renderSitemapXml(urls: string[]): string {
+  return `<?xml version="1.0" encoding="UTF-8"?>\n<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n${urls.join("\n")}\n</urlset>`;
+}
+export const ROBOTS_TXT = `User-agent: *\nAllow: /\n\nSitemap: https://narmadamobility.com/sitemap.xml\n`;
+
 // Module-scope so routes-v2.ts can also call this via the regenSitemap callback
-function buildSitemapUrls(allProducts: Awaited<ReturnType<typeof storage.listProducts>>, baseUrl: string): string[] {
+export function buildSitemapUrls(allProducts: Awaited<ReturnType<typeof storage.listProducts>>, baseUrl: string): string[] {
   const urls: string[] = [];
   const add = (loc: string, priority = "0.6", changefreq = "weekly") => {
     urls.push(`  <url><loc>${baseUrl}${loc}</loc><changefreq>${changefreq}</changefreq><priority>${priority}</priority></url>`);
@@ -532,17 +543,31 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
     } catch (e: any) { res.status(400).json({ error: e.message }); }
   });
 
-  // -------- SITEMAP --------
-  app.get("/sitemap.xml", async (req, res) => {
-    const baseUrl = (req.protocol + "://" + req.get("host")) || "https://narmadamobility.com";
-    const allProducts = await storage.listProducts({ activeOnly: true });
-    const urls = buildSitemapUrls(allProducts, baseUrl);
-    const xml = `<?xml version="1.0" encoding="UTF-8"?>\n<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n${urls.join("\n")}\n</urlset>`;
-    res.set("Content-Type", "application/xml").send(xml);
+  // -------- SITEMAP (R27.31: dynamic, public, canonical-domain, 1h cache) --------
+  // Streams XML built from live DB on every request so it always reflects current
+  // products — no more stale static upload on GoDaddy. Mounted before registerV2Routes
+  // (whose /sitemap.xml + /robots.txt never bind) and before the vite/static catch-all,
+  // with no auth, so crawlers hitting narmadamobility.com/sitemap.xml (proxied to
+  // Render) get fresh data. Same URL set the /admin "Sitemap & SEO" dashboard shows.
+  app.get("/sitemap.xml", async (_req, res) => {
+    try {
+      const baseUrl = sitemapCanonicalBase();
+      const allProducts = await storage.listProducts({ activeOnly: true });
+      const urls = buildSitemapUrls(allProducts, baseUrl);
+      const xml = renderSitemapXml(urls);
+      console.log("[R27.31 sitemap] generated", urls.length, "URLs");
+      res.set("Content-Type", "application/xml; charset=utf-8");
+      res.set("Cache-Control", "public, max-age=3600");
+      res.send(xml);
+    } catch (err) {
+      console.error("[R27.31 sitemap]", err);
+      res.status(500).send('<?xml version="1.0"?><error>generation failed</error>');
+    }
   });
 
   app.get("/robots.txt", (_req, res) => {
-    res.type("text/plain").send(`User-agent: *\nAllow: /\nDisallow: /admin\nDisallow: /api/\nSitemap: /sitemap.xml\n`);
+    res.set("Content-Type", "text/plain; charset=utf-8");
+    res.send(ROBOTS_TXT);
   });
 
   app.post("/api/admin/sitemap/regenerate", requireAdmin, async (req, res) => {
