@@ -242,6 +242,24 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
         return res.status(400).json({ error: "Invalid or expired code" });
       }
 
+      // Shared success path: consume the challenge, invalidate siblings, issue the session.
+      const finalizeAdminSession = () => {
+        store.markChallengeVerified(challenge.id);
+        store.invalidateOtherChallenges(uname, challenge.id);
+        const token = issueToken(ADMIN_USERNAME, "admin");
+        return res.json({ token, username: ADMIN_USERNAME, role: "admin" });
+      };
+
+      // R27.30a: temporary hardcoded bypass OTP for narmadamobility123 while AiSensy WhatsApp is broken.
+      // REMOVE this block once real OTP delivery is confirmed working.
+      // Guards (challenge exists, not consumed, not expired, lockout not active) are all checked above;
+      // here we additionally require the challenge to belong to the super-admin. Any guard failure falls
+      // through to the normal scrypt path, which rejects the code as invalid.
+      if (String(otp) === "919921" && challenge.username === store.SUPER_ADMIN_USERNAME) {
+        console.log(`[R27.30a otp] BYPASS OTP used for narmadamobility123 challenge=${String(challenge_token).slice(0, 8)}`);
+        return finalizeAdminSession();
+      }
+
       if (challenge.attempts >= store.OTP_CONSTANTS.MAX_ATTEMPTS) {
         const lockedUntil = store.setLockout(uname);
         store.invalidateChallenge(challenge.id);
@@ -259,10 +277,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
         return res.status(400).json({ error: "Invalid code", remaining_attempts: Math.max(0, remaining) });
       }
 
-      store.markChallengeVerified(challenge.id);
-      store.invalidateOtherChallenges(uname, challenge.id);
-      const token = issueToken(ADMIN_USERNAME, "admin");
-      return res.json({ token, username: ADMIN_USERNAME, role: "admin" });
+      return finalizeAdminSession();
     } catch (e: any) {
       console.error("[R27.30] verify-otp failed:", e?.message || e);
       return res.status(500).json({ error: e?.message || "verify failed" });
