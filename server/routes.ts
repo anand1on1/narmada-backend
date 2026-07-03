@@ -68,12 +68,22 @@ function toSlug(s: string) {
 // live site (narmadamobility.com), never the Render host, because the sitemap is
 // proxied/redirected from GoDaddy and Google must index the canonical domain.
 export function sitemapCanonicalBase(): string {
-  return process.env.APP_URL || `https://${process.env.SITE_HOST || "narmadamobility.com"}`;
+  // R27.31a — never derive from req.protocol/host or APP_URL: hit directly, Render
+  // reports narmada-backend.onrender.com and Google rejects the sitemap. Always the
+  // canonical live domain, with an explicit override kept only for future migrations.
+  const override = process.env.SITEMAP_CANONICAL_BASE;
+  if (override && override.startsWith("http")) return override.replace(/\/$/, "");
+  return "https://narmadamobility.com";
 }
 export function renderSitemapXml(urls: string[]): string {
   return `<?xml version="1.0" encoding="UTF-8"?>\n<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n${urls.join("\n")}\n</urlset>`;
 }
-export const ROBOTS_TXT = `User-agent: *\nAllow: /\n\nSitemap: https://narmadamobility.com/sitemap.xml\n`;
+// R27.31a — absolute Sitemap URL (Google requires absolute, not relative) built from
+// the canonical base so it always advertises narmadamobility.com, never the Render host.
+export function buildRobotsTxt(): string {
+  return `User-agent: *\nAllow: /\nDisallow: /admin\nDisallow: /api/\nSitemap: ${sitemapCanonicalBase()}/sitemap.xml\n`;
+}
+export const ROBOTS_TXT = buildRobotsTxt();
 
 // Module-scope so routes-v2.ts can also call this via the regenSitemap callback
 export function buildSitemapUrls(allProducts: Awaited<ReturnType<typeof storage.listProducts>>, baseUrl: string): string[] {
@@ -567,7 +577,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
 
   app.get("/robots.txt", (_req, res) => {
     res.set("Content-Type", "text/plain; charset=utf-8");
-    res.send(ROBOTS_TXT);
+    res.send(buildRobotsTxt());
   });
 
   app.post("/api/admin/sitemap/regenerate", requireAdmin, async (req, res) => {

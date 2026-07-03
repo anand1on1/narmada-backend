@@ -14,7 +14,7 @@ import {
   getActiveChallenge, getChallengeByToken, createOrReuseChallenge,
   incrementAttempts, markChallengeVerified, invalidateOtherChallenges, invalidateChallenge,
 } from "../../server/otp-store";
-import { buildSitemapUrls, renderSitemapXml, sitemapCanonicalBase, ROBOTS_TXT } from "../../server/routes";
+import { buildSitemapUrls, renderSitemapXml, sitemapCanonicalBase, ROBOTS_TXT, buildRobotsTxt } from "../../server/routes";
 
 beforeAll(() => {
   for (const [name, fn] of Object.entries(migrations)) {
@@ -200,5 +200,28 @@ describe("R27.31 dynamic sitemap + robots", () => {
     expect(ROBOTS_TXT).toContain("Allow: /");
     expect(ROBOTS_TXT).toContain("Sitemap: https://narmadamobility.com/sitemap.xml");
     expect(ROBOTS_TXT).not.toContain("onrender.com");
+  });
+
+  // R27.31a — Render was serving the onrender.com host in <loc> and a relative
+  // Sitemap directive; these pin the canonical domain end-to-end.
+  it("(4) first <loc> is the canonical home URL, never the Render host", () => {
+    const urls = buildSitemapUrls([], sitemapCanonicalBase());
+    expect(urls[0]).toContain("<loc>https://narmadamobility.com/</loc>");
+    expect(urls[0]).not.toContain("onrender.com");
+  });
+
+  it("(5) last <loc> is absolute and starts from the canonical base", () => {
+    const products = [anyProduct({ active: true, slug: "brake-pad", partNumber: "BP 1" })];
+    const urls = buildSitemapUrls(products, sitemapCanonicalBase());
+    const last = urls[urls.length - 1];
+    expect(last).toContain("<loc>https://narmadamobility.com/");
+    expect(last).not.toContain("onrender.com");
+  });
+
+  it("(6) robots.txt Sitemap directive is absolute (canonical), not relative", () => {
+    const body = buildRobotsTxt();
+    expect(body).toContain("Sitemap: https://narmadamobility.com/sitemap.xml");
+    expect(body).not.toContain("Sitemap: /sitemap.xml");
+    expect(body).not.toContain("onrender.com");
   });
 });
