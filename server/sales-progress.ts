@@ -169,6 +169,93 @@ export function getTeamAggregateProgress(year: number, month: number, now = Date
   };
 }
 
+// ---- R27.29a: per-client breakdown (payments + POs), current calendar month ----
+//
+// "Payments pending this month": the codebase has NO invoice/ledger concept of
+// "invoiced but not paid" — payment_records only records money actually received,
+// and purchase_orders_v2 carries the order value. So per the R27.29a spec we use
+// OPEN PO VALUE as the proxy for pending revenue (openPosValue), i.e. money owed
+// on orders not yet delivered/completed/cancelled. paymentsPending === openPosValue.
+// No new columns/tables are introduced. Time window + scope mirror R27.29's
+// getSalespersonProgress (customers.sales_rep_id; payment_date / COALESCE(po_date,
+// created_at); soft-deleted POs excluded). "Open" = status NOT IN the three
+// terminal states below.
+const OPEN_PO_TERMINAL = "('delivered','completed','cancelled')";
+
+export interface ClientBreakdownRow {
+  customerId: number;
+  customerName: string;
+  paymentsCollected: number;
+  paymentsPending: number;
+  posThisMonthValue: number;
+  posThisMonthCount: number;
+  openPosValue: number;
+  openPosCount: number;
+}
+
+export function getSalespersonClientBreakdown(
+  userId: number,
+  monthStart: Date,
+  monthEnd: Date,
+): { clients: ClientBreakdownRow[] } {
+  const startMs = monthStart.getTime();
+  const endMs = monthEnd.getTime();
+  try {
+    const rows = sqlite.prepare(
+      `SELECT
+         c.id AS customerId,
+         c.name AS customerName,
+         COALESCE((SELECT SUM(pr.amount_inr) FROM payment_records pr
+                    WHERE pr.customer_id = c.id AND pr.payment_date BETWEEN ? AND ?), 0) AS paymentsCollected,
+         COALESCE((SELECT SUM(po.total) FROM purchase_orders_v2 po
+                    WHERE po.customer_id = c.id AND po.deleted_at IS NULL
+                      AND COALESCE(po.po_date, po.created_at) BETWEEN ? AND ?), 0) AS posThisMonthValue,
+         COALESCE((SELECT COUNT(*) FROM purchase_orders_v2 po
+                    WHERE po.customer_id = c.id AND po.deleted_at IS NULL
+                      AND COALESCE(po.po_date, po.created_at) BETWEEN ? AND ?), 0) AS posThisMonthCount,
+         COALESCE((SELECT SUM(po.total) FROM purchase_orders_v2 po
+                    WHERE po.customer_id = c.id AND po.deleted_at IS NULL
+                      AND LOWER(COALESCE(po.status,'')) NOT IN ${OPEN_PO_TERMINAL}
+                      AND COALESCE(po.po_date, po.created_at) BETWEEN ? AND ?), 0) AS openPosValue,
+         COALESCE((SELECT COUNT(*) FROM purchase_orders_v2 po
+                    WHERE po.customer_id = c.id AND po.deleted_at IS NULL
+                      AND LOWER(COALESCE(po.status,'')) NOT IN ${OPEN_PO_TERMINAL}
+                      AND COALESCE(po.po_date, po.created_at) BETWEEN ? AND ?), 0) AS openPosCount
+       FROM customers c
+       WHERE c.sales_rep_id = ?`,
+    ).all(startMs, endMs, startMs, endMs, startMs, endMs, startMs, endMs, startMs, endMs, userId) as any[];
+
+    const clients: ClientBreakdownRow[] = rows.map((r) => {
+      const openPosValue = num(r.openPosValue);
+      return {
+        customerId: num(r.customerId),
+        customerName: r.customerName || `Customer #${num(r.customerId)}`,
+        paymentsCollected: num(r.paymentsCollected),
+        paymentsPending: openPosValue, // proxy — see note at top of section
+        posThisMonthValue: num(r.posThisMonthValue),
+        posThisMonthCount: num(r.posThisMonthCount),
+        openPosValue,
+        openPosCount: num(r.openPosCount),
+      };
+    });
+    clients.sort((a, b) => (b.openPosValue + b.paymentsPending) - (a.openPosValue + a.paymentsPending));
+    return { clients };
+  } catch {
+    return { clients: [] };
+  }
+}
+
+export function getAllSalespersonsBreakdown(
+  monthStart: Date,
+  monthEnd: Date,
+): Array<{ salespersonId: number; salespersonName: string; clients: ClientBreakdownRow[] }> {
+  return getActiveSalespeople().map((s) => ({
+    salespersonId: s.id,
+    salespersonName: s.name,
+    clients: getSalespersonClientBreakdown(s.id, monthStart, monthEnd).clients,
+  }));
+}
+
 // ---- Digest log ----
 export interface DigestLogEntry {
   digest_date: string; recipient_type: string; recipient_user_id?: number | null;
