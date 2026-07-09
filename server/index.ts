@@ -229,6 +229,15 @@ app.use((req, res, next) => {
     console.log("[boot] step: post-R27.29 sales-digest-log table");
     runR27_30Migrations();
     console.log("[boot] step: post-R27.30 admin-otp tables");
+    const { runR27_32Migrations } = await import("./migrations");
+    runR27_32Migrations();
+    console.log("[boot] step: post-R27.32 payment tables");
+    // R27.32 — Process Payment authorizes admin/procurement/finance. finance was not
+    // in the admin-role whitelist before this release; it is added in VALID_ROLES.
+    try {
+      const { PAYMENT_ROLES } = await import("./routes-payments");
+      console.log(`[R27.32] finance role support: ADDED (allowed payment roles: ${PAYMENT_ROLES.join(", ")})`);
+    } catch { console.log("[R27.32] finance role support: ADDED"); }
     const { seedR5Defaults } = await import("./seed-r5");
     await seedR5Defaults();
     console.log("[boot] step: post-seed");

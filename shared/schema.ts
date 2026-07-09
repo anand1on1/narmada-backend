@@ -242,7 +242,8 @@ export const adminUsers = sqliteTable("admin_users", {
 });
 export type AdminUser = typeof adminUsers.$inferSelect;
 // PartSetu v1.4: added `data_center` — PartSetu + Products only, no delete.
-export type AdminRole = "admin" | "logistics" | "accounts" | "sales" | "data_center";
+// R27.32: added `procurement` + `finance` — Process Payment (admin/procurement/finance).
+export type AdminRole = "admin" | "logistics" | "accounts" | "sales" | "data_center" | "procurement" | "finance";
 
 // -------- ADMIN SESSIONS (Session A V2) --------
 // DB-backed sessions survive Render restarts. Token map in memory is rehydrated from this table.

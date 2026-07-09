@@ -12,6 +12,7 @@ import { sendNotification, buildTrackingLink, sendGenericEmail, emitCrossTeamEve
 import { rawSqlite } from "./storage";
 import * as XLSX from "xlsx";
 import { recordMarketingWhatsAppReceipt } from "./marketing/webhook-hook";
+import { registerPaymentRoutes, type Actor } from "./routes-payments";
 import {
   insertPostSchema, insertConsignmentSchema, insertPriceListSchema,
   insertCustomerSchema,
@@ -75,7 +76,11 @@ export interface TokenInfo {
   displayName?: string;
 }
 export type TokenMap = Map<string, TokenInfo>;
-const VALID_ROLES: AdminRole[] = ["admin", "logistics", "accounts", "sales", "data_center"];
+// R27.32: procurement + finance added so admins can assign the Process Payment roles.
+const VALID_ROLES: AdminRole[] = ["admin", "logistics", "accounts", "sales", "data_center", "procurement", "finance"];
+export function isValidAdminRole(role: string): boolean {
+  return VALID_ROLES.includes(role as AdminRole);
+}
 
 // Session A V2: DB-backed admin session helpers (token survives Render restarts)
 const SESSION_TTL_MS = 30 * 24 * 60 * 60 * 1000; // 30 days
@@ -251,6 +256,21 @@ export function registerV2Routes(app: Express, ctx: V2Context) {
       });
     };
   }
+
+  // R27.32 — Process Payment. Resolve the acting user's data_team_users id/name for
+  // snapshotting on batches/payments; fall back to the token's display name.
+  const resolveActor = (req: Request): Actor => {
+    const u = (req as any).user as TokenInfo | undefined;
+    const username = u?.username || "";
+    let userId: number | null = null;
+    let userName = u?.displayName || username || "Unknown";
+    try {
+      const row = rawSqlite.prepare(`SELECT id, name FROM data_team_users WHERE username = ? LIMIT 1`).get(username) as any;
+      if (row) { userId = row.id; if (row.name) userName = row.name; }
+    } catch { /* data_team_users may not exist in every deployment */ }
+    return { userId, userName };
+  };
+  registerPaymentRoutes(app, { db: rawSqlite as any, uploadsDir: ctx.uploadsDir, requireRole, resolveActor });
 
   // ============== LOGIN (extended — supports primary admin OR DB users) ==============
   // Replaces the original /api/admin/login behavior via shadow: if username matches

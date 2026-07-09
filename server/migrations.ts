@@ -3969,3 +3969,73 @@ export function runR27_30Migrations() {
     )`);
   console.log("[migrations] R27.30: complete");
 }
+
+// R27.32 — Process Payment. Additive: payment batch + line-item snapshot + vendor
+// queue tables plus supporting indexes. Each statement wrapped so a re-run is a
+// no-op. Never drops/renames existing tables.
+export function runR27_32Migrations() {
+  console.log("[migrations] R27.32: start");
+  const run = (label: string, sql: string) => {
+    try { sqlite.exec(sql); console.log(`[migrations] R27.32: ${label} ok`); }
+    catch (e: any) {
+      const msg = String(e?.message || e);
+      if (/already exists|duplicate column/i.test(msg)) console.log(`[migrations] R27.32: ${label} skip (exists)`);
+      else console.log(`[migrations] R27.32: ${label} skip (${msg})`);
+    }
+  };
+  run("payment_batches table", `
+    CREATE TABLE IF NOT EXISTS payment_batches (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      slip_number TEXT UNIQUE NOT NULL,
+      created_by INTEGER,
+      created_by_name TEXT,
+      notes TEXT,
+      created_at INTEGER NOT NULL,
+      vendor_count INTEGER NOT NULL DEFAULT 0,
+      po_count INTEGER NOT NULL DEFAULT 0,
+      total_amount REAL NOT NULL DEFAULT 0
+    )`);
+  run("idx_payment_batches_created_at",
+    `CREATE INDEX IF NOT EXISTS idx_payment_batches_created_at ON payment_batches(created_at DESC)`);
+  run("payment_batch_items table", `
+    CREATE TABLE IF NOT EXISTS payment_batch_items (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      batch_id INTEGER NOT NULL,
+      po_id INTEGER NOT NULL,
+      po_number TEXT,
+      po_item_id INTEGER,
+      vendor_name TEXT NOT NULL,
+      item_name TEXT NOT NULL,
+      qty REAL NOT NULL,
+      rate_locked REAL NOT NULL,
+      amount_locked REAL NOT NULL,
+      FOREIGN KEY (batch_id) REFERENCES payment_batches(id)
+    )`);
+  run("idx_payment_batch_items_batch",
+    `CREATE INDEX IF NOT EXISTS idx_payment_batch_items_batch ON payment_batch_items(batch_id)`);
+  run("idx_payment_batch_items_vendor",
+    `CREATE INDEX IF NOT EXISTS idx_payment_batch_items_vendor ON payment_batch_items(vendor_name)`);
+  run("payment_batch_vendors table", `
+    CREATE TABLE IF NOT EXISTS payment_batch_vendors (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      batch_id INTEGER NOT NULL,
+      vendor_name TEXT NOT NULL,
+      total_amount REAL NOT NULL,
+      status TEXT NOT NULL DEFAULT 'pending',
+      paid_at INTEGER,
+      paid_by INTEGER,
+      paid_by_name TEXT,
+      proof_url TEXT,
+      skip_reason TEXT,
+      notes TEXT,
+      po_numbers TEXT,
+      FOREIGN KEY (batch_id) REFERENCES payment_batches(id)
+    )`);
+  run("idx_payment_batch_vendors_batch",
+    `CREATE INDEX IF NOT EXISTS idx_payment_batch_vendors_batch ON payment_batch_vendors(batch_id)`);
+  run("idx_payment_batch_vendors_status",
+    `CREATE INDEX IF NOT EXISTS idx_payment_batch_vendors_status ON payment_batch_vendors(status)`);
+  run("idx_payment_batch_vendors_vendor",
+    `CREATE INDEX IF NOT EXISTS idx_payment_batch_vendors_vendor ON payment_batch_vendors(vendor_name)`);
+  console.log("[migrations] R27.32: complete");
+}
