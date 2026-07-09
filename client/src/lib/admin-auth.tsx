@@ -5,7 +5,7 @@
 import { createContext, useContext, useState, ReactNode, useCallback, useEffect } from "react";
 import { apiUrl } from "@/lib/queryClient";
 
-export type AdminRole = "admin" | "logistics" | "accounts" | "sales" | "data_center";
+export type AdminRole = "admin" | "logistics" | "accounts" | "sales" | "data_center" | "procurement" | "finance";
 
 interface AdminCtx {
   token: string | null;

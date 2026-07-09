@@ -43,8 +43,9 @@ interface AggVendor {
   pos: AggPo[];
   vendor_total: number;
 }
-// Editable working copy: per item we carry a mutable rate string.
-interface EditItem extends AggItem { rate: number; }
+// Editable working copy: per item we carry a mutable rate and a checked flag
+// (R27.32a — item-level selection; only checked items are sent to /generate).
+interface EditItem extends AggItem { rate: number; checked: boolean; }
 interface EditPo { po_id: number; po_number: string; items: EditItem[]; }
 interface EditVendor { vendor_name: string; already_processed: boolean; last_slip_number: string | null; last_batch_date: string | null; pos: EditPo[]; }
 
@@ -206,6 +207,7 @@ function ProcessVendorsTab({ onGenerated }: { onGenerated: () => void }) {
   }, [pos]);
 
   const allVisibleSelected = pos.length > 0 && pos.every((p) => selected.has(p.id));
+  const selectedTotal = pos.reduce((s, p) => s + (selected.has(p.id) ? Number(p.total_amount) || 0 : 0), 0);
   function toggleAll() {
     setSelected(allVisibleSelected ? new Set() : new Set(pos.map((p) => p.id)));
   }
@@ -235,7 +237,7 @@ function ProcessVendorsTab({ onGenerated }: { onGenerated: () => void }) {
         pos: v.pos.map((po) => ({
           po_id: po.po_id,
           po_number: po.po_number,
-          items: po.items.map((it) => ({ ...it, rate: it.rate_default })),
+          items: po.items.map((it) => ({ ...it, rate: it.rate_default, checked: true })),
         })),
       }));
       if (edit.length === 0) {
@@ -251,26 +253,52 @@ function ProcessVendorsTab({ onGenerated }: { onGenerated: () => void }) {
     }
   }
 
-  function setRate(vi: number, pi: number, ii: number, rate: number) {
+  // Deep-clone the working copy so state updates stay immutable, then apply `mut`.
+  function mutateVendors(mut: (next: EditVendor[]) => void) {
     setEditVendors((prev) => {
       const next = prev.map((v) => ({ ...v, pos: v.pos.map((p) => ({ ...p, items: p.items.map((i) => ({ ...i })) })) }));
-      next[vi].pos[pi].items[ii].rate = rate;
+      mut(next);
       return next;
     });
   }
 
+  function setRate(vi: number, pi: number, ii: number, rate: number) {
+    mutateVendors((next) => { next[vi].pos[pi].items[ii].rate = rate; });
+  }
+
+  // R27.32a — item-level toggle.
+  function toggleItem(vi: number, pi: number, ii: number) {
+    mutateVendors((next) => {
+      const it = next[vi].pos[pi].items[ii];
+      it.checked = !it.checked;
+    });
+  }
+
+  // R27.32a — PO-level toggle: if every item under the PO is checked, uncheck all;
+  // otherwise check all (so a partial/none state resolves to fully-checked).
+  function togglePo(vi: number, pi: number) {
+    mutateVendors((next) => {
+      const items = next[vi].pos[pi].items;
+      const allOn = items.length > 0 && items.every((i) => i.checked);
+      items.forEach((i) => { i.checked = !allOn; });
+    });
+  }
+
   const vendorTotal = (v: EditVendor) =>
-    v.pos.reduce((s, p) => s + p.items.reduce((ss, i) => ss + (Number(i.qty) || 0) * (Number(i.rate) || 0), 0), 0);
+    v.pos.reduce((s, p) => s + p.items.reduce((ss, i) => ss + (i.checked ? (Number(i.qty) || 0) * (Number(i.rate) || 0) : 0), 0), 0);
   const grandTotal = editVendors.reduce((s, v) => s + vendorTotal(v), 0);
+  const checkedItemCount = editVendors.reduce(
+    (s, v) => s + v.pos.reduce((ss, p) => ss + p.items.filter((i) => i.checked).length, 0), 0);
 
   async function generate() {
     if (!token) return;
     setGenerating(true);
     try {
+      // R27.32a — only checked items are sent; vendors left with no checked items drop out.
       const vendors = editVendors.map((v) => ({
         vendor_name: v.vendor_name,
         items: v.pos.flatMap((p) =>
-          p.items.map((i) => {
+          p.items.filter((i) => i.checked).map((i) => {
             const qty = Number(i.qty) || 0;
             const rate = Number(i.rate) || 0;
             return {
@@ -283,7 +311,7 @@ function ProcessVendorsTab({ onGenerated }: { onGenerated: () => void }) {
             };
           }),
         ),
-      }));
+      })).filter((v) => v.items.length > 0);
       const r = await adminFetch(token, `/api/payments/generate`, {
         method: "POST",
         body: JSON.stringify({ vendors, notes: notes || undefined }),
@@ -340,12 +368,25 @@ function ProcessVendorsTab({ onGenerated }: { onGenerated: () => void }) {
                 </div>
                 <div className="text-sm">Vendor total: <strong>{inr(vendorTotal(v))}</strong></div>
               </div>
-              {v.pos.map((po, pi) => (
+              {v.pos.map((po, pi) => {
+                const poAllChecked = po.items.length > 0 && po.items.every((i) => i.checked);
+                const poSomeChecked = po.items.some((i) => i.checked);
+                return (
                 <div key={po.po_id} className="border-b last:border-b-0">
-                  <div className="px-4 pt-3 text-xs font-bold uppercase tracking-wider text-indigo-600">{po.po_number}</div>
+                  <label className="px-4 pt-3 pb-1 flex items-center gap-2 text-xs font-bold uppercase tracking-wider text-indigo-600 cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={poAllChecked}
+                      ref={(el) => { if (el) el.indeterminate = poSomeChecked && !poAllChecked; }}
+                      onChange={() => togglePo(vi, pi)}
+                      data-testid={`checkbox-po-${po.po_id}`}
+                    />
+                    {po.po_number}
+                  </label>
                   <table className="w-full text-sm">
                     <thead>
                       <tr className="text-left text-xs text-muted-foreground">
+                        <th className="px-4 py-2 font-semibold w-8"></th>
                         <th className="px-4 py-2 font-semibold">Item</th>
                         <th className="px-4 py-2 font-semibold text-right w-20">Qty</th>
                         <th className="px-4 py-2 font-semibold text-right w-40">Rate (₹)</th>
@@ -354,7 +395,15 @@ function ProcessVendorsTab({ onGenerated }: { onGenerated: () => void }) {
                     </thead>
                     <tbody>
                       {po.items.map((it, ii) => (
-                        <tr key={ii} className="border-t">
+                        <tr key={ii} className={"border-t " + (it.checked ? "" : "opacity-50")}>
+                          <td className="px-4 py-2">
+                            <input
+                              type="checkbox"
+                              checked={it.checked}
+                              onChange={() => toggleItem(vi, pi, ii)}
+                              data-testid={`checkbox-item-${po.po_id}-${it.po_item_id ?? `${pi}-${ii}`}`}
+                            />
+                          </td>
                           <td className="px-4 py-2">{it.item_name}</td>
                           <td className="px-4 py-2 text-right">{it.qty}</td>
                           <td className="px-4 py-2 text-right">
@@ -374,7 +423,8 @@ function ProcessVendorsTab({ onGenerated }: { onGenerated: () => void }) {
                     </tbody>
                   </table>
                 </div>
-              ))}
+                );
+              })}
             </div>
           ))}
         </div>
@@ -394,12 +444,17 @@ function ProcessVendorsTab({ onGenerated }: { onGenerated: () => void }) {
         </div>
 
         <div className="mt-4 flex items-center justify-end gap-3">
+          {checkedItemCount === 0 && (
+            <div className="text-sm font-medium text-rose-600" data-testid="text-no-items-selected">
+              Select at least one item to generate
+            </div>
+          )}
           <div className="text-sm text-slate-500">
-            {editVendors.length} vendor(s) · <strong className="text-slate-900">{inr(grandTotal)}</strong>
+            {checkedItemCount} item(s) · <strong className="text-slate-900">{inr(grandTotal)}</strong>
           </div>
           <button
             onClick={generate}
-            disabled={generating || editVendors.length === 0}
+            disabled={generating || checkedItemCount === 0}
             className="px-6 py-2.5 bg-indigo-600 text-white rounded-lg font-semibold text-sm inline-flex items-center gap-2 disabled:opacity-50"
             data-testid="button-generate-slips"
           >
@@ -414,6 +469,37 @@ function ProcessVendorsTab({ onGenerated }: { onGenerated: () => void }) {
   // ---- Step 1: PO selection -----------------------------------------------
   return (
     <div>
+      {/* R27.32a — sticky action bar: appears the moment ≥1 PO is selected so the
+          user never has to scroll to the bottom Continue button. */}
+      {selected.size > 0 && (
+        <div
+          className="sticky top-[73px] z-10 -mx-8 px-8 py-3 mb-4 bg-white/95 backdrop-blur border-b border-slate-200 shadow-sm flex items-center justify-between"
+          data-testid="bar-selection-sticky"
+        >
+          <div className="text-sm text-slate-700">
+            <strong className="text-slate-900">{selected.size}</strong> PO{selected.size === 1 ? "" : "s"} selected · <strong className="text-slate-900">{inr(selectedTotal)}</strong> total
+          </div>
+          <div className="flex items-center gap-2">
+            <button
+              onClick={() => setSelected(new Set())}
+              className="px-3 py-2 border rounded-lg font-semibold text-sm hover:bg-muted"
+              data-testid="button-clear-selection"
+            >
+              Clear selection
+            </button>
+            <button
+              onClick={continueToAggregate}
+              disabled={aggregating}
+              className="px-5 py-2 bg-indigo-600 text-white rounded-lg font-semibold text-sm inline-flex items-center gap-2 disabled:opacity-50"
+              data-testid="button-continue-top"
+            >
+              {aggregating ? <Loader2 className="w-4 h-4 animate-spin" /> : null}
+              Continue →
+            </button>
+          </div>
+        </div>
+      )}
+
       <div className="flex flex-wrap gap-2 items-end mb-4">
         <label className="text-sm">
           <div className="text-xs font-bold uppercase tracking-wider mb-1 text-muted-foreground">Client</div>

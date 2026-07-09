@@ -50,6 +50,19 @@ const ROLE_PAGES: Record<AdminRole, Set<string>> = {
     "/admin/dashboard", "/admin/price-lists", "/admin/products", "/admin/contacts",
     "/admin/customers", "/admin/rfqs", "/admin/quotes", "/admin/purchase-orders",
   ]),
+  // R27.32a: procurement & finance are the two roles gated into Process Payment
+  // (matches routes-payments.ts PAYMENT_ROLES). Each gets its functional group plus
+  // /admin/process-payment so the nav item renders instead of falling back to admin.
+  procurement: new Set([
+    "/admin/dashboard",
+    "/admin/parts", "/admin/purchase-orders", "/admin/purchase-history",
+    "/admin/vendors", "/admin/vendor-ledger", "/admin/process-payment",
+  ]),
+  finance: new Set([
+    "/admin/dashboard",
+    "/admin/ledger", "/admin/payments", "/admin/bank", "/admin/companies",
+    "/admin/vendor-ledger", "/admin/process-payment",
+  ]),
 };
 
 const ROLE_BADGE: Record<AdminRole, string> = {
@@ -58,6 +71,8 @@ const ROLE_BADGE: Record<AdminRole, string> = {
   accounts: "bg-emerald-500/15 text-emerald-700",
   sales: "bg-amber-500/15 text-amber-700",
   data_center: "bg-cyan-500/15 text-cyan-700",
+  procurement: "bg-orange-500/15 text-orange-700",
+  finance: "bg-teal-500/15 text-teal-700",
 };
 
 export function AdminLayout({ children, title }: { children: ReactNode; title: string }) {
