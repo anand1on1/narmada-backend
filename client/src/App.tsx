@@ -212,6 +212,7 @@ import TeamSellers from "@/pages/team/TeamSellers";
 // Rounds 4.4–7 — team PO/RFQ pages
 import TeamPOs from "@/pages/team/TeamPOs";
 import TeamPODetail from "@/pages/team/TeamPODetail";
+import TeamProcessPayment from "@/pages/team/TeamProcessPayment"; // R27.32c
 import TeamDeviations from "@/pages/team/TeamDeviations"; // R27.4 BUG-13
 import TeamRFQs from "@/pages/team/TeamRFQs";
 import TeamRFQDetail from "@/pages/team/TeamRFQDetail";
@@ -441,6 +442,7 @@ function AppRouter() {
         <Route path="/team/purchase-orders/:id/edit" component={PoEditRedirect} />
         <Route path="/team/purchase-orders/:id" component={TeamPODetail} />
         <Route path="/team/purchase-orders" component={TeamPOs} />
+        <Route path="/team/process-payment" component={TeamProcessPayment} />
         <Route path="/team/deviations" component={TeamDeviations} />
         <Route path="/team/rfqs/:id" component={TeamRFQDetail} />
         <Route path="/team/rfqs" component={TeamRFQs} />

@@ -128,6 +128,73 @@ export function deleteAdminSession(token: string) {
   try { db.delete(adminSessions).where(eq(adminSessions.token, token)).run(); } catch {}
 }
 
+// R27.32c — Dual-auth resolver for /api/payments/*. Accepts an admin token (x-admin-token)
+// OR a Data Team token (x-team-token / Bearer) and populates (req as any).user with the
+// SAME shape requireAuth sets ({ role, username, displayName }) so resolveActor and every
+// downstream payments handler don't care which token type was used. Admin token is tried
+// first. Extracted as an injectable factory so it is unit-testable with mocked stores
+// (no Express boot required).
+export interface DualAuthDeps {
+  tokenMap: TokenMap;
+  rehydrate: (tokenMap: TokenMap, token: string) => TokenInfo | null;
+  getSession: (token: string) => Promise<{ userId: number } | undefined>;
+  getUser: (id: number) => Promise<{ username: string; role: string; name: string | null; active: boolean | null } | undefined>;
+}
+export function createAdminOrTeamAuth(deps: DualAuthDeps) {
+  return async function requireAdminOrTeamAuth(req: Request, res: Response, next: NextFunction): Promise<void> {
+    const adminToken = req.headers["x-admin-token"] as string | undefined;
+    if (adminToken) {
+      let info = deps.tokenMap.get(adminToken);
+      if (!info) info = deps.rehydrate(deps.tokenMap, adminToken) || undefined;
+      if (info) {
+        if (info.role === "data_center") {
+          res.status(403).json({ error: "Data Center users must log in at /datacenter/login" });
+          return;
+        }
+        (req as any).user = info;
+        next();
+        return;
+      }
+    }
+    const teamToken = (req.headers["x-team-token"] as string | undefined)
+      || (req.headers["authorization"] as string | undefined)?.replace("Bearer ", "");
+    if (teamToken) {
+      try {
+        const session = await deps.getSession(teamToken);
+        if (session) {
+          const user = await deps.getUser(session.userId);
+          if (user && user.active) {
+            (req as any).teamUser = user;
+            (req as any).user = {
+              role: user.role as AdminRole,
+              username: user.username,
+              displayName: user.name || user.username,
+            } as TokenInfo;
+            next();
+            return;
+          }
+        }
+      } catch { /* fall through to 401 */ }
+    }
+    res.status(401).json({ error: "Unauthorized" });
+  };
+}
+
+// Role gate on top of the dual-auth resolver. Mirrors requireRole: admin always passes,
+// otherwise the resolved token's role must be in the allowlist.
+export function createAdminOrTeamRole(
+  auth: (req: Request, res: Response, next: NextFunction) => Promise<void>,
+) {
+  return (...roles: AdminRole[]) =>
+    async (req: Request, res: Response, next: NextFunction): Promise<void> => {
+      await auth(req, res, () => {
+        const u = (req as any).user as TokenInfo;
+        if (u.role === "admin" || roles.includes(u.role)) { next(); return; }
+        res.status(403).json({ error: `Role ${roles.join("/")} required` });
+      });
+    };
+}
+
 // Password hashing helpers (scrypt with random salt)
 export function hashPassword(plain: string): string {
   const salt = randomBytes(16).toString("hex");
@@ -257,6 +324,17 @@ export function registerV2Routes(app: Express, ctx: V2Context) {
     };
   }
 
+  // R27.32c — Dual-auth for /api/payments/* (admin token OR Data Team token). Built from
+  // the injectable module-level factories so the exact same resolver is unit-tested with
+  // mocked stores. See createAdminOrTeamAuth / createAdminOrTeamRole above.
+  const requireAdminOrTeamAuth = createAdminOrTeamAuth({
+    tokenMap,
+    rehydrate: rehydrateSession,
+    getSession: v2.getDataTeamSession,
+    getUser: v2.getDataTeamUser as DualAuthDeps["getUser"],
+  });
+  const requireAdminOrTeamRole = createAdminOrTeamRole(requireAdminOrTeamAuth);
+
   // R27.32 — Process Payment. Resolve the acting user's data_team_users id/name for
   // snapshotting on batches/payments; fall back to the token's display name.
   const resolveActor = (req: Request): Actor => {
@@ -270,7 +348,7 @@ export function registerV2Routes(app: Express, ctx: V2Context) {
     } catch { /* data_team_users may not exist in every deployment */ }
     return { userId, userName };
   };
-  registerPaymentRoutes(app, { db: rawSqlite as any, uploadsDir: ctx.uploadsDir, requireRole, resolveActor });
+  registerPaymentRoutes(app, { db: rawSqlite as any, uploadsDir: ctx.uploadsDir, requireRole: requireAdminOrTeamRole, resolveActor });
 
   // ============== LOGIN (extended — supports primary admin OR DB users) ==============
   // Replaces the original /api/admin/login behavior via shadow: if username matches

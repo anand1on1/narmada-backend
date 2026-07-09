@@ -2,10 +2,13 @@ import { ReactNode, useEffect, useState } from "react";
 import { Link, useLocation } from "wouter";
 import { useTeamAuth, teamFetch } from "@/lib/team-auth";
 import { Logo } from "@/components/Logo";
-import { LayoutDashboard, FileText, FilePlus, Users, Package, LogOut, ShoppingCart, Send, Upload, X, Megaphone, MessageSquare, Store, FileWarning } from "lucide-react";
+import { LayoutDashboard, FileText, FilePlus, Users, Package, LogOut, ShoppingCart, Send, Upload, X, Megaphone, MessageSquare, Store, FileWarning, CreditCard } from "lucide-react";
 import { useQuery } from "@tanstack/react-query";
 
-const navItems = [
+// R27.32c — roles that may access Process Payment (matches the backend dual-auth guard).
+const PAYMENT_ROLES = ["admin", "procurement", "finance"];
+
+const baseNavItems = [
   { href: "/team/dashboard", label: "Dashboard", icon: LayoutDashboard },
   { href: "/team/quotations", label: "Quotations", icon: FileText },
   { href: "/team/quotations/new", label: "New Quotation", icon: FilePlus },
@@ -22,6 +25,16 @@ const navItems = [
 export function TeamLayout({ children, title }: { children: ReactNode; title: string }) {
   const { token, user, clear, ready } = useTeamAuth();
   const [, navigate] = useLocation();
+
+  // R27.32c — insert Process Payment (after Purchase Orders) only for payment roles.
+  const navItems = (() => {
+    if (!(user?.role && PAYMENT_ROLES.includes(user.role))) return baseNavItems;
+    const items = [...baseNavItems];
+    const poIdx = items.findIndex((n) => n.href === "/team/purchase-orders");
+    const at = poIdx >= 0 ? poIdx + 1 : items.length;
+    items.splice(at, 0, { href: "/team/process-payment", label: "Process Payment", icon: CreditCard });
+    return items;
+  })();
   const [bannerDismissed, setBannerDismissed] = useState(() => {
     try { return sessionStorage.getItem("team_announcement_dismissed") === "1"; } catch { return false; }
   });
