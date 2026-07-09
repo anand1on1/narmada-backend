@@ -24,7 +24,7 @@ import { createCanvas } from "canvas";
 // ---------------------------------------------------------------------------
 // Roles
 // ---------------------------------------------------------------------------
-export const PAYMENT_ROLES = ["admin", "procurement", "finance"] as const;
+export const PAYMENT_ROLES = ["admin", "procurement", "finance", "data_team"] as const;
 export type PaymentRole = (typeof PAYMENT_ROLES)[number];
 export function hasPaymentAccess(role: string | undefined | null): boolean {
   return !!role && (PAYMENT_ROLES as readonly string[]).includes(role);
@@ -721,7 +721,7 @@ export interface PaymentRoutesDeps {
 
 export function registerPaymentRoutes(app: Express, deps: PaymentRoutesDeps) {
   const { db, uploadsDir, requireRole, resolveActor } = deps;
-  const guard = requireRole("procurement", "finance"); // admin auto-passes inside requireRole
+  const guard = requireRole("procurement", "finance", "data_team"); // admin auto-passes inside requireRole
   const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 15 * 1024 * 1024 } });
 
   app.get("/api/payments/pos", guard, (req, res) => {

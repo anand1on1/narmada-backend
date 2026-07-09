@@ -319,11 +319,12 @@ describe("R27.32 — access control + finance role whitelist", () => {
     expect(hasPaymentAccess(undefined)).toBe(false);
   });
 
-  it("(13) admin + procurement + finance are granted payment access", () => {
+  it("(13) admin + procurement + finance + data_team are granted payment access", () => {
     expect(hasPaymentAccess("admin")).toBe(true);
     expect(hasPaymentAccess("procurement")).toBe(true);
     expect(hasPaymentAccess("finance")).toBe(true);
-    expect([...PAYMENT_ROLES].sort()).toEqual(["admin", "finance", "procurement"]);
+    expect(hasPaymentAccess("data_team")).toBe(true); // R27.32d
+    expect([...PAYMENT_ROLES].sort()).toEqual(["admin", "data_team", "finance", "procurement"]);
   });
 
   it("(14) finance is accepted as a valid admin role + usable as a data_team_users.role", () => {

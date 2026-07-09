@@ -19,7 +19,7 @@ import {
   RefreshCw, ChevronLeft, FileArchive, Download, Check, Ban, Loader2, Search,
 } from "lucide-react";
 
-const PAYMENT_ROLES = ["admin", "procurement", "finance"];
+const PAYMENT_ROLES = ["admin", "procurement", "finance", "data_team"];
 
 // ---------------------------------------------------------------------------
 // Types (mirror server/routes-payments.ts response shapes)
@@ -110,7 +110,7 @@ export default function TeamProcessPayment() {
         <div className="bg-card border rounded-xl p-12 text-center" data-testid="payments-forbidden">
           <div className="text-lg font-bold text-rose-600 mb-1">403 — Access denied</div>
           <div className="text-sm text-muted-foreground">
-            Process Payment is available to admin, procurement and finance roles only.
+            Process Payment is available to admin, procurement, finance and data team roles only.
           </div>
         </div>
       </TeamLayout>

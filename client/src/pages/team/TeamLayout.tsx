@@ -6,7 +6,7 @@ import { LayoutDashboard, FileText, FilePlus, Users, Package, LogOut, ShoppingCa
 import { useQuery } from "@tanstack/react-query";
 
 // R27.32c — roles that may access Process Payment (matches the backend dual-auth guard).
-const PAYMENT_ROLES = ["admin", "procurement", "finance"];
+const PAYMENT_ROLES = ["admin", "procurement", "finance", "data_team"];
 
 const baseNavItems = [
   { href: "/team/dashboard", label: "Dashboard", icon: LayoutDashboard },
