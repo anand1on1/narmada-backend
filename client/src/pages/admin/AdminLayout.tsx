@@ -23,7 +23,7 @@ const ROLE_PAGES: Record<AdminRole, Set<string>> = {
     "/admin/command-center", "/admin/chats", "/admin/ai-bar", "/admin/operations",
     "/admin/dashboard", "/admin/products", "/admin/blog", "/admin/price-lists",
     "/admin/consignments", "/admin/contacts", "/admin/sitemap", "/admin/team", "/admin/settings",
-    "/admin/customers", "/admin/ledger", "/admin/payments",
+    "/admin/customers", "/admin/ledger", "/admin/payments", "/admin/process-payment",
     "/admin/rfqs", "/admin/quotes", "/admin/parts", "/admin/purchase-orders", "/admin/purchase-history", "/admin/bank",
     "/admin/quoting-companies", "/admin/data-team", "/admin/audit-logs", "/admin/notification-log", "/admin/account-requests",
     "/admin/vendors", "/admin/vendor-ledger", "/admin/vendor-inbox", "/admin/market-radar", "/admin/companies",
@@ -128,6 +128,7 @@ export function AdminLayout({ children, title }: { children: ReactNode; title: s
     { href: "/admin/purchase-history", label: "Purchase History", icon: History, group: "Procurement" },
     { href: "/admin/vendors", label: "Vendors", icon: Factory, group: "Procurement" },
     { href: "/admin/vendor-ledger", label: "Vendor Ledger", icon: Wallet, group: "Procurement" },
+    { href: "/admin/process-payment", label: "Process Payment", icon: CreditCard, group: "Procurement" },
 
     { href: "/admin/stock", label: "Stock", icon: Boxes, group: "Inventory" },
     { href: "/admin/products", label: "Products", icon: Package, group: "Inventory" },
