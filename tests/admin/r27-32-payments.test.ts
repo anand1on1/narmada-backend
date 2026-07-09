@@ -242,6 +242,76 @@ describe("R27.32 — Assign Payments (batches queue)", () => {
   });
 });
 
+describe("R27.32b — R8 legacy vendor/rate fallback + unpayable PO filter", () => {
+  // Insert a PO whose items carry only R8 legacy fields (no R9 quote).
+  function seedLegacyPo() {
+    db.prepare(`INSERT INTO purchase_orders_v2 (id, po_number, customer_id, status, total, created_at) VALUES (?,?,?,?,?,?)`)
+      .run(190, "NM/PO/26/0190", 42, "approved", 3000, day("2026-06-28"));
+    // Item with R8 vendor_name + vendor_rate, no quote.
+    db.prepare(`INSERT INTO po_items (id, po_id, description, qty, purchase_cost, vendor_name, vendor_rate) VALUES (?,?,?,?,?,?,?)`)
+      .run(630, 190, "Legacy timing belt", 2, 99, "Legacy Traders", 500);
+    // Item with R8 vendor_id only (name resolved via vendors table), rate via vendor_rate.
+    db.prepare(`INSERT INTO po_items (id, po_id, description, qty, purchase_cost, vendor_id, vendor_rate) VALUES (?,?,?,?,?,?,?)`)
+      .run(631, 190, "Legacy spark plug", 3, 0, 1, 700);
+  }
+
+  it("(15) resolveItemVendorRate picks R8 vendor_name when R9 quote is absent", () => {
+    seedLegacyPo();
+    const { vendors } = aggregateVendors(db, [190]);
+    const legacy = vendors.find((v) => v.vendor_name === "Legacy Traders");
+    expect(legacy).toBeTruthy();
+    const item = legacy!.pos[0].items.find((i: any) => i.item_name === "Legacy timing belt");
+    expect(item.rate_default).toBe(500); // R8 vendor_rate, not purchase_cost (99)
+    expect(item.amount).toBe(1000);
+  });
+
+  it("(15b) resolveItemVendorRate resolves R8 vendor_id → vendors.name + vendor_rate", () => {
+    seedLegacyPo();
+    const { vendors } = aggregateVendors(db, [190]);
+    const bosch = vendors.find((v) => v.vendor_name === "Bosch India");
+    expect(bosch).toBeTruthy();
+    const item = bosch!.pos[0].items.find((i: any) => i.item_name === "Legacy spark plug");
+    expect(item.rate_default).toBe(700);
+  });
+
+  it("(16) listPaymentPos excludes POs where every item is unassigned", () => {
+    // PO with no R9 quote, no R8 vendor, no approved vendor → unpayable.
+    db.prepare(`INSERT INTO purchase_orders_v2 (id, po_number, customer_id, status, total, created_at) VALUES (?,?,?,?,?,?)`)
+      .run(191, "NM/PO/26/0191", 42, "draft", 100, day("2026-06-29"));
+    db.prepare(`INSERT INTO po_items (id, po_id, description, qty, purchase_cost) VALUES (?,?,?,?,?)`)
+      .run(640, 191, "Orphan bolt", 1, 0);
+    const rows = listPaymentPos(db);
+    expect(rows.find((r) => r.id === 191)).toBeUndefined();
+    // The seeded payable POs still show.
+    expect(rows.find((r) => r.id === 184)).toBeTruthy();
+  });
+
+  it("(16b) listPaymentPos includes a PO payable only via R8 legacy fields", () => {
+    seedLegacyPo();
+    const rows = listPaymentPos(db);
+    const po = rows.find((r) => r.id === 190);
+    expect(po).toBeTruthy();
+    expect(po!.vendor_count).toBe(2); // Legacy Traders + Bosch India
+  });
+
+  it("(16c) vendor_count excludes the Unassigned bucket", () => {
+    db.prepare(`INSERT INTO purchase_orders_v2 (id, po_number, customer_id, status, total, created_at) VALUES (?,?,?,?,?,?)`)
+      .run(192, "NM/PO/26/0192", 42, "approved", 900, day("2026-06-30"));
+    // One real vendor via R9 quote, one fully-unassigned item.
+    db.prepare(`INSERT INTO po_items (id, po_id, description, qty, purchase_cost) VALUES (?,?,?,?,?)`)
+      .run(650, 192, "Real item", 1, 0);
+    db.prepare(`INSERT INTO po_items (id, po_id, description, qty, purchase_cost) VALUES (?,?,?,?,?)`)
+      .run(651, 192, "Orphan item", 1, 0);
+    db.prepare(
+      `INSERT INTO po_item_vendor_quotes (po_item_id, vendor_id, vendor_name, rate, status, received_at, approved_at)
+       VALUES (?,?,?,?,?,?,?)`,
+    ).run(650, 1, "Bosch India", 400, "approved", 1, 2);
+    const rows = listPaymentPos(db);
+    const po = rows.find((r) => r.id === 192)!;
+    expect(po.vendor_count).toBe(1); // Unassigned not counted
+  });
+});
+
 describe("R27.32 — access control + finance role whitelist", () => {
   it("(12) sales role is denied payment access", () => {
     expect(hasPaymentAccess("sales")).toBe(false);

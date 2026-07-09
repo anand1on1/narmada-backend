@@ -97,8 +97,21 @@ function itemName(row: any): string {
   return (row.description || row.part_number || row.brand || "Item").toString();
 }
 
-// Resolve the vendor + default rate for a single po_items row from R9 vendor quotes,
-// falling back to the item's approved vendor / purchase cost.
+// Resolve the vendor + default rate for a single po_items row, checking (first hit wins):
+//   Vendor name:
+//     1. R9 approved quote (approved_quote_id → po_item_vendor_quotes.vendor_name)
+//     2. R9 latest quote for this po_item_id (same fallback query)
+//     3. quote.vendor_id → vendors.name (when a quote has an id but no name)
+//     4. R8 legacy — po_items.vendor_name on the item row
+//     5. R8 legacy — po_items.vendor_id → vendors.name
+//     6. approved_vendor_id → vendors.name
+//     7. "Unassigned"
+//   Rate:
+//     1. R9 approved quote rate
+//     2. R9 latest quote rate
+//     3. R8 legacy — po_items.vendor_rate (when non-null and > 0)
+//     4. po_items.purchase_cost
+//     5. 0
 function resolveItemVendorRate(db: Database, item: any): { vendor_name: string; rate_default: number } {
   let quote: any = null;
   if (item.approved_quote_id) {
@@ -117,12 +130,24 @@ function resolveItemVendorRate(db: Database, item: any): { vendor_name: string; 
     const v: any = db.prepare(`SELECT name FROM vendors WHERE id = ?`).get(quote.vendor_id);
     vendor_name = v?.name || null;
   }
+  // R8 legacy fallbacks
+  if (!vendor_name && item.vendor_name) {
+    vendor_name = String(item.vendor_name) || null;
+  }
+  if (!vendor_name && item.vendor_id) {
+    const v: any = db.prepare(`SELECT name FROM vendors WHERE id = ?`).get(item.vendor_id);
+    vendor_name = v?.name || null;
+  }
   if (!vendor_name && item.approved_vendor_id) {
     const v: any = db.prepare(`SELECT name FROM vendors WHERE id = ?`).get(item.approved_vendor_id);
     vendor_name = v?.name || null;
   }
   if (!vendor_name) vendor_name = "Unassigned";
   let rate = quote?.rate;
+  if (rate === undefined || rate === null) {
+    const r8 = Number(item.vendor_rate);
+    if (item.vendor_rate !== undefined && item.vendor_rate !== null && r8 > 0) rate = r8;
+  }
   if (rate === undefined || rate === null) rate = item.purchase_cost;
   if (rate === undefined || rate === null) rate = 0;
   return { vendor_name, rate_default: Number(rate) || 0 };
@@ -156,36 +181,46 @@ export function listPaymentPos(db: Database, filters: PoListFilters = {}): any[]
      JOIN payment_batches b ON b.id = i.batch_id
      WHERE i.po_id = ? ORDER BY b.created_at DESC, b.id DESC LIMIT 1`,
   );
+  // Count DISTINCT real vendors, mirroring the resolver's chain (R9 quote → R8 vendor_name/
+  // vendor_id → approved_vendor_id). COALESCE returns NULL when every source is NULL, and
+  // COUNT(DISTINCT ...) ignores NULLs — so c = 0 means no item has a real vendor and the PO
+  // is unpayable. "Unassigned" is never counted.
   const vendorCount = db.prepare(
-    `SELECT COUNT(DISTINCT COALESCE(q.vendor_name, v.name, 'Unassigned')) AS c
+    `SELECT COUNT(DISTINCT COALESCE(q.vendor_name, v_q.name, pi.vendor_name, v_pi.name, v_approved.name)) AS c
      FROM po_items pi
      LEFT JOIN po_item_vendor_quotes q ON q.po_item_id = pi.id
-     LEFT JOIN vendors v ON v.id = pi.approved_vendor_id
+     LEFT JOIN vendors v_q ON v_q.id = q.vendor_id
+     LEFT JOIN vendors v_pi ON v_pi.id = pi.vendor_id
+     LEFT JOIN vendors v_approved ON v_approved.id = pi.approved_vendor_id
      WHERE pi.po_id = ?`,
   );
 
-  return rows.map((r) => {
-    const already = !!inBatch.get(r.id);
-    return {
-      id: r.id,
-      po_number: r.po_number,
-      client_id: r.customer_id,
-      client_name: r.client_name || null,
-      created_at: epochToDay(r.created_at),
-      status: r.status,
-      total_amount: Number(r.total) || 0,
-      vendor_count: (vendorCount.get(r.id) as any)?.c || 0,
-      already_in_batch: already,
-      last_batch_slip: already ? ((lastSlip.get(r.id) as any)?.slip_number || null) : null,
-    };
-  });
+  return rows
+    .map((r) => {
+      const already = !!inBatch.get(r.id);
+      const count = (vendorCount.get(r.id) as any)?.c || 0;
+      return {
+        id: r.id,
+        po_number: r.po_number,
+        client_id: r.customer_id,
+        client_name: r.client_name || null,
+        created_at: epochToDay(r.created_at),
+        status: r.status,
+        total_amount: Number(r.total) || 0,
+        vendor_count: count,
+        already_in_batch: already,
+        last_batch_slip: already ? ((lastSlip.get(r.id) as any)?.slip_number || null) : null,
+      };
+    })
+    .filter((r) => r.vendor_count > 0);
 }
 
 export function aggregateVendors(db: Database, poIds: number[]): { vendors: any[] } {
   const vendorMap = new Map<string, { pos: Map<number, any>; total: number }>();
   const getPoRow = db.prepare(`SELECT id, po_number FROM purchase_orders_v2 WHERE id = ?`);
   const getItems = db.prepare(
-    `SELECT id, po_id, part_number, brand, description, qty, purchase_cost, approved_vendor_id, approved_quote_id
+    `SELECT id, po_id, part_number, brand, description, qty, purchase_cost, approved_vendor_id, approved_quote_id,
+            vendor_id, vendor_name, vendor_rate
      FROM po_items WHERE po_id = ?`,
   );
 
