@@ -229,11 +229,13 @@ app.use((req, res, next) => {
     console.log("[boot] step: post-R27.29 sales-digest-log table");
     runR27_30Migrations();
     console.log("[boot] step: post-R27.30 admin-otp tables");
-    const { runR27_32Migrations, runR27_33Migrations } = await import("./migrations");
+    const { runR27_32Migrations, runR27_33Migrations, runR27_33aMigrations } = await import("./migrations");
     runR27_32Migrations();
     console.log("[boot] step: post-R27.32 payment tables");
     runR27_33Migrations();
     console.log("[boot] step: post-R27.33 item-edit + per-vendor GST columns");
+    runR27_33aMigrations();
+    console.log("[boot] step: post-R27.33a GST inclusive/exclusive mode columns");
     // R27.32 — Process Payment authorizes admin/procurement/finance. finance was not
     // in the admin-role whitelist before this release; it is added in VALID_ROLES.
     try {

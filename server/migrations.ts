@@ -4091,3 +4091,37 @@ export function runR27_33Migrations() {
   verify("po_items", ["deleted_at"]);
   console.log("[migrations] R27.33: complete");
 }
+
+export function runR27_33aMigrations() {
+  console.log("[migrations] R27.33a: start");
+  const run = (label: string, sql: string) => {
+    try { sqlite.exec(sql); console.log(`[migrations] R27.33a: ${label} ok`); }
+    catch (e: any) {
+      const msg = String(e?.message || e);
+      if (/already exists|duplicate column/i.test(msg)) console.log(`[migrations] R27.33a: ${label} skip (exists)`);
+      else console.log(`[migrations] R27.33a: ${label} skip (${msg})`);
+    }
+  };
+  // Per-vendor GST mode: "exclusive" (rate is pre-tax, GST added on top — the
+  // R27.33 behaviour) or "inclusive" (rate already includes GST, extract it out).
+  // Default 'exclusive' so every existing R27.33 slip continues to render/compute
+  // identically.
+  run("payment_batch_vendors.gst_mode",
+    `ALTER TABLE payment_batch_vendors ADD COLUMN gst_mode TEXT DEFAULT 'exclusive'`);
+  run("payment_batches.gst_default_mode",
+    `ALTER TABLE payment_batches ADD COLUMN gst_default_mode TEXT DEFAULT 'exclusive'`);
+
+  const verify = (table: string, expected: string[]) => {
+    try {
+      const cols = (sqlite.prepare(`PRAGMA table_info(${table})`).all() as any[]).map(r => r.name);
+      const missing = expected.filter(c => !cols.includes(c));
+      if (missing.length) console.log(`[migrations] R27.33a: verify ${table} MISSING ${missing.join(",")}`);
+      else console.log(`[migrations] R27.33a: verify ${table} ok (${expected.join(",")})`);
+    } catch (e: any) {
+      console.log(`[migrations] R27.33a: verify ${table} skip (${String(e?.message || e)})`);
+    }
+  };
+  verify("payment_batch_vendors", ["gst_mode"]);
+  verify("payment_batches", ["gst_default_mode"]);
+  console.log("[migrations] R27.33a: complete");
+}

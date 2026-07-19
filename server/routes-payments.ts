@@ -50,9 +50,14 @@ export interface AggregateItem {
 // optional po_items write-back — they are never snapshotted into a slip.
 export type OverrideSource = "original" | "qty_modified" | "manually_added" | "removed";
 export type OverrideScope = "slip_only" | "update_po";
+// R27.33a per-vendor GST mode. "exclusive" (default): rate is pre-tax, GST added
+// on top (the R27.33 behaviour). "inclusive": rate already includes GST, extract
+// the taxable value back out.
+export type GstMode = "exclusive" | "inclusive";
 export interface GenerateVendorInput {
   vendor_name: string;
   gst_percent?: number; // R27.33 per-vendor GST %; omitted → batch default (0 if unset)
+  gst_mode?: GstMode;   // R27.33a; omitted → batch default (exclusive)
   items: Array<{
     po_id: number;
     po_item_id?: number | null;
@@ -315,6 +320,7 @@ export interface GeneratedBatch {
     total_amount: number;
     po_numbers: string;
     gst_percent: number;
+    gst_mode: GstMode;
     subtotal: number;
     gst_amount: number;
     total_with_gst: number;
@@ -323,7 +329,7 @@ export interface GeneratedBatch {
 
 export function generateBatch(
   db: Database,
-  input: { notes?: string; gst_default_percent?: number; vendors: GenerateVendorInput[] },
+  input: { notes?: string; gst_default_percent?: number; gst_default_mode?: GstMode; vendors: GenerateVendorInput[] },
   actor: Actor,
 ): GeneratedBatch {
   const vendors = input.vendors || [];
@@ -332,6 +338,7 @@ export function generateBatch(
   // GST omitted by a caller (e.g. the existing test suite / API clients predating
   // R27.33) means "no GST" — keeps batch/vendor totals identical to R27.32.
   const batchGstDefault = input.gst_default_percent != null ? Number(input.gst_default_percent) || 0 : 0;
+  const batchGstMode: GstMode = input.gst_default_mode === "inclusive" ? "inclusive" : "exclusive";
 
   const tx = db.transaction(() => {
     const now = Date.now();
@@ -343,9 +350,9 @@ export function generateBatch(
     const poIds = new Set(allItems.map((i) => i.po_id));
 
     const batchRes = db.prepare(
-      `INSERT INTO payment_batches (slip_number, created_by, created_by_name, notes, created_at, vendor_count, po_count, total_amount, gst_default_percent)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-    ).run(slip, actor.userId, actor.userName, input.notes || null, now, vendors.length, poIds.size, 0, batchGstDefault);
+      `INSERT INTO payment_batches (slip_number, created_by, created_by_name, notes, created_at, vendor_count, po_count, total_amount, gst_default_percent, gst_default_mode)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    ).run(slip, actor.userId, actor.userName, input.notes || null, now, vendors.length, poIds.size, 0, batchGstDefault, batchGstMode);
     const batchId = Number(batchRes.lastInsertRowid);
 
     const poNumberCache = new Map<number, string>();
@@ -362,8 +369,8 @@ export function generateBatch(
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     );
     const insVendor = db.prepare(
-      `INSERT INTO payment_batch_vendors (batch_id, vendor_name, total_amount, status, po_numbers, gst_percent, subtotal, gst_amount, total_with_gst)
-       VALUES (?, ?, ?, 'pending', ?, ?, ?, ?, ?)`,
+      `INSERT INTO payment_batch_vendors (batch_id, vendor_name, total_amount, status, po_numbers, gst_percent, gst_mode, subtotal, gst_amount, total_with_gst)
+       VALUES (?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?)`,
     );
     // R27.33 "Update PO too" write-backs. Additive/soft only: qty edits update the
     // po_items row; removals set deleted_at. Guarded so a missing po_item_id or a
@@ -382,7 +389,8 @@ export function generateBatch(
     const outVendors: GeneratedBatch["vendors"] = [];
     for (const v of vendors) {
       const gstPercent = v.gst_percent != null ? Number(v.gst_percent) || 0 : batchGstDefault;
-      let subtotal = 0;
+      const gstMode: GstMode = v.gst_mode === "inclusive" ? "inclusive" : (v.gst_mode === "exclusive" ? "exclusive" : batchGstMode);
+      let rawTotal = 0; // Σ rate × qty as entered by the team (mode-agnostic).
       const poNums = new Set<string>();
       for (const it of (v.items || [])) {
         applyPoWriteback(it);
@@ -394,20 +402,31 @@ export function generateBatch(
         const poNum = poNumberOf(it.po_id);
         poNums.add(poNum);
         insItem.run(batchId, it.po_id, poNum, it.po_item_id ?? null, v.vendor_name, it.item_name, qty, rate, amount, source, it.original_qty ?? null);
-        subtotal += amount;
+        rawTotal += amount;
       }
-      subtotal = Math.round(subtotal * 100) / 100;
-      const gstAmount = Math.round(subtotal * (gstPercent / 100) * 100) / 100;
-      const totalWithGst = Math.round((subtotal + gstAmount) * 100) / 100;
+      rawTotal = Math.round(rawTotal * 100) / 100;
+      // R27.33a — inclusive extracts the taxable value out of the entered rate;
+      // exclusive (default) adds GST on top, exactly as R27.33 did.
+      let subtotal: number, gstAmount: number, totalWithGst: number;
+      if (gstMode === "inclusive") {
+        totalWithGst = rawTotal;
+        subtotal = gstPercent > 0 ? Math.round((rawTotal / (1 + gstPercent / 100)) * 100) / 100 : rawTotal;
+        gstAmount = Math.round((totalWithGst - subtotal) * 100) / 100;
+      } else {
+        subtotal = rawTotal;
+        gstAmount = Math.round(subtotal * (gstPercent / 100) * 100) / 100;
+        totalWithGst = Math.round((subtotal + gstAmount) * 100) / 100;
+      }
       grandWithGst += totalWithGst;
       const poNumbers = Array.from(poNums).join(", ");
-      const vres = insVendor.run(batchId, v.vendor_name, totalWithGst, poNumbers, gstPercent, subtotal, gstAmount, totalWithGst);
+      const vres = insVendor.run(batchId, v.vendor_name, totalWithGst, poNumbers, gstPercent, gstMode, subtotal, gstAmount, totalWithGst);
       outVendors.push({
         vendor_id: Number(vres.lastInsertRowid),
         vendor_name: v.vendor_name,
         total_amount: totalWithGst,
         po_numbers: poNumbers,
         gst_percent: gstPercent,
+        gst_mode: gstMode,
         subtotal,
         gst_amount: gstAmount,
         total_with_gst: totalWithGst,
@@ -511,9 +530,10 @@ export interface SlipData {
   generated_by: string;
   vendor_name: string;
   pos: Array<{ po_number: string; items: Array<{ item_name: string; qty: number; rate: number; amount: number }> }>;
-  subtotal: number;      // R27.33 pre-GST sum
+  subtotal: number;      // R27.33 pre-GST taxable value
   gst_percent: number;   // R27.33 per-vendor GST %
   gst_amount: number;    // R27.33 subtotal * gst_percent/100
+  gst_mode: GstMode;     // R27.33a exclusive | inclusive
   grand_total: number;   // subtotal + gst_amount (== subtotal when no GST)
 }
 
@@ -538,11 +558,27 @@ export function buildSlipData(db: Database, vendorRow: any): SlipData {
     });
     total += Number(it.amount_locked) || 0;
   }
-  const subtotal = Math.round(total * 100) / 100;
+  const rawTotal = Math.round(total * 100) / 100; // Σ amount_locked = rate × qty as entered
   // GST is read from the locked vendor snapshot. Old R27.32 rows (pre-R27.33) carry
   // gst_amount = 0, so they render exactly as before — no GST rows, grand = subtotal.
   const gstPercent = Number(vendorRow.gst_percent) || 0;
   const gstAmount = Math.round((Number(vendorRow.gst_amount) || 0) * 100) / 100;
+  const gstMode: GstMode = vendorRow.gst_mode === "inclusive" ? "inclusive" : "exclusive";
+  // R27.33a — for inclusive rows the entered rate already contains GST, so the sum
+  // of line amounts IS the grand total and the taxable value comes from the locked
+  // snapshot. Exclusive rows keep the R27.33 behaviour (line sum is the taxable
+  // subtotal; GST is added on top), which also renders old rows unchanged.
+  let subtotal: number, grandTotal: number;
+  if (gstMode === "inclusive") {
+    grandTotal = rawTotal;
+    const lockedSubtotal = Number(vendorRow.subtotal);
+    subtotal = Number.isFinite(lockedSubtotal) && lockedSubtotal > 0
+      ? Math.round(lockedSubtotal * 100) / 100
+      : Math.round((rawTotal - gstAmount) * 100) / 100;
+  } else {
+    subtotal = rawTotal;
+    grandTotal = Math.round((rawTotal + gstAmount) * 100) / 100;
+  }
   return {
     slip_number: vendorRow.slip_number,
     date: epochToDay(vendorRow.batch_created_at) || epochToDay(Date.now()),
@@ -552,7 +588,8 @@ export function buildSlipData(db: Database, vendorRow: any): SlipData {
     subtotal,
     gst_percent: gstPercent,
     gst_amount: gstAmount,
-    grand_total: Math.round((subtotal + gstAmount) * 100) / 100,
+    gst_mode: gstMode,
+    grand_total: grandTotal,
   };
 }
 
@@ -650,11 +687,14 @@ export function renderSlipJpeg(data: SlipData): Buffer {
   y += 20;
   ctx.textAlign = "right";
   if (showGst) {
+    // R27.33a — inclusive slips label the taxable value / GST so a CA can read the
+    // break-up off a GST-inclusive rate; exclusive keeps the plain R27.33 labels.
+    const incl = data.gst_mode === "inclusive";
     ctx.fillStyle = "#333333";
     ctx.font = "13px sans-serif";
-    ctx.fillText(`Subtotal: ${formatINR(data.subtotal)}`, colAmt, y);
+    ctx.fillText(`${incl ? "Subtotal (excl. GST)" : "Subtotal"}: ${formatINR(data.subtotal)}`, colAmt, y);
     y += rowH;
-    ctx.fillText(`GST @ ${formatGstPct(data.gst_percent)}%: ${formatINR(data.gst_amount)}`, colAmt, y);
+    ctx.fillText(`GST @ ${formatGstPct(data.gst_percent)}%${incl ? " (incl.)" : ""}: ${formatINR(data.gst_amount)}`, colAmt, y);
     y += rowH + 2;
   }
   ctx.fillStyle = "#000000";
@@ -773,7 +813,7 @@ export function buildBatchSlipZip(db: Database, batchId: number): { slip_number:
 // and exercised directly by the tests.
 export function generateBatchWithSlips(
   db: Database,
-  input: { notes?: string; gst_default_percent?: number; vendors: GenerateVendorInput[] },
+  input: { notes?: string; gst_default_percent?: number; gst_default_mode?: GstMode; vendors: GenerateVendorInput[] },
   actor: Actor,
 ): { batch: GeneratedBatch; files: Array<{ name: string; data: Buffer }>; zip: Buffer } {
   const batch = generateBatch(db, input, actor);

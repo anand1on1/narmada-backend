@@ -52,7 +52,8 @@ interface AggVendor {
 // R27.33 adds qty editing, deletion, custom items and per-vendor GST.
 type OverrideSource = "original" | "qty_modified" | "manually_added" | "removed";
 type PoScope = "slip_only" | "update_po";
-const GST_OPTIONS = [0, 5, 12, 18, 28]; // "Custom…" handled separately
+type GstMode = "exclusive" | "inclusive"; // R27.33a
+const GST_PRESETS = [0, 5, 12, 18, 28]; // R27.33a quick-preset pills next to the free % input
 interface EditItem extends AggItem {
   rate: number;
   checked: boolean;
@@ -67,6 +68,7 @@ interface EditVendor {
   last_batch_date: string | null;
   pos: EditPo[];
   gstPercent: number;          // R27.33 per-vendor GST %, default 18
+  gstMode: GstMode;            // R27.33a exclusive (default) | inclusive
 }
 
 interface BatchVendorRow {
@@ -258,6 +260,7 @@ function ProcessVendorsTab({ onGenerated }: { onGenerated: () => void }) {
         last_slip_number: v.last_slip_number,
         last_batch_date: v.last_batch_date,
         gstPercent: 18,
+        gstMode: "exclusive" as GstMode,
         pos: v.pos.map((po) => ({
           po_id: po.po_id,
           po_number: po.po_number,
@@ -334,8 +337,17 @@ function ProcessVendorsTab({ onGenerated }: { onGenerated: () => void }) {
     mutateVendors((next) => { next[vi].pos[pi].scope = scope; });
   }
 
+  // R27.33a — free GST % entry (Option A). Accepts any value 0–28 incl. decimals;
+  // blank/NaN resolves to 0. Preset pills call this with a fixed number.
   function setVendorGst(vi: number, pct: number) {
-    mutateVendors((next) => { next[vi].gstPercent = Number.isFinite(pct) ? pct : 0; });
+    mutateVendors((next) => {
+      const clamped = !Number.isFinite(pct) ? 0 : Math.min(28, Math.max(0, pct));
+      next[vi].gstPercent = clamped;
+    });
+  }
+
+  function setVendorGstMode(vi: number, mode: GstMode) {
+    mutateVendors((next) => { next[vi].gstMode = mode; });
   }
 
   function addCustomItem() {
@@ -378,11 +390,23 @@ function ProcessVendorsTab({ onGenerated }: { onGenerated: () => void }) {
 
   // Only checked, non-removed items contribute to a vendor subtotal.
   const isPayable = (i: EditItem) => i.checked && i.overrideSource !== "removed";
-  const vendorSubtotal = (v: EditVendor) =>
+  const r2 = (n: number) => Math.round(n * 100) / 100;
+  // Σ rate × qty as entered by the team — mode-agnostic raw figure.
+  const vendorRawTotal = (v: EditVendor) =>
     v.pos.reduce((s, p) => s + p.items.reduce((ss, i) => ss + (isPayable(i) ? (Number(i.qty) || 0) * (Number(i.rate) || 0) : 0), 0), 0);
-  const vendorGstAmount = (v: EditVendor) => Math.round(vendorSubtotal(v) * ((Number(v.gstPercent) || 0) / 100) * 100) / 100;
-  const vendorTotal = (v: EditVendor) => vendorSubtotal(v) + vendorGstAmount(v);
-  const grandTotal = editVendors.reduce((s, v) => s + vendorTotal(v), 0);
+  // R27.33a — inclusive extracts the taxable value out of the entered rate; exclusive
+  // (default) adds GST on top. Mirrors the server calc in routes-payments.ts.
+  const vendorTotals = (v: EditVendor) => {
+    const raw = vendorRawTotal(v);
+    const pct = Number(v.gstPercent) || 0;
+    if (v.gstMode === "inclusive") {
+      const subtotal = pct > 0 ? r2(raw / (1 + pct / 100)) : raw;
+      return { subtotal, gst: r2(raw - subtotal), total: r2(raw) };
+    }
+    const gst = r2(raw * (pct / 100));
+    return { subtotal: r2(raw), gst, total: r2(raw + gst) };
+  };
+  const grandTotal = editVendors.reduce((s, v) => s + vendorTotals(v).total, 0);
   const checkedItemCount = editVendors.reduce(
     (s, v) => s + v.pos.reduce((ss, p) => ss + p.items.filter(isPayable).length, 0), 0);
 
@@ -397,6 +421,7 @@ function ProcessVendorsTab({ onGenerated }: { onGenerated: () => void }) {
       const vendors = editVendors.map((v) => ({
         vendor_name: v.vendor_name,
         gst_percent: Number(v.gstPercent) || 0,
+        gst_mode: v.gstMode,
         items: v.pos.flatMap((p) =>
           p.items
             .filter((i) => {
@@ -422,7 +447,7 @@ function ProcessVendorsTab({ onGenerated }: { onGenerated: () => void }) {
       })).filter((v) => v.items.length > 0);
       const r = await teamFetch(token, `/api/payments/generate`, {
         method: "POST",
-        body: JSON.stringify({ vendors, notes: notes || undefined, gst_default_percent: 18 }),
+        body: JSON.stringify({ vendors, notes: notes || undefined, gst_default_percent: 18, gst_default_mode: "exclusive" }),
       });
       if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error || `HTTP ${r.status}`);
       const slip = r.headers.get("X-Slip-Number") || "batch";
@@ -475,39 +500,63 @@ function ProcessVendorsTab({ onGenerated }: { onGenerated: () => void }) {
                   )}
                 </div>
                 <div className="flex items-center gap-4">
-                  {/* R27.33 — per-vendor GST selector */}
-                  <label className="flex items-center gap-1.5 text-xs font-semibold text-slate-600">
-                    GST
-                    {GST_OPTIONS.includes(v.gstPercent) ? (
-                      <select
-                        value={v.gstPercent}
-                        onChange={(e) => {
-                          if (e.target.value === "custom") setVendorGst(vi, NaN); // force custom input
-                          else setVendorGst(vi, Number(e.target.value));
-                        }}
-                        className="border rounded-lg px-2 py-1 bg-background text-right"
-                        data-testid={`select-vendor-gst-${vendorSlug(v.vendor_name)}`}
-                      >
-                        {GST_OPTIONS.map((g) => <option key={g} value={g}>{g}%</option>)}
-                        <option value="custom">Custom…</option>
-                      </select>
-                    ) : (
-                      <input
-                        type="number" step="0.01" min="0" autoFocus
-                        value={Number.isFinite(v.gstPercent) ? v.gstPercent : ""}
-                        onChange={(e) => setVendorGst(vi, parseFloat(e.target.value))}
-                        onBlur={(e) => { if (e.target.value === "") setVendorGst(vi, 0); }}
-                        className="w-20 border rounded-lg px-2 py-1 bg-background text-right"
-                        placeholder="%"
-                        data-testid={`input-vendor-gst-${vendorSlug(v.vendor_name)}`}
-                      />
-                    )}
-                  </label>
-                  {/* R27.33 — live vendor totals */}
-                  <div className="text-sm text-right" data-testid={`text-vendor-totals-${vendorSlug(v.vendor_name)}`}>
-                    <div className="text-xs text-slate-500">Subtotal {inr(vendorSubtotal(v))}{(Number(v.gstPercent) || 0) > 0 ? ` · GST ${inr(vendorGstAmount(v))}` : ""}</div>
-                    <div>Vendor total: <strong>{inr(vendorTotal(v))}</strong></div>
+                  {/* R27.33a — GST mode toggle (exclusive default | inclusive) */}
+                  <div className="flex items-center gap-1.5 text-xs font-semibold text-slate-600">
+                    <span>Mode</span>
+                    <div className="inline-flex rounded-lg border overflow-hidden" role="group" aria-label="GST mode">
+                      {(["exclusive", "inclusive"] as GstMode[]).map((m) => (
+                        <button
+                          key={m}
+                          type="button"
+                          onClick={() => setVendorGstMode(vi, m)}
+                          className={`px-2.5 py-1 capitalize transition-colors ${v.gstMode === m ? "bg-indigo-600 text-white" : "bg-background text-slate-600 hover:bg-slate-100"}`}
+                          data-testid={`toggle-vendor-gstmode-${m}-${vendorSlug(v.vendor_name)}`}
+                        >
+                          {m}
+                        </button>
+                      ))}
+                    </div>
                   </div>
+                  {/* R27.33a — free GST % input (Option A) + quick presets */}
+                  <div className="flex items-center gap-1.5 text-xs font-semibold text-slate-600">
+                    <span>GST%</span>
+                    <input
+                      type="number" step="0.01" min="0" max="28"
+                      value={Number.isFinite(v.gstPercent) ? v.gstPercent : ""}
+                      onChange={(e) => setVendorGst(vi, parseFloat(e.target.value))}
+                      onBlur={(e) => { if (e.target.value === "") setVendorGst(vi, 0); }}
+                      className="w-16 border rounded-lg px-2 py-1 bg-background text-right"
+                      placeholder="%"
+                      data-testid={`input-vendor-gst-${vendorSlug(v.vendor_name)}`}
+                    />
+                    <div className="hidden sm:flex items-center gap-1">
+                      {GST_PRESETS.map((g) => (
+                        <button
+                          key={g}
+                          type="button"
+                          onClick={() => setVendorGst(vi, g)}
+                          className={`px-1.5 py-0.5 rounded border text-[11px] transition-colors ${(Number(v.gstPercent) || 0) === g ? "bg-indigo-600 text-white border-indigo-600" : "bg-background text-slate-500 hover:bg-slate-100"}`}
+                          data-testid={`preset-vendor-gst-${g}-${vendorSlug(v.vendor_name)}`}
+                        >
+                          {g}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                  {/* R27.33 / R27.33a — live vendor totals (mode-aware) */}
+                  {(() => {
+                    const t = vendorTotals(v);
+                    return (
+                      <div className="text-sm text-right" data-testid={`text-vendor-totals-${vendorSlug(v.vendor_name)}`}>
+                        <div className="text-xs text-slate-500">
+                          {v.gstMode === "inclusive"
+                            ? `Total ${inr(t.total)}${t.gst > 0 ? ` (incl. GST ${inr(t.gst)}, taxable ${inr(t.subtotal)})` : ""}`
+                            : `Subtotal ${inr(t.subtotal)}${t.gst > 0 ? ` · GST ${inr(t.gst)}` : ""}`}
+                        </div>
+                        <div>Vendor total: <strong>{inr(t.total)}</strong></div>
+                      </div>
+                    );
+                  })()}
                 </div>
               </div>
               {v.pos.map((po, pi) => {
