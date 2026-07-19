@@ -46,8 +46,13 @@ export interface AggregateItem {
   rate_default: number;
   amount: number;
 }
+// R27.33 item override provenance. "removed" items are used only to drive the
+// optional po_items write-back — they are never snapshotted into a slip.
+export type OverrideSource = "original" | "qty_modified" | "manually_added" | "removed";
+export type OverrideScope = "slip_only" | "update_po";
 export interface GenerateVendorInput {
   vendor_name: string;
+  gst_percent?: number; // R27.33 per-vendor GST %; omitted → batch default (0 if unset)
   items: Array<{
     po_id: number;
     po_item_id?: number | null;
@@ -55,6 +60,9 @@ export interface GenerateVendorInput {
     qty: number;
     rate_locked: number;
     amount_locked?: number;
+    override_source?: OverrideSource;
+    original_qty?: number | null;
+    scope?: OverrideScope; // R27.33: "update_po" writes the edit back to po_items
   }>;
 }
 export interface Actor { userId: number | null; userName: string; }
@@ -77,6 +85,13 @@ export function formatINR(n: number): string {
     out = rest.replace(/\B(?=(\d{2})+(?!\d))/g, ",") + "," + last3;
   }
   return `${neg ? "-" : ""}₹ ${out}.${decPart}`;
+}
+
+// GST percent for display: whole numbers show plain (18 → "18"), fractional keep
+// up to two decimals without trailing zeros (12.5 → "12.5").
+export function formatGstPct(n: number): string {
+  const v = Number(n) || 0;
+  return Number.isInteger(v) ? String(v) : String(parseFloat(v.toFixed(2)));
 }
 
 // YYYY-MM-DD (start or end of day) → ms epoch.
@@ -192,7 +207,7 @@ export function listPaymentPos(db: Database, filters: PoListFilters = {}): any[]
      LEFT JOIN vendors v_q ON v_q.id = q.vendor_id
      LEFT JOIN vendors v_pi ON v_pi.id = pi.vendor_id
      LEFT JOIN vendors v_approved ON v_approved.id = pi.approved_vendor_id
-     WHERE pi.po_id = ?`,
+     WHERE pi.po_id = ? AND pi.deleted_at IS NULL`,
   );
 
   return rows
@@ -221,7 +236,7 @@ export function aggregateVendors(db: Database, poIds: number[]): { vendors: any[
   const getItems = db.prepare(
     `SELECT id, po_id, part_number, brand, description, qty, purchase_cost, approved_vendor_id, approved_quote_id,
             vendor_id, vendor_name, vendor_rate
-     FROM po_items WHERE po_id = ?`,
+     FROM po_items WHERE po_id = ? AND deleted_at IS NULL`,
   );
 
   for (const poId of poIds) {
@@ -294,34 +309,43 @@ export interface GeneratedBatch {
   batch_id: number;
   slip_number: string;
   created_at: number;
-  vendors: Array<{ vendor_id: number; vendor_name: string; total_amount: number; po_numbers: string }>;
+  vendors: Array<{
+    vendor_id: number;
+    vendor_name: string;
+    total_amount: number;
+    po_numbers: string;
+    gst_percent: number;
+    subtotal: number;
+    gst_amount: number;
+    total_with_gst: number;
+  }>;
 }
 
 export function generateBatch(
   db: Database,
-  input: { notes?: string; vendors: GenerateVendorInput[] },
+  input: { notes?: string; gst_default_percent?: number; vendors: GenerateVendorInput[] },
   actor: Actor,
 ): GeneratedBatch {
   const vendors = input.vendors || [];
   if (!vendors.length) throw new Error("At least one vendor is required");
 
+  // GST omitted by a caller (e.g. the existing test suite / API clients predating
+  // R27.33) means "no GST" — keeps batch/vendor totals identical to R27.32.
+  const batchGstDefault = input.gst_default_percent != null ? Number(input.gst_default_percent) || 0 : 0;
+
   const tx = db.transaction(() => {
     const now = Date.now();
     const slip = nextSlipNumber(db, new Date(now).getFullYear());
 
-    const allItems = vendors.flatMap((v) => v.items || []);
+    // "removed" items never count toward the snapshot subtotal.
+    const included = (it: GenerateVendorInput["items"][number]) => (it.override_source ?? "original") !== "removed";
+    const allItems = vendors.flatMap((v) => v.items || []).filter(included);
     const poIds = new Set(allItems.map((i) => i.po_id));
-    let total = 0;
-    for (const it of allItems) {
-      const amt = it.amount_locked != null ? it.amount_locked : (Number(it.qty) || 0) * (Number(it.rate_locked) || 0);
-      total += amt;
-    }
-    total = Math.round(total * 100) / 100;
 
     const batchRes = db.prepare(
-      `INSERT INTO payment_batches (slip_number, created_by, created_by_name, notes, created_at, vendor_count, po_count, total_amount)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-    ).run(slip, actor.userId, actor.userName, input.notes || null, now, vendors.length, poIds.size, total);
+      `INSERT INTO payment_batches (slip_number, created_by, created_by_name, notes, created_at, vendor_count, po_count, total_amount, gst_default_percent)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    ).run(slip, actor.userId, actor.userName, input.notes || null, now, vendors.length, poIds.size, 0, batchGstDefault);
     const batchId = Number(batchRes.lastInsertRowid);
 
     const poNumberCache = new Map<number, string>();
@@ -334,37 +358,64 @@ export function generateBatch(
     };
 
     const insItem = db.prepare(
-      `INSERT INTO payment_batch_items (batch_id, po_id, po_number, po_item_id, vendor_name, item_name, qty, rate_locked, amount_locked)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO payment_batch_items (batch_id, po_id, po_number, po_item_id, vendor_name, item_name, qty, rate_locked, amount_locked, override_source, original_qty)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     );
     const insVendor = db.prepare(
-      `INSERT INTO payment_batch_vendors (batch_id, vendor_name, total_amount, status, po_numbers)
-       VALUES (?, ?, ?, 'pending', ?)`,
+      `INSERT INTO payment_batch_vendors (batch_id, vendor_name, total_amount, status, po_numbers, gst_percent, subtotal, gst_amount, total_with_gst)
+       VALUES (?, ?, ?, 'pending', ?, ?, ?, ?, ?)`,
     );
+    // R27.33 "Update PO too" write-backs. Additive/soft only: qty edits update the
+    // po_items row; removals set deleted_at. Guarded so a missing po_item_id or a
+    // legacy schema is a no-op rather than a hard failure.
+    const updatePoQty = db.prepare(`UPDATE po_items SET qty = ? WHERE id = ?`);
+    const softDeletePo = db.prepare(`UPDATE po_items SET deleted_at = ? WHERE id = ?`);
+    const applyPoWriteback = (it: GenerateVendorInput["items"][number]) => {
+      if (it.scope !== "update_po" || it.po_item_id == null) return;
+      try {
+        if (it.override_source === "qty_modified") updatePoQty.run(Number(it.qty) || 0, it.po_item_id);
+        else if (it.override_source === "removed") softDeletePo.run(now, it.po_item_id);
+      } catch { /* legacy schema without deleted_at / qty — leave PO untouched */ }
+    };
 
+    let grandWithGst = 0;
     const outVendors: GeneratedBatch["vendors"] = [];
     for (const v of vendors) {
-      let vendorTotal = 0;
+      const gstPercent = v.gst_percent != null ? Number(v.gst_percent) || 0 : batchGstDefault;
+      let subtotal = 0;
       const poNums = new Set<string>();
       for (const it of (v.items || [])) {
+        applyPoWriteback(it);
+        const source: OverrideSource = it.override_source ?? "original";
+        if (source === "removed") continue; // audit-only signal; never snapshotted
         const qty = Number(it.qty) || 0;
         const rate = Number(it.rate_locked) || 0;
         const amount = it.amount_locked != null ? it.amount_locked : Math.round(qty * rate * 100) / 100;
         const poNum = poNumberOf(it.po_id);
         poNums.add(poNum);
-        insItem.run(batchId, it.po_id, poNum, it.po_item_id ?? null, v.vendor_name, it.item_name, qty, rate, amount);
-        vendorTotal += amount;
+        insItem.run(batchId, it.po_id, poNum, it.po_item_id ?? null, v.vendor_name, it.item_name, qty, rate, amount, source, it.original_qty ?? null);
+        subtotal += amount;
       }
-      vendorTotal = Math.round(vendorTotal * 100) / 100;
+      subtotal = Math.round(subtotal * 100) / 100;
+      const gstAmount = Math.round(subtotal * (gstPercent / 100) * 100) / 100;
+      const totalWithGst = Math.round((subtotal + gstAmount) * 100) / 100;
+      grandWithGst += totalWithGst;
       const poNumbers = Array.from(poNums).join(", ");
-      const vres = insVendor.run(batchId, v.vendor_name, vendorTotal, poNumbers);
+      const vres = insVendor.run(batchId, v.vendor_name, totalWithGst, poNumbers, gstPercent, subtotal, gstAmount, totalWithGst);
       outVendors.push({
         vendor_id: Number(vres.lastInsertRowid),
         vendor_name: v.vendor_name,
-        total_amount: vendorTotal,
+        total_amount: totalWithGst,
         po_numbers: poNumbers,
+        gst_percent: gstPercent,
+        subtotal,
+        gst_amount: gstAmount,
+        total_with_gst: totalWithGst,
       });
     }
+
+    grandWithGst = Math.round(grandWithGst * 100) / 100;
+    db.prepare(`UPDATE payment_batches SET total_amount = ? WHERE id = ?`).run(grandWithGst, batchId);
 
     return { batch_id: batchId, slip_number: slip, created_at: now, vendors: outVendors };
   });
@@ -460,7 +511,10 @@ export interface SlipData {
   generated_by: string;
   vendor_name: string;
   pos: Array<{ po_number: string; items: Array<{ item_name: string; qty: number; rate: number; amount: number }> }>;
-  grand_total: number;
+  subtotal: number;      // R27.33 pre-GST sum
+  gst_percent: number;   // R27.33 per-vendor GST %
+  gst_amount: number;    // R27.33 subtotal * gst_percent/100
+  grand_total: number;   // subtotal + gst_amount (== subtotal when no GST)
 }
 
 // Assemble the slip payload for one vendor in an existing batch, reading the locked
@@ -484,13 +538,21 @@ export function buildSlipData(db: Database, vendorRow: any): SlipData {
     });
     total += Number(it.amount_locked) || 0;
   }
+  const subtotal = Math.round(total * 100) / 100;
+  // GST is read from the locked vendor snapshot. Old R27.32 rows (pre-R27.33) carry
+  // gst_amount = 0, so they render exactly as before — no GST rows, grand = subtotal.
+  const gstPercent = Number(vendorRow.gst_percent) || 0;
+  const gstAmount = Math.round((Number(vendorRow.gst_amount) || 0) * 100) / 100;
   return {
     slip_number: vendorRow.slip_number,
     date: epochToDay(vendorRow.batch_created_at) || epochToDay(Date.now()),
     generated_by: vendorRow.created_by_name || "—",
     vendor_name: vendorRow.vendor_name,
     pos: Array.from(poMap.values()),
-    grand_total: Math.round(total * 100) / 100,
+    subtotal,
+    gst_percent: gstPercent,
+    gst_amount: gstAmount,
+    grand_total: Math.round((subtotal + gstAmount) * 100) / 100,
   };
 }
 
@@ -502,7 +564,9 @@ export function renderSlipJpeg(data: SlipData): Buffer {
   // Measure required height first.
   let bodyRows = 0;
   for (const po of data.pos) bodyRows += 1 /*po head*/ + 1 /*col head*/ + po.items.length + 0.5;
-  const H = Math.min(800, Math.max(360, Math.round(160 + bodyRows * rowH + 90)));
+  const showGst = (data.gst_amount || 0) > 0;
+  const totalsRows = showGst ? 2 : 0; // Subtotal + GST rows above Grand Total
+  const H = Math.min(900, Math.max(360, Math.round(160 + bodyRows * rowH + totalsRows * rowH + 90)));
 
   const canvas = createCanvas(W, H);
   const ctx = canvas.getContext("2d");
@@ -579,13 +643,22 @@ export function renderSlipJpeg(data: SlipData): Buffer {
     y += 6;
   }
 
-  // Grand total
+  // Totals block. Subtotal + GST rows only when this vendor has GST; Grand Total
+  // always. Old (pre-R27.33) slips have gst_amount 0 and render as before.
   ctx.strokeStyle = "#0b3d2e";
   ctx.beginPath(); ctx.moveTo(padX, y); ctx.lineTo(W - padX, y); ctx.stroke();
-  y += 22;
+  y += 20;
+  ctx.textAlign = "right";
+  if (showGst) {
+    ctx.fillStyle = "#333333";
+    ctx.font = "13px sans-serif";
+    ctx.fillText(`Subtotal: ${formatINR(data.subtotal)}`, colAmt, y);
+    y += rowH;
+    ctx.fillText(`GST @ ${formatGstPct(data.gst_percent)}%: ${formatINR(data.gst_amount)}`, colAmt, y);
+    y += rowH + 2;
+  }
   ctx.fillStyle = "#000000";
   ctx.font = "bold 15px sans-serif";
-  ctx.textAlign = "right";
   ctx.fillText(`Grand Total: ${formatINR(data.grand_total)}`, colAmt, y);
   ctx.textAlign = "left";
 
@@ -700,7 +773,7 @@ export function buildBatchSlipZip(db: Database, batchId: number): { slip_number:
 // and exercised directly by the tests.
 export function generateBatchWithSlips(
   db: Database,
-  input: { notes?: string; vendors: GenerateVendorInput[] },
+  input: { notes?: string; gst_default_percent?: number; vendors: GenerateVendorInput[] },
   actor: Actor,
 ): { batch: GeneratedBatch; files: Array<{ name: string; data: Buffer }>; zip: Buffer } {
   const batch = generateBatch(db, input, actor);

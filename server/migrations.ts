@@ -4039,3 +4039,55 @@ export function runR27_32Migrations() {
     `CREATE INDEX IF NOT EXISTS idx_payment_batch_vendors_vendor ON payment_batch_vendors(vendor_name)`);
   console.log("[migrations] R27.32: complete");
 }
+
+// R27.33 — Item edit + per-vendor GST in Process Payment. Additive only:
+// GST columns on the batch/vendor snapshot, item override provenance columns,
+// and a soft-delete marker on po_items for the "update PO too" removal path.
+// Each ALTER is wrapped; duplicate-column re-runs are no-ops.
+export function runR27_33Migrations() {
+  console.log("[migrations] R27.33: start");
+  const run = (label: string, sql: string) => {
+    try { sqlite.exec(sql); console.log(`[migrations] R27.33: ${label} ok`); }
+    catch (e: any) {
+      const msg = String(e?.message || e);
+      if (/already exists|duplicate column/i.test(msg)) console.log(`[migrations] R27.33: ${label} skip (exists)`);
+      else console.log(`[migrations] R27.33: ${label} skip (${msg})`);
+    }
+  };
+  run("payment_batches.gst_default_percent",
+    `ALTER TABLE payment_batches ADD COLUMN gst_default_percent REAL DEFAULT 18`);
+  run("payment_batch_vendors.gst_percent",
+    `ALTER TABLE payment_batch_vendors ADD COLUMN gst_percent REAL DEFAULT 18`);
+  run("payment_batch_vendors.subtotal",
+    `ALTER TABLE payment_batch_vendors ADD COLUMN subtotal REAL DEFAULT 0`);
+  run("payment_batch_vendors.gst_amount",
+    `ALTER TABLE payment_batch_vendors ADD COLUMN gst_amount REAL DEFAULT 0`);
+  run("payment_batch_vendors.total_with_gst",
+    `ALTER TABLE payment_batch_vendors ADD COLUMN total_with_gst REAL DEFAULT 0`);
+  run("payment_batch_items.override_source",
+    `ALTER TABLE payment_batch_items ADD COLUMN override_source TEXT DEFAULT 'original'`);
+  run("payment_batch_items.original_qty",
+    `ALTER TABLE payment_batch_items ADD COLUMN original_qty REAL`);
+  // Soft-delete marker for the "Update PO too" removal path (deviation from the
+  // 7 spec columns): lets us hide items from PO aggregation without a hard delete.
+  run("po_items.deleted_at",
+    `ALTER TABLE po_items ADD COLUMN deleted_at INTEGER`);
+
+  // Verify the additive columns actually landed (ALTER failures are swallowed
+  // above, so a typo would otherwise be silent).
+  const verify = (table: string, expected: string[]) => {
+    try {
+      const cols = (sqlite.prepare(`PRAGMA table_info(${table})`).all() as any[]).map(r => r.name);
+      const missing = expected.filter(c => !cols.includes(c));
+      if (missing.length) console.log(`[migrations] R27.33: verify ${table} MISSING ${missing.join(",")}`);
+      else console.log(`[migrations] R27.33: verify ${table} ok (${expected.join(",")})`);
+    } catch (e: any) {
+      console.log(`[migrations] R27.33: verify ${table} skip (${String(e?.message || e)})`);
+    }
+  };
+  verify("payment_batches", ["gst_default_percent"]);
+  verify("payment_batch_vendors", ["gst_percent", "subtotal", "gst_amount", "total_with_gst"]);
+  verify("payment_batch_items", ["override_source", "original_qty"]);
+  verify("po_items", ["deleted_at"]);
+  console.log("[migrations] R27.33: complete");
+}

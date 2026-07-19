@@ -17,6 +17,7 @@ import { useToast } from "@/hooks/use-toast";
 import { apiUrl } from "@/lib/queryClient";
 import {
   RefreshCw, ChevronLeft, FileArchive, Download, Check, Ban, Loader2, Search,
+  Trash2, Plus, RotateCcw,
 } from "lucide-react";
 
 const PAYMENT_ROLES = ["admin", "procurement", "finance", "data_team"];
@@ -48,9 +49,25 @@ interface AggVendor {
 }
 // Editable working copy: per item we carry a mutable rate and a checked flag
 // (item-level selection; only checked items are sent to /generate).
-interface EditItem extends AggItem { rate: number; checked: boolean; }
-interface EditPo { po_id: number; po_number: string; items: EditItem[]; }
-interface EditVendor { vendor_name: string; already_processed: boolean; last_slip_number: string | null; last_batch_date: string | null; pos: EditPo[]; }
+// R27.33 adds qty editing, deletion, custom items and per-vendor GST.
+type OverrideSource = "original" | "qty_modified" | "manually_added" | "removed";
+type PoScope = "slip_only" | "update_po";
+const GST_OPTIONS = [0, 5, 12, 18, 28]; // "Custom…" handled separately
+interface EditItem extends AggItem {
+  rate: number;
+  checked: boolean;
+  originalQty: number;         // snapshot for the "modified" indicator
+  overrideSource: OverrideSource;
+}
+interface EditPo { po_id: number; po_number: string; items: EditItem[]; scope: PoScope; }
+interface EditVendor {
+  vendor_name: string;
+  already_processed: boolean;
+  last_slip_number: string | null;
+  last_batch_date: string | null;
+  pos: EditPo[];
+  gstPercent: number;          // R27.33 per-vendor GST %, default 18
+}
 
 interface BatchVendorRow {
   id: number;
@@ -169,6 +186,9 @@ function ProcessVendorsTab({ onGenerated }: { onGenerated: () => void }) {
   const [notes, setNotes] = useState("");
   const [aggregating, setAggregating] = useState(false);
   const [generating, setGenerating] = useState(false);
+  // R27.33 — "+ Add Custom Item" modal (scoped to the vendor block it was opened from).
+  const [customModal, setCustomModal] = useState<{ vi: number } | null>(null);
+  const [customForm, setCustomForm] = useState({ poId: "", itemName: "", qty: "1", rate: "0" });
 
   useEffect(() => {
     (async () => {
@@ -237,10 +257,15 @@ function ProcessVendorsTab({ onGenerated }: { onGenerated: () => void }) {
         already_processed: v.already_processed,
         last_slip_number: v.last_slip_number,
         last_batch_date: v.last_batch_date,
+        gstPercent: 18,
         pos: v.pos.map((po) => ({
           po_id: po.po_id,
           po_number: po.po_number,
-          items: po.items.map((it) => ({ ...it, rate: it.rate_default, checked: true })),
+          scope: "slip_only" as PoScope,
+          items: po.items.map((it) => ({
+            ...it, rate: it.rate_default, checked: true,
+            originalQty: it.qty, overrideSource: "original" as OverrideSource,
+          })),
         })),
       }));
       if (edit.length === 0) {
@@ -269,6 +294,70 @@ function ProcessVendorsTab({ onGenerated }: { onGenerated: () => void }) {
     mutateVendors((next) => { next[vi].pos[pi].items[ii].rate = rate; });
   }
 
+  // R27.33 — inline qty editing. A qty that differs from the original snapshot flags
+  // the row as "qty_modified"; reverting to the original clears the flag. Manually
+  // added rows keep their "manually_added" source regardless of qty.
+  function setQty(vi: number, pi: number, ii: number, qty: number) {
+    mutateVendors((next) => {
+      const it = next[vi].pos[pi].items[ii];
+      it.qty = qty;
+      if (it.overrideSource === "manually_added") return;
+      it.overrideSource = qty !== it.originalQty ? "qty_modified" : "original";
+    });
+  }
+
+  // R27.33 — delete: flag as "removed" (strikethrough + Undo). Manually-added rows
+  // are dropped outright since there is nothing to restore them from.
+  function removeItem(vi: number, pi: number, ii: number) {
+    mutateVendors((next) => {
+      const items = next[vi].pos[pi].items;
+      if (items[ii].overrideSource === "manually_added") items.splice(ii, 1);
+      else items[ii].overrideSource = "removed";
+    });
+  }
+  function undoRemove(vi: number, pi: number, ii: number) {
+    mutateVendors((next) => {
+      const it = next[vi].pos[pi].items[ii];
+      it.overrideSource = it.qty !== it.originalQty ? "qty_modified" : "original";
+    });
+  }
+
+  // R27.33 — per-PO scope. Flipping to "update_po" requires an explicit confirm since
+  // it mutates the underlying Purchase Order.
+  function setPoScope(vi: number, pi: number, scope: PoScope) {
+    if (scope === "update_po") {
+      const ok = window.confirm(
+        "This will modify the original Purchase Order and may affect quotations, deviations, and downstream reports. Continue?",
+      );
+      if (!ok) return;
+    }
+    mutateVendors((next) => { next[vi].pos[pi].scope = scope; });
+  }
+
+  function setVendorGst(vi: number, pct: number) {
+    mutateVendors((next) => { next[vi].gstPercent = Number.isFinite(pct) ? pct : 0; });
+  }
+
+  function addCustomItem() {
+    if (!customModal) return;
+    const { vi } = customModal;
+    const po = editVendors[vi]?.pos.find((p) => String(p.po_id) === customForm.poId);
+    if (!po) { toast({ title: "Pick a PO", description: "Select a PO for the custom item.", variant: "destructive" }); return; }
+    const name = customForm.itemName.trim();
+    if (!name) { toast({ title: "Item name required", variant: "destructive" }); return; }
+    const qty = Number(customForm.qty) || 0;
+    const rate = Number(customForm.rate) || 0;
+    mutateVendors((next) => {
+      const target = next[vi].pos.find((p) => p.po_id === po.po_id)!;
+      target.items.push({
+        po_item_id: null, item_name: name, qty, rate_default: rate, amount: Math.round(qty * rate * 100) / 100,
+        rate, checked: true, originalQty: qty, overrideSource: "manually_added",
+      });
+    });
+    setCustomModal(null);
+    setCustomForm({ poId: "", itemName: "", qty: "1", rate: "0" });
+  }
+
   // item-level toggle.
   function toggleItem(vi: number, pi: number, ii: number) {
     mutateVendors((next) => {
@@ -281,43 +370,59 @@ function ProcessVendorsTab({ onGenerated }: { onGenerated: () => void }) {
   // otherwise check all (so a partial/none state resolves to fully-checked).
   function togglePo(vi: number, pi: number) {
     mutateVendors((next) => {
-      const items = next[vi].pos[pi].items;
+      const items = next[vi].pos[pi].items.filter((i) => i.overrideSource !== "removed");
       const allOn = items.length > 0 && items.every((i) => i.checked);
       items.forEach((i) => { i.checked = !allOn; });
     });
   }
 
-  const vendorTotal = (v: EditVendor) =>
-    v.pos.reduce((s, p) => s + p.items.reduce((ss, i) => ss + (i.checked ? (Number(i.qty) || 0) * (Number(i.rate) || 0) : 0), 0), 0);
+  // Only checked, non-removed items contribute to a vendor subtotal.
+  const isPayable = (i: EditItem) => i.checked && i.overrideSource !== "removed";
+  const vendorSubtotal = (v: EditVendor) =>
+    v.pos.reduce((s, p) => s + p.items.reduce((ss, i) => ss + (isPayable(i) ? (Number(i.qty) || 0) * (Number(i.rate) || 0) : 0), 0), 0);
+  const vendorGstAmount = (v: EditVendor) => Math.round(vendorSubtotal(v) * ((Number(v.gstPercent) || 0) / 100) * 100) / 100;
+  const vendorTotal = (v: EditVendor) => vendorSubtotal(v) + vendorGstAmount(v);
   const grandTotal = editVendors.reduce((s, v) => s + vendorTotal(v), 0);
   const checkedItemCount = editVendors.reduce(
-    (s, v) => s + v.pos.reduce((ss, p) => ss + p.items.filter((i) => i.checked).length, 0), 0);
+    (s, v) => s + v.pos.reduce((ss, p) => ss + p.items.filter(isPayable).length, 0), 0);
 
   async function generate() {
     if (!token) return;
     setGenerating(true);
     try {
-      // only checked items are sent; vendors left with no checked items drop out.
+      // only checked items are sent; vendors left with no payable items drop out.
+      // R27.33 — carry qty/override provenance + per-PO scope + per-vendor GST. A removed
+      // item is sent ONLY when its PO scope is "update_po" (so the backend can soft-delete
+      // the po_item); slip-only removals simply never leave the browser.
       const vendors = editVendors.map((v) => ({
         vendor_name: v.vendor_name,
+        gst_percent: Number(v.gstPercent) || 0,
         items: v.pos.flatMap((p) =>
-          p.items.filter((i) => i.checked).map((i) => {
-            const qty = Number(i.qty) || 0;
-            const rate = Number(i.rate) || 0;
-            return {
-              po_id: p.po_id,
-              po_item_id: i.po_item_id,
-              item_name: i.item_name,
-              qty,
-              rate_locked: rate,
-              amount_locked: Math.round(qty * rate * 100) / 100,
-            };
-          }),
+          p.items
+            .filter((i) => {
+              if (i.overrideSource === "removed") return p.scope === "update_po";
+              return i.checked;
+            })
+            .map((i) => {
+              const qty = Number(i.qty) || 0;
+              const rate = Number(i.rate) || 0;
+              return {
+                po_id: p.po_id,
+                po_item_id: i.po_item_id,
+                item_name: i.item_name,
+                qty,
+                rate_locked: rate,
+                amount_locked: Math.round(qty * rate * 100) / 100,
+                override_source: i.overrideSource,
+                original_qty: i.originalQty,
+                scope: p.scope,
+              };
+            }),
         ),
       })).filter((v) => v.items.length > 0);
       const r = await teamFetch(token, `/api/payments/generate`, {
         method: "POST",
-        body: JSON.stringify({ vendors, notes: notes || undefined }),
+        body: JSON.stringify({ vendors, notes: notes || undefined, gst_default_percent: 18 }),
       });
       if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error || `HTTP ${r.status}`);
       const slip = r.headers.get("X-Slip-Number") || "batch";
@@ -360,7 +465,7 @@ function ProcessVendorsTab({ onGenerated }: { onGenerated: () => void }) {
         <div className="space-y-4">
           {editVendors.map((v, vi) => (
             <div key={v.vendor_name} className="bg-card border rounded-xl overflow-hidden" data-testid={`card-vendor-${vendorSlug(v.vendor_name)}`}>
-              <div className="px-4 py-3 border-b bg-muted/40 flex items-center justify-between">
+              <div className="px-4 py-3 border-b bg-muted/40 flex items-center justify-between gap-3 flex-wrap">
                 <div className="flex items-center gap-2">
                   <span className="font-bold text-slate-900">{v.vendor_name}</span>
                   {v.already_processed && (
@@ -369,68 +474,241 @@ function ProcessVendorsTab({ onGenerated }: { onGenerated: () => void }) {
                     </span>
                   )}
                 </div>
-                <div className="text-sm">Vendor total: <strong>{inr(vendorTotal(v))}</strong></div>
+                <div className="flex items-center gap-4">
+                  {/* R27.33 — per-vendor GST selector */}
+                  <label className="flex items-center gap-1.5 text-xs font-semibold text-slate-600">
+                    GST
+                    {GST_OPTIONS.includes(v.gstPercent) ? (
+                      <select
+                        value={v.gstPercent}
+                        onChange={(e) => {
+                          if (e.target.value === "custom") setVendorGst(vi, NaN); // force custom input
+                          else setVendorGst(vi, Number(e.target.value));
+                        }}
+                        className="border rounded-lg px-2 py-1 bg-background text-right"
+                        data-testid={`select-vendor-gst-${vendorSlug(v.vendor_name)}`}
+                      >
+                        {GST_OPTIONS.map((g) => <option key={g} value={g}>{g}%</option>)}
+                        <option value="custom">Custom…</option>
+                      </select>
+                    ) : (
+                      <input
+                        type="number" step="0.01" min="0" autoFocus
+                        value={Number.isFinite(v.gstPercent) ? v.gstPercent : ""}
+                        onChange={(e) => setVendorGst(vi, parseFloat(e.target.value))}
+                        onBlur={(e) => { if (e.target.value === "") setVendorGst(vi, 0); }}
+                        className="w-20 border rounded-lg px-2 py-1 bg-background text-right"
+                        placeholder="%"
+                        data-testid={`input-vendor-gst-${vendorSlug(v.vendor_name)}`}
+                      />
+                    )}
+                  </label>
+                  {/* R27.33 — live vendor totals */}
+                  <div className="text-sm text-right" data-testid={`text-vendor-totals-${vendorSlug(v.vendor_name)}`}>
+                    <div className="text-xs text-slate-500">Subtotal {inr(vendorSubtotal(v))}{(Number(v.gstPercent) || 0) > 0 ? ` · GST ${inr(vendorGstAmount(v))}` : ""}</div>
+                    <div>Vendor total: <strong>{inr(vendorTotal(v))}</strong></div>
+                  </div>
+                </div>
               </div>
               {v.pos.map((po, pi) => {
-                const poAllChecked = po.items.length > 0 && po.items.every((i) => i.checked);
-                const poSomeChecked = po.items.some((i) => i.checked);
+                const poAllChecked = po.items.filter((i) => i.overrideSource !== "removed").length > 0
+                  && po.items.every((i) => i.overrideSource === "removed" || i.checked);
+                const poSomeChecked = po.items.some((i) => i.overrideSource !== "removed" && i.checked);
                 return (
                 <div key={po.po_id} className="border-b last:border-b-0">
-                  <label className="px-4 pt-3 pb-1 flex items-center gap-2 text-xs font-bold uppercase tracking-wider text-indigo-600 cursor-pointer">
-                    <input
-                      type="checkbox"
-                      checked={poAllChecked}
-                      ref={(el) => { if (el) el.indeterminate = poSomeChecked && !poAllChecked; }}
-                      onChange={() => togglePo(vi, pi)}
-                      data-testid={`checkbox-po-${po.po_id}`}
-                    />
-                    {po.po_number}
-                  </label>
+                  <div className="px-4 pt-3 pb-1 flex items-center justify-between gap-2">
+                    <label className="flex items-center gap-2 text-xs font-bold uppercase tracking-wider text-indigo-600 cursor-pointer">
+                      <input
+                        type="checkbox"
+                        checked={poAllChecked}
+                        ref={(el) => { if (el) el.indeterminate = poSomeChecked && !poAllChecked; }}
+                        onChange={() => togglePo(vi, pi)}
+                        data-testid={`checkbox-po-${po.po_id}`}
+                      />
+                      {po.po_number}
+                    </label>
+                    {/* R27.33 — per-PO scope toggle. Default "Only this slip" (safe). */}
+                    <label className="flex items-center gap-1.5 text-[11px] font-medium text-slate-500 normal-case">
+                      Apply to:
+                      <select
+                        value={po.scope}
+                        onChange={(e) => setPoScope(vi, pi, e.target.value as PoScope)}
+                        className="border rounded-lg px-2 py-1 bg-background"
+                        data-testid={`select-po-scope-${po.po_id}`}
+                      >
+                        <option value="slip_only">Only this slip</option>
+                        <option value="update_po">Update PO too</option>
+                      </select>
+                    </label>
+                  </div>
                   <table className="w-full text-sm">
                     <thead>
                       <tr className="text-left text-xs text-muted-foreground">
                         <th className="px-4 py-2 font-semibold w-8"></th>
                         <th className="px-4 py-2 font-semibold">Item</th>
-                        <th className="px-4 py-2 font-semibold text-right w-20">Qty</th>
+                        <th className="px-4 py-2 font-semibold text-right w-24">Qty</th>
                         <th className="px-4 py-2 font-semibold text-right w-40">Rate (₹)</th>
                         <th className="px-4 py-2 font-semibold text-right w-40">Amount</th>
+                        <th className="px-4 py-2 font-semibold text-right w-10"></th>
                       </tr>
                     </thead>
                     <tbody>
-                      {po.items.map((it, ii) => (
-                        <tr key={ii} className={"border-t " + (it.checked ? "" : "opacity-50")}>
+                      {po.items.map((it, ii) => {
+                        const removed = it.overrideSource === "removed";
+                        const modified = it.overrideSource === "qty_modified";
+                        const added = it.overrideSource === "manually_added";
+                        const rowBorder = removed ? "border-l-4 border-l-slate-300"
+                          : modified ? "border-l-4 border-l-yellow-400"
+                          : added ? "border-l-4 border-l-green-500" : "";
+                        return (
+                        <tr key={ii} className={"border-t " + rowBorder + " " + (removed ? "bg-slate-50 text-slate-400" : it.checked ? "" : "opacity-50")}>
                           <td className="px-4 py-2">
                             <input
                               type="checkbox"
                               checked={it.checked}
+                              disabled={removed}
                               onChange={() => toggleItem(vi, pi, ii)}
                               data-testid={`checkbox-item-${po.po_id}-${it.po_item_id ?? `${pi}-${ii}`}`}
                             />
                           </td>
-                          <td className="px-4 py-2">{it.item_name}</td>
-                          <td className="px-4 py-2 text-right">{it.qty}</td>
-                          <td className="px-4 py-2 text-right">
-                            <input
-                              type="number"
-                              step="0.01"
-                              min="0"
-                              value={it.rate}
-                              onChange={(e) => setRate(vi, pi, ii, parseFloat(e.target.value) || 0)}
-                              className="w-32 border rounded-lg px-2 py-1 bg-background text-right"
-                              data-testid={`input-vendor-rate-${vendorSlug(v.vendor_name)}-${it.po_item_id ?? `${pi}-${ii}`}`}
-                            />
+                          <td className="px-4 py-2">
+                            <span className={removed ? "line-through" : ""}>{it.item_name}</span>
+                            {modified && <span className="ml-2 text-[9px] uppercase font-bold px-1.5 py-0.5 rounded bg-yellow-400/20 text-yellow-700" data-testid="badge-item-modified">modified</span>}
+                            {added && <span className="ml-2 text-[9px] uppercase font-bold px-1.5 py-0.5 rounded bg-green-500/20 text-green-700" data-testid="badge-item-added">added</span>}
+                            {removed && <span className="ml-2 text-[9px] uppercase font-bold px-1.5 py-0.5 rounded bg-slate-400/20 text-slate-500" data-testid="badge-item-removed">removed</span>}
                           </td>
-                          <td className="px-4 py-2 text-right font-medium">{inr((Number(it.qty) || 0) * (Number(it.rate) || 0))}</td>
+                          <td className="px-4 py-2 text-right">
+                            {removed ? (
+                              <span className="line-through">{it.qty}</span>
+                            ) : (
+                              <input
+                                type="number" step="1" min="1"
+                                value={it.qty}
+                                onChange={(e) => setQty(vi, pi, ii, parseFloat(e.target.value) || 0)}
+                                className="w-20 border rounded-lg px-2 py-1 bg-background text-right"
+                                data-testid={`input-vendor-qty-${vendorSlug(v.vendor_name)}-${it.po_item_id ?? `${pi}-${ii}`}`}
+                              />
+                            )}
+                          </td>
+                          <td className="px-4 py-2 text-right">
+                            {removed ? (
+                              <span className="line-through">{inr(it.rate)}</span>
+                            ) : (
+                              <input
+                                type="number" step="0.01" min="0"
+                                value={it.rate}
+                                onChange={(e) => setRate(vi, pi, ii, parseFloat(e.target.value) || 0)}
+                                className="w-32 border rounded-lg px-2 py-1 bg-background text-right"
+                                data-testid={`input-vendor-rate-${vendorSlug(v.vendor_name)}-${it.po_item_id ?? `${pi}-${ii}`}`}
+                              />
+                            )}
+                          </td>
+                          <td className={"px-4 py-2 text-right font-medium " + (removed ? "line-through" : "")}>{inr((Number(it.qty) || 0) * (Number(it.rate) || 0))}</td>
+                          <td className="px-4 py-2 text-right">
+                            {removed ? (
+                              <button
+                                onClick={() => undoRemove(vi, pi, ii)}
+                                className="inline-flex items-center gap-1 text-[11px] font-semibold text-indigo-600 hover:text-indigo-800"
+                                data-testid={`button-undo-item-${po.po_id}-${it.po_item_id ?? `${pi}-${ii}`}`}
+                              >
+                                <RotateCcw className="w-3.5 h-3.5" /> Undo
+                              </button>
+                            ) : (
+                              <button
+                                onClick={() => removeItem(vi, pi, ii)}
+                                className="text-slate-400 hover:text-rose-600"
+                                title="Remove from slip"
+                                data-testid={`button-remove-item-${po.po_id}-${it.po_item_id ?? `${pi}-${ii}`}`}
+                              >
+                                <Trash2 size={14} />
+                              </button>
+                            )}
+                          </td>
                         </tr>
-                      ))}
+                        );
+                      })}
                     </tbody>
                   </table>
                 </div>
                 );
               })}
+              {/* R27.33 — add an ad-hoc line item to this vendor's slip */}
+              <div className="px-4 py-3 border-t">
+                <button
+                  onClick={() => { setCustomForm({ poId: String(v.pos[0]?.po_id ?? ""), itemName: "", qty: "1", rate: "0" }); setCustomModal({ vi }); }}
+                  className="inline-flex items-center gap-1.5 text-sm font-semibold text-slate-600 border border-dashed rounded-lg px-3 py-1.5 hover:bg-muted"
+                  data-testid={`button-add-custom-item-${vendorSlug(v.vendor_name)}`}
+                >
+                  <Plus className="w-4 h-4" /> Add Custom Item
+                </button>
+              </div>
             </div>
           ))}
         </div>
+
+        {/* R27.33 — Add Custom Item modal */}
+        {customModal && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4" data-testid="modal-add-custom-item">
+            <div className="bg-card border rounded-xl w-full max-w-md p-5 space-y-3">
+              <div className="flex items-center justify-between">
+                <h3 className="font-bold text-slate-900">Add Custom Item</h3>
+                <span className="text-xs text-slate-500">{editVendors[customModal.vi]?.vendor_name}</span>
+              </div>
+              <label className="block text-sm">
+                <div className="text-xs font-bold uppercase tracking-wider mb-1 text-muted-foreground">PO #</div>
+                <select
+                  value={customForm.poId}
+                  onChange={(e) => setCustomForm((f) => ({ ...f, poId: e.target.value }))}
+                  className="w-full border rounded-lg px-3 py-2 bg-background"
+                  data-testid="select-custom-po"
+                >
+                  {editVendors[customModal.vi]?.pos.map((p) => <option key={p.po_id} value={p.po_id}>{p.po_number}</option>)}
+                </select>
+              </label>
+              <label className="block text-sm">
+                <div className="text-xs font-bold uppercase tracking-wider mb-1 text-muted-foreground">Item name</div>
+                <input
+                  type="text" value={customForm.itemName}
+                  onChange={(e) => setCustomForm((f) => ({ ...f, itemName: e.target.value }))}
+                  className="w-full border rounded-lg px-3 py-2 bg-background"
+                  data-testid="input-custom-item-name"
+                />
+              </label>
+              <div className="flex gap-3">
+                <label className="block text-sm flex-1">
+                  <div className="text-xs font-bold uppercase tracking-wider mb-1 text-muted-foreground">Qty</div>
+                  <input
+                    type="number" step="1" min="1" value={customForm.qty}
+                    onChange={(e) => setCustomForm((f) => ({ ...f, qty: e.target.value }))}
+                    className="w-full border rounded-lg px-3 py-2 bg-background text-right"
+                    data-testid="input-custom-item-qty"
+                  />
+                </label>
+                <label className="block text-sm flex-1">
+                  <div className="text-xs font-bold uppercase tracking-wider mb-1 text-muted-foreground">Rate (₹)</div>
+                  <input
+                    type="number" step="0.01" min="0" value={customForm.rate}
+                    onChange={(e) => setCustomForm((f) => ({ ...f, rate: e.target.value }))}
+                    className="w-full border rounded-lg px-3 py-2 bg-background text-right"
+                    data-testid="input-custom-item-rate"
+                  />
+                </label>
+              </div>
+              <div className="flex items-center justify-end gap-2 pt-1">
+                <button
+                  onClick={() => setCustomModal(null)}
+                  className="px-4 py-2 border rounded-lg font-semibold text-sm hover:bg-muted"
+                  data-testid="button-custom-cancel"
+                >Cancel</button>
+                <button
+                  onClick={addCustomItem}
+                  className="px-4 py-2 bg-indigo-600 text-white rounded-lg font-semibold text-sm"
+                  data-testid="button-custom-add"
+                >Add Item</button>
+              </div>
+            </div>
+          </div>
+        )}
 
         <div className="mt-4">
           <label className="block text-sm">
