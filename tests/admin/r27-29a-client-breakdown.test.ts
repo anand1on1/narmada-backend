@@ -285,6 +285,10 @@ describe("R27.29a — WhatsApp payloads unchanged + digest log", () => {
     vi.resetModules();
 
     const rep = seedRep({ phone: "+919222222222", email: "log@nm.test" });
+    // R27.34a — the admin digest no longer falls back to sales@; it only sends when
+    // ADMIN_DIGEST_EMAIL names a real admin address. Set one so this still exercises
+    // the admin email leg. (Read at module load, hence after resetModules above.)
+    process.env.ADMIN_DIGEST_EMAIL = "admin@nm.test";
     const { runSalesDigest } = await import("../../server/sales-digest");
     const summary = await runSalesDigest({ year: YEAR, month: MONTH, now: NOW });
     const logs = getDigestLog(summary.digest_date) as any[];
@@ -295,7 +299,9 @@ describe("R27.29a — WhatsApp payloads unchanged + digest log", () => {
     // admin gets its own whatsapp + email rows
     expect(logs.some((r) => r.recipient_type === "admin" && r.channel === "whatsapp")).toBe(true);
     expect(logs.some((r) => r.recipient_type === "admin" && r.channel === "email")).toBe(true);
+    expect(logs.some((r) => /sales@narmadamobility/i.test(String(r.recipient_email || "")))).toBe(false);
 
+    delete process.env.ADMIN_DIGEST_EMAIL;
     vi.doUnmock("../../server/whatsapp");
     vi.doUnmock("../../server/notifications");
     vi.resetModules();

@@ -229,13 +229,15 @@ app.use((req, res, next) => {
     console.log("[boot] step: post-R27.29 sales-digest-log table");
     runR27_30Migrations();
     console.log("[boot] step: post-R27.30 admin-otp tables");
-    const { runR27_32Migrations, runR27_33Migrations, runR27_33aMigrations } = await import("./migrations");
+    const { runR27_32Migrations, runR27_33Migrations, runR27_33aMigrations, runR27_34aMigrations } = await import("./migrations");
     runR27_32Migrations();
     console.log("[boot] step: post-R27.32 payment tables");
     runR27_33Migrations();
     console.log("[boot] step: post-R27.33 item-edit + per-vendor GST columns");
     runR27_33aMigrations();
     console.log("[boot] step: post-R27.33a GST inclusive/exclusive mode columns");
+    runR27_34aMigrations();
+    console.log("[boot] step: post-R27.34a store transfer scoping + consignment receipt columns");
     // R27.32 — Process Payment authorizes admin/procurement/finance. finance was not
     // in the admin-role whitelist before this release; it is added in VALID_ROLES.
     try {
@@ -373,10 +375,13 @@ app.use((req, res, next) => {
   // ---- PO reminder cron (daily check for POs > 3 days pending) ----
   const PO_REMINDER_INTERVAL_MS = 24 * 60 * 60 * 1000; // 24 hours
   const PO_STALE_DAYS = 3;
-  const ADMIN_REMINDER_EMAIL = process.env.ADMIN_REMINDER_EMAIL || process.env.SALES_EMAIL || "sales@Narmadamobility.com";
+  // R27.34a: disabled per user request — these ops reminders defaulted to sales@. No
+  // fallback now: without an explicit ADMIN_REMINDER_EMAIL the cron sends nothing.
+  const ADMIN_REMINDER_EMAIL = process.env.ADMIN_REMINDER_EMAIL || "";
 
   async function runPoReminderCheck() {
     try {
+      if (!ADMIN_REMINDER_EMAIL) { log("[po-reminder] No ADMIN_REMINDER_EMAIL configured — skipping"); return; }
       const { getStalePurchaseOrders, incrementPoReminder, getCustomer } = await import("./storage-v2");
       const { sendGenericEmail } = await import("./notifications");
       const stale = await getStalePurchaseOrders(PO_STALE_DAYS);
@@ -418,6 +423,7 @@ ${rows.join("\n")}
   const DELHI_STALE_DAYS = 2;
   async function runDelhiReminderCheck() {
     try {
+      if (!ADMIN_REMINDER_EMAIL) { log("[delhi-reminder] No ADMIN_REMINDER_EMAIL configured — skipping"); return; }
       const { getStaleDelhiPickups } = await import("./storage-v2");
       const { sendGenericEmail } = await import("./notifications");
       const stale = await getStaleDelhiPickups(DELHI_STALE_DAYS);

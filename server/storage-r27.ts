@@ -230,25 +230,38 @@ export function deviationSummaryForPOs(poIds: number[]): Record<number, { count:
 // R27.2-2/3 — Branch transfers + stock (Delhi -> Patna), store + dispatch flows
 // ===========================================================================
 
-export function createBranchTransfer(opts: { poId?: number; consignmentId?: number; notes?: string; fromBranch?: string; toBranch?: string }) {
+export function createBranchTransfer(opts: { poId?: number; consignmentId?: number; notes?: string; fromBranch?: string; toBranch?: string; isInternal?: boolean }) {
   // R27.5 #5 — also persist normalized lowercase branch keys so the store query can
   // match case-insensitively regardless of how the source branch name was cased.
   const from = opts.fromBranch || "Delhi";
   const to = opts.toBranch || "Patna";
+  // R27.34a Bug 1A — record whether this is a genuine inter-branch stock movement or a
+  // customer-bound dispatch. Omitted stays NULL so readers apply the legacy heuristic.
+  const isInternal = opts.isInternal === undefined ? null : (opts.isInternal ? 1 : 0);
   const info = sqlite.prepare(
-    `INSERT INTO branch_transfers (po_id, consignment_id, from_branch, to_branch, from_branch_key, to_branch_key, dispatched_at, status, notes, created_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, 'in_transit', ?, ?)`,
+    `INSERT INTO branch_transfers (po_id, consignment_id, from_branch, to_branch, from_branch_key, to_branch_key, dispatched_at, status, notes, created_at, is_internal)
+     VALUES (?, ?, ?, ?, ?, ?, ?, 'in_transit', ?, ?, ?)`,
   ).run(
     opts.poId ?? null, opts.consignmentId ?? null, from, to,
     from.toLowerCase().trim(), to.toLowerCase().trim(),
-    nowIso(), opts.notes ?? null, nowIso(),
+    nowIso(), opts.notes ?? null, nowIso(), isInternal,
   );
   return Number(info.lastInsertRowid);
 }
 
-export function listTransfers(opts: { status?: string } = {}) {
+// R27.34a Bug 1A — `internalOnly` scopes the list to genuine inter-branch movement.
+// Off by default so the Delhi/dispatch views keep seeing everything; the Store Portal
+// opts in. NULL is_internal (legacy rows written before R27.34a and not caught by the
+// backfill) falls back to "the parent PO has no customer", the same heuristic R27.27
+// applied to consignments.
+export function listTransfers(opts: { status?: string; internalOnly?: boolean; toBranch?: string } = {}) {
   const conds: string[] = []; const params: any[] = [];
   if (opts.status) { conds.push("t.status = ?"); params.push(opts.status); }
+  if (opts.internalOnly) conds.push("(t.is_internal = 1 OR (t.is_internal IS NULL AND po.customer_id IS NULL))");
+  if (opts.toBranch) {
+    conds.push("LOWER(TRIM(COALESCE(t.to_branch_key, t.to_branch, ''))) = ?");
+    params.push(opts.toBranch.toLowerCase().trim());
+  }
   const where = conds.length ? `WHERE ${conds.join(" AND ")}` : "";
   const transfers = sqlite.prepare(
     `SELECT t.*, po.po_number AS poNumber, po.customer_id AS customerId,
@@ -305,14 +318,14 @@ export function listTransfers(opts: { status?: string } = {}) {
     // "no customer linked" guard so genuine old branch transfers still appear.
     consignmentRows = (sqlite.prepare(
       `SELECT id, docket_number, carrier, origin, destination, status,
-              dispatch_date, eta_date, bundles_count, invoice_number
+              dispatch_date, eta_date, bundles_count, invoice_number, received_at
        FROM consignments
-       WHERE LOWER(TRIM(destination)) = 'patna'
+       WHERE LOWER(TRIM(destination)) = ?
          AND LOWER(TRIM(COALESCE(status,''))) NOT IN ('received','delivered','cancelled')
          AND (inter_branch_transfer = 1
               OR (customer_id IS NULL AND (customer_name IS NULL OR TRIM(customer_name) = '')))
        ORDER BY dispatch_date DESC`,
-    ).all() as any[])
+    ).all((opts.toBranch || "patna").toLowerCase().trim()) as any[])
       .filter((c) => {
         const d = Number(c.dispatch_date);
         // dispatch_date is stored as epoch-ms in this DB; keep last 4 days.
@@ -335,7 +348,7 @@ export function listTransfers(opts: { status?: string } = {}) {
         transferInvoiceNo: invoiceNo(c.id, "consignment"),
         status: c.status || "in_transit",
         dispatched_at: c.dispatch_date ? new Date(Number(c.dispatch_date)).toISOString() : null,
-        received_at: null,
+        received_at: c.received_at || null,
         notes: c.carrier ? `Consignment via ${c.carrier}` : null,
       }));
     if (opts.status) consignmentRows = consignmentRows.filter((c) => c.status === opts.status);
@@ -754,6 +767,37 @@ export async function receiveTransfer(transferId: number, items: Array<{ part_nu
     } catch (e: any) { console.error("[r27.2] sub-PO on receive failed:", e?.message || e); }
   }
   return getTransferDetail(transferId);
+}
+
+// R27.34a Bug 1B — consignment rows surface in the store's incoming list but have no
+// parent PO, so receiveTransfer() (which is driven by po_items) can never apply to them
+// and the Store Portal offered no action at all. A consignment receipt is a bundle count
+// plus a note; there are no line items to reconcile, so no deviation/sub-PO is raised.
+export function getConsignmentReceiptDetail(consignmentId: number) {
+  return sqlite.prepare(
+    `SELECT id, docket_number, carrier, origin, destination, status, dispatch_date,
+            bundles_count, invoice_number, received_at, received_by, received_notes, received_bundles
+     FROM consignments WHERE id = ?`,
+  ).get(consignmentId) as any;
+}
+
+export function receiveConsignment(
+  consignmentId: number,
+  opts: { received_bundles?: number | null; notes?: string | null } = {},
+  receivedBy?: number,
+) {
+  const c = getConsignmentReceiptDetail(consignmentId);
+  if (!c) throw new Error("Consignment not found");
+  if (String(c.status || "").toLowerCase() === "received" || c.received_at) {
+    throw new Error("Consignment already received");
+  }
+  const bundles = opts.received_bundles == null || opts.received_bundles === ("" as any)
+    ? (c.bundles_count ?? null)
+    : Number(opts.received_bundles);
+  sqlite.prepare(
+    `UPDATE consignments SET status = 'received', received_at = ?, received_by = ?, received_notes = ?, received_bundles = ? WHERE id = ?`,
+  ).run(nowIso(), receivedBy ?? null, opts.notes ?? null, bundles, consignmentId);
+  return getConsignmentReceiptDetail(consignmentId);
 }
 
 // R27.5 #6 — single source of truth for stock changes. Adjusts branch_stock for the

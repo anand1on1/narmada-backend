@@ -3498,6 +3498,8 @@ function registerR4toR7Routes(
               const ap = r27.autoCreateProductsForPo(item.poId);
               console.log(`[R27.2] auto-product PO ${item.poId}: created=${ap.created} skipped=${ap.skipped}`);
               const existingTransfer = (r27.listTransfers() as any[]).find((t) => t.po_id === item.poId && t.status === "in_transit");
+              // R27.34a — no explicit internal/external signal on this path, so leave
+              // is_internal NULL and let the reader fall back to "parent PO has no customer".
               if (!existingTransfer) r27.createBranchTransfer({ poId: item.poId, notes: `Auto-created on Delhi dispatch of PO ${po?.poNumber || item.poId}` });
             } catch (e: any) { console.error("[R27.2] auto-product/transfer hook:", e?.message || e); }
           }
@@ -5741,6 +5743,9 @@ function registerR8Routes(
         if (!existingTransfer) {
           r27.createBranchTransfer({
             poId,
+            // R27.34a Bug 1A — persist the flag the dispatcher actually ticked. Before this
+            // it only altered the notes text, so the store could not tell the two apart.
+            isInternal: isInternalTransfer,
             notes: isInternalTransfer
               ? `Inter-branch transfer on Delhi dispatch${docketNumber ? ` (docket ${docketNumber})` : ""}`
               : `Delhi dispatch${carrier ? ` via ${carrier}` : ""}${docketNumber ? ` (docket ${docketNumber})` : ""}`,
@@ -7516,17 +7521,23 @@ function registerR8Routes(
   });
 
   // ---- R27.2-2/3 Store incharge: branch transfers + receive + stock ----
+  // R27.34a Bug 1A — the store only handles material physically arriving at Patna, so
+  // scope to internal branch movement. Without this every Delhi→customer dispatch (which
+  // also opens a branch_transfers row) showed up here with the customer's name on it.
+  const STORE_TRANSFER_SCOPE = { internalOnly: true, toBranch: "Patna" } as const;
   app.get("/api/store/transfers", requireStore, async (req, res) => {
-    try { const s = await r27(); res.json(s.listTransfers({ status: req.query.status as string | undefined })); }
+    try { const s = await r27(); res.json(s.listTransfers({ ...STORE_TRANSFER_SCOPE, status: req.query.status as string | undefined })); }
     catch (e: any) { res.status(500).json({ error: e.message }); }
   });
   // R27.7 #5 — store/dispatch transfer exports (xlsx + csv). Columns per spec:
   // Date, Client, PO No, Item, Part No, Qty, Source Branch, Dest Branch, Status,
   // Transfer Invoice No. Both store ("received" view) and dispatch ("sent" view)
   // draw from listTransfers (branch_transfers + Patna-bound consignments).
-  async function transfersAoa(req: any) {
+  // `scope` mirrors whatever filter the calling portal's list uses, so an export never
+  // contains rows the operator cannot see on screen. Dispatch ("sent") stays unscoped.
+  async function transfersAoa(req: any, scope: { internalOnly?: boolean; toBranch?: string } = {}) {
     const s = await r27();
-    const rows = s.listTransfers({ status: req.query.status as string | undefined }) as any[];
+    const rows = s.listTransfers({ ...scope, status: req.query.status as string | undefined }) as any[];
     const aoa: any[][] = [["Date", "Client Name", "PO No", "Item Name", "Part No", "Quantity", "Source Branch", "Dest Branch", "Status", "Transfer Invoice No"]];
     for (const t of rows) {
       const date = t.dispatched_at || t.received_at || t.created_at || "";
@@ -7545,8 +7556,8 @@ function registerR8Routes(
     }
     return aoa;
   }
-  app.get("/api/store/received.xlsx", requireStore, async (req: any, res) => { try { sendXlsx(res, "store-received", "Received", await transfersAoa(req)); } catch (e: any) { res.status(500).json({ error: e.message }); } });
-  app.get("/api/store/received.csv", requireStore, async (req: any, res) => { try { sendCsv(res, "store-received", await transfersAoa(req)); } catch (e: any) { res.status(500).json({ error: e.message }); } });
+  app.get("/api/store/received.xlsx", requireStore, async (req: any, res) => { try { sendXlsx(res, "store-received", "Received", await transfersAoa(req, STORE_TRANSFER_SCOPE)); } catch (e: any) { res.status(500).json({ error: e.message }); } });
+  app.get("/api/store/received.csv", requireStore, async (req: any, res) => { try { sendCsv(res, "store-received", await transfersAoa(req, STORE_TRANSFER_SCOPE)); } catch (e: any) { res.status(500).json({ error: e.message }); } });
   app.get("/api/dispatch/sent.xlsx", requireDispatch, async (req: any, res) => { try { sendXlsx(res, "dispatch-sent", "Dispatched", await transfersAoa(req)); } catch (e: any) { res.status(500).json({ error: e.message }); } });
   app.get("/api/dispatch/sent.csv", requireDispatch, async (req: any, res) => { try { sendCsv(res, "dispatch-sent", await transfersAoa(req)); } catch (e: any) { res.status(500).json({ error: e.message }); } });
 
@@ -7560,6 +7571,30 @@ function registerR8Routes(
       const items = Array.isArray(req.body?.items) ? req.body.items : [];
       if (!items.length) return res.status(400).json({ error: "items required" });
       res.json(await s.receiveTransfer(parseInt(req.params.id as string, 10), items, (req.teamUser?.id)));
+    } catch (e: any) { res.status(400).json({ error: e.message }); }
+  });
+  // R27.34a Bug 1B — receive a Patna-bound consignment. These have no parent PO, so they
+  // cannot go through /transfers/:id/receive; the store confirms bundles + an optional note.
+  app.get("/api/store/consignments/:id", requireStore, async (req, res) => {
+    try {
+      const s = await r27();
+      const d = s.getConsignmentReceiptDetail(parseInt(req.params.id as string, 10));
+      if (!d) return res.status(404).json({ error: "Not found" });
+      res.json(d);
+    } catch (e: any) { res.status(500).json({ error: e.message }); }
+  });
+  app.post("/api/store/consignments/:id/receive", requireStore, async (req: any, res) => {
+    try {
+      const s = await r27();
+      const raw = req.body?.received_bundles;
+      res.json(s.receiveConsignment(
+        parseInt(req.params.id as string, 10),
+        {
+          received_bundles: raw === undefined || raw === null || raw === "" ? null : Number(raw),
+          notes: req.body?.notes ?? null,
+        },
+        req.teamUser?.id,
+      ));
     } catch (e: any) { res.status(400).json({ error: e.message }); }
   });
   app.get("/api/store/stock", requireStore, async (req, res) => {
@@ -7656,7 +7691,9 @@ function registerR8Routes(
       // Email admin — fire-and-forget.
       (async () => {
         try {
-          const adminEmail = process.env.ADMIN_REMINDER_EMAIL || process.env.SALES_EMAIL || "sales@Narmadamobility.com";
+          // R27.34a: disabled per user request — defaulted to sales@; now opt-in only.
+          const adminEmail = process.env.ADMIN_REMINDER_EMAIL || "";
+          if (!adminEmail) return;
           const rows = `<tr><td>Invoice No</td><td>${inv.invoice_no}</td></tr>
             <tr><td>Route</td><td>${inv.source_branch || "Delhi"} → ${inv.dest_branch || "Patna"}</td></tr>
             <tr><td>Transport Vendor</td><td>${inv.transport_vendor || "—"}</td></tr>

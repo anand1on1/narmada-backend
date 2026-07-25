@@ -37,11 +37,25 @@ export function renderTemplate(template: string, vars: Record<string, string>): 
 // Session B: generic email send (used for OTP, PO reminders, customer notifications).
 // `event` is a short label recorded in the notification log so the admin viewer can tell
 // approval-welcome mails apart from OTP/PO mails. Logging is fire-and-forget — it never throws.
+// R27.34a: disabled per user request — the sales@ inbox is now human-only. This is the
+// central guard: no matter which caller or env var resolves to it, a system-generated
+// email addressed to sales@ is dropped before it reaches the transport. Customer, vendor
+// and admin recipients are unaffected; sales@ remains valid as the FROM address.
+const SALES_INBOX = "sales@narmadamobility.com";
+export function isSalesInbox(addr: string | string[] | undefined | null): boolean {
+  const list = Array.isArray(addr) ? addr : [addr || ""];
+  return list.some((a) => String(a || "").trim().toLowerCase() === SALES_INBOX);
+}
+
 export async function sendGenericEmail(opts: {
   to: string | string[]; cc?: string | string[]; subject: string; html: string; text?: string; event?: string;
 }): Promise<{ ok: boolean; via: string; error?: string }> {
   const event = opts.event || "generic";
   const recipient = Array.isArray(opts.to) ? opts.to.join(",") : opts.to;
+  if (isSalesInbox(opts.to)) {
+    console.log(`[email] R27.34a: system email to ${SALES_INBOX} disabled — skipping (subject: ${opts.subject})`);
+    return { ok: false, via: "disabled", error: "sales@ system emails disabled" };
+  }
   const logSafe = async (status: string, errorMsg: string | null) => {
     try {
       await v2.logNotification({

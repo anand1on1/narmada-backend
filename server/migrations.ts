@@ -4125,3 +4125,50 @@ export function runR27_33aMigrations() {
   verify("payment_batches", ["gst_default_mode"]);
   console.log("[migrations] R27.33a: complete");
 }
+
+export function runR27_34aMigrations() {
+  console.log("[migrations] R27.34a: start");
+  const run = (label: string, sql: string) => {
+    try { sqlite.exec(sql); console.log(`[migrations] R27.34a: ${label} ok`); }
+    catch (e: any) {
+      const msg = String(e?.message || e);
+      if (/already exists|duplicate column/i.test(msg)) console.log(`[migrations] R27.34a: ${label} skip (exists)`);
+      else console.log(`[migrations] R27.34a: ${label} skip (${msg})`);
+    }
+  };
+  // Bug 1A — branch_transfers rows are opened on EVERY Delhi dispatch, customer-bound
+  // or not, so the Store Portal saw customer consignments. NULL = legacy row of unknown
+  // origin (callers fall back to the "no customer on the parent PO" heuristic);
+  // 1 = internal Delhi→Patna stock movement; 0 = customer dispatch.
+  run("branch_transfers.is_internal",
+    `ALTER TABLE branch_transfers ADD COLUMN is_internal INTEGER`);
+  // Bug 1B — consignment rows surfaced to the Store Portal had nowhere to record a
+  // receipt, so "Mark Received" could never be offered for them.
+  run("consignments.received_at", `ALTER TABLE consignments ADD COLUMN received_at TEXT`);
+  run("consignments.received_by", `ALTER TABLE consignments ADD COLUMN received_by INTEGER`);
+  run("consignments.received_notes", `ALTER TABLE consignments ADD COLUMN received_notes TEXT`);
+  run("consignments.received_bundles", `ALTER TABLE consignments ADD COLUMN received_bundles INTEGER`);
+
+  // Backfill is_internal for existing rows from the same heuristic the reader uses, so
+  // history stops leaking too. Customer-bound POs -> 0, PO-less transfers -> 1.
+  run("backfill is_internal from parent PO",
+    `UPDATE branch_transfers SET is_internal = CASE
+       WHEN po_id IS NULL THEN 1
+       WHEN (SELECT customer_id FROM purchase_orders_v2 WHERE id = branch_transfers.po_id) IS NULL THEN 1
+       ELSE 0 END
+     WHERE is_internal IS NULL`);
+
+  const verify = (table: string, expected: string[]) => {
+    try {
+      const cols = (sqlite.prepare(`PRAGMA table_info(${table})`).all() as any[]).map(r => r.name);
+      const missing = expected.filter(c => !cols.includes(c));
+      if (missing.length) console.log(`[migrations] R27.34a: verify ${table} MISSING ${missing.join(",")}`);
+      else console.log(`[migrations] R27.34a: verify ${table} ok (${expected.join(",")})`);
+    } catch (e: any) {
+      console.log(`[migrations] R27.34a: verify ${table} skip (${String(e?.message || e)})`);
+    }
+  };
+  verify("branch_transfers", ["is_internal"]);
+  verify("consignments", ["received_at", "received_by", "received_notes", "received_bundles"]);
+  console.log("[migrations] R27.34a: complete");
+}

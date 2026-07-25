@@ -79,7 +79,10 @@ function clientBreakdownSectionHtml(clients: ClientBreakdownRow[]): string {
 }
 
 const ADMIN_DIGEST_MOBILE = "+917909083806";
-const ADMIN_DIGEST_EMAIL = process.env.ADMIN_DIGEST_EMAIL || "sales@Narmadamobility.com";
+// R27.34a: disabled per user request — the daily admin digest defaulted to sales@.
+// Set ADMIN_DIGEST_EMAIL to a real admin address to re-enable; the WhatsApp leg is
+// unaffected. Per-salesperson digests (sent to their own address) are untouched.
+const ADMIN_DIGEST_EMAIL = process.env.ADMIN_DIGEST_EMAIL || "";
 
 function statusBadge(status: string): string {
   return status === "on_track"
@@ -278,7 +281,7 @@ export async function runSalesDigest(opts: { year?: number; month?: number; now?
       bump("failed");
     }
     try {
-      if (email) {
+      if (email && ADMIN_DIGEST_EMAIL) {
         const breakdowns = rows.map((p) => ({
           salespersonId: p.salesperson.id,
           salespersonName: p.salesperson.name,

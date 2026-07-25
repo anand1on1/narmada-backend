@@ -3,7 +3,11 @@ import { Resend } from "resend";
 
 const RESEND_API_KEY = process.env.RESEND_API_KEY || "";
 const FROM_EMAIL = process.env.MAIL_FROM || "Narmada Mobility <onboarding@resend.dev>";
-const TO_EMAIL = process.env.SALES_EMAIL || "sales@Narmadamobility.com";
+// R27.34a: disabled per user request — contact-form enquiries used to be emailed to
+// sales@. They are still persisted and visible in the admin panel (Contacts); only the
+// automated mail is gone. Set SALES_EMAIL to a different address to route them elsewhere.
+const SALES_INBOX = "sales@narmadamobility.com";
+const TO_EMAIL = process.env.SALES_EMAIL || "";
 
 const resend = RESEND_API_KEY ? new Resend(RESEND_API_KEY) : null;
 
@@ -18,6 +22,10 @@ export interface ContactPayload {
 }
 
 export async function sendContactEmail(c: ContactPayload): Promise<{ ok: boolean; via: string; error?: string }> {
+  if (!TO_EMAIL || TO_EMAIL.trim().toLowerCase() === SALES_INBOX) {
+    console.log("[email] R27.34a: contact-form email to sales@ disabled — contact saved in admin panel only");
+    return { ok: false, via: "disabled" };
+  }
   if (!resend) {
     console.log("[email] RESEND_API_KEY not set — skipping SMTP, contact only saved in admin panel");
     return { ok: false, via: "skipped" };

@@ -530,7 +530,9 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
         message: parsed.message,
       });
       console.log(`[contact] #${created.id} from ${parsed.email} — email: ${mail.ok ? "sent" : "not sent (" + mail.via + (mail.error ? ": " + mail.error : "") + ")"}`);
-      res.json({ ok: true, id: created.id, deliveredTo: SALES_EMAIL, emailSent: mail.ok });
+      // R27.34a: disabled per user request — no automated mail to sales@, so report the
+      // address only when a send actually happened.
+      res.json({ ok: true, id: created.id, deliveredTo: mail.ok ? SALES_EMAIL : null, emailSent: mail.ok });
     } catch (e: any) { res.status(400).json({ error: e.message, details: e.errors }); }
   });
   app.get("/api/admin/contacts", requireAdmin, async (_req, res) => res.json(await storage.listContacts()));

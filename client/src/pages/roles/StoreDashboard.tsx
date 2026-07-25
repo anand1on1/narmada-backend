@@ -3,7 +3,7 @@ import RolePortalShell from "./RolePortalShell";
 import { StoreAuth } from "@/lib/role-auth";
 import { Warehouse, PackageCheck, Boxes } from "lucide-react";
 
-interface Transfer { id: number; po_id: number | null; poNumber?: string | null; clientName?: string | null; itemSummary?: string | null; partNumbers?: string | null; transferInvoiceNo?: string | null; status: string; dispatched_at?: string | null; received_at?: string | null; notes?: string | null; source?: string; from_branch?: string | null; to_branch?: string | null; carrier?: string | null; }
+interface Transfer { id: number; po_id: number | null; poNumber?: string | null; clientName?: string | null; itemSummary?: string | null; partNumbers?: string | null; transferInvoiceNo?: string | null; status: string; dispatched_at?: string | null; received_at?: string | null; notes?: string | null; source?: string; from_branch?: string | null; to_branch?: string | null; carrier?: string | null; consignment_id?: number | null; bundles?: number | null; }
 
 async function downloadFile(token: string | null, url: string, filename: string) {
   const r = await StoreAuth.roleFetch(token, url);
@@ -25,6 +25,12 @@ export default function StoreDashboard() {
   const [detail, setDetail] = useState<any | null>(null);
   const [recv, setRecv] = useState<Record<string, number>>({});
   const [msg, setMsg] = useState<string | null>(null);
+  // R27.34a Bug 1B — consignment rows have no parent PO, so they get their own confirm
+  // modal (bundle count + note) instead of the per-line-item receive table.
+  const [cnDetail, setCnDetail] = useState<Transfer | null>(null);
+  const [cnBundles, setCnBundles] = useState<string>("");
+  const [cnNotes, setCnNotes] = useState<string>("");
+  const [cnBusy, setCnBusy] = useState(false);
 
   async function loadTransfers() {
     const r = await StoreAuth.roleFetch(token, "/api/store/transfers");
@@ -54,6 +60,27 @@ export default function StoreDashboard() {
       (d.expected || []).forEach((it: ExpectedItem, i: number) => { init[i] = it.expectedQty; });
       setRecv(init);
     }
+  }
+
+  function openConsignment(t: Transfer) {
+    setCnDetail(t);
+    setCnBundles(t.bundles != null ? String(t.bundles) : "");
+    setCnNotes("");
+  }
+
+  async function submitConsignmentReceive() {
+    if (!cnDetail?.consignment_id) return;
+    setCnBusy(true);
+    const r = await StoreAuth.roleFetch(token, `/api/store/consignments/${cnDetail.consignment_id}/receive`, {
+      method: "POST",
+      body: JSON.stringify({ received_bundles: cnBundles === "" ? null : Number(cnBundles), notes: cnNotes || null }),
+    });
+    setCnBusy(false);
+    if (r.ok) {
+      setMsg(`Consignment ${cnDetail.poNumber || cnDetail.consignment_id} marked received.`);
+      setCnDetail(null); loadTransfers(); loadStock();
+      setTimeout(() => setMsg(null), 4000);
+    } else { const j = await r.json().catch(() => ({})); setMsg(j.error || "Receive failed"); }
   }
 
   async function submitReceive() {
@@ -103,11 +130,9 @@ export default function StoreDashboard() {
                     <td className="p-3"><span className={`text-xs font-bold rounded px-2 py-1 ${t.status === "received" ? "bg-emerald-600 text-white" : t.status === "partial_received" ? "bg-amber-500/15 text-amber-700" : "bg-blue-500/15 text-blue-700"}`}>{t.status}</span></td>
                     <td className="p-3 font-mono text-xs">{t.transferInvoiceNo || "—"}</td>
                     <td className="p-3 text-xs text-muted-foreground">{t.dispatched_at ? new Date(t.dispatched_at).toLocaleDateString("en-IN") : "—"}</td>
-                    <td className="p-3">{isConsignment
-                      ? <span className="text-xs text-muted-foreground italic">In transit (consignment)</span>
-                      : t.status === "received"
-                        ? <span className="text-xs font-semibold text-emerald-700 inline-flex items-center gap-1"><PackageCheck className="w-3.5 h-3.5" /> Received</span>
-                        : <button onClick={() => openDetail(t.id)} className="px-2 py-1 rounded bg-accent text-accent-foreground text-xs font-semibold inline-flex items-center gap-1"><PackageCheck className="w-3.5 h-3.5" /> Mark Received</button>}
+                    <td className="p-3">{t.status === "received"
+                      ? <span className="text-xs font-semibold text-emerald-700 inline-flex items-center gap-1"><PackageCheck className="w-3.5 h-3.5" /> Received</span>
+                      : <button onClick={() => (isConsignment ? openConsignment(t) : openDetail(t.id))} className="px-2 py-1 rounded bg-accent text-accent-foreground text-xs font-semibold inline-flex items-center gap-1"><PackageCheck className="w-3.5 h-3.5" /> Mark Received</button>}
                     </td>
                   </tr>
                   );
@@ -135,6 +160,34 @@ export default function StoreDashboard() {
               </tbody>
             </table>
           )}
+        </div>
+      )}
+
+      {cnDetail && (
+        <div className="fixed inset-0 z-50 bg-black/40 flex items-center justify-center p-4" onClick={() => setCnDetail(null)}>
+          <div className="bg-card rounded-xl shadow-xl max-w-md w-full p-6" onClick={(e) => e.stopPropagation()}>
+            <h3 className="text-lg font-bold mb-1">Confirm receipt of consignment #{cnDetail.poNumber || cnDetail.consignment_id}?</h3>
+            <p className="text-sm text-muted-foreground mb-4">
+              {cnDetail.from_branch || "Delhi"} → {cnDetail.to_branch || "Patna"}
+              {cnDetail.carrier ? ` · ${cnDetail.carrier}` : ""}
+              {cnDetail.bundles != null ? ` · ${cnDetail.bundles} bundle(s) dispatched` : ""}
+            </p>
+            <div className="space-y-3">
+              <div>
+                <label className="text-xs font-semibold">Bundles received</label>
+                <input type="number" min="0" value={cnBundles} onChange={(e) => setCnBundles(e.target.value)} placeholder={cnDetail.bundles != null ? String(cnDetail.bundles) : "—"} className="w-full px-3 py-2 rounded border bg-background text-sm" />
+                <p className="text-[11px] text-muted-foreground mt-1">Leave as-is to accept the full dispatched count. Enter a lower number for a partial receipt.</p>
+              </div>
+              <div>
+                <label className="text-xs font-semibold">Notes (optional)</label>
+                <textarea value={cnNotes} onChange={(e) => setCnNotes(e.target.value)} rows={3} placeholder="Damage, shortfall, or anything the team should know" className="w-full px-3 py-2 rounded border bg-background text-sm" />
+              </div>
+            </div>
+            <div className="flex justify-end gap-2 mt-5">
+              <button onClick={() => setCnDetail(null)} className="px-4 py-2 rounded-lg text-sm font-semibold hover:bg-muted">Cancel</button>
+              <button onClick={submitConsignmentReceive} disabled={cnBusy} className="px-4 py-2 rounded-lg text-sm font-semibold bg-emerald-600 text-white hover:bg-emerald-700 disabled:opacity-50 inline-flex items-center gap-1"><PackageCheck className="w-4 h-4" /> {cnBusy ? "Saving…" : "Confirm Received"}</button>
+            </div>
+          </div>
         </div>
       )}
 
