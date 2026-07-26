@@ -98,6 +98,7 @@ import AdminPayments from "@/pages/admin/AdminPayments";
 import AdminProcessPayment from "@/pages/admin/AdminProcessPayment";
 import AdminPaymentApprovals from "@/pages/admin/AdminPaymentApprovals";
 import AdminExpenseApprovals from "@/pages/admin/AdminExpenseApprovals"; // R27.36
+import AdminExpensesUnified, { TeamExpensesUnified } from "@/pages/ExpensesUnified"; // R27.36a-part-2
 import AdminRFQs from "@/pages/admin/AdminRFQs";
 import AdminQuotes from "@/pages/admin/AdminQuotes";
 import AdminPOs from "@/pages/admin/AdminPOs";
@@ -150,7 +151,7 @@ import SalesDashboard from "@/pages/roles/SalesDashboard";
 import FinanceLogin from "@/pages/roles/FinanceLogin";
 import FinanceDashboard from "@/pages/roles/FinanceDashboard";
 import FinanceApprovalsPage from "@/pages/roles/FinanceApprovalsPage";
-import { FinanceExpenses, FinanceExpenseLedger, FinanceExpenseApprovals } from "@/pages/roles/FinanceExpensePages"; // R27.36-FIX-1
+import { FinanceExpenses, FinanceExpenseLedger, FinanceExpenseApprovals, FinanceExpensesUnified } from "@/pages/roles/FinanceExpensePages"; // R27.36-FIX-1, R27.36a-part-2
 import HRLogin from "@/pages/roles/HRLogin";
 import HRDashboard from "@/pages/roles/HRDashboard";
 import ConsignmentLogin from "@/pages/roles/ConsignmentLogin";
@@ -305,6 +306,8 @@ function AppRouter() {
         <Route path="/admin/process-payment" component={AdminProcessPayment} />
         <Route path="/admin/payment-approvals" component={AdminPaymentApprovals} />
         <Route path="/admin/expense-approvals" component={AdminExpenseApprovals} />
+        {/* R27.36a-part-2 — unified Expenses page (Ledger + Advances + Cash + Person + Categories). Legacy AccountsDashboard remains at /admin/accounts until validated. */}
+        <Route path="/admin/expenses-unified" component={AdminExpensesUnified} />
         <Route path="/admin/rfqs" component={AdminRFQs} />
         <Route path="/admin/quotes" component={AdminQuotes} />
         {/* R26.6a (5) — admin PO detail page (was a 404). Must precede the list route. */}
@@ -451,6 +454,8 @@ function AppRouter() {
         <Route path="/team/purchase-orders" component={TeamPOs} />
         <Route path="/team/process-payment" component={TeamProcessPayment} />
         <Route path="/team/expenses" component={TeamExpenses} />
+        {/* R27.36a-part-2 — unified Expenses page. */}
+        <Route path="/team/expenses-unified" component={TeamExpensesUnified} />
         <Route path="/team/expense-ledger" component={TeamExpenseLedger} />
         <Route path="/team/deviations" component={TeamDeviations} />
         <Route path="/team/rfqs/:id" component={TeamRFQDetail} />
@@ -491,6 +496,8 @@ function AppRouter() {
             <Route path="/finance/approvals" component={FinanceApprovalsPage} />
             <Route path="/finance/accounts" component={AccountsDashboard} />
             {/* R27.36-FIX-1 — R27.36 expense pages, reachable from the finance portal. */}
+            {/* R27.36a-part-2 — unified Expenses page for finance portal. */}
+            <Route path="/finance/expenses-unified" component={FinanceExpensesUnified} />
             <Route path="/finance/expenses" component={FinanceExpenses} />
             <Route path="/finance/expense-ledger" component={FinanceExpenseLedger} />
             <Route path="/finance/expense-approvals" component={FinanceExpenseApprovals} />

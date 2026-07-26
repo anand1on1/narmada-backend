@@ -35,6 +35,7 @@ const ROLE_PAGES: Record<AdminRole, Set<string>> = {
     "/admin/orders", "/admin/web-customers", "/admin/freight", "/admin/stock",
     "/admin/accounts",
     "/admin/expense-approvals",
+    "/admin/expenses-unified",
   ]),
   // Data Center role: public Products only, no delete (enforced backend + UI).
   data_center: new Set([
@@ -46,6 +47,7 @@ const ROLE_PAGES: Record<AdminRole, Set<string>> = {
     "/admin/customers", "/admin/ledger", "/admin/payments",
     "/admin/rfqs", "/admin/quotes", "/admin/purchase-orders", "/admin/bank", "/admin/vendor-ledger",
     "/admin/staff", "/admin/accounts",
+    "/admin/expenses-unified",
   ]),
   sales: new Set([
     "/admin/dashboard", "/admin/price-lists", "/admin/products", "/admin/contacts",
@@ -63,6 +65,7 @@ const ROLE_PAGES: Record<AdminRole, Set<string>> = {
     "/admin/dashboard",
     "/admin/ledger", "/admin/payments", "/admin/bank", "/admin/companies",
     "/admin/vendor-ledger", "/admin/process-payment", "/admin/expense-approvals",
+    "/admin/expenses-unified",
   ]),
 };
 
@@ -208,6 +211,8 @@ export function AdminLayout({ children, title }: { children: ReactNode; title: s
     { href: "/admin/companies", label: "Companies", icon: Building2, group: "Finance" },
 
     { href: "/admin/accounts", label: "Accounts (Expenses)", icon: Calculator, group: "Accounts" },
+    // R27.36a-part-2 — unified Expenses (Ledger + Advances + Cash + Person + Categories).
+    { href: "/admin/expenses-unified", label: "Expenses (Unified)", icon: Receipt, group: "Accounts" },
     { href: "/admin/staff", label: "Staff", icon: UserSquare, group: "Accounts" },
     { href: "/admin/expense-approvals", label: "Expense Approvals", icon: Receipt, badge: pendingExpenseApprovals, group: "Accounts" },
 

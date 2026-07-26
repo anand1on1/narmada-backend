@@ -13,10 +13,14 @@ import { FinanceAuth } from "@/lib/role-auth";
 import { ExpensesBody } from "@/pages/team/TeamExpenses";
 import { ExpenseLedgerBody } from "@/pages/team/TeamExpenseLedger";
 import { ExpenseApprovalsBody } from "@/pages/admin/AdminExpenseApprovals";
+import { ExpensesUnifiedBody } from "@/pages/ExpensesUnified"; // R27.36a-part-2
 
 const NAV = [
   { href: "/finance/dashboard", label: "Accounts" },
   { href: "/finance/approvals", label: "Sales Expense Approvals" },
+  // R27.36a-part-2 — unified Expenses button (Ledger + Advances + Cash + Person + Categories).
+  // The R27.36 buttons below remain for now until this is validated on prod.
+  { href: "/finance/expenses-unified", label: "Expenses (Unified)" },
   { href: "/finance/expenses", label: "Expenses" },
   { href: "/finance/expense-ledger", label: "Expense Ledger" },
   { href: "/finance/expense-approvals", label: "Expense Approvals" },
@@ -101,4 +105,10 @@ export function FinanceExpenseLedger() {
 export function FinanceExpenseApprovals() {
   const { token } = FinanceAuth.useAuth();
   return <ExpenseApprovalsBody token={token} fetcher={FinanceAuth.roleFetch} Layout={FinanceExpenseLayout} />;
+}
+
+// R27.36a-part-2 — unified Expenses page for the Finance portal.
+export function FinanceExpensesUnified() {
+  const { token } = FinanceAuth.useAuth();
+  return <ExpensesUnifiedBody token={token} fetcher={FinanceAuth.roleFetch} Layout={FinanceExpenseLayout} />;
 }

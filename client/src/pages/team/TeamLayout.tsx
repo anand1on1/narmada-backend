@@ -51,6 +51,8 @@ export function TeamLayout({ children, title }: { children: ReactNode; title: st
     return [...navItems,
       { href: "/team/expenses", label: "Expenses", icon: Receipt },
       { href: "/team/expense-ledger", label: "Expense Ledger", icon: BookOpen },
+      // R27.36a-part-2 — unified Expenses page (Ledger + Advances + Cash + Person + Categories).
+      { href: "/team/expenses-unified", label: "Expenses (Unified)", icon: Receipt },
     ];
   })();
   const [bannerDismissed, setBannerDismissed] = useState(() => {
