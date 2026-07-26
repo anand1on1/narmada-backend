@@ -7,6 +7,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { TeamLayout } from "./TeamLayout";
 import { useTeamAuth, teamFetch } from "@/lib/team-auth";
+import type { ExpensePageProps } from "@/lib/expense-page-props";
 import { useToast } from "@/hooks/use-toast";
 import { Plus, RefreshCw, FileText, Trash2, Search, X } from "lucide-react";
 
@@ -54,8 +55,7 @@ function Badge({ status }: { status: ApprovalStatus }) {
 
 const today = () => new Date().toISOString().slice(0, 10);
 
-export default function TeamExpenses() {
-  const { token } = useTeamAuth();
+export function ExpensesBody({ token, fetcher, Layout }: ExpensePageProps) {
   const { toast } = useToast();
 
   const [rows, setRows] = useState<Expense[]>([]);
@@ -93,7 +93,7 @@ export default function TeamExpenses() {
   const [newPayee, setNewPayee] = useState<Record<string, string>>({});
 
   async function api(pathname: string, init?: RequestInit) {
-    const r = await teamFetch(token!, pathname, init);
+    const r = await fetcher(token, pathname, init);
     if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error || `HTTP ${r.status}`);
     return r;
   }
@@ -218,7 +218,7 @@ export default function TeamExpenses() {
   async function generateSlip(e: Expense) {
     if (!window.confirm(`Generate a slip for ${inr(e.total_amount)} to ${e.payee_name}?`)) return;
     try {
-      const r = await teamFetch(token!, `/api/expenses/${e.id}/generate-slip`, { method: "POST" });
+      const r = await fetcher(token, `/api/expenses/${e.id}/generate-slip`, { method: "POST" });
       if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error || `HTTP ${r.status}`);
       const slip = r.headers.get("X-Slip-Number") || "";
       const blob = await r.blob();
@@ -248,7 +248,7 @@ export default function TeamExpenses() {
   const total = rows.reduce((s, r) => s + r.total_amount, 0);
 
   return (
-    <TeamLayout title="Expenses">
+    <Layout title="Expenses">
       <div className="p-6">
         <div className="flex items-center justify-between mb-4 gap-2 flex-wrap">
           <p className="text-sm text-muted-foreground" data-testid="heading-expenses">
@@ -569,6 +569,12 @@ export default function TeamExpenses() {
           </div>
         </div>
       )}
-    </TeamLayout>
+    </Layout>
   );
+}
+
+// Team panel entry point — unchanged route /team/expenses.
+export default function TeamExpenses() {
+  const { token } = useTeamAuth();
+  return <ExpensesBody token={token} fetcher={teamFetch} Layout={TeamLayout} />;
 }

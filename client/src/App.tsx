@@ -150,6 +150,7 @@ import SalesDashboard from "@/pages/roles/SalesDashboard";
 import FinanceLogin from "@/pages/roles/FinanceLogin";
 import FinanceDashboard from "@/pages/roles/FinanceDashboard";
 import FinanceApprovalsPage from "@/pages/roles/FinanceApprovalsPage";
+import { FinanceExpenses, FinanceExpenseLedger, FinanceExpenseApprovals } from "@/pages/roles/FinanceExpensePages"; // R27.36-FIX-1
 import HRLogin from "@/pages/roles/HRLogin";
 import HRDashboard from "@/pages/roles/HRDashboard";
 import ConsignmentLogin from "@/pages/roles/ConsignmentLogin";
@@ -489,6 +490,10 @@ function AppRouter() {
             <Route path="/finance/dashboard" component={FinanceDashboard} />
             <Route path="/finance/approvals" component={FinanceApprovalsPage} />
             <Route path="/finance/accounts" component={AccountsDashboard} />
+            {/* R27.36-FIX-1 — R27.36 expense pages, reachable from the finance portal. */}
+            <Route path="/finance/expenses" component={FinanceExpenses} />
+            <Route path="/finance/expense-ledger" component={FinanceExpenseLedger} />
+            <Route path="/finance/expense-approvals" component={FinanceExpenseApprovals} />
             <Route component={NotFound} />
           </Switch>
         </FinanceAuth.Provider>

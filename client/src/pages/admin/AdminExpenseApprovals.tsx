@@ -7,6 +7,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { AdminLayout } from "./AdminLayout";
 import { adminFetch, useAdminAuth } from "@/lib/admin-auth";
+import type { ExpensePageProps } from "@/lib/expense-page-props";
 import { useToast } from "@/hooks/use-toast";
 import { Check, X, RefreshCw, ShieldAlert } from "lucide-react";
 
@@ -57,8 +58,7 @@ function Badge({ status }: { status: ApprovalStatus }) {
   );
 }
 
-export default function AdminExpenseApprovals() {
-  const { token } = useAdminAuth();
+export function ExpenseApprovalsBody({ token, fetcher, Layout }: ExpensePageProps) {
   const { toast } = useToast();
 
   const [tab, setTab] = useState("pending_approval");
@@ -77,7 +77,7 @@ export default function AdminExpenseApprovals() {
     if (!token) return;
     setLoading(true);
     try {
-      const r = await adminFetch(token, `/api/admin/expense-approvals/pending?status=${encodeURIComponent(tab)}`);
+      const r = await fetcher(token, `/api/admin/expense-approvals/pending?status=${encodeURIComponent(tab)}`);
       if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error || `HTTP ${r.status}`);
       const d = await r.json();
       setRows(Array.isArray(d.expenses) ? d.expenses : []);
@@ -96,7 +96,7 @@ export default function AdminExpenseApprovals() {
     if (!token) return;
     setBusyId(e.id);
     try {
-      const r = await adminFetch(token, `/api/admin/expense-approvals/${e.id}/${action}`, {
+      const r = await fetcher(token, `/api/admin/expense-approvals/${e.id}/${action}`, {
         method: "POST",
         body: JSON.stringify(action === "reject" ? { reason } : {}),
       });
@@ -121,7 +121,7 @@ export default function AdminExpenseApprovals() {
   const totalOnScreen = useMemo(() => rows.reduce((s, r) => s + r.total_amount, 0), [rows]);
 
   return (
-    <AdminLayout title="Expense Approvals">
+    <Layout title="Expense Approvals">
       <div className="p-6">
         <div className="flex items-center justify-between mb-4">
           <p className="text-sm text-muted-foreground" data-testid="heading-expense-approvals">
@@ -275,6 +275,12 @@ export default function AdminExpenseApprovals() {
           </div>
         </div>
       )}
-    </AdminLayout>
+    </Layout>
   );
+}
+
+// Admin panel entry point — unchanged route /admin/expense-approvals.
+export default function AdminExpenseApprovals() {
+  const { token } = useAdminAuth();
+  return <ExpenseApprovalsBody token={token} fetcher={adminFetch} Layout={AdminLayout} />;
 }

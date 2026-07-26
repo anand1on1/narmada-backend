@@ -12,6 +12,11 @@ const PAYMENT_ROLES = ["admin", "procurement", "finance", "data_team"];
 // only (matches EXPENSE_ROLES in server/routes-expenses.ts).
 const EXPENSE_ROLES = ["admin", "finance"];
 
+// R27.36-FIX-1 — the server's hasExpenseAccess() trims and lowercases before matching,
+// so a role stored as "Finance" authorises the API but used to hide the nav. Match it.
+const hasExpenseNav = (role: string | null | undefined) =>
+  !!role && EXPENSE_ROLES.includes(String(role).trim().toLowerCase());
+
 const baseNavItems = [
   { href: "/team/dashboard", label: "Dashboard", icon: LayoutDashboard },
   { href: "/team/quotations", label: "Quotations", icon: FileText },
@@ -42,7 +47,7 @@ export function TeamLayout({ children, title }: { children: ReactNode; title: st
 
   // R27.36 — Expenses + Expense Ledger, admin & finance only.
   const finalNavItems = (() => {
-    if (!(user?.role && EXPENSE_ROLES.includes(user.role))) return navItems;
+    if (!hasExpenseNav(user?.role)) return navItems;
     return [...navItems,
       { href: "/team/expenses", label: "Expenses", icon: Receipt },
       { href: "/team/expense-ledger", label: "Expense Ledger", icon: BookOpen },

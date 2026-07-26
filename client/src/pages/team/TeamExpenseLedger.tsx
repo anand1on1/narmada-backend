@@ -6,6 +6,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { TeamLayout } from "./TeamLayout";
 import { useTeamAuth, teamFetch } from "@/lib/team-auth";
+import type { ExpensePageProps } from "@/lib/expense-page-props";
 import { useToast } from "@/hooks/use-toast";
 import { RefreshCw, Download } from "lucide-react";
 
@@ -50,8 +51,7 @@ function topOf(m: Record<string, number>): { name: string; value: number } {
   return rows.length ? { name: rows[0][0], value: rows[0][1] } : { name: "—", value: 0 };
 }
 
-export default function TeamExpenseLedger() {
-  const { token } = useTeamAuth();
+export function ExpenseLedgerBody({ token, fetcher, Layout }: ExpensePageProps) {
   const { toast } = useToast();
 
   const [data, setData] = useState<LedgerResponse>(EMPTY);
@@ -66,7 +66,7 @@ export default function TeamExpenseLedger() {
   const [fTo, setFTo] = useState("");
 
   async function api(pathname: string) {
-    const r = await teamFetch(token!, pathname);
+    const r = await fetcher(token, pathname);
     if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error || `HTTP ${r.status}`);
     return r.json();
   }
@@ -126,7 +126,7 @@ export default function TeamExpenseLedger() {
     : {};
 
   return (
-    <TeamLayout title="Expense Ledger">
+    <Layout title="Expense Ledger">
       <div className="p-6">
         <div className="flex items-center justify-between mb-4 gap-2 flex-wrap">
           <p className="text-sm text-muted-foreground" data-testid="heading-expense-ledger">
@@ -286,6 +286,12 @@ export default function TeamExpenseLedger() {
           </div>
         </div>
       </div>
-    </TeamLayout>
+    </Layout>
   );
+}
+
+// Team panel entry point — unchanged route /team/expense-ledger.
+export default function TeamExpenseLedger() {
+  const { token } = useTeamAuth();
+  return <ExpenseLedgerBody token={token} fetcher={teamFetch} Layout={TeamLayout} />;
 }

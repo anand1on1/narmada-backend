@@ -157,7 +157,19 @@ export function createAdminOrTeamAuth(deps: DualAuthDeps) {
         return;
       }
     }
+    // R27.36-FIX-1 — the role portals (/finance, /sales, /store, ...) issue a
+    // data_team session token and send it under their own header name as well as
+    // x-team-token. Accept every role header so a portal token still resolves if
+    // x-team-token is absent. Mirrors requireRoleHeaders' list. This does not widen
+    // access: createAdminOrTeamRole still gates on the resolved user's role, so a
+    // sales token on an expense route is still a 403.
     const teamToken = (req.headers["x-team-token"] as string | undefined)
+      || (req.headers["x-finance-token"] as string | undefined)
+      || (req.headers["x-sales-token"] as string | undefined)
+      || (req.headers["x-hr-token"] as string | undefined)
+      || (req.headers["x-consignment-token"] as string | undefined)
+      || (req.headers["x-store-token"] as string | undefined)
+      || (req.headers["x-dispatch-token"] as string | undefined)
       || (req.headers["authorization"] as string | undefined)?.replace("Bearer ", "");
     if (teamToken) {
       try {
