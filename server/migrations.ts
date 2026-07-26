@@ -4507,6 +4507,53 @@ export function runR27_36aMigrations() {
   console.log("[migrations] R27.36a: complete");
 }
 
+// R27.36b — payment model. Direct/bus expenses can be paid from one of two cash
+// pools (Delhi, Patna), a bank transfer, or against an existing advance. Advance
+// issuance additionally records which staff member physically handled the cash.
+// Legacy rows keep NULL paid_from — the column is nullable and only enforced for
+// rows created via the R27.36b UI / API path.
+export function runR27_36bMigrations() {
+  console.log("[migrations] R27.36b: start");
+  const run = (label: string, sql: string) => {
+    try { sqlite.exec(sql); console.log(`[migrations] R27.36b: ${label} ok`); }
+    catch (e: any) {
+      const msg = String(e?.message || e);
+      if (/already exists|duplicate column/i.test(msg)) console.log(`[migrations] R27.36b: ${label} skip (exists)`);
+      else console.log(`[migrations] R27.36b: ${label} skip (${msg})`);
+    }
+  };
+  const addCol = (table: string, col: string, decl: string) =>
+    run(`${table}.${col}`, `ALTER TABLE ${table} ADD COLUMN ${col} ${decl}`);
+
+  // paid_from is the cash/bank source of funds. NULL on legacy rows so the check
+  // constraint stays absent — SQLite ALTER TABLE cannot add CHECK constraints
+  // anyway; validation lives in the application layer (routes-expenses.ts).
+  addCol("expense_slips", "paid_from", "TEXT");
+  // handled_by_staff_* is used when the payee is not the person who moved the cash.
+  // Mainly meaningful for advance issuance: "we gave Rakesh ₹5,000 but Aditi handed
+  // it to him from the Delhi cash box." Free-form ID + name snapshot so a later
+  // rename of the admin user doesn't rewrite audit history.
+  addCol("expense_slips", "handled_by_staff_id", "INTEGER");
+  addCol("expense_slips", "handled_by_staff_name", "TEXT");
+
+  run("idx_expense_slips_paid_from",
+    `CREATE INDEX IF NOT EXISTS idx_expense_slips_paid_from ON expense_slips(paid_from)`);
+
+  const verifyCols = (table: string, expected: string[]) => {
+    try {
+      const cols = (sqlite.prepare(`PRAGMA table_info(${table})`).all() as any[]).map(r => r.name);
+      if (!cols.length) { console.log(`[migrations] R27.36b: verify ${table} MISSING (no such table)`); return; }
+      const missing = expected.filter(c => !cols.includes(c));
+      if (missing.length) console.log(`[migrations] R27.36b: verify ${table} MISSING ${missing.join(",")}`);
+      else console.log(`[migrations] R27.36b: verify ${table} ok (${cols.length} cols)`);
+    } catch (e: any) {
+      console.log(`[migrations] R27.36b: verify ${table} skip (${String(e?.message || e)})`);
+    }
+  };
+  verifyCols("expense_slips", ["paid_from", "handled_by_staff_id", "handled_by_staff_name"]);
+  console.log("[migrations] R27.36b: complete");
+}
+
 // Data migration, kept separate from the schema step so a boot can apply columns
 // even if the R27.6 backfill throws. Idempotent — see migrations-r27-36a.ts.
 export function runR27_36aDataMigration() {

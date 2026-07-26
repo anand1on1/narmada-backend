@@ -31,6 +31,25 @@ export type ExpenseType = "direct" | "advance" | "bus";
 export const EXPENSE_TYPES: ExpenseType[] = ["direct", "advance", "bus"];
 export type PaymentMode = "cash" | "upi" | "bank" | "cheque" | "advance";
 export const PAYMENT_MODES: PaymentMode[] = ["cash", "upi", "bank", "cheque", "advance"];
+
+// R27.36b — payment source. Where the money actually came from.
+// - cash_delhi / cash_patna: physical cash pool in the named office.
+// - bank_transfer: online transfer, cheque, UPI, or any non-cash outflow — the
+//   user records the transaction reference in reference_number.
+// - against_advance: this direct/bus expense is booked against an already-issued
+//   advance. advance_slip_id must also be set.
+export type PaidFrom = "cash_delhi" | "cash_patna" | "bank_transfer" | "against_advance";
+export const PAID_FROM_OPTIONS: PaidFrom[] = ["cash_delhi", "cash_patna", "bank_transfer", "against_advance"];
+export const PAID_FROM_CASH: PaidFrom[] = ["cash_delhi", "cash_patna"];
+export const PAID_FROM_FOR_ADVANCE: PaidFrom[] = ["cash_delhi", "cash_patna", "bank_transfer"];
+
+// Branch label attached to cash-in-hand ledger rows. Matches the branch column
+// already seeded by R27.6 (`Delhi`, `Patna`).
+export function branchForCashPool(paidFrom: PaidFrom | null | undefined): "Delhi" | "Patna" | null {
+  if (paidFrom === "cash_delhi") return "Delhi";
+  if (paidFrom === "cash_patna") return "Patna";
+  return null;
+}
 export type AdvanceStatus = "open" | "partial" | "reconciled" | "returned";
 
 // Expenses are money going out, so the allowlist is tighter than PAYMENT_ROLES:
@@ -197,6 +216,10 @@ export interface ExpenseInput {
   // When a direct/bus expense is paid out of an existing advance, reconcile it in
   // the same call rather than making the user do a second step.
   advance_slip_id?: number | null;
+  // R27.36b — payment source and (for advance issuance) the staff handler.
+  paid_from?: PaidFrom | null;
+  handled_by_staff_id?: number | null;
+  handled_by_staff_name?: string | null;
 }
 
 function resolveDate(v: string | number | undefined | null, fallback: number): number {
@@ -228,6 +251,114 @@ function resolvePaymentMode(v: any, fallback: PaymentMode): PaymentMode {
   const m = String(v).trim().toLowerCase() as PaymentMode;
   if (!PAYMENT_MODES.includes(m)) throw new ExpenseError(`payment_mode must be one of ${PAYMENT_MODES.join(", ")}`, 400);
   return m;
+}
+
+// R27.36b — resolve paid_from from user input. Returns null if not supplied so
+// legacy call sites (that don't yet pass paid_from) continue to work. When
+// advance_slip_id is set the value is forced to "against_advance" no matter what
+// the caller passed — the two must always agree.
+function resolvePaidFrom(
+  input: any,
+  expenseType: ExpenseType,
+  hasAdvanceSlip: boolean,
+): PaidFrom | null {
+  if (hasAdvanceSlip) return "against_advance";
+  const raw = input?.paid_from;
+  if (raw == null || raw === "") return null;
+  const v = String(raw).trim().toLowerCase() as PaidFrom;
+  if (!PAID_FROM_OPTIONS.includes(v)) {
+    throw new ExpenseError(`paid_from must be one of ${PAID_FROM_OPTIONS.join(", ")}`, 400);
+  }
+  if (expenseType === "advance" && !PAID_FROM_FOR_ADVANCE.includes(v)) {
+    throw new ExpenseError(
+      `An advance issuance must be paid from one of ${PAID_FROM_FOR_ADVANCE.join(", ")} — got "${v}"`,
+      400,
+    );
+  }
+  if (v === "against_advance") {
+    // Caller said "against_advance" but did not identify which advance. Reject.
+    throw new ExpenseError("paid_from = against_advance requires advance_slip_id", 400);
+  }
+  return v;
+}
+
+// R27.36b — who physically handled the cash. Required for advance issuance so
+// there is a name attached to the outflow. Accepts either an admin_users.id or
+// a freetext name (the UI passes both, we store what we get).
+function resolveHandledByStaff(
+  db: Database,
+  input: any,
+  expenseType: ExpenseType,
+  paidFrom: PaidFrom | null,
+): { id: number | null; name: string | null } {
+  const rawId = input?.handled_by_staff_id;
+  const rawName = input?.handled_by_staff_name;
+  const nameFromInput = rawName == null ? null : String(rawName).trim() || null;
+
+  let id: number | null = null;
+  let name: string | null = nameFromInput;
+
+  if (rawId != null && rawId !== "") {
+    const n = Number(rawId);
+    if (!Number.isFinite(n) || n <= 0) throw new ExpenseError("handled_by_staff_id must be a positive integer", 400);
+    try {
+      const u: any = db.prepare(`SELECT id, display_name, username FROM admin_users WHERE id = ?`).get(n);
+      if (!u) throw new ExpenseError(`Staff member ${n} not found`, 404);
+      id = u.id;
+      name = name || u.display_name || u.username || null;
+    } catch (e: any) {
+      if (String(e?.message || "").includes("no such table")) {
+        id = n; // best-effort on tenants without admin_users
+      } else {
+        throw e;
+      }
+    }
+  }
+
+  // Only enforced when the caller has actually adopted the R27.36b payment model
+  // for this row (i.e. supplied paid_from). Legacy callers that don't set
+  // paid_from continue to work with NULL handler, matching existing behaviour.
+  if (expenseType === "advance" && paidFrom && !id && !name) {
+    throw new ExpenseError(
+      "An advance issuance must record who handled the cash (handled_by_staff_id or handled_by_staff_name)",
+      400,
+    );
+  }
+  return { id, name };
+}
+
+// R27.36b — post the cash outflow to the cash_in_hand ledger for direct spends
+// paid from a physical cash pool. Skipped for bank_transfer (already recorded in
+// the bank feed) and against_advance (the advance issuance itself was the cash
+// outflow — double-counting here would inflate expenses).
+export function debitCashInHandForExpense(db: Database, expenseId: number): void {
+  const row: any = db.prepare(
+    `SELECT id, slip_number, total_amount, expense_date, paid_from, description
+     FROM expense_slips WHERE id = ?`,
+  ).get(expenseId);
+  if (!row) return;
+  const branch = branchForCashPool(row.paid_from as PaidFrom);
+  if (!branch) return; // not a cash payment
+  if (!row.slip_number) return; // wait until the slip is minted so the reference is stable
+
+  // Idempotent: skip if we already booked this expense against the cash pool.
+  const reference = `expense_slip:${row.slip_number}`;
+  try {
+    const existing: any = db.prepare(
+      `SELECT id FROM cash_in_hand WHERE reference = ? AND source = 'expense'`,
+    ).get(reference);
+    if (existing) return;
+  } catch { /* cash_in_hand may not exist on very old tenants; skip silently */ }
+
+  const iso = new Date(Number(row.expense_date) || Date.now()).toISOString();
+  try {
+    db.prepare(
+      `INSERT INTO cash_in_hand (source, amount, reference, date, notes, created_by, branch, direction)
+       VALUES ('expense', ?, ?, ?, ?, NULL, ?, 'out')`,
+    ).run(Number(row.total_amount) || 0, reference, iso, row.description || null, branch);
+  } catch (e: any) {
+    console.log(`[R27.36b] cash_in_hand debit skipped for ${reference}: ${String(e?.message || e)}`);
+  }
 }
 
 // R27.36a-part-2b — auto-mint a slip number once the row is in a spendable state
@@ -323,6 +454,12 @@ export function createExpense(db: Database, input: ExpenseInput, actor: Actor): 
     assertAdvanceCapacity(advanceSlip, gst.total_amount);
   }
 
+  // R27.36b — payment source + advance handler. paid_from is forced to
+  // "against_advance" when advance_slip_id is set; handled_by_staff is mandatory
+  // only for advance issuance.
+  const paidFrom = resolvePaidFrom(input, expenseType, !!advanceSlipId);
+  const handler = resolveHandledByStaff(db, input, expenseType, paidFrom);
+
   const res = db.prepare(
     `INSERT INTO expense_slips (
        category_id, payee_id, payee_name_freetext, amount, gst_percent, gst_mode, gst_amount,
@@ -330,8 +467,9 @@ export function createExpense(db: Database, input: ExpenseInput, actor: Actor): 
        recurring_parent_id, approval_status, approved_by, approved_at, created_by, created_at, is_deleted,
        expense_type, payment_mode, branch_id, reference_number, proof_url,
        expected_return_date, advance_status, reconciled_amount, returned_amount,
-       bus_number, bus_name, bus_contact, bus_from, is_legacy
-     ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,0,?,?,?,?,?,?,?,0,0,?,?,?,?,0)`,
+       bus_number, bus_name, bus_contact, bus_from, is_legacy,
+       paid_from, handled_by_staff_id, handled_by_staff_name
+     ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,0,?,?,?,?,?,?,?,0,0,?,?,?,?,0,?,?,?)`,
   ).run(
     categoryId, payeeId, freetext, gst.amount, gstPercent, gstMode, gst.gst_amount,
     gst.total_amount, input?.description ? String(input.description).trim() : null, expenseDate,
@@ -342,6 +480,7 @@ export function createExpense(db: Database, input: ExpenseInput, actor: Actor): 
     str(input?.reference_number), str(input?.proof_url),
     expectedReturn, advanceStatus,
     str(input?.bus_number), str(input?.bus_name), str(input?.bus_contact), str(input?.bus_from),
+    paidFrom, handler.id, handler.name,
   );
   const id = Number(res.lastInsertRowid);
 
@@ -357,7 +496,13 @@ export function createExpense(db: Database, input: ExpenseInput, actor: Actor): 
   // R27.36a-part-2b — auto-mint slip number for auto-approved rows so the ledger
   // never shows "–" for an already-spent expense. Rows over ₹5,000 stay NULL until
   // the approver flips them via approveExpense (which also mints).
-  if (autoApproved) mintSlipForExpense(db, id);
+  if (autoApproved) {
+    mintSlipForExpense(db, id);
+    // R27.36b — after the slip is minted the reference is stable, so book the
+    // cash outflow into cash_in_hand. approveExpense() below repeats this call
+    // for the pending-approval path.
+    debitCashInHandForExpense(db, id);
+  }
 
   return getExpense(db, id);
 }
@@ -487,10 +632,23 @@ export function updateExpense(db: Database, id: number, input: ExpenseInput): an
   // internally consistent when expense_date or expense_type is what changed).
   const revokeSlip = !autoApproved && !!row.slip_number;
 
+  // R27.36b — allow paid_from / handled_by_staff to be edited. Only overwrite
+  // when the caller passed the field so a partial patch keeps the stored value.
+  const expenseType = (row.expense_type as ExpenseType) || "direct";
+  const paidFromChanged = input?.paid_from !== undefined;
+  const nextPaidFrom = paidFromChanged
+    ? resolvePaidFrom(input, expenseType, !!row.advance_slip_id || !!(input as any)?.advance_slip_id)
+    : (row.paid_from as PaidFrom | null);
+  const handlerChanged = input?.handled_by_staff_id !== undefined || input?.handled_by_staff_name !== undefined;
+  const nextHandler = handlerChanged
+    ? resolveHandledByStaff(db, input, expenseType, nextPaidFrom)
+    : { id: row.handled_by_staff_id ?? null, name: row.handled_by_staff_name ?? null };
+
   db.prepare(
     `UPDATE expense_slips SET category_id=?, payee_id=?, payee_name_freetext=?, amount=?, gst_percent=?, gst_mode=?,
        gst_amount=?, total_amount=?, description=?, expense_date=?, is_recurring=?, recurring_frequency=?,
        recurring_next_date=?, approval_status=?, approved_by=?, approved_at=?, rejection_reason=NULL,
+       paid_from=?, handled_by_staff_id=?, handled_by_staff_name=?,
        slip_number = CASE WHEN ? = 1 THEN NULL ELSE slip_number END,
        slip_generated_at = CASE WHEN ? = 1 THEN NULL ELSE slip_generated_at END
      WHERE id = ?`,
@@ -499,13 +657,17 @@ export function updateExpense(db: Database, id: number, input: ExpenseInput): an
     input?.description !== undefined ? (input.description ? String(input.description).trim() : null) : row.description,
     expenseDate, isRecurring, frequency, nextDate,
     approval, autoApproved ? "system" : null, autoApproved ? Date.now() : null,
+    nextPaidFrom, nextHandler.id, nextHandler.name,
     revokeSlip ? 1 : 0, revokeSlip ? 1 : 0,
     id,
   );
   // R27.36a-part-2b — an edit that drops total below ₹5,000 re-auto-approves the
   // row; mint the slip here so the ledger stops showing "–" without a separate
   // approval action. Guard at top of function blocks edits once the JPG is printed.
-  if (autoApproved) mintSlipForExpense(db, id);
+  if (autoApproved) {
+    mintSlipForExpense(db, id);
+    debitCashInHandForExpense(db, id);
+  }
   return getExpense(db, id);
 }
 
@@ -961,6 +1123,8 @@ export function approveExpense(db: Database, id: number, actor: Actor): any {
   // R27.36a-part-2b — mint slip on approval when it wasn't minted at creation
   // (i.e. the row was > ₹5,000 and went through the pending queue).
   mintSlipForExpense(db, id);
+  // R27.36b — the slip reference is now stable; book the cash outflow.
+  debitCashInHandForExpense(db, id);
   return getExpense(db, id);
 }
 
@@ -1304,18 +1468,30 @@ export function materialiseRecurringExpense(db: Database, template: any, today: 
   const approval = approvalForTotal(gst.total_amount);
   const autoApproved = approval === "auto_approved";
 
+  // R27.36b — inherit payment fields from the template so a recurring child
+  // lands in the same cash pool / bank / advance as its parent. If the parent
+  // paid "against_advance" but has no advance_slip_id on the template (edge
+  // case), we clear paid_from rather than lose track.
+  const inheritedPaidFrom = template.paid_from || null;
+  const inheritedHandlerId = template.handled_by_staff_id ?? null;
+  const inheritedHandlerName = template.handled_by_staff_name ?? null;
+
   const res = db.prepare(
     `INSERT INTO expense_slips (
        category_id, payee_id, payee_name_freetext, amount, gst_percent, gst_mode, gst_amount,
        total_amount, description, expense_date, is_recurring, recurring_frequency, recurring_next_date,
-       recurring_parent_id, approval_status, approved_by, approved_at, created_by, created_at, is_deleted
-     ) VALUES (?,?,?,?,?,?,?,?,?,?,0,NULL,NULL,?,?,?,?,?,?,0)`,
+       recurring_parent_id, approval_status, approved_by, approved_at, created_by, created_at, is_deleted,
+       expense_type, payment_mode, branch_id,
+       paid_from, handled_by_staff_id, handled_by_staff_name
+     ) VALUES (?,?,?,?,?,?,?,?,?,?,0,NULL,NULL,?,?,?,?,?,?,0,?,?,?,?,?,?)`,
   ).run(
     template.category_id, template.payee_id, template.payee_name_freetext,
     gst.amount, Number(template.gst_percent) || 0, gstMode, gst.gst_amount, gst.total_amount,
     template.description, expenseDate, template.id,
     approval, autoApproved ? "system" : null, autoApproved ? now : null,
     template.created_by || "recurring", now,
+    template.expense_type || "direct", template.payment_mode || "cash", template.branch_id || null,
+    inheritedPaidFrom, inheritedHandlerId, inheritedHandlerName,
   );
 
   const freq = (FREQUENCIES.includes(template.recurring_frequency) ? template.recurring_frequency : "monthly") as RecurringFrequency;
@@ -1328,7 +1504,14 @@ export function materialiseRecurringExpense(db: Database, template: any, today: 
   while (next <= expenseDate && guard++ < 120) next = nextRecurringDate(next, freq);
   db.prepare(`UPDATE expense_slips SET recurring_next_date = ? WHERE id = ?`).run(next, template.id);
 
-  return getExpense(db, Number(res.lastInsertRowid));
+  const childId = Number(res.lastInsertRowid);
+  // R27.36b — auto-approved recurring children need slip + cash-in-hand posted
+  // right away so the ledger matches the non-recurring path.
+  if (autoApproved) {
+    mintSlipForExpense(db, childId);
+    debitCashInHandForExpense(db, childId);
+  }
+  return getExpense(db, childId);
 }
 
 export function runRecurringExpenses(db: Database, today: number = Date.now()): { created: number; ids: number[] } {
@@ -1463,5 +1646,87 @@ export function registerExpenseRoutes(app: Express, deps: ExpenseRoutesDeps) {
   app.post("/api/admin/expense-approvals/:id/reject", adminOnly, (req, res) => {
     try { res.json(rejectExpense(db, parseInt(String(req.params.id), 10), req.body?.reason, resolveActor(req))); }
     catch (e: any) { fail(res, e); }
+  });
+
+  // ---- R27.36b: payment-model support endpoints ----
+
+  // Outstanding advances for a payee, used by the "paid against advance" dropdown
+  // in the New Expense modal. Filters by payee_id when the payee is saved, and by
+  // payee_name_freetext when the user typed a freeform name. Returns the smallest
+  // shape the UI needs — id, slip_number, amount, outstanding, expense_date, payee.
+  app.get("/api/expenses/advances/outstanding", guard, (req, res) => {
+    try {
+      const q = req.query as any;
+      const payeeId = q.payee_id != null && q.payee_id !== "" ? Number(q.payee_id) : undefined;
+      const payeeName = q.payee_name ? String(q.payee_name).trim() : undefined;
+      const branchId = q.branch_id ? String(q.branch_id).trim() : undefined;
+
+      // listAdvances's payee filter is a LIKE against saved-name or freetext, so
+      // a payee_id search happens post-fetch below. We fetch both open and partial
+      // in two calls and merge — the volume is tiny (an active payee rarely has
+      // more than a handful of open advances).
+      const openRows = listAdvances(db, { status: "open", branch_id: branchId, payee: payeeName });
+      const partialRows = listAdvances(db, { status: "partial", branch_id: branchId, payee: payeeName });
+      let rows = [...openRows, ...partialRows];
+      if (payeeId != null && Number.isFinite(payeeId)) {
+        rows = rows.filter((r: any) => Number(r.payee_id) === payeeId);
+      }
+      const out = rows
+        .map((r: any) => ({
+          id: r.id,
+          slip_number: r.slip_number,
+          expense_date: r.expense_date,
+          total_amount: Number(r.total_amount) || 0,
+          outstanding: advanceOutstanding(r),
+          reconciled_amount: Number(r.reconciled_amount) || 0,
+          returned_amount: Number(r.returned_amount) || 0,
+          advance_status: r.advance_status,
+          payee_id: r.payee_id,
+          payee_name: r.payee_saved_name || r.payee_name_freetext,
+          handled_by_staff_name: r.handled_by_staff_name || null,
+          branch_id: r.branch_id || null,
+          expected_return_date: r.expected_return_date || null,
+        }))
+        .filter(r => r.outstanding > 0.005);
+      res.json({ advances: out });
+    } catch (e: any) { fail(res, e); }
+  });
+
+  // Staff picker for the "who handled the cash" field on advance issuance. Pulled
+  // from admin_users so it stays in sync with logins; falls back to an empty list
+  // when the table isn't present (fresh tenants). Frontend can still POST a name.
+  app.get("/api/expenses/staff", guard, (req, res) => {
+    try {
+      let rows: any[] = [];
+      try {
+        rows = db.prepare(
+          `SELECT id, username, display_name, role
+           FROM admin_users
+           WHERE COALESCE(active, 1) = 1
+           ORDER BY COALESCE(display_name, username)`,
+        ).all() as any[];
+      } catch (e: any) {
+        if (!/no such table/i.test(String(e?.message || ""))) throw e;
+      }
+      res.json({
+        staff: rows.map(u => ({
+          id: u.id,
+          username: u.username,
+          name: u.display_name || u.username,
+          role: u.role,
+        })),
+      });
+    } catch (e: any) { fail(res, e); }
+  });
+
+  // Expose the paid_from enum so the frontend doesn't have to hard-code it.
+  app.get("/api/expenses/payment-options", guard, (req, res) => {
+    try {
+      res.json({
+        paid_from: PAID_FROM_OPTIONS,
+        paid_from_for_advance: PAID_FROM_FOR_ADVANCE,
+        approval_threshold: 5000,
+      });
+    } catch (e: any) { fail(res, e); }
   });
 }
