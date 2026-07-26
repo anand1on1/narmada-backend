@@ -354,6 +354,72 @@ export function registerV2Routes(app: Express, ctx: V2Context) {
   registerPaymentRoutes(app, { db: rawSqlite as any, uploadsDir: ctx.uploadsDir, requireRole: requireAdminOrTeamRole, resolveActor });
   registerExpenseRoutes(app, { db: rawSqlite as any, uploadsDir: ctx.uploadsDir, requireRole: requireAdminOrTeamRole, resolveActor });
 
+  // ==========================================================================
+  // R27.36-DEBUG: TEMPORARY endpoint to inspect the legacy R27.6 `expenses`
+  // table (Accounts module) so a migration into R27.36's `expense_slips` can be
+  // planned. Read-only, admin-role only.
+  // TODO: Remove in R27.36a migration release.
+  // ==========================================================================
+  app.get("/api/admin/debug/r27-6-expenses", requireAdminRole, (_req, res) => {
+    // better-sqlite3 is synchronous — every probe is wrapped so one missing
+    // table or column cannot sink the whole dump.
+    const probe = <T>(fn: () => T, fallback: T): T => {
+      try { return fn(); } catch { return fallback; }
+    };
+    try {
+      const schema = probe(() => rawSqlite.prepare("PRAGMA table_info(expenses)").all(), []);
+      const count = probe(
+        () => rawSqlite.prepare("SELECT COUNT(*) AS total FROM expenses").get() as { total: number },
+        { total: -1 },
+      );
+      const rows = probe(() => rawSqlite.prepare("SELECT * FROM expenses ORDER BY id DESC LIMIT 20").all(), []);
+      const distinctExpenseTypes = probe(
+        () => rawSqlite.prepare("SELECT expense_type, COUNT(*) AS c FROM expenses GROUP BY expense_type").all(),
+        [],
+      );
+      // The R27.6 table has no `status` column; kept because later migrations
+      // may have added one on some deployments.
+      const distinctStatuses = probe(
+        () => rawSqlite.prepare("SELECT status, COUNT(*) AS c FROM expenses GROUP BY status").all(),
+        [],
+      );
+
+      // Every other expense-shaped table, discovered rather than hardcoded, so
+      // legacy tables nobody remembers still show up.
+      const relatedNames = probe(
+        () => (rawSqlite
+          .prepare(
+            `SELECT name FROM sqlite_master
+             WHERE type = 'table' AND name != 'expenses'
+               AND (name LIKE '%expense%' OR name LIKE '%advance%')
+             ORDER BY name`,
+          )
+          .all() as { name: string }[]).map((r) => r.name),
+        [] as string[],
+      );
+      const relatedTables = relatedNames.map((name) => ({
+        name,
+        row_count: probe(
+          () => (rawSqlite.prepare(`SELECT COUNT(*) AS total FROM "${name}"`).get() as { total: number }).total,
+          -1,
+        ),
+        schema: probe(() => rawSqlite.prepare(`PRAGMA table_info("${name}")`).all(), []),
+      }));
+
+      res.json({
+        _debug_note: "R27.36-DEBUG: legacy R27.6 expenses table — for migration planning only, remove in R27.36a",
+        schema,
+        total_row_count: count.total,
+        distinct_expense_types: distinctExpenseTypes,
+        distinct_statuses: distinctStatuses,
+        sample_rows: rows,
+        related_tables: relatedTables,
+      });
+    } catch (e: any) {
+      res.status(500).json({ error: e?.message || String(e), stack: e?.stack });
+    }
+  });
+
   // ============== LOGIN (extended — supports primary admin OR DB users) ==============
   // Replaces the original /api/admin/login behavior via shadow: if username matches
   // primary admin password, accept. Otherwise, check admin_users table.
