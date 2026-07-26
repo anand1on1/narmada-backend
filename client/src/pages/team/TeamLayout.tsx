@@ -2,11 +2,15 @@ import { ReactNode, useEffect, useState } from "react";
 import { Link, useLocation } from "wouter";
 import { useTeamAuth, teamFetch } from "@/lib/team-auth";
 import { Logo } from "@/components/Logo";
-import { LayoutDashboard, FileText, FilePlus, Users, Package, LogOut, ShoppingCart, Send, Upload, X, Megaphone, MessageSquare, Store, FileWarning, CreditCard } from "lucide-react";
+import { LayoutDashboard, FileText, FilePlus, Users, Package, LogOut, ShoppingCart, Send, Upload, X, Megaphone, MessageSquare, Store, FileWarning, CreditCard, Receipt, BookOpen } from "lucide-react";
 import { useQuery } from "@tanstack/react-query";
 
 // R27.32c — roles that may access Process Payment (matches the backend dual-auth guard).
 const PAYMENT_ROLES = ["admin", "procurement", "finance", "data_team"];
+
+// R27.36 — booking an expense is tighter than raising a payment slip: admin + finance
+// only (matches EXPENSE_ROLES in server/routes-expenses.ts).
+const EXPENSE_ROLES = ["admin", "finance"];
 
 const baseNavItems = [
   { href: "/team/dashboard", label: "Dashboard", icon: LayoutDashboard },
@@ -34,6 +38,15 @@ export function TeamLayout({ children, title }: { children: ReactNode; title: st
     const at = poIdx >= 0 ? poIdx + 1 : items.length;
     items.splice(at, 0, { href: "/team/process-payment", label: "Process Payment", icon: CreditCard });
     return items;
+  })();
+
+  // R27.36 — Expenses + Expense Ledger, admin & finance only.
+  const finalNavItems = (() => {
+    if (!(user?.role && EXPENSE_ROLES.includes(user.role))) return navItems;
+    return [...navItems,
+      { href: "/team/expenses", label: "Expenses", icon: Receipt },
+      { href: "/team/expense-ledger", label: "Expense Ledger", icon: BookOpen },
+    ];
   })();
   const [bannerDismissed, setBannerDismissed] = useState(() => {
     try { return sessionStorage.getItem("team_announcement_dismissed") === "1"; } catch { return false; }
@@ -86,7 +99,7 @@ export function TeamLayout({ children, title }: { children: ReactNode; title: st
           <div className="mt-2 text-[10px] uppercase tracking-widest text-violet-600 font-bold">Data Team</div>
         </div>
         <nav className="flex-1 p-3 space-y-1 overflow-y-auto">
-          {navItems.map((n) => <NavItem key={n.href} {...n} />)}
+          {finalNavItems.map((n) => <NavItem key={n.href} {...n} />)}
         </nav>
         <div className="p-4 border-t border-slate-200">
           {user && (

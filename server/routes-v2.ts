@@ -13,6 +13,7 @@ import { rawSqlite } from "./storage";
 import * as XLSX from "xlsx";
 import { recordMarketingWhatsAppReceipt } from "./marketing/webhook-hook";
 import { registerPaymentRoutes, type Actor } from "./routes-payments";
+import { registerExpenseRoutes } from "./routes-expenses";
 import {
   insertPostSchema, insertConsignmentSchema, insertPriceListSchema,
   insertCustomerSchema,
@@ -351,6 +352,7 @@ export function registerV2Routes(app: Express, ctx: V2Context) {
     return { userId, userName, username };
   };
   registerPaymentRoutes(app, { db: rawSqlite as any, uploadsDir: ctx.uploadsDir, requireRole: requireAdminOrTeamRole, resolveActor });
+  registerExpenseRoutes(app, { db: rawSqlite as any, uploadsDir: ctx.uploadsDir, requireRole: requireAdminOrTeamRole, resolveActor });
 
   // ============== LOGIN (extended — supports primary admin OR DB users) ==============
   // Replaces the original /api/admin/login behavior via shadow: if username matches

@@ -97,6 +97,7 @@ import AdminLedger from "@/pages/admin/AdminLedger";
 import AdminPayments from "@/pages/admin/AdminPayments";
 import AdminProcessPayment from "@/pages/admin/AdminProcessPayment";
 import AdminPaymentApprovals from "@/pages/admin/AdminPaymentApprovals";
+import AdminExpenseApprovals from "@/pages/admin/AdminExpenseApprovals"; // R27.36
 import AdminRFQs from "@/pages/admin/AdminRFQs";
 import AdminQuotes from "@/pages/admin/AdminQuotes";
 import AdminPOs from "@/pages/admin/AdminPOs";
@@ -214,6 +215,8 @@ import TeamSellers from "@/pages/team/TeamSellers";
 import TeamPOs from "@/pages/team/TeamPOs";
 import TeamPODetail from "@/pages/team/TeamPODetail";
 import TeamProcessPayment from "@/pages/team/TeamProcessPayment"; // R27.32c
+import TeamExpenses from "@/pages/team/TeamExpenses"; // R27.36
+import TeamExpenseLedger from "@/pages/team/TeamExpenseLedger"; // R27.36
 import TeamDeviations from "@/pages/team/TeamDeviations"; // R27.4 BUG-13
 import TeamRFQs from "@/pages/team/TeamRFQs";
 import TeamRFQDetail from "@/pages/team/TeamRFQDetail";
@@ -300,6 +303,7 @@ function AppRouter() {
         <Route path="/admin/payments" component={AdminPayments} />
         <Route path="/admin/process-payment" component={AdminProcessPayment} />
         <Route path="/admin/payment-approvals" component={AdminPaymentApprovals} />
+        <Route path="/admin/expense-approvals" component={AdminExpenseApprovals} />
         <Route path="/admin/rfqs" component={AdminRFQs} />
         <Route path="/admin/quotes" component={AdminQuotes} />
         {/* R26.6a (5) — admin PO detail page (was a 404). Must precede the list route. */}
@@ -445,6 +449,8 @@ function AppRouter() {
         <Route path="/team/purchase-orders/:id" component={TeamPODetail} />
         <Route path="/team/purchase-orders" component={TeamPOs} />
         <Route path="/team/process-payment" component={TeamProcessPayment} />
+        <Route path="/team/expenses" component={TeamExpenses} />
+        <Route path="/team/expense-ledger" component={TeamExpenseLedger} />
         <Route path="/team/deviations" component={TeamDeviations} />
         <Route path="/team/rfqs/:id" component={TeamRFQDetail} />
         <Route path="/team/rfqs" component={TeamRFQs} />

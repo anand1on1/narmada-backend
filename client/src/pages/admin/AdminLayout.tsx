@@ -10,7 +10,7 @@ import {
   Building2, UserCog, ScrollText, ClipboardList, Bell,
   Factory, Search, Target, Megaphone, CheckSquare, Sparkles, Facebook, History,
   Gauge, Radar, Link2, Bug, ShoppingBag, Boxes, ChevronDown, ChevronRight, Calculator,
-  BookOpen, ShieldCheck,
+  BookOpen, ShieldCheck, Receipt,
 } from "lucide-react";
 
 // Session A V2: 4-role sidebar matrix.
@@ -34,6 +34,7 @@ const ROLE_PAGES: Record<AdminRole, Set<string>> = {
     "/admin/webhook-events",
     "/admin/orders", "/admin/web-customers", "/admin/freight", "/admin/stock",
     "/admin/accounts",
+    "/admin/expense-approvals",
   ]),
   // Data Center role: public Products only, no delete (enforced backend + UI).
   data_center: new Set([
@@ -61,7 +62,7 @@ const ROLE_PAGES: Record<AdminRole, Set<string>> = {
   finance: new Set([
     "/admin/dashboard",
     "/admin/ledger", "/admin/payments", "/admin/bank", "/admin/companies",
-    "/admin/vendor-ledger", "/admin/process-payment",
+    "/admin/vendor-ledger", "/admin/process-payment", "/admin/expense-approvals",
   ]),
 };
 
@@ -81,6 +82,9 @@ export function AdminLayout({ children, title }: { children: ReactNode; title: s
   const [unreadChats, setUnreadChats] = useState(0);
   // R27.35 — payment slips over ₹5,000 waiting for release.
   const [pendingApprovals, setPendingApprovals] = useState(0);
+  // R27.36 — expense slips over ₹5,000 waiting for release. Counted separately from
+  // payment approvals so each nav item carries its own number.
+  const [pendingExpenseApprovals, setPendingExpenseApprovals] = useState(0);
   // R27.5 #9 — sidebar search + collapsible sections with localStorage-persisted state.
   const [navSearch, setNavSearch] = useState("");
   const [expanded, setExpanded] = useState<Record<string, boolean>>(() => {
@@ -126,6 +130,23 @@ export function AdminLayout({ children, title }: { children: ReactNode; title: s
         if (!res.ok || !alive) return;
         const d = await res.json();
         if (alive) setPendingApprovals(Number(d?.pending_count) || 0);
+      } catch { /* ignore */ }
+    };
+    tick();
+    const id = setInterval(tick, 60000);
+    return () => { alive = false; clearInterval(id); };
+  }, [token]);
+
+  // R27.36 — pending expense-approval count, same 60s cadence as payments.
+  useEffect(() => {
+    if (!token) return;
+    let alive = true;
+    const tick = async () => {
+      try {
+        const res = await adminFetch(token, "/api/admin/expense-approvals/pending");
+        if (!res.ok || !alive) return;
+        const d = await res.json();
+        if (alive) setPendingExpenseApprovals(Number(d?.pending_count) || 0);
       } catch { /* ignore */ }
     };
     tick();
@@ -188,6 +209,7 @@ export function AdminLayout({ children, title }: { children: ReactNode; title: s
 
     { href: "/admin/accounts", label: "Accounts (Expenses)", icon: Calculator, group: "Accounts" },
     { href: "/admin/staff", label: "Staff", icon: UserSquare, group: "Accounts" },
+    { href: "/admin/expense-approvals", label: "Expense Approvals", icon: Receipt, badge: pendingExpenseApprovals, group: "Accounts" },
 
     { href: "/admin/team", label: "Team", icon: Users, group: "People" },
     { href: "/admin/users", label: "Create Users", icon: UserCog, group: "People" },

@@ -4277,3 +4277,119 @@ export function runR27_35Migrations() {
   verify("payment_batches", ["approval_status", "approved_by", "approved_at", "rejection_reason", "grand_total_snapshot"]);
   console.log("[migrations] R27.35: complete");
 }
+
+// ===========================================================================
+// R27.36 — Expense slip module + expense ledger.
+//
+// Three new tables. Nothing existing is touched: the ledger is derived from
+// `expenses` rather than materialised, so there is no second source of truth to
+// keep in sync. approval_status mirrors the R27.35 enum so the same threshold
+// and the same approver rule apply to expenses.
+// ===========================================================================
+export function runR27_36Migrations() {
+  console.log("[migrations] R27.36: start");
+  const run = (label: string, sql: string) => {
+    try { sqlite.exec(sql); console.log(`[migrations] R27.36: ${label} ok`); }
+    catch (e: any) {
+      const msg = String(e?.message || e);
+      if (/already exists|duplicate column/i.test(msg)) console.log(`[migrations] R27.36: ${label} skip (exists)`);
+      else console.log(`[migrations] R27.36: ${label} skip (${msg})`);
+    }
+  };
+
+  run("expense_categories", `
+    CREATE TABLE IF NOT EXISTS expense_categories (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      name TEXT NOT NULL UNIQUE,
+      description TEXT,
+      created_by TEXT NOT NULL,
+      created_at INTEGER NOT NULL,
+      is_active INTEGER DEFAULT 1
+    )`);
+
+  run("expense_payees", `
+    CREATE TABLE IF NOT EXISTS expense_payees (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      name TEXT NOT NULL,
+      phone TEXT,
+      email TEXT,
+      address TEXT,
+      gst_number TEXT,
+      pan_number TEXT,
+      bank_account TEXT,
+      ifsc TEXT,
+      bank_name TEXT,
+      created_by TEXT NOT NULL,
+      created_at INTEGER NOT NULL,
+      is_active INTEGER DEFAULT 1
+    )`);
+
+  run("expense_slips", `
+    CREATE TABLE IF NOT EXISTS expense_slips (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      category_id INTEGER NOT NULL,
+      payee_id INTEGER,
+      payee_name_freetext TEXT,
+      amount REAL NOT NULL,
+      gst_percent REAL DEFAULT 0,
+      gst_mode TEXT DEFAULT 'exclusive',
+      gst_amount REAL DEFAULT 0,
+      total_amount REAL NOT NULL,
+      description TEXT,
+      expense_date INTEGER NOT NULL,
+      is_recurring INTEGER DEFAULT 0,
+      recurring_frequency TEXT,
+      recurring_next_date INTEGER,
+      recurring_parent_id INTEGER,
+      approval_status TEXT DEFAULT 'auto_approved',
+      approved_by TEXT,
+      approved_at INTEGER,
+      rejection_reason TEXT,
+      created_by TEXT NOT NULL,
+      created_at INTEGER NOT NULL,
+      slip_number TEXT,
+      slip_generated_at INTEGER,
+      slip_image_path TEXT,
+      is_deleted INTEGER DEFAULT 0,
+      FOREIGN KEY (category_id) REFERENCES expense_categories(id),
+      FOREIGN KEY (payee_id) REFERENCES expense_payees(id),
+      FOREIGN KEY (recurring_parent_id) REFERENCES expense_slips(id)
+    )`);
+
+  run("idx_expense_slips_category_id", `CREATE INDEX IF NOT EXISTS idx_expense_slips_category_id ON expense_slips(category_id)`);
+  run("idx_expense_slips_payee_id", `CREATE INDEX IF NOT EXISTS idx_expense_slips_payee_id ON expense_slips(payee_id)`);
+  run("idx_expense_slips_expense_date", `CREATE INDEX IF NOT EXISTS idx_expense_slips_expense_date ON expense_slips(expense_date)`);
+  run("idx_expense_slips_approval_status", `CREATE INDEX IF NOT EXISTS idx_expense_slips_approval_status ON expense_slips(approval_status)`);
+  run("idx_expense_slips_recurring_next",
+    `CREATE INDEX IF NOT EXISTS idx_expense_slips_recurring_next ON expense_slips(recurring_next_date) WHERE is_recurring = 1`);
+
+  const verifyCols = (table: string, expected: string[]) => {
+    try {
+      const cols = (sqlite.prepare(`PRAGMA table_info(${table})`).all() as any[]).map(r => r.name);
+      if (!cols.length) { console.log(`[migrations] R27.36: verify ${table} MISSING (no such table)`); return; }
+      const missing = expected.filter(c => !cols.includes(c));
+      if (missing.length) console.log(`[migrations] R27.36: verify ${table} MISSING ${missing.join(",")}`);
+      else console.log(`[migrations] R27.36: verify ${table} ok (${cols.length} cols)`);
+    } catch (e: any) {
+      console.log(`[migrations] R27.36: verify ${table} skip (${String(e?.message || e)})`);
+    }
+  };
+  verifyCols("expense_categories", ["id", "name", "description", "created_by", "created_at", "is_active"]);
+  verifyCols("expense_payees", ["id", "name", "gst_number", "pan_number", "bank_account", "ifsc", "bank_name", "is_active"]);
+  verifyCols("expense_slips", [
+    "id", "category_id", "payee_id", "payee_name_freetext", "amount", "gst_percent", "gst_mode",
+    "gst_amount", "total_amount", "description", "expense_date", "is_recurring", "recurring_frequency",
+    "recurring_next_date", "recurring_parent_id", "approval_status", "approved_by", "approved_at",
+    "rejection_reason", "created_by", "created_at", "slip_number", "slip_generated_at",
+    "slip_image_path", "is_deleted",
+  ]);
+  try {
+    const idx = (sqlite.prepare(
+      `SELECT name FROM sqlite_master WHERE type = 'index' AND name LIKE 'idx_expense_slips_%'`,
+    ).all() as any[]).map(r => r.name).sort();
+    console.log(`[migrations] R27.36: verify indexes ok (${idx.join(",")})`);
+  } catch (e: any) {
+    console.log(`[migrations] R27.36: verify indexes skip (${String(e?.message || e)})`);
+  }
+  console.log("[migrations] R27.36: complete");
+}
