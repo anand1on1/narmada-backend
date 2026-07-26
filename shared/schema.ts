@@ -549,6 +549,9 @@ export const quotations = sqliteTable("quotations", {
   currency: text("currency").notNull().default("INR"), // INR | USD | EUR | AED
   fxRate: real("fx_rate").default(1),
   fxLockedAt: integer("fx_locked_at"),
+  // R27.34b — currency is switchable after save; these record the last flip.
+  currencyChangedAt: integer("currency_changed_at"),
+  currencyChangedBy: text("currency_changed_by"),
   subtotal: real("subtotal").default(0),
   totalDiscount: real("total_discount").default(0),
   totalTax: real("total_tax").default(0),

@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { useLocation } from "wouter";
 import { AdminLayout } from "./AdminLayout";
 import { adminFetch, useAdminAuth } from "@/lib/admin-auth";
-import { Trash2, Plus, ExternalLink, Copy } from "lucide-react";
+import { Trash2, Plus, ExternalLink, Copy, Search, X } from "lucide-react";
 
 // R26.5 (A3) — repointed to the v2 quotations table (Data Team is source of truth).
 // GET /api/admin/quotations returns { quotations, total, pages }.
@@ -21,18 +21,46 @@ export default function AdminQuotes() {
   const [items, setItems] = useState<Quote[]>([]);
   const [filter, setFilter] = useState<"all" | string>("all");
   const [busy, setBusy] = useState(false);
+  // R27.34b — same search/filter bar the team quotation list has. The search term is
+  // matched server-side against quote #, customer and line-item text.
+  const [q, setQ] = useState("");
+  const [dq, setDq] = useState("");
+  const [customerId, setCustomerId] = useState("");
+  const [fromDate, setFromDate] = useState("");
+  const [toDate, setToDate] = useState("");
+  const [counts, setCounts] = useState({ shown: 0, all: 0 });
+  const [customers, setCustomers] = useState<Array<{ id: number; name: string }>>([]);
+  useEffect(() => { const t = setTimeout(() => setDq(q), 300); return () => clearTimeout(t); }, [q]);
+  const hasActiveFilter = filter !== "all" || !!(dq || customerId || fromDate || toDate);
 
   async function load() {
     if (!token) return;
     const params = new URLSearchParams();
     if (filter !== "all") params.set("status", filter);
+    if (dq.trim()) params.set("q", dq.trim());
+    if (customerId) params.set("customer_id", customerId);
+    if (fromDate) params.set("from", fromDate);
+    if (toDate) params.set("to", toDate);
     const r = await adminFetch(token, `/api/admin/quotations?${params}`);
     if (!r.ok) { setItems([]); return; }
     const d = await r.json();
-    // v2 shape: { quotations, total, pages }; tolerate a bare array too.
-    setItems(Array.isArray(d) ? d : (Array.isArray(d?.quotations) ? d.quotations : []));
+    // v2 shape: { quotations, total, total_count, pages }; tolerate a bare array too.
+    const rows = Array.isArray(d) ? d : (Array.isArray(d?.quotations) ? d.quotations : []);
+    setItems(rows);
+    setCounts({ shown: Array.isArray(d) ? rows.length : (d?.total ?? rows.length), all: Array.isArray(d) ? rows.length : (d?.total_count ?? d?.total ?? rows.length) });
   }
-  useEffect(() => { load(); }, [token, filter]); // eslint-disable-line
+  useEffect(() => { load(); }, [token, filter, dq, customerId, fromDate, toDate]); // eslint-disable-line
+  useEffect(() => {
+    if (!token) return;
+    adminFetch(token, "/api/admin/customers")
+      .then((r) => (r.ok ? r.json() : []))
+      .then((j) => setCustomers(Array.isArray(j) ? j : (j?.customers || [])))
+      .catch(() => setCustomers([]));
+  }, [token]);
+
+  function clearFilters() {
+    setFilter("all"); setQ(""); setDq(""); setCustomerId(""); setFromDate(""); setToDate("");
+  }
 
   async function setStatus(id: number, status: string) {
     if (!token) return;
@@ -94,7 +122,33 @@ export default function AdminQuotes() {
           <Plus className="w-4 h-4" /> New Quotation
         </button>
       </div>
+      {/* R27.34b — search + customer + date range, mirroring the team quotation list. */}
+      <div className="flex gap-2 mb-3 flex-wrap items-center">
+        <div className="relative flex-1 min-w-56">
+          <Search className="w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground" />
+          <input value={q} onChange={(e) => setQ(e.target.value)} placeholder="Search quote #, customer, part #, item…"
+            className="w-full border rounded-lg pl-9 pr-3 py-2 bg-background text-sm" data-testid="input-admin-quote-search" />
+        </div>
+        <select value={customerId} onChange={(e) => setCustomerId(e.target.value)} className="border rounded-lg px-2 py-1.5 bg-background text-sm max-w-48" data-testid="select-admin-quote-customer">
+          <option value="">All customers</option>
+          {customers.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
+        </select>
+        <label className="text-xs text-muted-foreground">From</label>
+        <input type="date" value={fromDate} onChange={(e) => setFromDate(e.target.value)} className="border rounded-lg px-2 py-1.5 bg-background text-sm" data-testid="input-admin-quote-from" />
+        <label className="text-xs text-muted-foreground">To</label>
+        <input type="date" value={toDate} onChange={(e) => setToDate(e.target.value)} className="border rounded-lg px-2 py-1.5 bg-background text-sm" data-testid="input-admin-quote-to" />
+        {hasActiveFilter && (
+          <button onClick={clearFilters} className="px-3 py-1.5 rounded-lg text-xs font-semibold border hover:bg-muted inline-flex items-center gap-1" data-testid="button-admin-quote-clear">
+            <X className="w-3 h-3" /> Clear filters
+          </button>
+        )}
+      </div>
       <div className="mb-4 text-xs text-muted-foreground">
+        {hasActiveFilter && (
+          <span className="mr-2" data-testid="text-admin-quote-count">
+            Showing <span className="font-semibold text-foreground">{counts.shown}</span> of <span className="font-semibold text-foreground">{counts.all}</span> quotation{counts.all !== 1 ? "s" : ""}.
+          </span>
+        )}
         Showing the v2 quotations table (same data the Data Team sees). Use Open / PDF to edit line items in the Team portal.
       </div>
 

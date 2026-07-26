@@ -50,6 +50,9 @@ export interface QuotationForPdf {
   quoteNo: string;
   currency: string;
   fxRate: number | null;
+  // R27.34b — the currency can now be re-set after save, so the PDF dates the rate.
+  fxLockedAt?: number | null;
+  currencyChangedAt?: number | null;
   subtotal: number | null;
   totalDiscount: number | null;
   totalTax: number | null;
@@ -557,7 +560,10 @@ export async function generateQuotationPDF(
 
   // FX note (if applicable)
   if (quotation.currency !== "INR" && quotation.fxRate && quotation.fxRate !== 1) {
-    drawText(curPage, `Rate: 1 ${quotation.currency} = ${useUnicodeFont ? "₹" : "Rs. "}${quotation.fxRate.toFixed(4)}`,
+    // R27.34b — the rate can now be re-set after save, so say when it was locked.
+    const lockedTs = (quotation as any).currencyChangedAt || quotation.fxLockedAt;
+    const lockedOn = lockedTs ? ` (locked on ${new Date(Number(lockedTs)).toISOString().slice(0, 10)})` : "";
+    drawText(curPage, `Exchange rate: 1 ${quotation.currency} = ${useUnicodeFont ? "₹" : "Rs. "}${quotation.fxRate.toFixed(4)}${lockedOn}`,
       totalsX + 14, y - totalsH - 12, fontRegular, 7, COLOR_TEXT_MUTED);
   }
 

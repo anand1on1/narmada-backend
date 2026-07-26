@@ -1154,10 +1154,10 @@ export async function listQuotations(opts: {
   createdByUserId?: number;
   fromDate?: number; // unix ms
   toDate?: number;   // unix ms
-  q?: string;        // search quote_no or notes
+  q?: string;        // R27.34b: quote_no, notes, customer name, and line-item text
   page?: number;
   limit?: number;
-} = {}): Promise<{ rows: Quotation[]; total: number }> {
+} = {}): Promise<{ rows: Quotation[]; total: number; totalUnfiltered: number }> {
   const conds: any[] = [];
   // R20.1: exclude soft-deleted quotations.
   conds.push(sql`deleted_at IS NULL`);
@@ -1167,8 +1167,20 @@ export async function listQuotations(opts: {
   if (opts.fromDate) conds.push(sql`${quotations.createdAt} >= ${opts.fromDate}`);
   if (opts.toDate) conds.push(sql`${quotations.createdAt} <= ${opts.toDate}`);
   if (opts.q && opts.q.trim()) {
+    // R27.34b — correlated EXISTS rather than a JOIN so a quotation with several
+    // matching lines is still returned once and the COUNT(*) stays accurate.
     const term = `%${opts.q.trim().toLowerCase()}%`;
-    conds.push(sql`(LOWER(${quotations.quoteNo}) LIKE ${term} OR LOWER(COALESCE(${quotations.notes}, '')) LIKE ${term})`);
+    conds.push(sql`(
+      LOWER(COALESCE(${quotations.quoteNo}, '')) LIKE ${term}
+      OR LOWER(COALESCE(${quotations.notes}, '')) LIKE ${term}
+      OR EXISTS (SELECT 1 FROM customers c WHERE c.id = quotations.customer_id
+                 AND (LOWER(COALESCE(c.name, '')) LIKE ${term} OR LOWER(COALESCE(c.customer_code, '')) LIKE ${term}))
+      OR EXISTS (SELECT 1 FROM quotation_items qi WHERE qi.quotation_id = quotations.id
+                 AND (LOWER(COALESCE(qi.part_number, '')) LIKE ${term}
+                   OR LOWER(COALESCE(qi.product_name, '')) LIKE ${term}
+                   OR LOWER(COALESCE(qi.brand, '')) LIKE ${term}
+                   OR LOWER(COALESCE(qi.hsn, '')) LIKE ${term}))
+    )`);
   }
 
   let q: any = db.select().from(quotations);
@@ -1179,10 +1191,16 @@ export async function listQuotations(opts: {
     countQ = countQ.where(where);
   }
   const total = (countQ.get()?.c as number) || 0;
+  // R27.34b — denominator for "Showing X of Y": every live quotation the caller could
+  // see with no filters applied (creator scope still applies; it is not a filter).
+  const baseConds: any[] = [sql`deleted_at IS NULL`];
+  if (opts.createdByUserId) baseConds.push(eq(quotations.createdByUserId, opts.createdByUserId));
+  const totalUnfiltered = (db.select({ c: sql<number>`COUNT(*)` }).from(quotations)
+    .where(baseConds.length === 1 ? baseConds[0] : and(...baseConds)).get()?.c as number) || 0;
   const limit = opts.limit || 20;
   const offset = ((opts.page || 1) - 1) * limit;
   q = q.orderBy(desc(quotations.createdAt)).limit(limit).offset(offset);
-  return { rows: q.all(), total };
+  return { rows: q.all(), total, totalUnfiltered };
 }
 export async function getQuotation(id: number): Promise<Quotation | undefined> {
   return db.select().from(quotations).where(eq(quotations.id, id)).get();
@@ -1222,6 +1240,81 @@ export function computeQuoteTotals(
     totalTax: Math.round(tax * 100) / 100,
     grandTotal: Math.round(grand * 100) / 100,
   };
+}
+
+// R27.34b Feature 2 — currency used to lock on save. Flipping it re-prices every line
+// at the supplied rate, which is the rate the PDF then quotes back ("1 USD = X INR"),
+// so it is stored on the existing fx_rate column rather than a parallel one.
+export const R27_34B_CURRENCIES = ["INR", "USD", "EUR", "AED"] as const;
+const round2 = (n: number) => Math.round(n * 100) / 100;
+
+export function convertAmount(amount: number, from: string, to: string, rate: number): number {
+  if (from === to) return round2(amount);
+  // rate is always foreign-per-INR-denominated: "1 <foreign> = rate INR".
+  if (from === "INR") return round2(amount / rate);
+  if (to === "INR") return round2(amount * rate);
+  // Foreign→foreign is not offered by the UI; going via INR keeps it honest.
+  return round2(amount);
+}
+
+export async function changeQuotationCurrency(
+  id: number,
+  newCurrency: string,
+  exchangeRate: number,
+  actor?: { type?: string; id?: string; name?: string },
+): Promise<{ quotation: Quotation; items: QuotationItem[] }> {
+  const currency = String(newCurrency || "").trim().toUpperCase();
+  if (!(R27_34B_CURRENCIES as readonly string[]).includes(currency)) {
+    throw new Error(`Unsupported currency: ${newCurrency}`);
+  }
+  const rate = Number(exchangeRate);
+  if (!Number.isFinite(rate) || rate <= 0) throw new Error("exchange_rate must be a positive number");
+  const existing = await getQuotation(id);
+  if (!existing) throw new Error("Quotation not found");
+
+  const from = String(existing.currency || "INR").toUpperCase();
+  const now = Date.now();
+
+  const apply = sqlite.transaction(() => {
+    const lines = db.select().from(quotationItems).where(eq(quotationItems.quotationId, id)).all();
+    for (const it of lines) {
+      db.update(quotationItems)
+        .set({ mrp: convertAmount(Number(it.mrp || 0), from, currency, rate) })
+        .where(eq(quotationItems.id, it.id)).run();
+    }
+    const updated = db.select().from(quotationItems).where(eq(quotationItems.quotationId, id)).all();
+    for (const it of updated) {
+      const gross = Number(it.qty || 0) * Number(it.mrp || 0);
+      db.update(quotationItems)
+        .set({ lineTotal: round2(gross - gross * (Number(it.discount || 0) / 100)) })
+        .where(eq(quotationItems.id, it.id)).run();
+    }
+    const totals = computeQuoteTotals(updated as any);
+    db.update(quotations).set({
+      currency,
+      // INR quotations carry no meaningful rate; keep 1 so the PDF omits the FX line.
+      fxRate: currency === "INR" ? 1 : rate,
+      fxLockedAt: now,
+      currencyChangedAt: now,
+      currencyChangedBy: actor?.name || actor?.id || null,
+      ...totals,
+      updatedAt: now,
+    } as any).where(eq(quotations.id, id)).run();
+  });
+  apply();
+
+  await writeAuditLog({
+    actorType: actor?.type || "admin",
+    actorId: actor?.id,
+    action: "quotation.change_currency",
+    entityType: "quotation",
+    entityId: String(id),
+    beforeJson: JSON.stringify({ currency: from, fxRate: existing.fxRate, grandTotal: existing.grandTotal }),
+    afterJson: JSON.stringify({ currency, fxRate: currency === "INR" ? 1 : rate }),
+  });
+
+  const after = await getQuotationWithItems(id);
+  return { quotation: after!.quotation, items: after!.items };
 }
 
 export async function createQuotation(
@@ -1852,6 +1945,7 @@ export async function listPurchaseOrdersV2WithTotals(opts: { status?: string; cu
           if (it.partNumber) haystack.push(it.partNumber);
           if (it.vendorName) haystack.push(it.vendorName);
           if (it.description) haystack.push(it.description);
+          if (it.brand) haystack.push(it.brand); // R27.34b
         }
         return haystack.some((s) => String(s).toLowerCase().includes(q));
       })
@@ -1870,6 +1964,11 @@ export async function listPurchaseOrdersV2WithTotals(opts: { status?: string; cu
     : filtered;
   // Strip the line items we only needed for searching back off the list payload.
   return dated.map(({ items: _items, ...rest }: any) => rest);
+}
+// R27.34b — denominator for the PO list's "Showing X of Y". Deliberately unfiltered:
+// listPurchaseOrdersV2WithTotals already returns the filtered numerator.
+export function countPurchaseOrdersV2(): number {
+  return (db.select({ c: sql<number>`COUNT(*)` }).from(purchaseOrdersV2).get()?.c as number) || 0;
 }
 // R13: has this quotation already been converted to a PO? Used to lock the quotation's
 // ordered-company once it's downstream of a PO.

@@ -38,6 +38,8 @@ interface Quotation {
   companyId?: number | null;
   currency: string;
   fxRate: number;
+  currencyChangedAt?: number | null;
+  currencyChangedBy?: string | null;
   notes: string | null;
   terms: string | null;
   validUntil: string | null;
@@ -107,6 +109,10 @@ export default function TeamQuotationEdit() {
   const [shippingState, setShippingState] = useState("");
   const [shippingPincode, setShippingPincode] = useState("");
   const [shippingPhone, setShippingPhone] = useState("");
+
+  // R27.34b — currency is switchable after save; the modal collects the FX rate.
+  const [currencyTarget, setCurrencyTarget] = useState<string | null>(null);
+  const [fxInput, setFxInput] = useState("");
 
   // Round 3: AI prompt
   const [aiPrompt, setAiPrompt] = useState("");
@@ -343,6 +349,29 @@ export default function TeamQuotationEdit() {
     onError: (e: Error) => toast({ title: "Error", description: e.message, variant: "destructive" }),
   });
 
+  // R27.34b — re-prices every line server-side, so the local `items` state must be
+  // replaced from the response rather than merged, or unsaved edits would re-apply
+  // the old-currency numbers on the next Save.
+  const currencyMut = useMutation({
+    mutationFn: async (vars: { currency: string; rate: number }) => {
+      const r = await teamFetch(token, `/api/team/quotations/${id}/change-currency`, {
+        method: "POST",
+        body: JSON.stringify({ new_currency: vars.currency, exchange_rate: vars.rate }),
+      });
+      if (!r.ok) { const e = await r.json().catch(() => ({})); throw new Error(e.error || "Currency change failed"); }
+      return r.json();
+    },
+    onSuccess: (json: any) => {
+      if (Array.isArray(json?.items)) setItems(json.items);
+      setDirty(false);
+      setCurrencyTarget(null);
+      setFxInput("");
+      qc.invalidateQueries({ queryKey: ["team-quotation", id] });
+      toast({ title: `Currency changed to ${json?.quotation?.currency || ""}`.trim() });
+    },
+    onError: (e: Error) => toast({ title: "Currency change failed", description: e.message, variant: "destructive" }),
+  });
+
   const finalizeMut = useMutation({
     mutationFn: async () => {
       await saveMut.mutateAsync();
@@ -450,8 +479,29 @@ export default function TeamQuotationEdit() {
               {quotation.status}
             </span>
           </div>
-          <div className="text-sm text-muted-foreground mt-1">
-            Currency: {currencySym(quotation.currency)} {quotation.currency || "INR"}
+          {/* R27.34b — currency no longer locks on save; switching re-prices every line. */}
+          <div className="text-sm text-muted-foreground mt-1 flex flex-wrap items-center gap-2">
+            <span>Currency:</span>
+            <select
+              value={(quotation.currency || "INR").toUpperCase()}
+              onChange={(e) => { setCurrencyTarget(e.target.value); setFxInput(""); }}
+              disabled={currencyMut.isPending}
+              className="border rounded-lg px-2 py-1 bg-background text-sm font-semibold text-foreground disabled:opacity-50"
+              data-testid="select-quotation-currency"
+            >
+              {["INR", "USD", "EUR", "AED"].map((c) => (
+                <option key={c} value={c}>{currencySym(c).trim()} {c}</option>
+              ))}
+            </select>
+            {quotation.currency !== "INR" && quotation.fxRate && quotation.fxRate !== 1 && (
+              <span className="text-xs">1 {quotation.currency} = ₹{Number(quotation.fxRate).toFixed(2)}</span>
+            )}
+            {quotation.currencyChangedAt && (
+              <span className="text-[11px] px-2 py-0.5 rounded bg-muted" data-testid="badge-currency-changed">
+                Currency changed on {new Date(Number(quotation.currencyChangedAt)).toLocaleDateString("en-IN")}
+                {quotation.currencyChangedBy ? ` by ${quotation.currencyChangedBy}` : ""}
+              </span>
+            )}
           </div>
         </div>
         <div className="flex-1" />
@@ -688,7 +738,64 @@ export default function TeamQuotationEdit() {
           </div>
         )}
       </div>
+
+      {currencyTarget && (
+        <CurrencyChangeModal
+          target={currencyTarget}
+          from={(quotation.currency || "INR").toUpperCase()}
+          value={fxInput}
+          onChange={setFxInput}
+          busy={currencyMut.isPending}
+          onCancel={() => { setCurrencyTarget(null); setFxInput(""); }}
+          onConfirm={(rate) => currencyMut.mutate({ currency: currencyTarget, rate })}
+        />
+      )}
     </TeamLayout>
+  );
+}
+
+// R27.34b — the rate is always quoted as "1 <foreign> = X INR", which is also how the
+// PDF prints it, so an INR target needs no rate at all.
+function CurrencyChangeModal({ target, from, value, onChange, busy, onCancel, onConfirm }: {
+  target: string; from: string; value: string; onChange: (v: string) => void; busy: boolean;
+  onCancel: () => void; onConfirm: (rate: number) => void;
+}) {
+  const rate = Number(value);
+  const valid = Number.isFinite(rate) && rate > 0;
+  const foreign = target === "INR" ? from : target;
+  return (
+    <div className="fixed inset-0 z-50 bg-black/40 flex items-center justify-center p-4" onClick={onCancel}>
+      <div className="bg-card rounded-xl shadow-xl max-w-md w-full p-6" onClick={(e) => e.stopPropagation()}>
+        <h3 className="text-lg font-bold mb-3">Change currency to {target}</h3>
+        <label className="block text-sm">
+          <span className="text-xs font-semibold text-muted-foreground uppercase tracking-wide">
+            Exchange rate (1 {foreign} = ₹)
+          </span>
+          <input
+            type="number" min="0" step="0.01" autoFocus
+            value={value} onChange={(e) => onChange(e.target.value)}
+            onKeyDown={(e) => { if (e.key === "Enter" && valid && !busy) onConfirm(rate); }}
+            placeholder="83.50"
+            className="mt-1 w-full border rounded-lg px-3 py-2 bg-background text-sm"
+            data-testid="input-currency-fx-rate"
+          />
+        </label>
+        <p className="text-xs text-muted-foreground mt-3">
+          This will convert all amounts using the entered rate. Rate is stored on the quotation.
+        </p>
+        {value !== "" && !valid && (
+          <p className="text-xs text-red-600 mt-1">Enter a positive number, e.g. 83.50.</p>
+        )}
+        <div className="flex justify-end gap-2 mt-5">
+          <button onClick={onCancel} className="px-4 py-2 rounded-lg text-sm font-semibold hover:bg-muted">Cancel</button>
+          <button onClick={() => onConfirm(rate)} disabled={!valid || busy}
+            className="px-4 py-2 rounded-lg text-sm font-semibold bg-accent text-accent-foreground disabled:opacity-50 inline-flex items-center gap-2"
+            data-testid="button-currency-confirm">
+            {busy && <RefreshCw className="w-4 h-4 animate-spin" />} Confirm
+          </button>
+        </div>
+      </div>
+    </div>
   );
 }
 

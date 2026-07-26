@@ -4172,3 +4172,44 @@ export function runR27_34aMigrations() {
   verify("consignments", ["received_at", "received_by", "received_notes", "received_bundles"]);
   console.log("[migrations] R27.34a: complete");
 }
+
+export function runR27_34bMigrations() {
+  console.log("[migrations] R27.34b: start");
+  const run = (label: string, sql: string) => {
+    try { sqlite.exec(sql); console.log(`[migrations] R27.34b: ${label} ok`); }
+    catch (e: any) {
+      const msg = String(e?.message || e);
+      if (/already exists|duplicate column/i.test(msg)) console.log(`[migrations] R27.34b: ${label} skip (exists)`);
+      else console.log(`[migrations] R27.34b: ${label} skip (${msg})`);
+    }
+  };
+  // Feature 2 — currency is now switchable after save. The rate itself reuses the
+  // existing quotations.fx_rate column (already read by pdf-service) rather than a
+  // second exchange_rate column, which would leave the PDF rendering a stale rate.
+  // These two are the genuinely new bits: who flipped it and when.
+  run("quotations.currency_changed_at", `ALTER TABLE quotations ADD COLUMN currency_changed_at INTEGER`);
+  run("quotations.currency_changed_by", `ALTER TABLE quotations ADD COLUMN currency_changed_by TEXT`);
+  // Defensive: fx_rate/fx_locked_at predate R27.34b on every live DB, but a DB built
+  // from an older snapshot would otherwise fail the currency write.
+  run("quotations.fx_rate", `ALTER TABLE quotations ADD COLUMN fx_rate REAL DEFAULT 1`);
+  run("quotations.fx_locked_at", `ALTER TABLE quotations ADD COLUMN fx_locked_at INTEGER`);
+  // Feature 1 — the quotation search does a correlated EXISTS into quotation_items on
+  // every keystroke-debounced request; without this the subquery is a full scan.
+  run("idx quotation_items.quotation_id",
+    `CREATE INDEX IF NOT EXISTS idx_quotation_items_quotation_id ON quotation_items(quotation_id)`);
+  run("idx po_items.po_id",
+    `CREATE INDEX IF NOT EXISTS idx_po_items_po_id ON po_items(po_id)`);
+
+  const verify = (table: string, expected: string[]) => {
+    try {
+      const cols = (sqlite.prepare(`PRAGMA table_info(${table})`).all() as any[]).map(r => r.name);
+      const missing = expected.filter(c => !cols.includes(c));
+      if (missing.length) console.log(`[migrations] R27.34b: verify ${table} MISSING ${missing.join(",")}`);
+      else console.log(`[migrations] R27.34b: verify ${table} ok (${expected.join(",")})`);
+    } catch (e: any) {
+      console.log(`[migrations] R27.34b: verify ${table} skip (${String(e?.message || e)})`);
+    }
+  };
+  verify("quotations", ["currency", "fx_rate", "fx_locked_at", "currency_changed_at", "currency_changed_by"]);
+  console.log("[migrations] R27.34b: complete");
+}

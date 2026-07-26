@@ -1,4 +1,4 @@
-import { useState, useMemo } from "react";
+import { useState, useMemo, useEffect } from "react";
 import { TeamLayout } from "./TeamLayout";
 import { teamFetch, useTeamAuth } from "@/lib/team-auth";
 import { Plus, Search, ChevronLeft, ChevronRight, X, Calendar, Trash2 } from "lucide-react";
@@ -121,11 +121,21 @@ export default function TeamQuotations() {
   const items: Quotation[] = Array.isArray(data) ? data : (data as any)?.quotations || [];
   const totalPages: number = Array.isArray(data) ? 1 : (data as any)?.pages || 1;
   const totalCount: number = Array.isArray(data) ? items.length : (data as any)?.total || 0;
+  // R27.34b — "Showing X of Y": Y is every live quotation, not the filtered subset.
+  const grandCount: number = Array.isArray(data) ? items.length : ((data as any)?.total_count ?? totalCount);
 
   function doSearch() {
     setSearchActive(search);
     setPage(1);
   }
+
+  // R27.34b — debounce the search box so typing a part number does not fire a query
+  // (and a line-item EXISTS scan) per keystroke. Enter/blur still commit immediately.
+  useEffect(() => {
+    if (search === searchActive) return;
+    const t = setTimeout(doSearch, 300);
+    return () => clearTimeout(t);
+  }, [search]); // eslint-disable-line react-hooks/exhaustive-deps
 
   function applyPreset(p: typeof PRESETS[number]) {
     const r = p.range();
@@ -178,7 +188,7 @@ export default function TeamQuotations() {
               <input value={search} onChange={(e) => setSearch(e.target.value)}
                 onKeyDown={(e) => e.key === "Enter" && doSearch()}
                 onBlur={doSearch}
-                placeholder="Quote # or notes…"
+                placeholder="Quote #, customer, part #, item…"
                 className="border rounded-lg pl-9 pr-3 py-2 bg-background text-sm w-full" />
             </div>
           </div>
@@ -249,7 +259,7 @@ export default function TeamQuotations() {
         {/* Active filter summary */}
         {hasActiveFilter && (
           <div className="mt-2 text-xs text-muted-foreground">
-            Showing <span className="font-semibold text-foreground">{totalCount}</span> result{totalCount !== 1 ? "s" : ""}
+            Showing <span className="font-semibold text-foreground">{totalCount}</span> of <span className="font-semibold text-foreground">{grandCount}</span> quotation{grandCount !== 1 ? "s" : ""}
             {fromDate && toDate && fromDate === toDate && <> for <span className="font-semibold text-foreground">{fromDate}</span></>}
             {fromDate && toDate && fromDate !== toDate && <> from <span className="font-semibold text-foreground">{fromDate}</span> to <span className="font-semibold text-foreground">{toDate}</span></>}
             {fromDate && !toDate && <> from <span className="font-semibold text-foreground">{fromDate}</span></>}

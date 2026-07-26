@@ -1965,16 +1965,20 @@ export function registerV2Routes(app: Express, ctx: V2Context) {
     try {
       const status = (req.query.status as string) || undefined;
       const customerId = req.query.customer_id ? parseInt(req.query.customer_id as string, 10) : undefined;
+      // R27.34b — admin list gains the q/from/to filters the team list already had.
+      const qStr = (req.query.q as string) || undefined;
+      const fromDate = req.query.from ? new Date(req.query.from as string).getTime() : undefined;
+      const toDate = req.query.to ? new Date(new Date(req.query.to as string).setHours(23, 59, 59, 999)).getTime() : undefined;
       const page = req.query.page ? parseInt(req.query.page as string, 10) : 1;
       const limit = 20;
-      const { rows, total } = await v2.listQuotations({ status, customerId, page, limit });
+      const { rows, total, totalUnfiltered } = await v2.listQuotations({ status, customerId, fromDate, toDate, q: qStr, page, limit });
       // R27.25 — batch customer name resolution replaces the per-row getCustomer
       // N+1 (was 1 + 1 + up-to-20 queries; now 2 + 1 = 3 total).
       const custIds = rows.map((r: any) => r.customerId).filter(Boolean) as number[];
       const custMap = await v2.getCustomersByIds(custIds);
       const quotations = rows.map((r: any) => ({ ...r, customerName: custMap.get(r.customerId)?.name || null }));
       console.log(`[admin] perf endpoint=/api/admin/quotations queries=3 rows_returned=${quotations.length} total=${Date.now() - t0}ms`);
-      res.json({ quotations, total, pages: Math.ceil(total / limit) });
+      res.json({ quotations, total, total_count: totalUnfiltered, pages: Math.ceil(total / limit) });
     } catch (e: any) { res.status(500).json({ error: e.message }); }
   });
 
@@ -2141,7 +2145,7 @@ export function registerV2Routes(app: Express, ctx: V2Context) {
       const qStr = (req.query.q as string) || undefined;
       const page = req.query.page ? parseInt(req.query.page as string, 10) : 1;
       const limit = 20;
-      const { rows, total } = await v2.listQuotations({ status, customerId, fromDate, toDate, q: qStr, page, limit });
+      const { rows, total, totalUnfiltered } = await v2.listQuotations({ status, customerId, fromDate, toDate, q: qStr, page, limit });
       // Enrich rows with customerName by batching customer lookup
       const custIds = Array.from(new Set(rows.map((r: any) => r.customerId).filter(Boolean)));
       const custMap: Record<number, string> = {};
@@ -2190,7 +2194,7 @@ export function registerV2Routes(app: Express, ctx: V2Context) {
           companyLogoUrl: r.companyId ? (compMap[r.companyId]?.logoUrl ?? null) : null,
         };
       }));
-      res.json({ quotations, total, pages: Math.ceil(total / limit) });
+      res.json({ quotations, total, total_count: totalUnfiltered, pages: Math.ceil(total / limit) });
     } catch (e: any) { res.status(500).json({ error: e.message }); }
   });
 
@@ -2352,6 +2356,29 @@ export function registerV2Routes(app: Express, ctx: V2Context) {
       res.json({ ok: true });
     } catch (e: any) { res.status(400).json({ error: e.message }); }
   });
+
+  // R27.34b Feature 2 — switch a saved quotation between INR and USD. Gated on the same
+  // guards that already allow editing a quotation, mounted once per portal so neither
+  // guard is loosened: requireDataTeam for the team portal, requireAuth for admin.
+  async function changeCurrencyHandler(req: Request, res: Response) {
+    try {
+      const id = parseInt(req.params.id as string, 10);
+      const { new_currency, exchange_rate } = req.body || {};
+      const teamUser = (req as any).teamUser;
+      const adminUser = (req as any).user;
+      const result = await v2.changeQuotationCurrency(id, new_currency, exchange_rate, {
+        type: teamUser ? "data_team" : "admin",
+        id: String(teamUser?.id ?? adminUser?.id ?? ""),
+        name: teamUser?.name || teamUser?.username || adminUser?.username || null,
+      });
+      res.json(result);
+    } catch (e: any) {
+      const msg = String(e?.message || e);
+      res.status(/not found/i.test(msg) ? 404 : 400).json({ error: msg });
+    }
+  }
+  app.post("/api/team/quotations/:id/change-currency", requireDataTeam, changeCurrencyHandler);
+  app.post("/api/admin/quotations/:id/change-currency", requireAuth, changeCurrencyHandler);
 
   // R20.1: mark a quotation Processed — only valid from the Accepted state.
   app.post("/api/team/quotations/:id/mark-processed", requireDataTeam, async (req, res) => {
@@ -3177,6 +3204,8 @@ function registerR4toR7Routes(
     // R27.1b BUG-4 — team portal PO search (mirror admin q/from/to filters).
     const allRows = await v2.listPurchaseOrdersV2WithTotals({
       status: req.query.status as string | undefined,
+      // R27.34b — team list gains the customer filter the admin list already had.
+      customerId: req.query.customer_id ? parseInt(req.query.customer_id as string, 10) : undefined,
       q: req.query.q as string | undefined,
       from: req.query.from as string | undefined,
       to: req.query.to as string | undefined,
@@ -3191,6 +3220,9 @@ function registerR4toR7Routes(
       rows = allRows.slice(offset, offset + limit);
     }
     res.setHeader("X-Total-Count", String(total));
+    // R27.34b — unfiltered denominator for "Showing X of Y".
+    res.setHeader("X-Unfiltered-Count", String(v2.countPurchaseOrdersV2()));
+    res.setHeader("Access-Control-Expose-Headers", "X-Total-Count, X-Unfiltered-Count");
     // R12: attach per-PO dispatch rollup (Status/Carrier/Bundles/Docket# columns).
     const summary = await v2.getDispatchSummaryForPOs(rows.map((r: any) => r.id));
     // R27.2-4 — per-PO open-deviation rollup so the team list can show the deviation column.
@@ -6603,6 +6635,10 @@ function registerR8Routes(
         from: req.query.from as string | undefined,
         to: req.query.to as string | undefined,
       });
+      // R27.34b — filtered numerator + unfiltered denominator for "Showing X of Y".
+      res.setHeader("X-Total-Count", String(rows.length));
+      res.setHeader("X-Unfiltered-Count", String(v2.countPurchaseOrdersV2()));
+      res.setHeader("Access-Control-Expose-Headers", "X-Total-Count, X-Unfiltered-Count");
       const summary = await v2.getDispatchSummaryForPOs(rows.map((r: any) => r.id));
       // R27.4 BUG-7 — per-PO open-deviation rollup so the admin list can show the Deviation column.
       let devSummary: Record<number, { count: number }> = {};

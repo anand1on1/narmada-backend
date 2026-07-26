@@ -35,21 +35,42 @@ export default function TeamPOs() {
   const [dq, setDq] = useState("");
   const [fromDate, setFromDate] = useState("");
   const [toDate, setToDate] = useState("");
+  // R27.34b — status + customer filters, matching the quotation list.
+  const [status, setStatus] = useState("");
+  const [customerId, setCustomerId] = useState("");
   useEffect(() => { const t = setTimeout(() => setDq(q), 300); return () => clearTimeout(t); }, [q]);
 
-  const { data: pos = [] } = useQuery<PO[]>({
-    queryKey: ["team-pos", dq, fromDate, toDate],
+  const { data: customers = [] } = useQuery<Array<{ id: number; name: string }>>({
+    queryKey: ["team-customers-for-po-filter"],
+    queryFn: async () => {
+      const r = await teamFetch(token, "/api/team/customers?limit=500");
+      if (!r.ok) return [];
+      const j = await r.json();
+      return Array.isArray(j) ? j : (j?.customers || []);
+    },
+    enabled: !!token,
+  });
+
+  const { data: result } = useQuery<{ rows: PO[]; unfiltered: number }>({
+    queryKey: ["team-pos", dq, fromDate, toDate, status, customerId],
     queryFn: async () => {
       const p = new URLSearchParams();
       if (dq) p.set("q", dq);
       if (fromDate) p.set("from", fromDate);
       if (toDate) p.set("to", toDate);
+      if (status) p.set("status", status);
+      if (customerId) p.set("customer_id", customerId);
       const r = await teamFetch(token, `/api/team/purchase-orders?${p.toString()}`);
-      return r.ok ? r.json() : [];
+      if (!r.ok) return { rows: [], unfiltered: 0 };
+      const rows = await r.json();
+      return { rows, unfiltered: Number(r.headers.get("X-Unfiltered-Count") || rows.length) };
     },
     enabled: !!token,
     refetchInterval: 30000, // R24.5 — 30s auto-refresh, no page reload
   });
+  const pos: PO[] = result?.rows || [];
+  const unfilteredCount = result?.unfiltered ?? pos.length;
+  const hasActiveFilter = !!(q || fromDate || toDate || status || customerId);
 
   const dupMut = useMutation({
     mutationFn: async (id: number) => {
@@ -83,19 +104,34 @@ export default function TeamPOs() {
       <div className="flex flex-wrap items-center gap-2 mb-4">
         <div className="relative flex-1 min-w-56">
           <Search className="w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground" />
-          <input value={q} onChange={(e) => setQ(e.target.value)} placeholder="Search PO #, customer…"
+          <input value={q} onChange={(e) => setQ(e.target.value)} placeholder="Search PO #, customer, part #, item…"
             className="w-full border rounded-lg pl-9 pr-3 py-2 bg-background text-sm" data-testid="input-team-po-search" />
         </div>
+        <select value={status} onChange={(e) => setStatus(e.target.value)} className="border rounded-lg px-2 py-1.5 bg-background text-sm" data-testid="select-team-po-status">
+          <option value="">All statuses</option>
+          {["draft", "open", "partial", "dispatched", "processed", "fulfilled", "cancelled"].map((s) => (
+            <option key={s} value={s}>{s}</option>
+          ))}
+        </select>
+        <select value={customerId} onChange={(e) => setCustomerId(e.target.value)} className="border rounded-lg px-2 py-1.5 bg-background text-sm max-w-48" data-testid="select-team-po-customer">
+          <option value="">All customers</option>
+          {customers.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
+        </select>
         <label className="text-xs text-muted-foreground">From</label>
         <input type="date" value={fromDate} onChange={(e) => setFromDate(e.target.value)} className="border rounded-lg px-2 py-1.5 bg-background text-sm" data-testid="input-team-po-from" />
         <label className="text-xs text-muted-foreground">To</label>
         <input type="date" value={toDate} onChange={(e) => setToDate(e.target.value)} className="border rounded-lg px-2 py-1.5 bg-background text-sm" data-testid="input-team-po-to" />
-        {(q || fromDate || toDate) && (
-          <button onClick={() => { setQ(""); setFromDate(""); setToDate(""); }} className="px-3 py-1.5 rounded-lg text-xs font-semibold border hover:bg-muted" data-testid="button-team-po-clear">Show all</button>
+        {hasActiveFilter && (
+          <button onClick={() => { setQ(""); setFromDate(""); setToDate(""); setStatus(""); setCustomerId(""); }} className="px-3 py-1.5 rounded-lg text-xs font-semibold border hover:bg-muted" data-testid="button-team-po-clear">Clear filters</button>
         )}
       </div>
+      {hasActiveFilter && (
+        <div className="text-xs text-muted-foreground mb-3" data-testid="text-team-po-count">
+          Showing <span className="font-semibold text-foreground">{pos.length}</span> of <span className="font-semibold text-foreground">{unfilteredCount}</span> purchase order{unfilteredCount !== 1 ? "s" : ""}
+        </div>
+      )}
       <div className="bg-card border rounded-xl overflow-x-auto shadow-sm">
-        {pos.length === 0 ? <div className="p-12 text-center text-muted-foreground">{q || fromDate || toDate ? "No purchase orders match your search." : "No purchase orders yet. Convert a quotation to a PO to get started."}</div> : (
+        {pos.length === 0 ? <div className="p-12 text-center text-muted-foreground">{hasActiveFilter ? "No purchase orders match your search." : "No purchase orders yet. Convert a quotation to a PO to get started."}</div> : (
           <table className="w-full text-sm">
             <thead><tr className="bg-muted/50 text-left">
               <th className="px-3 py-3 font-semibold">PO Number</th>

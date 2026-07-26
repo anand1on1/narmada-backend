@@ -43,6 +43,12 @@ export default function AdminPOs() {
   // R27.4 BUG-7 — view a PO's deviation summary in a modal.
   const [deviationPo, setDeviationPo] = useState<PO | null>(null);
 
+  // R27.34b — customer filter + unfiltered denominator, matching the team PO list.
+  const [customerId, setCustomerId] = useState("");
+  const [unfilteredCount, setUnfilteredCount] = useState(0);
+  const [customers, setCustomers] = useState<Array<{ id: number; name: string }>>([]);
+  const hasActiveFilter = filter !== "all" || !!(debouncedSearch || fromDate || toDate || customerId);
+
   // R27.0 — debounce the search box (250ms) so each keystroke doesn't refetch.
   useEffect(() => {
     const id = setTimeout(() => setDebouncedSearch(search.trim()), 250);
@@ -56,12 +62,22 @@ export default function AdminPOs() {
     if (debouncedSearch) params.set("q", debouncedSearch);
     if (fromDate) params.set("from", fromDate);
     if (toDate) params.set("to", toDate);
+    if (customerId) params.set("customer_id", customerId);
     const r = await adminFetch(token, `/api/admin/purchase-orders-v2?${params}`);
     if (!r.ok) { setItems([]); return; }
     const d = await r.json();
-    setItems(Array.isArray(d) ? d : (Array.isArray(d?.purchaseOrders) ? d.purchaseOrders : []));
+    const rows = Array.isArray(d) ? d : (Array.isArray(d?.purchaseOrders) ? d.purchaseOrders : []);
+    setItems(rows);
+    setUnfilteredCount(Number(r.headers.get("X-Unfiltered-Count") || rows.length));
   }
-  useEffect(() => { load(); }, [token, filter, debouncedSearch, fromDate, toDate]); // eslint-disable-line
+  useEffect(() => { load(); }, [token, filter, debouncedSearch, fromDate, toDate, customerId]); // eslint-disable-line
+  useEffect(() => {
+    if (!token) return;
+    adminFetch(token, "/api/admin/customers")
+      .then((r) => (r.ok ? r.json() : []))
+      .then((j) => setCustomers(Array.isArray(j) ? j : (j?.customers || [])))
+      .catch(() => setCustomers([]));
+  }, [token]);
 
   // R27.1a BUG 9 — duplicate a PO (server resets date to today). Navigate to the new detail.
   async function duplicate(id: number) {
@@ -122,12 +138,19 @@ export default function AdminPOs() {
           />
         </div>
         <div className="flex items-center gap-2 text-sm">
+          <select value={customerId} onChange={(e) => setCustomerId(e.target.value)} className="border rounded-lg px-2 py-1.5 bg-background text-sm max-w-48" data-testid="select-po-customer">
+            <option value="">All customers</option>
+            {customers.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
+          </select>
           <label className="text-xs text-muted-foreground">From</label>
           <input type="date" value={fromDate} onChange={(e) => setFromDate(e.target.value)} className="border rounded-lg px-2 py-1.5 bg-background text-sm" data-testid="input-po-from" />
           <label className="text-xs text-muted-foreground">To</label>
           <input type="date" value={toDate} onChange={(e) => setToDate(e.target.value)} className="border rounded-lg px-2 py-1.5 bg-background text-sm" data-testid="input-po-to" />
-          {(fromDate || toDate) && (
-            <button onClick={() => { setFromDate(""); setToDate(""); }} className="text-xs text-muted-foreground underline" data-testid="button-po-clear-dates">Clear</button>
+          {hasActiveFilter && (
+            <button onClick={() => { setFilter("all"); setSearch(""); setDebouncedSearch(""); setFromDate(""); setToDate(""); setCustomerId(""); }}
+              className="px-3 py-1.5 rounded-lg text-xs font-semibold border hover:bg-muted inline-flex items-center gap-1" data-testid="button-po-clear-filters">
+              <X className="w-3 h-3" /> Clear filters
+            </button>
           )}
         </div>
       </div>
@@ -138,6 +161,11 @@ export default function AdminPOs() {
         ))}
       </div>
       <div className="mb-4 text-xs text-muted-foreground">
+        {hasActiveFilter && (
+          <span className="mr-2" data-testid="text-admin-po-count">
+            Showing <span className="font-semibold text-foreground">{items.length}</span> of <span className="font-semibold text-foreground">{unfilteredCount}</span> purchase order{unfilteredCount !== 1 ? "s" : ""}.
+          </span>
+        )}
         Showing the v2 purchase orders table (same data the Data Team sees). Use Open to edit in the Team portal.
       </div>
 
