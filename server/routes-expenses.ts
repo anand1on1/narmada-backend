@@ -230,6 +230,27 @@ function resolvePaymentMode(v: any, fallback: PaymentMode): PaymentMode {
   return m;
 }
 
+// R27.36a-part-2b — auto-mint a slip number once the row is in a spendable state
+// (auto-approved at creation, or manually approved later). Idempotent: does nothing
+// if a slip is already assigned. Slip series comes from expense_type, month comes
+// from expense_date so a backdated row lands in the correct counter.
+export function mintSlipForExpense(db: Database, id: number): string | null {
+  const row: any = db.prepare(
+    `SELECT id, slip_number, expense_type, expense_date, approval_status, is_deleted FROM expense_slips WHERE id = ?`,
+  ).get(id);
+  if (!row) return null;
+  if (row.is_deleted) return null;
+  if (row.slip_number) return row.slip_number;
+  const status = String(row.approval_status || "").trim();
+  if (status !== "auto_approved" && status !== "approved") return null;
+  const type = (row.expense_type || "direct") as ExpenseType;
+  const slip = nextExpenseSlipNumber(db, type, Number(row.expense_date) || Date.now());
+  db.prepare(
+    `UPDATE expense_slips SET slip_number = ?, slip_generated_at = ? WHERE id = ? AND slip_number IS NULL`,
+  ).run(slip, Date.now(), id);
+  return slip;
+}
+
 export function createExpense(db: Database, input: ExpenseInput, actor: Actor): any {
   const categoryId = Number(input?.category_id);
   if (!categoryId) throw new ExpenseError("Category is required", 400);
@@ -332,6 +353,12 @@ export function createExpense(db: Database, input: ExpenseInput, actor: Actor): 
     ).run(advanceSlip.id, id, gst.total_amount, now, actor.userName, "Booked against advance at entry");
     recomputeAdvanceTotals(db, advanceSlip.id);
   }
+
+  // R27.36a-part-2b — auto-mint slip number for auto-approved rows so the ledger
+  // never shows "–" for an already-spent expense. Rows over ₹5,000 stay NULL until
+  // the approver flips them via approveExpense (which also mints).
+  if (autoApproved) mintSlipForExpense(db, id);
+
   return getExpense(db, id);
 }
 
@@ -397,13 +424,15 @@ export function listExpenses(db: Database, filters: ExpenseFilters = {}): any[] 
   }));
 }
 
-// Editing is only allowed before a slip exists — once a JPG has been handed to a
-// payee the numbers on it are the record, and silently changing the row behind it
-// would make the slip a lie.
+// Editing is only allowed before a slip JPG exists — once the printed slip has
+// been handed to a payee the numbers on it are the record, and silently changing
+// the row behind it would make the slip a lie. R27.36a-part-2b relaxes this: a
+// slip_number alone (auto-minted at creation) does not block edits, only a
+// generated JPG (slip_image_path) does.
 export function updateExpense(db: Database, id: number, input: ExpenseInput): any {
   const row: any = db.prepare(`SELECT * FROM expense_slips WHERE id = ?`).get(id);
   if (!row || row.is_deleted) throw new ExpenseError("Expense not found", 404);
-  if (row.slip_number) throw new ExpenseError("Slip already generated — this expense can no longer be edited", 409);
+  if (row.slip_image_path) throw new ExpenseError("Slip already printed — this expense can no longer be edited", 409);
 
   const categoryId = input?.category_id != null ? Number(input.category_id) : row.category_id;
   if (input?.category_id != null && !db.prepare(`SELECT id FROM expense_categories WHERE id = ?`).get(categoryId)) {
@@ -453,18 +482,30 @@ export function updateExpense(db: Database, id: number, input: ExpenseInput): an
   const approval = approvalForTotal(gst.total_amount);
   const autoApproved = approval === "auto_approved";
 
+  // R27.36a-part-2b — if the edit pushes the total above ₹5,000, revoke the
+  // auto-minted slip so it can be re-minted on approval (and the series stays
+  // internally consistent when expense_date or expense_type is what changed).
+  const revokeSlip = !autoApproved && !!row.slip_number;
+
   db.prepare(
     `UPDATE expense_slips SET category_id=?, payee_id=?, payee_name_freetext=?, amount=?, gst_percent=?, gst_mode=?,
        gst_amount=?, total_amount=?, description=?, expense_date=?, is_recurring=?, recurring_frequency=?,
-       recurring_next_date=?, approval_status=?, approved_by=?, approved_at=?, rejection_reason=NULL
+       recurring_next_date=?, approval_status=?, approved_by=?, approved_at=?, rejection_reason=NULL,
+       slip_number = CASE WHEN ? = 1 THEN NULL ELSE slip_number END,
+       slip_generated_at = CASE WHEN ? = 1 THEN NULL ELSE slip_generated_at END
      WHERE id = ?`,
   ).run(
     categoryId, payeeId, freetext, gst.amount, gstPercent, gstMode, gst.gst_amount, gst.total_amount,
     input?.description !== undefined ? (input.description ? String(input.description).trim() : null) : row.description,
     expenseDate, isRecurring, frequency, nextDate,
     approval, autoApproved ? "system" : null, autoApproved ? Date.now() : null,
+    revokeSlip ? 1 : 0, revokeSlip ? 1 : 0,
     id,
   );
+  // R27.36a-part-2b — an edit that drops total below ₹5,000 re-auto-approves the
+  // row; mint the slip here so the ledger stops showing "–" without a separate
+  // approval action. Guard at top of function blocks edits once the JPG is printed.
+  if (autoApproved) mintSlipForExpense(db, id);
   return getExpense(db, id);
 }
 
@@ -917,6 +958,9 @@ export function approveExpense(db: Database, id: number, actor: Actor): any {
   db.prepare(
     `UPDATE expense_slips SET approval_status='approved', approved_by=?, approved_at=?, rejection_reason=NULL WHERE id = ?`,
   ).run(APPROVER_USERNAME, Date.now(), id);
+  // R27.36a-part-2b — mint slip on approval when it wasn't minted at creation
+  // (i.e. the row was > ₹5,000 and went through the pending queue).
+  mintSlipForExpense(db, id);
   return getExpense(db, id);
 }
 
@@ -1204,12 +1248,13 @@ export function generateExpenseSlip(
   if (status === "rejected") {
     throw new ExpenseError("Expense was rejected — cannot generate a slip", 403);
   }
-  if (row.slip_number) throw new ExpenseError(`Slip ${row.slip_number} already generated for this expense`, 409);
-
+  // R27.36a-part-2b — slip is now auto-minted at creation, so this endpoint
+  // becomes idempotent: reuse the existing slip and just (re)render the JPG. The
+  // old 409 was a UX trap now that every auto-approved row already has a number.
   const now = Date.now();
   const expenseType = (row.expense_type || "direct") as ExpenseType;
   const expenseDateMs = Number(row.expense_date) || now;
-  const slip = nextExpenseSlipNumber(db, expenseType, expenseDateMs);
+  const slip: string = row.slip_number || nextExpenseSlipNumber(db, expenseType, expenseDateMs);
   const data = buildExpenseSlipData(db, expenseId, slip);
   const jpeg = renderExpenseSlipJpeg(data);
 

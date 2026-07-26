@@ -3,6 +3,7 @@
 // NEVER drop or rename existing tables/columns — additive only.
 import { rawSqlite as sqlite } from "./storage";
 import { migrateLegacyExpenses, logLegacyMigrationReport } from "./migrations-r27-36a";
+import { backfillMissingSlips, logBackfillReport } from "./migrations-r27-36a-part2b";
 
 export function runR4toR7Migrations() {
   sqlite.exec(`
@@ -4514,5 +4515,12 @@ export function runR27_36aDataMigration() {
     logLegacyMigrationReport(migrateLegacyExpenses(sqlite as any));
   } catch (e: any) {
     console.log(`[migrations] R27.36a-migrate: aborted (${String(e?.message || e)})`);
+  }
+  // R27.36a-part-2b — mint slip numbers for auto-approved rows created by the
+  // R27.36 code path before the auto-mint behaviour was added. Idempotent.
+  try {
+    logBackfillReport(backfillMissingSlips(sqlite as any));
+  } catch (e: any) {
+    console.log(`[migrations] R27.36a-part-2b backfill aborted (${String(e?.message || e)})`);
   }
 }

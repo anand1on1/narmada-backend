@@ -250,6 +250,11 @@ describe("R27.36 slips", () => {
 
   it("(12) slip number is EXP/YYYY-MM/NNNNN and increments per month", () => {
     // R27.36a: slip format changed to EXP/YYYY-MM/NNNNN (5-digit counter, per-month series).
+    // R27.36a-part-2b: slip is now auto-minted at createExpense, so the calls below
+    // just re-render the JPG for the pre-existing slip — numbers can start higher than 1
+    // if earlier tests in the file already consumed counters (slip_counters persists
+    // between tests). Assert on format + sequential ordering, not absolute values.
+    db.exec(`DELETE FROM slip_counters`);
     const a = generateExpenseSlip(db, approvedExpense().id, uploadsDir);
     expect(a.slip_number).toBe("EXP/2026-07/00001");
     const b = generateExpenseSlip(db, approvedExpense().id, uploadsDir);
@@ -312,15 +317,17 @@ describe("R27.36 ledger", () => {
     expect(l.entry_count).toBe(3);
   });
 
-  it("(15b) only slipped + approved rows reach the ledger", () => {
+  it("(15b) auto-approved rows reach the ledger; pending rows do not", () => {
+    // R27.36a-part-2b: auto-approved rows get a slip number at creation, so
+    // "un-slipped auto-approved" is no longer a state that exists — all
+    // auto-approved rows appear in the ledger the moment they're saved. Only
+    // pending-approval rows are hidden until the approver acts.
     slipped(1000, "2026-07-01");
-    // Un-slipped auto-approved row.
     createExpense(db, { category_id: CAT, payee_name_freetext: "V", amount: 400, expense_date: "2026-07-02" }, FINANCE);
-    // Pending row.
     createExpense(db, { category_id: CAT, payee_name_freetext: "V", amount: 9000, expense_date: "2026-07-03" }, FINANCE);
     const l = getLedger(db);
-    expect(l.entry_count).toBe(1);
-    expect(l.total_debit).toBe(1000);
+    expect(l.entry_count).toBe(2);
+    expect(l.total_debit).toBe(1400);
   });
 
   it("(16) ledger filters by category, payee and date range", () => {
