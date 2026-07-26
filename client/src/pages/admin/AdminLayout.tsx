@@ -10,7 +10,7 @@ import {
   Building2, UserCog, ScrollText, ClipboardList, Bell,
   Factory, Search, Target, Megaphone, CheckSquare, Sparkles, Facebook, History,
   Gauge, Radar, Link2, Bug, ShoppingBag, Boxes, ChevronDown, ChevronRight, Calculator,
-  BookOpen,
+  BookOpen, ShieldCheck,
 } from "lucide-react";
 
 // Session A V2: 4-role sidebar matrix.
@@ -79,6 +79,8 @@ export function AdminLayout({ children, title }: { children: ReactNode; title: s
   const { token, username, role, displayName, clear, ready } = useAdminAuth();
   const [location, navigate] = useLocation();
   const [unreadChats, setUnreadChats] = useState(0);
+  // R27.35 — payment slips over ₹5,000 waiting for release.
+  const [pendingApprovals, setPendingApprovals] = useState(0);
   // R27.5 #9 — sidebar search + collapsible sections with localStorage-persisted state.
   const [navSearch, setNavSearch] = useState("");
   const [expanded, setExpanded] = useState<Record<string, boolean>>(() => {
@@ -113,6 +115,24 @@ export function AdminLayout({ children, title }: { children: ReactNode; title: s
     return () => { alive = false; clearInterval(id); };
   }, [token]);
 
+  // R27.35 — pending payment-approval count for the sidebar badge. Every admin can see
+  // the number; only narmadamobility123 can act on the queue.
+  useEffect(() => {
+    if (!token) return;
+    let alive = true;
+    const tick = async () => {
+      try {
+        const res = await adminFetch(token, "/api/admin/payment-approvals/pending");
+        if (!res.ok || !alive) return;
+        const d = await res.json();
+        if (alive) setPendingApprovals(Number(d?.pending_count) || 0);
+      } catch { /* ignore */ }
+    };
+    tick();
+    const id = setInterval(tick, 60000);
+    return () => { alive = false; clearInterval(id); };
+  }, [token]);
+
   if (!ready) {
     // Brief loading state while /api/admin/me validates token on first paint
     return (
@@ -144,6 +164,7 @@ export function AdminLayout({ children, title }: { children: ReactNode; title: s
     { href: "/admin/vendors", label: "Vendors", icon: Factory, group: "Procurement" },
     { href: "/admin/vendor-ledger", label: "Vendor Ledger", icon: Wallet, group: "Procurement" },
     { href: "/admin/process-payment", label: "Process Payment", icon: CreditCard, group: "Procurement" },
+    { href: "/admin/payment-approvals", label: "Payment Approvals", icon: ShieldCheck, badge: pendingApprovals, group: "Procurement" },
 
     { href: "/admin/stock", label: "Stock", icon: Boxes, group: "Inventory" },
     { href: "/admin/products", label: "Products", icon: Package, group: "Inventory" },
@@ -241,7 +262,7 @@ export function AdminLayout({ children, title }: { children: ReactNode; title: s
                   </span>
                   <span className="flex-1">{n.label}</span>
                   {"badge" in n && (n as any).badge > 0 && (
-                    <span className="bg-rose-500 text-white text-[10px] font-bold px-1.5 py-0.5 rounded-full" data-testid="badge-unread-chats">
+                    <span className="bg-rose-500 text-white text-[10px] font-bold px-1.5 py-0.5 rounded-full" data-testid={`badge-nav-${n.href.split("/").pop()}`}>
                       {(n as any).badge}
                     </span>
                   )}

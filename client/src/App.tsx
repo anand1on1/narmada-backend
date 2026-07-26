@@ -96,6 +96,7 @@ import AdminCustomers from "@/pages/admin/AdminCustomers";
 import AdminLedger from "@/pages/admin/AdminLedger";
 import AdminPayments from "@/pages/admin/AdminPayments";
 import AdminProcessPayment from "@/pages/admin/AdminProcessPayment";
+import AdminPaymentApprovals from "@/pages/admin/AdminPaymentApprovals";
 import AdminRFQs from "@/pages/admin/AdminRFQs";
 import AdminQuotes from "@/pages/admin/AdminQuotes";
 import AdminPOs from "@/pages/admin/AdminPOs";
@@ -298,6 +299,7 @@ function AppRouter() {
         <Route path="/admin/ledger" component={AdminLedger} />
         <Route path="/admin/payments" component={AdminPayments} />
         <Route path="/admin/process-payment" component={AdminProcessPayment} />
+        <Route path="/admin/payment-approvals" component={AdminPaymentApprovals} />
         <Route path="/admin/rfqs" component={AdminRFQs} />
         <Route path="/admin/quotes" component={AdminQuotes} />
         {/* R26.6a (5) — admin PO detail page (was a 404). Must precede the list route. */}

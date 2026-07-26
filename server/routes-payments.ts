@@ -70,7 +70,37 @@ export interface GenerateVendorInput {
     scope?: OverrideScope; // R27.33: "update_po" writes the edit back to po_items
   }>;
 }
-export interface Actor { userId: number | null; userName: string; }
+export interface Actor {
+  userId: number | null;
+  userName: string;
+  // R27.35 — approval is gated on the login username, not the display name or role,
+  // so it has to travel with the actor rather than being re-derived downstream.
+  username?: string;
+}
+
+// ---------------------------------------------------------------------------
+// R27.35 — approval gate
+// ---------------------------------------------------------------------------
+export const APPROVAL_THRESHOLD = 5000;
+// Deliberately hardcoded, not a role: the owner wants exactly one human able to
+// release a payment, and roles are editable from the admin UI.
+export const APPROVER_USERNAME = "narmadamobility123";
+export type ApprovalStatus = "auto_approved" | "pending_approval" | "approved" | "rejected";
+
+export function canApprovePayments(username: string | undefined | null): boolean {
+  return String(username || "").trim().toLowerCase() === APPROVER_USERNAME;
+}
+
+// Errors carry the HTTP status so the thin Express wrappers don't have to pattern-match
+// on message text.
+export class PaymentApprovalError extends Error {
+  status: number;
+  constructor(message: string, status = 400) {
+    super(message);
+    this.name = "PaymentApprovalError";
+    this.status = status;
+  }
+}
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -314,6 +344,8 @@ export interface GeneratedBatch {
   batch_id: number;
   slip_number: string;
   created_at: number;
+  approval_status: ApprovalStatus; // R27.35
+  grand_total_snapshot: number;    // R27.35
   vendors: Array<{
     vendor_id: number;
     vendor_name: string;
@@ -434,9 +466,31 @@ export function generateBatch(
     }
 
     grandWithGst = Math.round(grandWithGst * 100) / 100;
-    db.prepare(`UPDATE payment_batches SET total_amount = ? WHERE id = ?`).run(grandWithGst, batchId);
+    // R27.35 — the threshold applies to everyone, admins included, so the audit trail
+    // reads the same whoever generated the slip.
+    const approvalStatus: ApprovalStatus =
+      grandWithGst > APPROVAL_THRESHOLD ? "pending_approval" : "auto_approved";
+    const autoApproved = approvalStatus === "auto_approved";
+    try {
+      db.prepare(
+        `UPDATE payment_batches
+         SET total_amount = ?, grand_total_snapshot = ?, approval_status = ?, approved_by = ?, approved_at = ?
+         WHERE id = ?`,
+      ).run(grandWithGst, grandWithGst, approvalStatus, autoApproved ? "system" : null, autoApproved ? now : null, batchId);
+    } catch {
+      // Pre-R27.35 schema: keep generating slips rather than failing the batch. With
+      // no approval_status column readBatchApproval treats the batch as approved.
+      db.prepare(`UPDATE payment_batches SET total_amount = ? WHERE id = ?`).run(grandWithGst, batchId);
+    }
 
-    return { batch_id: batchId, slip_number: slip, created_at: now, vendors: outVendors };
+    return {
+      batch_id: batchId,
+      slip_number: slip,
+      created_at: now,
+      approval_status: approvalStatus,
+      grand_total_snapshot: grandWithGst,
+      vendors: outVendors,
+    };
   });
 
   return tx();
@@ -463,22 +517,63 @@ export function listBatchVendors(db: Database, filters: BatchListFilters = {}): 
   const limit = filters.limit && filters.limit > 0 ? filters.limit : 100;
   const offset = filters.offset && filters.offset > 0 ? filters.offset : 0;
   const sql = `
-    SELECT bv.*, b.slip_number, b.created_at AS batch_created_at, b.notes AS batch_notes
+    SELECT bv.*, b.slip_number, b.created_at AS batch_created_at, b.notes AS batch_notes,
+           b.approval_status, b.rejection_reason, b.approved_by, b.approved_at
     FROM payment_batch_vendors bv
     JOIN payment_batches b ON b.id = bv.batch_id
     ${where.length ? "WHERE " + where.join(" AND ") : ""}
     ORDER BY b.created_at DESC, bv.id DESC
     LIMIT ? OFFSET ?`;
   const rows = db.prepare(sql).all(...params, limit, offset) as any[];
-  return rows.map((r) => ({ ...r, batch_date: epochToDay(r.batch_created_at) }));
+  return rows.map((r) => ({
+    ...r,
+    batch_date: epochToDay(r.batch_created_at),
+    approval_status: (r.approval_status || "auto_approved") as ApprovalStatus, // R27.35
+  }));
 }
 
 export function getBatchVendor(db: Database, vendorId: number): any {
   return db.prepare(
-    `SELECT bv.*, b.slip_number, b.created_at AS batch_created_at, b.notes AS batch_notes, b.created_by_name
+    `SELECT bv.*, b.slip_number, b.created_at AS batch_created_at, b.notes AS batch_notes, b.created_by_name,
+            b.approval_status, b.rejection_reason, b.approved_by, b.approved_at
      FROM payment_batch_vendors bv JOIN payment_batches b ON b.id = bv.batch_id
      WHERE bv.id = ?`,
   ).get(vendorId);
+}
+
+// R27.35 — read a batch's approval state. A legacy DB with no approval_status column
+// (or a batch predating the backfill) reads as auto_approved, so the gate can never
+// strand a slip that was payable before this release.
+export function readBatchApproval(db: Database, batchId: number): {
+  approval_status: ApprovalStatus;
+  rejection_reason: string | null;
+  approved_by: string | null;
+  approved_at: number | null;
+} {
+  let row: any = null;
+  try {
+    row = db.prepare(
+      `SELECT approval_status, rejection_reason, approved_by, approved_at FROM payment_batches WHERE id = ?`,
+    ).get(batchId);
+  } catch { /* pre-R27.35 schema */ }
+  const status = (row?.approval_status || "auto_approved") as ApprovalStatus;
+  return {
+    approval_status: status,
+    rejection_reason: row?.rejection_reason ?? null,
+    approved_by: row?.approved_by ?? null,
+    approved_at: row?.approved_at ?? null,
+  };
+}
+
+// Throws 403 when the batch behind a vendor row is not yet payable.
+export function assertBatchPayable(db: Database, batchId: number): void {
+  const { approval_status } = readBatchApproval(db, batchId);
+  if (approval_status === "pending_approval") {
+    throw new PaymentApprovalError("Slip is pending approval — cannot mark paid yet", 403);
+  }
+  if (approval_status === "rejected") {
+    throw new PaymentApprovalError("Slip was rejected — cannot mark paid", 403);
+  }
 }
 
 export function markPaid(
@@ -489,6 +584,7 @@ export function markPaid(
 ): any {
   const row = getBatchVendor(db, vendorId);
   if (!row) throw new Error("Vendor payment row not found");
+  assertBatchPayable(db, row.batch_id);
   const paidAt = data.paid_at ? dayToEpoch(data.paid_at, false) : Date.now();
   db.prepare(
     `UPDATE payment_batch_vendors
@@ -513,12 +609,135 @@ export function bulkMarkPaid(db: Database, vendorIds: number[], paidAt: string |
   const stmt = db.prepare(
     `UPDATE payment_batch_vendors SET status = 'paid', paid_at = ?, paid_by = ?, paid_by_name = ? WHERE id = ?`,
   );
+  const getBatchId = db.prepare(`SELECT batch_id FROM payment_batch_vendors WHERE id = ?`);
   const tx = db.transaction((ids: number[]) => {
     let n = 0;
-    for (const id of ids) { if (stmt.run(ts, actor.userId, actor.userName, id).changes > 0) n++; }
+    for (const id of ids) {
+      // R27.35 — checked per row and outside the loop body's update so one ungated
+      // vendor in the selection cannot drag a pending batch's vendors through with it.
+      const row: any = getBatchId.get(id);
+      if (row) assertBatchPayable(db, row.batch_id);
+      if (stmt.run(ts, actor.userId, actor.userName, id).changes > 0) n++;
+    }
     return n;
   });
   return tx(vendorIds);
+}
+
+// ---------------------------------------------------------------------------
+// R27.35 — approval queue
+// ---------------------------------------------------------------------------
+
+// Full detail for the admin queue: batch header + its vendors + each vendor's locked
+// line items, so the approver can see exactly what they are releasing without a
+// second round trip per batch.
+export function listApprovalBatches(db: Database, status: string = "pending_approval"): any[] {
+  const where: string[] = [];
+  const params: any[] = [];
+  if (status && status !== "all") { where.push(`b.approval_status = ?`); params.push(status); }
+  const batches = db.prepare(
+    `SELECT b.* FROM payment_batches b
+     ${where.length ? "WHERE " + where.join(" AND ") : ""}
+     ORDER BY b.created_at DESC, b.id DESC`,
+  ).all(...params) as any[];
+
+  const getVendors = db.prepare(`SELECT * FROM payment_batch_vendors WHERE batch_id = ? ORDER BY id`);
+  const getItems = db.prepare(
+    `SELECT po_number, item_name, qty, rate_locked, amount_locked
+     FROM payment_batch_items WHERE batch_id = ? AND vendor_name = ? ORDER BY po_number, id`,
+  );
+
+  return batches.map((b) => {
+    const vendors = (getVendors.all(b.id) as any[]).map((v) => ({
+      id: v.id,
+      vendor_name: v.vendor_name,
+      status: v.status,
+      po_numbers: v.po_numbers,
+      gst_percent: Number(v.gst_percent) || 0,
+      gst_mode: v.gst_mode === "inclusive" ? "inclusive" : "exclusive",
+      subtotal: Number(v.subtotal) || 0,
+      gst_amount: Number(v.gst_amount) || 0,
+      total_with_gst: Number(v.total_with_gst ?? v.total_amount) || 0,
+      items: (getItems.all(b.id, v.vendor_name) as any[]).map((i) => ({
+        po_number: i.po_number,
+        item_name: i.item_name,
+        qty: Number(i.qty) || 0,
+        rate: Number(i.rate_locked) || 0,
+        amount: Number(i.amount_locked) || 0,
+      })),
+    }));
+    return {
+      batch_id: b.id,
+      slip_number: b.slip_number,
+      approval_status: (b.approval_status || "auto_approved") as ApprovalStatus,
+      approved_by: b.approved_by ?? null,
+      approved_at: b.approved_at ?? null,
+      rejection_reason: b.rejection_reason ?? null,
+      generated_by: b.created_by_name || "—",
+      generated_at: b.created_at,
+      generated_date: epochToDay(b.created_at),
+      notes: b.notes ?? null,
+      vendor_count: vendors.length,
+      po_count: Number(b.po_count) || 0,
+      grand_total_snapshot: Number(b.grand_total_snapshot ?? b.total_amount) || 0,
+      vendors,
+    };
+  });
+}
+
+export function countPendingApprovals(db: Database): number {
+  try {
+    const r: any = db.prepare(
+      `SELECT COUNT(*) AS c FROM payment_batches WHERE approval_status = 'pending_approval'`,
+    ).get();
+    return Number(r?.c) || 0;
+  } catch { return 0; }
+}
+
+function loadBatchForDecision(db: Database, batchId: number): any {
+  const batch: any = db.prepare(`SELECT * FROM payment_batches WHERE id = ?`).get(batchId);
+  if (!batch) throw new PaymentApprovalError("Batch not found", 404);
+  const status = (batch.approval_status || "auto_approved") as ApprovalStatus;
+  // Auto-approved batches never enter the queue, so a decision on one is a stale UI
+  // acting on something already settled.
+  if (status !== "pending_approval") {
+    throw new PaymentApprovalError(`Batch is already ${status.replace("_", " ")}`, 409);
+  }
+  return batch;
+}
+
+function assertApprover(actor: Actor): void {
+  if (!canApprovePayments(actor.username)) {
+    throw new PaymentApprovalError(`Only ${APPROVER_USERNAME} can approve or reject payments`, 403);
+  }
+}
+
+export function approveBatch(db: Database, batchId: number, actor: Actor): any {
+  assertApprover(actor);
+  loadBatchForDecision(db, batchId);
+  const now = Date.now();
+  db.prepare(
+    `UPDATE payment_batches SET approval_status = 'approved', approved_by = ?, approved_at = ?, rejection_reason = NULL
+     WHERE id = ?`,
+  ).run(actor.username ?? null, now, batchId);
+  return listApprovalBatches(db, "all").find((b) => b.batch_id === batchId);
+}
+
+export function rejectBatch(db: Database, batchId: number, reason: string, actor: Actor): any {
+  assertApprover(actor);
+  const trimmed = String(reason ?? "").trim();
+  // Minimum 5 chars: the team member only ever sees this string, so "no" is not a
+  // reason they can act on.
+  if (trimmed.length < 5) {
+    throw new PaymentApprovalError("Rejection reason must be at least 5 characters", 400);
+  }
+  loadBatchForDecision(db, batchId);
+  const now = Date.now();
+  db.prepare(
+    `UPDATE payment_batches SET approval_status = 'rejected', rejection_reason = ?, approved_by = ?, approved_at = ?
+     WHERE id = ?`,
+  ).run(trimmed, actor.username ?? null, now, batchId);
+  return listApprovalBatches(db, "all").find((b) => b.batch_id === batchId);
 }
 
 // ---------------------------------------------------------------------------
@@ -865,6 +1084,14 @@ export function registerPaymentRoutes(app: Express, deps: PaymentRoutesDeps) {
       res.setHeader("Content-Disposition", `attachment; filename="${batch.slip_number.replace(/\//g, "-")}.zip"`);
       res.setHeader("X-Slip-Number", batch.slip_number);
       res.setHeader("X-Slip-Files", String(files.length));
+      // R27.35 — the body is the ZIP, so the approval outcome rides on headers.
+      res.setHeader("X-Batch-Id", String(batch.batch_id));
+      res.setHeader("X-Approval-Status", batch.approval_status);
+      res.setHeader("X-Grand-Total", String(batch.grand_total_snapshot));
+      res.setHeader(
+        "Access-Control-Expose-Headers",
+        "X-Slip-Number, X-Slip-Files, X-Batch-Id, X-Approval-Status, X-Grand-Total",
+      );
       res.send(zip);
     } catch (e: any) { res.status(500).json({ error: e.message }); }
   });
@@ -898,7 +1125,7 @@ export function registerPaymentRoutes(app: Express, deps: PaymentRoutesDeps) {
     try {
       const actor = resolveActor(req);
       res.json(markPaid(db, parseInt(String(req.params.vendor_id), 10), req.body || {}, actor));
-    } catch (e: any) { res.status(400).json({ error: e.message }); }
+    } catch (e: any) { res.status(e?.status || 400).json({ error: e.message }); }
   });
 
   app.post("/api/payments/batches/:vendor_id/mark-skipped", guard, (req, res) => {
@@ -913,7 +1140,37 @@ export function registerPaymentRoutes(app: Express, deps: PaymentRoutesDeps) {
       const ids: number[] = (req.body?.vendor_ids || []).map((n: any) => parseInt(n, 10)).filter((n: number) => !isNaN(n));
       const updated = bulkMarkPaid(db, ids, req.body?.paid_at, actor);
       res.json({ updated });
-    } catch (e: any) { res.status(400).json({ error: e.message }); }
+    } catch (e: any) { res.status(e?.status || 400).json({ error: e.message }); }
+  });
+
+  // R27.35 — approval queue. adminOnly is requireRole with an empty allowlist: admin
+  // auto-passes inside the factory, every other role 403s. The username check on top
+  // is what actually gates the decision.
+  const adminOnly = requireRole();
+
+  app.get("/api/admin/payment-approvals/pending", adminOnly, (req, res) => {
+    try {
+      const status = String((req.query as any).status || "pending_approval");
+      const actor = resolveActor(req);
+      res.json({
+        batches: listApprovalBatches(db, status),
+        pending_count: countPendingApprovals(db),
+        can_approve: canApprovePayments(actor.username),
+        approver_username: APPROVER_USERNAME,
+      });
+    } catch (e: any) { res.status(500).json({ error: e.message }); }
+  });
+
+  app.post("/api/admin/payment-approvals/:batch_id/approve", adminOnly, (req, res) => {
+    try {
+      res.json(approveBatch(db, parseInt(String(req.params.batch_id), 10), resolveActor(req)));
+    } catch (e: any) { res.status(e?.status || 400).json({ error: e.message }); }
+  });
+
+  app.post("/api/admin/payment-approvals/:batch_id/reject", adminOnly, (req, res) => {
+    try {
+      res.json(rejectBatch(db, parseInt(String(req.params.batch_id), 10), req.body?.reason, resolveActor(req)));
+    } catch (e: any) { res.status(e?.status || 400).json({ error: e.message }); }
   });
 
   app.post("/api/payments/proof-upload", guard, upload.single("proof"), (req, res) => {

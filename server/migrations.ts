@@ -4213,3 +4213,67 @@ export function runR27_34bMigrations() {
   verify("quotations", ["currency", "fx_rate", "fx_locked_at", "currency_changed_at", "currency_changed_by"]);
   console.log("[migrations] R27.34b: complete");
 }
+
+// R27.35 — payment approval gate. Slips over ₹5,000 stop at pending_approval until
+// narmadamobility123 releases them. Every pre-R27.35 batch was paid without a gate,
+// so the backfill marks them auto_approved rather than stranding live work in a queue
+// nobody knew existed.
+export function runR27_35Migrations() {
+  console.log("[migrations] R27.35: start");
+  const run = (label: string, sql: string) => {
+    try { sqlite.exec(sql); console.log(`[migrations] R27.35: ${label} ok`); }
+    catch (e: any) {
+      const msg = String(e?.message || e);
+      if (/already exists|duplicate column/i.test(msg)) console.log(`[migrations] R27.35: ${label} skip (exists)`);
+      else console.log(`[migrations] R27.35: ${label} skip (${msg})`);
+    }
+  };
+  run("payment_batches.approval_status",
+    `ALTER TABLE payment_batches ADD COLUMN approval_status TEXT DEFAULT 'auto_approved'`);
+  run("payment_batches.approved_by", `ALTER TABLE payment_batches ADD COLUMN approved_by TEXT`);
+  run("payment_batches.approved_at", `ALTER TABLE payment_batches ADD COLUMN approved_at INTEGER`);
+  run("payment_batches.rejection_reason", `ALTER TABLE payment_batches ADD COLUMN rejection_reason TEXT`);
+  run("payment_batches.grand_total_snapshot",
+    `ALTER TABLE payment_batches ADD COLUMN grand_total_snapshot REAL DEFAULT 0`);
+  run("idx_payment_batches_approval_status",
+    `CREATE INDEX IF NOT EXISTS idx_payment_batches_approval_status ON payment_batches(approval_status)`);
+
+  // Retroactive backfill. Idempotent: both statements only touch rows that are still
+  // unset, so a second run reports 0 changes.
+  try {
+    const r = sqlite.prepare(
+      `UPDATE payment_batches SET approval_status = 'auto_approved'
+       WHERE approval_status IS NULL OR approval_status = ''`,
+    ).run();
+    console.log(`[migrations] R27.35: backfill approval_status -> ${r.changes} row(s)`);
+  } catch (e: any) {
+    console.log(`[migrations] R27.35: backfill approval_status skip (${String(e?.message || e)})`);
+  }
+  try {
+    // total_with_gst is the R27.33 locked per-vendor figure; COALESCE covers R27.32
+    // rows written before that column existed, where total_amount was the only total.
+    const r = sqlite.prepare(
+      `UPDATE payment_batches SET grand_total_snapshot = COALESCE((
+         SELECT ROUND(SUM(COALESCE(bv.total_with_gst, bv.total_amount, 0)), 2)
+         FROM payment_batch_vendors bv WHERE bv.batch_id = payment_batches.id
+       ), 0)
+       WHERE grand_total_snapshot IS NULL OR grand_total_snapshot = 0`,
+    ).run();
+    console.log(`[migrations] R27.35: backfill grand_total_snapshot -> ${r.changes} row(s)`);
+  } catch (e: any) {
+    console.log(`[migrations] R27.35: backfill grand_total_snapshot skip (${String(e?.message || e)})`);
+  }
+
+  const verify = (table: string, expected: string[]) => {
+    try {
+      const cols = (sqlite.prepare(`PRAGMA table_info(${table})`).all() as any[]).map(r => r.name);
+      const missing = expected.filter(c => !cols.includes(c));
+      if (missing.length) console.log(`[migrations] R27.35: verify ${table} MISSING ${missing.join(",")}`);
+      else console.log(`[migrations] R27.35: verify ${table} ok (${expected.join(",")})`);
+    } catch (e: any) {
+      console.log(`[migrations] R27.35: verify ${table} skip (${String(e?.message || e)})`);
+    }
+  };
+  verify("payment_batches", ["approval_status", "approved_by", "approved_at", "rejection_reason", "grand_total_snapshot"]);
+  console.log("[migrations] R27.35: complete");
+}

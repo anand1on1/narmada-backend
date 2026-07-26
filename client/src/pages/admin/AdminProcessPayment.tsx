@@ -83,8 +83,15 @@ interface BatchVendorRow {
   slip_number: string;
   batch_date: string;
   batch_notes: string | null;
+  // R27.35 — batch-level approval state, joined onto every vendor row.
+  approval_status?: ApprovalStatus;
+  rejection_reason?: string | null;
+  approved_by?: string | null;
+  approved_at?: number | null;
 }
 interface Customer { id: number; name: string; }
+
+type ApprovalStatus = "auto_approved" | "pending_approval" | "approved" | "rejected";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -448,10 +455,16 @@ function ProcessVendorsTab({ onGenerated }: { onGenerated: () => void }) {
       });
       if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error || `HTTP ${r.status}`);
       const slip = r.headers.get("X-Slip-Number") || "batch";
+      // R27.35 — the body is the ZIP, so the approval outcome comes back on a header.
+      const approval = (r.headers.get("X-Approval-Status") || "auto_approved") as ApprovalStatus;
       await downloadBlob(r, `${slip.replace(/\//g, "-")}.zip`);
       toast({
         title: `Batch ${slip} created`,
-        description: `${vendors.length} vendor(s) — ${inr(grandTotal)} total. ZIP downloaded.`,
+        description:
+          `${vendors.length} vendor(s) — ${inr(grandTotal)} total. ZIP downloaded.` +
+          (approval === "pending_approval"
+            ? " Over ₹5,000 — sent to Payment Approvals for release by narmadamobility123."
+            : ""),
       });
       // Reset and move to the queue.
       setStep("select");
@@ -941,6 +954,8 @@ interface GroupedBatch {
   paid: number;
   pending: number;
   skipped: number;
+  approval_status: ApprovalStatus;
+  rejection_reason: string | null;
 }
 
 function AssignPaymentsTab() {
@@ -994,6 +1009,8 @@ function AssignPaymentsTab() {
           batch_date: r.batch_date,
           batch_notes: r.batch_notes,
           vendors: [], total: 0, paid: 0, pending: 0, skipped: 0,
+          approval_status: (r.approval_status || "auto_approved") as ApprovalStatus,
+          rejection_reason: r.rejection_reason ?? null,
         });
       }
       const g = map.get(r.batch_id)!;
@@ -1016,7 +1033,12 @@ function AssignPaymentsTab() {
     if (!batches.some((b) => b.batch_id === selectedBatchId)) setSelectedBatchId(batches[0].batch_id);
   }, [batches, selectedBatchId]);
 
-  const pendingInBatch = selectedBatch ? selectedBatch.vendors.filter((v) => v.status === "pending") : [];
+  // R27.35 — admins follow the same threshold as everyone else, so the queue locks
+  // here too until narmadamobility123 releases the batch.
+  const batchLocked =
+    !!selectedBatch && (selectedBatch.approval_status === "pending_approval" || selectedBatch.approval_status === "rejected");
+
+  const pendingInBatch = selectedBatch && !batchLocked ? selectedBatch.vendors.filter((v) => v.status === "pending") : [];
   const allPendingSelected = pendingInBatch.length > 0 && pendingInBatch.every((v) => selectedVendorIds.has(v.id));
 
   function toggleVendorSel(id: number) {
@@ -1177,6 +1199,7 @@ function AssignPaymentsTab() {
                     <span className="text-rose-600">{b.skipped} skipped</span>
                   </div>
                   <div className="mt-0.5 text-xs text-slate-500">{b.vendors.length} vendor(s) · {inr(b.total)}</div>
+                  <div className="mt-1"><ApprovalBadge status={b.approval_status} /></div>
                 </button>
               ))}
             </div>
@@ -1204,6 +1227,16 @@ function AssignPaymentsTab() {
             <div className="p-12 text-center text-muted-foreground text-sm">Select a batch to view its vendors.</div>
           ) : (
             <div className="overflow-x-auto">
+              {selectedBatch.approval_status === "pending_approval" && (
+                <div className="m-4 rounded-lg border border-amber-300 bg-amber-50 px-4 py-3 text-sm text-amber-900" data-testid="banner-approval-pending">
+                  <strong>Slip pending approval.</strong> Payments can be marked paid once narmadamobility123 approves this batch.
+                </div>
+              )}
+              {selectedBatch.approval_status === "rejected" && (
+                <div className="m-4 rounded-lg border border-rose-300 bg-rose-50 px-4 py-3 text-sm text-rose-900" data-testid="banner-approval-rejected">
+                  <strong>Slip rejected:</strong> {selectedBatch.rejection_reason || "no reason given"}. Regenerate the slip with corrections.
+                </div>
+              )}
               <table className="w-full text-sm">
                 <thead>
                   <tr className="bg-muted/50 text-left">
@@ -1224,7 +1257,7 @@ function AssignPaymentsTab() {
                   {selectedBatch.vendors.map((v) => (
                     <tr key={v.id} data-testid={`row-batch-vendor-${v.id}`}>
                       <td className="px-3 py-3">
-                        {v.status === "pending" && (
+                        {v.status === "pending" && !batchLocked && (
                           <input type="checkbox" checked={selectedVendorIds.has(v.id)} onChange={() => toggleVendorSel(v.id)} data-testid={`checkbox-vendor-${v.id}`} />
                         )}
                       </td>
@@ -1244,7 +1277,8 @@ function AssignPaymentsTab() {
                           </button>
                           <button
                             onClick={() => { setPaidTarget(v); setPaidNotes(""); setPaidFile(null); }}
-                            disabled={v.status !== "pending"}
+                            disabled={v.status !== "pending" || batchLocked}
+                            title={batchLocked ? "Awaiting approval from narmadamobility123" : undefined}
                             className="px-2 py-1 text-xs rounded bg-emerald-500/15 text-emerald-700 font-semibold disabled:opacity-40 inline-flex items-center gap-1"
                             data-testid={`button-mark-paid-${v.id}`}
                           >
@@ -1313,6 +1347,25 @@ function StatusBadge({ status }: { status: string }) {
     skipped: "bg-rose-500/15 text-rose-700",
   };
   return <span className={"text-[10px] uppercase font-bold px-2 py-0.5 rounded " + (map[status] || "bg-slate-500/15 text-slate-700")} data-testid={`badge-status-${status}`}>{status}</span>;
+}
+
+// R27.35 — batch approval state. Legacy rows arrive without the field; the backend
+// treats those as auto_approved, so the badge has to agree.
+const APPROVAL_BADGES: Record<ApprovalStatus, { label: string; dot: string; cls: string }> = {
+  approved: { label: "Approved", dot: "🟢", cls: "bg-emerald-500/15 text-emerald-700" },
+  pending_approval: { label: "Pending Approval", dot: "🟡", cls: "bg-amber-500/15 text-amber-800" },
+  rejected: { label: "Rejected", dot: "🔴", cls: "bg-rose-500/15 text-rose-700" },
+  auto_approved: { label: "Auto-Approved", dot: "⚪", cls: "bg-slate-500/15 text-slate-600" },
+};
+
+function ApprovalBadge({ status }: { status?: ApprovalStatus | null }) {
+  const s = (status || "auto_approved") as ApprovalStatus;
+  const b = APPROVAL_BADGES[s] || APPROVAL_BADGES.auto_approved;
+  return (
+    <span className={"text-[10px] font-bold px-2 py-0.5 rounded inline-flex items-center gap-1 " + b.cls} data-testid={`badge-approval-${s}`}>
+      <span aria-hidden>{b.dot}</span>{b.label}
+    </span>
+  );
 }
 
 function FieldLabel({ label, children }: { label: string; children: any }) {

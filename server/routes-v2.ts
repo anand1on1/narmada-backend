@@ -346,7 +346,9 @@ export function registerV2Routes(app: Express, ctx: V2Context) {
       const row = rawSqlite.prepare(`SELECT id, name FROM data_team_users WHERE username = ? LIMIT 1`).get(username) as any;
       if (row) { userId = row.id; if (row.name) userName = row.name; }
     } catch { /* data_team_users may not exist in every deployment */ }
-    return { userId, userName };
+    // R27.35 — the payment approval gate keys off the login username, which survives
+    // both token types identically (createAdminOrTeamAuth normalises the shape).
+    return { userId, userName, username };
   };
   registerPaymentRoutes(app, { db: rawSqlite as any, uploadsDir: ctx.uploadsDir, requireRole: requireAdminOrTeamRole, resolveActor });
 

@@ -15,10 +15,12 @@ import {
   listPaymentPos, aggregateVendors,
   nextSlipNumber, generateBatch, generateBatchWithSlips,
   listBatchVendors, markPaid, markSkipped, bulkMarkPaid,
+  approveBatch, readBatchApproval, APPROVER_USERNAME,
   type GenerateVendorInput, type Actor,
 } from "../../server/routes-payments";
 
 const ACTOR: Actor = { userId: null, userName: "Test Admin" };
+const APPROVER: Actor = { userId: null, userName: "Piyush Anand", username: APPROVER_USERNAME };
 const day = (d: string) => new Date(`${d}T09:00:00.000`).getTime();
 
 beforeAll(() => {
@@ -197,9 +199,16 @@ describe("R27.32 — POST /api/payments/generate", () => {
 });
 
 describe("R27.32 — Assign Payments (batches queue)", () => {
+  // R27.35 put a ₹5,000 approval gate in front of mark-paid. This fixture is over the
+  // threshold, so clear it here — these tests are about the mark-paid mechanics, and the
+  // gate itself is covered in r27-35-payment-approval.test.ts.
   function makeBatch() {
     const agg = aggregateVendors(db, [184, 185]);
-    return generateBatch(db, { vendors: toGenerateInput(agg) }, ACTOR);
+    const res = generateBatch(db, { vendors: toGenerateInput(agg) }, ACTOR);
+    if (readBatchApproval(db, res.batch_id).approval_status === "pending_approval") {
+      approveBatch(db, res.batch_id, APPROVER);
+    }
+    return res;
   }
 
   it("(8) GET /api/payments/batches filters by status", () => {
