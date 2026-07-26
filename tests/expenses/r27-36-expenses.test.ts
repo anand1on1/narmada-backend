@@ -317,6 +317,21 @@ describe("R27.36 ledger", () => {
     expect(l.entry_count).toBe(3);
   });
 
+  it("(15c) R27.36b-fix: ledger entries expose expense_type + approval_status", () => {
+    // Regression — the Unified frontend renders type + status badges from these
+    // fields. When getLedger didn't return them, `r.approval_status.replace(...)`
+    // threw and the whole Ledger tab silently collapsed to "No rows".
+    slipped(1500, "2026-07-01");
+    const l = getLedger(db);
+    expect(l.entries.length).toBeGreaterThan(0);
+    for (const e of l.entries) {
+      expect(typeof e.expense_type).toBe("string");
+      expect(typeof e.approval_status).toBe("string");
+      expect(["direct", "advance", "bus"]).toContain(e.expense_type);
+      expect(["auto_approved", "approved"]).toContain(e.approval_status);
+    }
+  });
+
   it("(15b) auto-approved rows reach the ledger; pending rows do not", () => {
     // R27.36a-part-2b: auto-approved rows get a slip number at creation, so
     // "un-slipped auto-approved" is no longer a state that exists — all

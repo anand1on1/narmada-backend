@@ -1175,8 +1175,11 @@ export function getLedger(db: Database, filters: LedgerFilters = {}): {
   if (to != null) { where.push(`e.expense_date <= ?`); params.push(to); }
 
   // Oldest first so the window function accumulates in the direction a ledger reads.
+  // R27.36b-fix: also return expense_type + approval_status so the Unified frontend
+  // can render the type/status badges without crashing on undefined.
   const rows = db.prepare(
     `SELECT e.id, e.expense_date, e.slip_number, e.description, e.amount, e.gst_amount, e.total_amount,
+            e.expense_type, e.approval_status,
             COALESCE(c.name, '—') AS category_name,
             COALESCE(p.name, e.payee_name_freetext, '—') AS payee_name,
             SUM(e.total_amount) OVER (ORDER BY e.expense_date, e.id
@@ -1193,6 +1196,8 @@ export function getLedger(db: Database, filters: LedgerFilters = {}): {
     expense_date: r.expense_date,
     expense_date_display: epochToDay(r.expense_date),
     slip_number: r.slip_number,
+    expense_type: r.expense_type || "direct",
+    approval_status: r.approval_status || "auto_approved",
     category_name: r.category_name,
     payee_name: r.payee_name,
     description: r.description,

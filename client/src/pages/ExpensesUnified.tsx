@@ -160,7 +160,17 @@ function LedgerTab({ token, fetcher }: { token: string | null; fetcher: ExpenseP
       const r = await fetcher(token, `/api/expenses/ledger?${p.toString()}`);
       const d = await r.json();
       if (!r.ok) throw new Error(d?.error || "Failed to load ledger");
-      setRows(Array.isArray(d?.rows) ? d.rows : Array.isArray(d) ? d : []);
+      // R27.36b-fix: the server returns `{entries, total_debit, ...}` — not `{rows}`.
+      // The old guard fell through to `[]` and the Ledger tab silently showed
+      // "No expenses match the filters." for every user. Accept both shapes.
+      const list = Array.isArray(d?.entries)
+        ? d.entries
+        : Array.isArray(d?.rows)
+          ? d.rows
+          : Array.isArray(d)
+            ? d
+            : [];
+      setRows(list);
     } catch (e: any) {
       toast({ title: "Failed to load ledger", description: String(e?.message || e), variant: "destructive" });
     } finally {
@@ -171,6 +181,30 @@ function LedgerTab({ token, fetcher }: { token: string | null; fetcher: ExpenseP
   useEffect(() => { load(); /* eslint-disable-next-line react-hooks/exhaustive-deps */ }, [typeFilter, from, to]);
 
   const total = useMemo(() => rows.reduce((s, r) => s + Number(r.total_amount || 0), 0), [rows]);
+
+  // R27.36b-fix: per-row slip download. The endpoint is idempotent server-side
+  // (reuses the auto-minted slip_number and re-renders the JPEG), so any approved
+  // row with a slip_number can be downloaded on demand.
+  const downloadSlip = async (row: LedgerRow) => {
+    if (!row.slip_number) return;
+    try {
+      const r = await fetcher(token, `/api/expenses/${row.id}/generate-slip`, { method: "POST" });
+      if (!r.ok) {
+        const err = await r.json().catch(() => ({}));
+        throw new Error(err?.error || `HTTP ${r.status}`);
+      }
+      const slip = r.headers.get("X-Slip-Number") || row.slip_number || "";
+      const blob = await r.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `${slip.replace(/\//g, "-") || "expense-slip"}.jpg`;
+      a.click();
+      setTimeout(() => URL.revokeObjectURL(url), 5000);
+    } catch (e: any) {
+      toast({ title: "Slip download failed", description: String(e?.message || e), variant: "destructive" });
+    }
+  };
 
   const downloadCsv = async () => {
     try {
@@ -240,15 +274,22 @@ function LedgerTab({ token, fetcher }: { token: string | null; fetcher: ExpenseP
               <th className="text-right px-3 py-2">GST</th>
               <th className="text-right px-3 py-2">Total</th>
               <th className="text-left px-3 py-2">Status</th>
+              <th className="text-right px-3 py-2">Slip</th>
             </tr>
           </thead>
           <tbody>
             {rows.length === 0 && !loading && (
-              <tr><td colSpan={10} className="px-3 py-6 text-center text-muted-foreground">No expenses match the filters.</td></tr>
+              <tr><td colSpan={11} className="px-3 py-6 text-center text-muted-foreground">No expenses match the filters.</td></tr>
             )}
             {rows.map((r) => {
               const t = (r.expense_type || "direct") as ExpenseType;
               const badge = TYPE_BADGE[t] || TYPE_BADGE.direct;
+              // R27.36b-fix: guard against ledger rows that pre-date the R27.36b
+              // response shape — the endpoint only returns approved rows so this
+              // fallback is cosmetic, but it stops a stale field from crashing render.
+              const status = (r.approval_status || "auto_approved") as ApprovalStatus;
+              const statusCls = STATUS_BADGE[status] || STATUS_BADGE.auto_approved;
+              const canDownload = !!r.slip_number && (status === "auto_approved" || status === "approved");
               return (
                 <tr key={r.id} className="border-t" data-testid={`row-ledger-${r.id}`}>
                   <td className="px-3 py-2 whitespace-nowrap">{r.expense_date_display}</td>
@@ -260,7 +301,18 @@ function LedgerTab({ token, fetcher }: { token: string | null; fetcher: ExpenseP
                   <td className="px-3 py-2 text-right">{inr(r.amount)}</td>
                   <td className="px-3 py-2 text-right text-muted-foreground">{inr(r.gst_amount)}</td>
                   <td className="px-3 py-2 text-right font-semibold">{inr(r.total_amount)}</td>
-                  <td className="px-3 py-2"><span className={"text-[10px] font-bold px-2 py-0.5 rounded " + STATUS_BADGE[r.approval_status]}>{r.approval_status.replace(/_/g, " ")}</span></td>
+                  <td className="px-3 py-2"><span className={"text-[10px] font-bold px-2 py-0.5 rounded " + statusCls}>{String(status).replace(/_/g, " ")}</span></td>
+                  <td className="px-3 py-2 text-right">
+                    <button
+                      onClick={() => downloadSlip(r)}
+                      disabled={!canDownload}
+                      title={canDownload ? `Download slip ${r.slip_number}` : "No slip available"}
+                      className="px-2 py-1 text-xs rounded bg-indigo-500/15 text-indigo-700 font-semibold disabled:opacity-40 inline-flex items-center gap-1"
+                      data-testid={`button-ledger-slip-${r.id}`}
+                    >
+                      <Download className="w-3.5 h-3.5" />
+                    </button>
+                  </td>
                 </tr>
               );
             })}
@@ -270,6 +322,7 @@ function LedgerTab({ token, fetcher }: { token: string | null; fetcher: ExpenseP
               <tr className="bg-muted/40 font-semibold">
                 <td colSpan={8} className="px-3 py-2 text-right text-xs uppercase tracking-wider text-muted-foreground">Total</td>
                 <td className="px-3 py-2 text-right" data-testid="text-ledger-total">{inr(total)}</td>
+                <td />
                 <td />
               </tr>
             </tfoot>
