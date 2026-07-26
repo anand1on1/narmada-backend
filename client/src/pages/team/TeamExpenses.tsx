@@ -92,6 +92,23 @@ export function ExpensesBody({ token, fetcher, Layout }: ExpensePageProps) {
   const [showNewPayee, setShowNewPayee] = useState(false);
   const [newPayee, setNewPayee] = useState<Record<string, string>>({});
 
+  // ---- R27.36b payment model ----
+  type PaidFrom = "cash_delhi" | "cash_patna" | "bank_transfer" | "against_advance";
+  type ExpenseKind = "direct" | "advance";
+  const [expenseKind, setExpenseKind] = useState<ExpenseKind>("direct");
+  const [paidFrom, setPaidFrom] = useState<PaidFrom | "">("");
+  const [referenceNumber, setReferenceNumber] = useState("");
+  const [advanceSlipId, setAdvanceSlipId] = useState("");
+  const [handledByStaffId, setHandledByStaffId] = useState("");
+  const [handledByStaffName, setHandledByStaffName] = useState("");
+  interface OutstandingAdvance {
+    id: number; slip_number: string | null; payee_name: string;
+    total_amount: number; outstanding: number; expense_date: number;
+  }
+  interface StaffOption { id: number; username: string; name: string; role: string | null }
+  const [outstandingAdvances, setOutstandingAdvances] = useState<OutstandingAdvance[]>([]);
+  const [staff, setStaff] = useState<StaffOption[]>([]);
+
   async function api(pathname: string, init?: RequestInit) {
     const r = await fetcher(token, pathname, init);
     if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error || `HTTP ${r.status}`);
@@ -103,9 +120,30 @@ export function ExpensesBody({ token, fetcher, Layout }: ExpensePageProps) {
     try {
       setCats(await (await api("/api/expenses/categories")).json());
       setPayees(await (await api("/api/expenses/payees")).json());
+      // R27.36b: staff list for advance-issuance handler picker. Endpoint is
+      // additive — tolerate 404 on tenants that haven't redeployed yet.
+      try {
+        const s = await (await api("/api/expenses/staff")).json();
+        setStaff(Array.isArray(s?.staff) ? s.staff : []);
+      } catch { /* ignore */ }
     } catch (e: any) {
       toast({ title: "Failed to load categories/payees", description: e.message, variant: "destructive" });
     }
+  }
+
+  // Fetch outstanding advances for the currently-selected payee (used by the
+  // "paid against advance" dropdown). Runs when paid_from=against_advance and
+  // the payee has been chosen. Silent on empty payees to avoid noise.
+  async function loadOutstandingAdvances() {
+    if (paidFrom !== "against_advance") { setOutstandingAdvances([]); return; }
+    const params = new URLSearchParams();
+    if (payeeMode === "saved" && payeeId) params.set("payee_id", payeeId);
+    else if (payeeMode === "quick" && payeeText.trim()) params.set("payee_name", payeeText.trim());
+    else { setOutstandingAdvances([]); return; }
+    try {
+      const j = await (await api(`/api/expenses/advances/outstanding?${params.toString()}`)).json();
+      setOutstandingAdvances(Array.isArray(j?.advances) ? j.advances : []);
+    } catch { setOutstandingAdvances([]); }
   }
 
   async function load() {
@@ -128,6 +166,8 @@ export function ExpensesBody({ token, fetcher, Layout }: ExpensePageProps) {
 
   useEffect(() => { loadRefs(); }, [token]); // eslint-disable-line react-hooks/exhaustive-deps
   useEffect(() => { load(); }, [token, fCat, fStatus, fFrom, fTo]); // eslint-disable-line react-hooks/exhaustive-deps
+  // Re-fetch outstanding advances whenever paid_from or the payee changes.
+  useEffect(() => { loadOutstandingAdvances(); }, [paidFrom, payeeMode, payeeId, payeeText]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Live preview uses the same math as the server so the number never jumps on save.
   const preview = useMemo(() => {
@@ -147,6 +187,10 @@ export function ExpensesBody({ token, fetcher, Layout }: ExpensePageProps) {
     setCategoryId(""); setPayeeMode("quick"); setPayeeText(""); setPayeeId("");
     setAmount(""); setGstPercent("0"); setGstMode("exclusive"); setDescription("");
     setExpenseDate(today()); setIsRecurring(false); setFrequency("monthly"); setNextDate("");
+    // R27.36b — payment model reset
+    setExpenseKind("direct"); setPaidFrom(""); setReferenceNumber("");
+    setAdvanceSlipId(""); setHandledByStaffId(""); setHandledByStaffName("");
+    setOutstandingAdvances([]);
   }
 
   async function submit() {
@@ -154,6 +198,17 @@ export function ExpensesBody({ token, fetcher, Layout }: ExpensePageProps) {
     if (!(parseFloat(amount) > 0)) { toast({ title: "Enter an amount", variant: "destructive" }); return; }
     if (payeeMode === "quick" && !payeeText.trim()) { toast({ title: "Enter a payee name", variant: "destructive" }); return; }
     if (payeeMode === "saved" && !payeeId) { toast({ title: "Pick a saved payee", variant: "destructive" }); return; }
+    // R27.36b — payment-model client validation. Mirror the backend so the user
+    // gets a fast, friendly toast instead of a raw 400.
+    if (paidFrom === "against_advance" && !advanceSlipId) {
+      toast({ title: "Pick which advance this settles", variant: "destructive" }); return;
+    }
+    if (expenseKind === "advance" && paidFrom === "against_advance") {
+      toast({ title: "An advance issuance cannot be paid from an advance", variant: "destructive" }); return;
+    }
+    if (expenseKind === "advance" && paidFrom && !handledByStaffId && !handledByStaffName.trim()) {
+      toast({ title: "Pick who handled the cash for this advance", variant: "destructive" }); return;
+    }
     setSaving(true);
     try {
       const body: Record<string, unknown> = {
@@ -163,9 +218,21 @@ export function ExpensesBody({ token, fetcher, Layout }: ExpensePageProps) {
         gst_mode: gstMode,
         description: description.trim() || undefined,
         expense_date: expenseDate,
+        expense_type: expenseKind,
       };
       if (payeeMode === "saved") body.payee_id = Number(payeeId);
       else body.payee_name_freetext = payeeText.trim();
+      if (paidFrom) body.paid_from = paidFrom;
+      if (paidFrom === "bank_transfer" && referenceNumber.trim()) {
+        body.reference_number = referenceNumber.trim();
+      }
+      if (paidFrom === "against_advance" && advanceSlipId) {
+        body.advance_slip_id = Number(advanceSlipId);
+      }
+      if (expenseKind === "advance") {
+        if (handledByStaffId) body.handled_by_staff_id = Number(handledByStaffId);
+        if (handledByStaffName.trim()) body.handled_by_staff_name = handledByStaffName.trim();
+      }
       if (isRecurring) {
         body.is_recurring = true;
         body.recurring_frequency = frequency;
@@ -434,6 +501,126 @@ export function ExpensesBody({ token, fetcher, Layout }: ExpensePageProps) {
               <div>
                 <label className="text-xs font-semibold text-slate-600">Date</label>
                 <input type="date" value={expenseDate} onChange={(e) => setExpenseDate(e.target.value)} className="w-full mt-1 border rounded-lg px-3 py-2 bg-background text-sm" data-testid="input-expense-date" />
+              </div>
+
+              {/* R27.36b — How was this paid? */}
+              <div className="col-span-2 rounded-lg border bg-muted/20 px-3 py-3" data-testid="section-paid-from">
+                <div className="flex items-center gap-3 mb-2 flex-wrap">
+                  <span className="text-xs font-semibold text-slate-600">This is</span>
+                  <div className="inline-flex rounded-lg border overflow-hidden text-xs" role="group" aria-label="Expense kind">
+                    {(["direct", "advance"] as const).map((k) => (
+                      <button
+                        key={k}
+                        type="button"
+                        onClick={() => {
+                          setExpenseKind(k);
+                          // Coming back to direct clears the advance-only handler; going to
+                          // advance clears any against_advance selection because it's illegal.
+                          if (k === "direct") { setHandledByStaffId(""); setHandledByStaffName(""); }
+                          else if (paidFrom === "against_advance") { setPaidFrom(""); setAdvanceSlipId(""); }
+                        }}
+                        className={`px-3 py-1 capitalize transition-colors ${expenseKind === k ? "bg-indigo-600 text-white" : "bg-background text-slate-600 hover:bg-slate-100"}`}
+                        data-testid={`toggle-expense-kind-${k}`}
+                      >
+                        {k === "direct" ? "a direct expense" : "an advance to someone"}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                <div className="text-xs font-semibold text-slate-600 mb-1">How was this paid?</div>
+                <div className="grid grid-cols-2 gap-2">
+                  {(
+                    [
+                      { key: "cash_delhi", label: "Cash — Delhi", show: true },
+                      { key: "cash_patna", label: "Cash — Patna", show: true },
+                      { key: "bank_transfer", label: "Bank Transfer", show: true },
+                      { key: "against_advance", label: "Against an existing advance", show: expenseKind === "direct" },
+                    ] as { key: PaidFrom; label: string; show: boolean }[]
+                  ).filter((o) => o.show).map((o) => (
+                    <label
+                      key={o.key}
+                      className={`flex items-center gap-2 px-3 py-2 rounded-lg border cursor-pointer text-sm ${paidFrom === o.key ? "border-indigo-500 bg-indigo-50" : "bg-background hover:bg-muted"}`}
+                      data-testid={`option-paid-from-${o.key}`}
+                    >
+                      <input
+                        type="radio"
+                        name="paid_from"
+                        value={o.key}
+                        checked={paidFrom === o.key}
+                        onChange={() => { setPaidFrom(o.key); if (o.key !== "against_advance") setAdvanceSlipId(""); if (o.key !== "bank_transfer") setReferenceNumber(""); }}
+                        data-testid={`radio-paid-from-${o.key}`}
+                      />
+                      <span>{o.label}</span>
+                    </label>
+                  ))}
+                </div>
+
+                {paidFrom === "bank_transfer" && (
+                  <div className="mt-2">
+                    <label className="text-xs font-semibold text-slate-600">Transaction reference (UTR / cheque no.)</label>
+                    <input
+                      value={referenceNumber}
+                      onChange={(e) => setReferenceNumber(e.target.value)}
+                      placeholder="e.g. UTR20260726001"
+                      className="w-full mt-1 border rounded-lg px-3 py-2 bg-background text-sm"
+                      data-testid="input-reference-number"
+                    />
+                  </div>
+                )}
+
+                {paidFrom === "against_advance" && (
+                  <div className="mt-2">
+                    <label className="text-xs font-semibold text-slate-600">Which outstanding advance?</label>
+                    <select
+                      value={advanceSlipId}
+                      onChange={(e) => setAdvanceSlipId(e.target.value)}
+                      className="w-full mt-1 border rounded-lg px-3 py-2 bg-background text-sm"
+                      data-testid="select-advance-slip"
+                    >
+                      <option value="">
+                        {outstandingAdvances.length === 0
+                          ? "No outstanding advances for this payee"
+                          : "Pick an advance…"}
+                      </option>
+                      {outstandingAdvances.map((a) => (
+                        <option key={a.id} value={a.id}>
+                          {(a.slip_number || `#${a.id}`)} · {a.payee_name} · outstanding {inr(a.outstanding)}
+                        </option>
+                      ))}
+                    </select>
+                    <p className="text-[11px] text-slate-500 mt-1">Filtered by the payee you picked above.</p>
+                  </div>
+                )}
+
+                {expenseKind === "advance" && (
+                  <div className="mt-2">
+                    <label className="text-xs font-semibold text-slate-600">Handled by</label>
+                    <select
+                      value={handledByStaffId}
+                      onChange={(e) => {
+                        setHandledByStaffId(e.target.value);
+                        const picked = staff.find((s) => String(s.id) === e.target.value);
+                        if (picked) setHandledByStaffName(picked.name);
+                      }}
+                      className="w-full mt-1 border rounded-lg px-3 py-2 bg-background text-sm"
+                      data-testid="select-handled-by"
+                    >
+                      <option value="">Pick a team member…</option>
+                      {staff.map((s) => (
+                        <option key={s.id} value={s.id}>{s.name}{s.role ? ` · ${s.role}` : ""}</option>
+                      ))}
+                    </select>
+                    <input
+                      value={handledByStaffName}
+                      onChange={(e) => { setHandledByStaffName(e.target.value); }}
+                      placeholder="or type a name"
+                      className="w-full mt-1 border rounded-lg px-3 py-2 bg-background text-sm"
+                      data-testid="input-handled-by-name"
+                    />
+                    <p className="text-[11px] text-slate-500 mt-1">Who physically handed over the cash / initiated the transfer.</p>
+                  </div>
+                )}
               </div>
 
               <div className="col-span-2 flex items-center gap-4 flex-wrap">
