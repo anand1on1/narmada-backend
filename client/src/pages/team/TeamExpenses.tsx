@@ -282,12 +282,16 @@ export function ExpensesBody({ token, fetcher, Layout }: ExpensePageProps) {
     }
   }
 
-  async function generateSlip(e: Expense) {
-    if (!window.confirm(`Generate a slip for ${inr(e.total_amount)} to ${e.payee_name}?`)) return;
+  // R27.36b-fix — the endpoint is idempotent server-side: it (re)mints the slip
+  // number if missing and always regenerates the JPEG. R27.36a-part-2b started
+  // auto-minting numbers on create, so the old "disabled once slip_number is
+  // set" rule was wrong — it locked users out of ever downloading the image.
+  // We now allow re-download for any approved row.
+  async function downloadSlip(e: Expense) {
     try {
       const r = await fetcher(token, `/api/expenses/${e.id}/generate-slip`, { method: "POST" });
       if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error || `HTTP ${r.status}`);
-      const slip = r.headers.get("X-Slip-Number") || "";
+      const slip = r.headers.get("X-Slip-Number") || e.slip_number || "";
       const blob = await r.blob();
       const url = URL.createObjectURL(blob);
       const a = document.createElement("a");
@@ -297,7 +301,7 @@ export function ExpensesBody({ token, fetcher, Layout }: ExpensePageProps) {
       setSlipPreview({ url, slip });
       await load();
     } catch (err: any) {
-      toast({ title: "Slip generation failed", description: err.message, variant: "destructive" });
+      toast({ title: "Slip download failed", description: err.message, variant: "destructive" });
     }
   }
 
@@ -412,13 +416,13 @@ export function ExpensesBody({ token, fetcher, Layout }: ExpensePageProps) {
                       <td className="px-3 py-3">
                         <div className="flex items-center justify-end gap-1.5">
                           <button
-                            onClick={() => generateSlip(e)}
-                            disabled={!!e.slip_number || e.approval_status === "pending_approval" || e.approval_status === "rejected"}
-                            title={e.slip_number ? "Slip already generated" : e.approval_status === "pending_approval" ? "Waiting for approval" : e.approval_status === "rejected" ? "Rejected" : "Generate slip"}
+                            onClick={() => downloadSlip(e)}
+                            disabled={e.approval_status === "pending_approval" || e.approval_status === "rejected"}
+                            title={e.approval_status === "pending_approval" ? "Waiting for approval" : e.approval_status === "rejected" ? "Rejected" : e.slip_number ? `Download slip ${e.slip_number}` : "Generate & download slip"}
                             className="px-2 py-1 text-xs rounded bg-indigo-500/15 text-indigo-700 font-semibold disabled:opacity-40 inline-flex items-center gap-1"
                             data-testid={`button-generate-slip-${e.id}`}
                           >
-                            <FileText className="w-3.5 h-3.5" /> Slip
+                            <FileText className="w-3.5 h-3.5" /> {e.slip_number ? "Download" : "Slip"}
                           </button>
                           <button
                             onClick={() => remove(e)}
