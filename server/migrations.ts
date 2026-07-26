@@ -2,6 +2,7 @@
 // Idempotent CREATE TABLE IF NOT EXISTS DDL run on boot from server/index.ts.
 // NEVER drop or rename existing tables/columns — additive only.
 import { rawSqlite as sqlite } from "./storage";
+import { migrateLegacyExpenses, logLegacyMigrationReport } from "./migrations-r27-36a";
 
 export function runR4toR7Migrations() {
   sqlite.exec(`
@@ -4392,4 +4393,126 @@ export function runR27_36Migrations() {
     console.log(`[migrations] R27.36: verify indexes skip (${String(e?.message || e)})`);
   }
   console.log("[migrations] R27.36: complete");
+}
+
+// ===========================================================================
+// R27.36a — unified expense module.
+//
+// `expense_slips` grows from "a direct expense" into the single home for direct,
+// advance and bus expenses, plus the columns needed to point every migrated row
+// back at the R27.6 table it came from. The R27.6 tables are never dropped: they
+// stay as the audit trail and only their UI disappears (part 2).
+// ===========================================================================
+export function runR27_36aMigrations() {
+  console.log("[migrations] R27.36a: start");
+  const run = (label: string, sql: string) => {
+    try { sqlite.exec(sql); console.log(`[migrations] R27.36a: ${label} ok`); }
+    catch (e: any) {
+      const msg = String(e?.message || e);
+      if (/already exists|duplicate column/i.test(msg)) console.log(`[migrations] R27.36a: ${label} skip (exists)`);
+      else console.log(`[migrations] R27.36a: ${label} skip (${msg})`);
+    }
+  };
+  const addCol = (table: string, col: string, decl: string) =>
+    run(`${table}.${col}`, `ALTER TABLE ${table} ADD COLUMN ${col} ${decl}`);
+
+  // --- expense_slips: three-way type + per-type fields ---
+  addCol("expense_slips", "expense_type", "TEXT NOT NULL DEFAULT 'direct'");
+  addCol("expense_slips", "payment_mode", "TEXT DEFAULT 'cash'");
+  addCol("expense_slips", "branch_id", "TEXT");
+  addCol("expense_slips", "reference_number", "TEXT");
+  addCol("expense_slips", "proof_url", "TEXT");
+  // Advance-only. `reconciled_amount` is a running total maintained by the
+  // reconcile endpoint; `returned_amount` is unspent cash handed back. They are
+  // separate columns because "spent against receipts" and "given back" are
+  // different answers to an auditor, even though both close out an advance.
+  addCol("expense_slips", "expected_return_date", "INTEGER");
+  addCol("expense_slips", "advance_status", "TEXT");
+  addCol("expense_slips", "reconciled_amount", "REAL DEFAULT 0");
+  addCol("expense_slips", "returned_amount", "REAL DEFAULT 0");
+  // Bus-only.
+  addCol("expense_slips", "bus_number", "TEXT");
+  addCol("expense_slips", "bus_name", "TEXT");
+  addCol("expense_slips", "bus_contact", "TEXT");
+  addCol("expense_slips", "bus_from", "TEXT");
+  // Legacy provenance — (legacy_source_table, legacy_source_id) is the dedup key
+  // that makes the R27.6 data migration re-runnable.
+  addCol("expense_slips", "is_legacy", "INTEGER DEFAULT 0");
+  addCol("expense_slips", "legacy_source_table", "TEXT");
+  addCol("expense_slips", "legacy_source_id", "INTEGER");
+
+  // System categories cannot be deactivated — the migration depends on them existing.
+  addCol("expense_categories", "is_system", "INTEGER DEFAULT 0");
+
+  run("idx_expense_slips_legacy",
+    `CREATE INDEX IF NOT EXISTS idx_expense_slips_legacy ON expense_slips(legacy_source_table, legacy_source_id)`);
+  run("idx_expense_slips_type", `CREATE INDEX IF NOT EXISTS idx_expense_slips_type ON expense_slips(expense_type)`);
+  run("idx_expense_slips_branch", `CREATE INDEX IF NOT EXISTS idx_expense_slips_branch ON expense_slips(branch_id)`);
+  run("idx_expense_slips_advance_status",
+    `CREATE INDEX IF NOT EXISTS idx_expense_slips_advance_status ON expense_slips(advance_status) WHERE expense_type = 'advance'`);
+
+  run("expense_reconciliations", `
+    CREATE TABLE IF NOT EXISTS expense_reconciliations (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      advance_slip_id INTEGER NOT NULL,
+      expense_slip_id INTEGER NOT NULL,
+      amount REAL NOT NULL,
+      reconciled_at INTEGER NOT NULL,
+      reconciled_by TEXT NOT NULL,
+      notes TEXT,
+      is_legacy INTEGER DEFAULT 0,
+      legacy_source_table TEXT,
+      legacy_source_id INTEGER
+    )`);
+  run("idx_recon_advance", `CREATE INDEX IF NOT EXISTS idx_recon_advance ON expense_reconciliations(advance_slip_id)`);
+  run("idx_recon_expense", `CREATE INDEX IF NOT EXISTS idx_recon_expense ON expense_reconciliations(expense_slip_id)`);
+  run("idx_recon_legacy",
+    `CREATE INDEX IF NOT EXISTS idx_recon_legacy ON expense_reconciliations(legacy_source_table, legacy_source_id)`);
+
+  // R27.36 derived the next EXP number by scanning slip_number strings. Three
+  // interleaved series with their own monthly counters need real state, so the
+  // counter moves into a table.
+  run("slip_counters", `
+    CREATE TABLE IF NOT EXISTS slip_counters (
+      series TEXT NOT NULL,
+      year_month TEXT NOT NULL,
+      counter INTEGER NOT NULL DEFAULT 0,
+      PRIMARY KEY (series, year_month)
+    )`);
+
+  const verifyCols = (table: string, expected: string[]) => {
+    try {
+      const cols = (sqlite.prepare(`PRAGMA table_info(${table})`).all() as any[]).map(r => r.name);
+      if (!cols.length) { console.log(`[migrations] R27.36a: verify ${table} MISSING (no such table)`); return; }
+      const missing = expected.filter(c => !cols.includes(c));
+      if (missing.length) console.log(`[migrations] R27.36a: verify ${table} MISSING ${missing.join(",")}`);
+      else console.log(`[migrations] R27.36a: verify ${table} ok (${cols.length} cols)`);
+    } catch (e: any) {
+      console.log(`[migrations] R27.36a: verify ${table} skip (${String(e?.message || e)})`);
+    }
+  };
+  verifyCols("expense_slips", [
+    "expense_type", "payment_mode", "branch_id", "reference_number", "proof_url",
+    "expected_return_date", "advance_status", "reconciled_amount", "returned_amount",
+    "bus_number", "bus_name", "bus_contact", "bus_from",
+    "is_legacy", "legacy_source_table", "legacy_source_id",
+  ]);
+  verifyCols("expense_categories", ["id", "name", "is_active", "is_system"]);
+  verifyCols("expense_reconciliations", [
+    "id", "advance_slip_id", "expense_slip_id", "amount", "reconciled_at", "reconciled_by",
+    "notes", "is_legacy", "legacy_source_table", "legacy_source_id",
+  ]);
+  verifyCols("slip_counters", ["series", "year_month", "counter"]);
+  console.log("[migrations] R27.36a: complete");
+}
+
+// Data migration, kept separate from the schema step so a boot can apply columns
+// even if the R27.6 backfill throws. Idempotent — see migrations-r27-36a.ts.
+export function runR27_36aDataMigration() {
+  console.log("[migrations] R27.36a-migrate: start");
+  try {
+    logLegacyMigrationReport(migrateLegacyExpenses(sqlite as any));
+  } catch (e: any) {
+    console.log(`[migrations] R27.36a-migrate: aborted (${String(e?.message || e)})`);
+  }
 }

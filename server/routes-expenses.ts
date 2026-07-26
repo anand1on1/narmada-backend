@@ -19,7 +19,19 @@ import {
   type ApprovalStatus, type Actor, type GstMode,
 } from "./routes-payments";
 
+import { nextSlipNumber, peekSlipCounter, yearMonthOf, SERIES_FOR_TYPE, type SlipSeries } from "./slip-counters";
+import { recomputeAdvanceTotals } from "./migrations-r27-36a";
+
 export { APPROVAL_THRESHOLD, APPROVER_USERNAME, canApprovePayments };
+export { nextSlipNumber, peekSlipCounter, yearMonthOf, recomputeAdvanceTotals };
+
+// R27.36a — direct spend, a cash advance handed to a person, or a bus trip. All three
+// live in expense_slips and all three get a slip; only the series prefix differs.
+export type ExpenseType = "direct" | "advance" | "bus";
+export const EXPENSE_TYPES: ExpenseType[] = ["direct", "advance", "bus"];
+export type PaymentMode = "cash" | "upi" | "bank" | "cheque" | "advance";
+export const PAYMENT_MODES: PaymentMode[] = ["cash", "upi", "bank", "cheque", "advance"];
+export type AdvanceStatus = "open" | "partial" | "reconciled" | "returned";
 
 // Expenses are money going out, so the allowlist is tighter than PAYMENT_ROLES:
 // procurement and data_team can raise payment slips but not book expenses.
@@ -171,6 +183,20 @@ export interface ExpenseInput {
   is_recurring?: boolean | number;
   recurring_frequency?: RecurringFrequency;
   recurring_next_date?: string | number;
+  // R27.36a
+  expense_type?: ExpenseType;
+  payment_mode?: PaymentMode;
+  branch_id?: string | null;
+  reference_number?: string | null;
+  proof_url?: string | null;
+  expected_return_date?: string | number | null;
+  bus_number?: string | null;
+  bus_name?: string | null;
+  bus_contact?: string | null;
+  bus_from?: string | null;
+  // When a direct/bus expense is paid out of an existing advance, reconcile it in
+  // the same call rather than making the user do a second step.
+  advance_slip_id?: number | null;
 }
 
 function resolveDate(v: string | number | undefined | null, fallback: number): number {
@@ -189,6 +215,19 @@ export function nextRecurringDate(from: number, frequency: RecurringFrequency): 
   else if (frequency === "quarterly") d.setMonth(d.getMonth() + 3);
   else d.setFullYear(d.getFullYear() + 1);
   return d.getTime();
+}
+
+function resolveExpenseType(v: any): ExpenseType {
+  const t = String(v || "direct").trim().toLowerCase() as ExpenseType;
+  if (!EXPENSE_TYPES.includes(t)) throw new ExpenseError(`expense_type must be one of ${EXPENSE_TYPES.join(", ")}`, 400);
+  return t;
+}
+
+function resolvePaymentMode(v: any, fallback: PaymentMode): PaymentMode {
+  if (v == null || String(v).trim() === "") return fallback;
+  const m = String(v).trim().toLowerCase() as PaymentMode;
+  if (!PAYMENT_MODES.includes(m)) throw new ExpenseError(`payment_mode must be one of ${PAYMENT_MODES.join(", ")}`, 400);
+  return m;
 }
 
 export function createExpense(db: Database, input: ExpenseInput, actor: Actor): any {
@@ -232,23 +271,68 @@ export function createExpense(db: Database, input: ExpenseInput, actor: Actor): 
     nextDate = resolveDate(input?.recurring_next_date, nextRecurringDate(expenseDate, frequency));
   }
 
+  // Advances and bus trips carry the same ₹5,000 approval rule as a direct expense —
+  // decision #10 of R27.36a is explicitly one queue, not a parallel flow.
   const approval = approvalForTotal(gst.total_amount);
   const autoApproved = approval === "auto_approved";
+
+  const expenseType = resolveExpenseType(input?.expense_type);
+  const paymentMode = resolvePaymentMode(input?.payment_mode, expenseType === "advance" ? "cash" : "cash");
+  const str = (v: any) => (v == null || String(v).trim() === "" ? null : String(v).trim());
+
+  let expectedReturn: number | null = null;
+  let advanceStatus: AdvanceStatus | null = null;
+  if (expenseType === "advance") {
+    advanceStatus = "open";
+    expectedReturn = input?.expected_return_date != null && input.expected_return_date !== ""
+      ? resolveDate(input.expected_return_date, expenseDate) : null;
+  }
+  if (expenseType === "bus" && !str(input?.bus_number) && !str(input?.bus_name)) {
+    throw new ExpenseError("A bus expense needs at least a bus number or bus name", 400);
+  }
+
+  // A direct/bus expense paid from an advance is only meaningful if the advance can
+  // actually cover it — validate before spending the row, not after.
+  let advanceSlip: any = null;
+  const advanceSlipId = input?.advance_slip_id != null && input.advance_slip_id !== ("" as any)
+    ? Number(input.advance_slip_id) : null;
+  if (advanceSlipId) {
+    if (expenseType === "advance") throw new ExpenseError("An advance cannot itself be paid from an advance", 400);
+    advanceSlip = loadAdvanceSlip(db, advanceSlipId);
+    assertAdvanceCapacity(advanceSlip, gst.total_amount);
+  }
 
   const res = db.prepare(
     `INSERT INTO expense_slips (
        category_id, payee_id, payee_name_freetext, amount, gst_percent, gst_mode, gst_amount,
        total_amount, description, expense_date, is_recurring, recurring_frequency, recurring_next_date,
-       recurring_parent_id, approval_status, approved_by, approved_at, created_by, created_at, is_deleted
-     ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,0)`,
+       recurring_parent_id, approval_status, approved_by, approved_at, created_by, created_at, is_deleted,
+       expense_type, payment_mode, branch_id, reference_number, proof_url,
+       expected_return_date, advance_status, reconciled_amount, returned_amount,
+       bus_number, bus_name, bus_contact, bus_from, is_legacy
+     ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,0,?,?,?,?,?,?,?,0,0,?,?,?,?,0)`,
   ).run(
     categoryId, payeeId, freetext, gst.amount, gstPercent, gstMode, gst.gst_amount,
     gst.total_amount, input?.description ? String(input.description).trim() : null, expenseDate,
     isRecurring, frequency, nextDate, null,
     approval, autoApproved ? "system" : null, autoApproved ? now : null,
     actor.userName, now,
+    expenseType, advanceSlipId ? "advance" : paymentMode, str(input?.branch_id),
+    str(input?.reference_number), str(input?.proof_url),
+    expectedReturn, advanceStatus,
+    str(input?.bus_number), str(input?.bus_name), str(input?.bus_contact), str(input?.bus_from),
   );
-  return getExpense(db, Number(res.lastInsertRowid));
+  const id = Number(res.lastInsertRowid);
+
+  if (advanceSlip) {
+    db.prepare(
+      `INSERT INTO expense_reconciliations
+         (advance_slip_id, expense_slip_id, amount, reconciled_at, reconciled_by, notes, is_legacy)
+       VALUES (?,?,?,?,?,?,0)`,
+    ).run(advanceSlip.id, id, gst.total_amount, now, actor.userName, "Booked against advance at entry");
+    recomputeAdvanceTotals(db, advanceSlip.id);
+  }
+  return getExpense(db, id);
 }
 
 export function getExpense(db: Database, id: number): any {
@@ -389,6 +473,386 @@ export function softDeleteExpense(db: Database, id: number): any {
   if (!row) throw new ExpenseError("Expense not found", 404);
   db.prepare(`UPDATE expense_slips SET is_deleted = 1 WHERE id = ?`).run(id);
   return { ...row, is_deleted: 1 };
+}
+
+// ---------------------------------------------------------------------------
+// R27.36a — advances
+//
+// An advance is cash handed to a person before the spend is known. It closes when
+// receipts account for it (reconciliations) or the cash comes back (returned).
+// `outstanding` is always amount − reconciled − returned; nothing else is trusted.
+// ---------------------------------------------------------------------------
+export function loadAdvanceSlip(db: Database, id: number): any {
+  const row: any = db.prepare(`SELECT * FROM expense_slips WHERE id = ?`).get(id);
+  if (!row || row.is_deleted) throw new ExpenseError("Advance not found", 404);
+  if (row.expense_type !== "advance") throw new ExpenseError(`Expense ${id} is not an advance`, 400);
+  return row;
+}
+
+export function advanceOutstanding(row: any): number {
+  return round2((Number(row.amount) || 0) - (Number(row.reconciled_amount) || 0) - (Number(row.returned_amount) || 0));
+}
+
+function assertAdvanceCapacity(advance: any, amount: number): void {
+  const outstanding = advanceOutstanding(advance);
+  if (round2(amount) > outstanding + 0.01) {
+    throw new ExpenseError(
+      `Advance ${advance.slip_number || advance.id} has only ${formatINR(outstanding)} outstanding — cannot reconcile ${formatINR(amount)}`,
+      400,
+    );
+  }
+}
+
+export interface AdvanceFilters {
+  status?: string;
+  payee?: string;
+  branch_id?: string;
+  from?: string;
+  to?: string;
+}
+
+export function listAdvances(db: Database, filters: AdvanceFilters = {}): any[] {
+  const where = [`e.expense_type = 'advance'`, `e.is_deleted = 0`];
+  const params: any[] = [];
+  const status = String(filters.status || "all").trim().toLowerCase();
+  if (status && status !== "all") { where.push(`COALESCE(e.advance_status,'open') = ?`); params.push(status); }
+  if (filters.payee && String(filters.payee).trim()) {
+    where.push(`LOWER(COALESCE(p.name, e.payee_name_freetext, '')) LIKE ?`);
+    params.push(`%${String(filters.payee).trim().toLowerCase()}%`);
+  }
+  if (filters.branch_id && String(filters.branch_id).trim()) {
+    where.push(`e.branch_id = ?`); params.push(String(filters.branch_id).trim());
+  }
+  const from = filters.from ? dayToEpoch(filters.from) : null;
+  const to = filters.to ? dayToEpoch(filters.to, true) : null;
+  if (from != null) { where.push(`e.expense_date >= ?`); params.push(from); }
+  if (to != null) { where.push(`e.expense_date <= ?`); params.push(to); }
+
+  const rows = db.prepare(
+    `SELECT e.*, c.name AS category_name, p.name AS payee_saved_name
+     FROM expense_slips e
+     LEFT JOIN expense_categories c ON c.id = e.category_id
+     LEFT JOIN expense_payees p ON p.id = e.payee_id
+     WHERE ${where.join(" AND ")}
+     ORDER BY e.expense_date DESC, e.id DESC`,
+  ).all(...params) as any[];
+
+  return rows.map((r) => ({
+    ...r,
+    payee_name: r.payee_saved_name || r.payee_name_freetext || "—",
+    expense_date_display: epochToDay(r.expense_date),
+    expected_return_date_display: epochToDay(r.expected_return_date),
+    advance_status: r.advance_status || "open",
+    reconciled_amount: round2(r.reconciled_amount),
+    returned_amount: round2(r.returned_amount),
+    outstanding: advanceOutstanding(r),
+  }));
+}
+
+export function listAdvanceReconciliations(db: Database, advanceSlipId: number): any[] {
+  return (db.prepare(
+    `SELECT r.*, e.slip_number, e.description, e.expense_date
+     FROM expense_reconciliations r
+     LEFT JOIN expense_slips e ON e.id = r.expense_slip_id
+     WHERE r.advance_slip_id = ?
+     ORDER BY r.reconciled_at, r.id`,
+  ).all(advanceSlipId) as any[]).map((r) => ({
+    ...r,
+    amount: round2(r.amount),
+    reconciled_at_display: epochToDay(r.reconciled_at),
+  }));
+}
+
+export function reconcileAdvance(
+  db: Database,
+  advanceSlipId: number,
+  input: { expense_slip_ids?: any[]; amounts?: any[]; notes?: string },
+  actor: Actor,
+): { advance: any; reconciliations: any[]; warnings: string[] } {
+  const advance = loadAdvanceSlip(db, advanceSlipId);
+  if (advance.advance_status === "returned") {
+    throw new ExpenseError("Advance was closed by a cash return — reopen it before reconciling", 409);
+  }
+  const ids = Array.isArray(input?.expense_slip_ids) ? input.expense_slip_ids.map((n) => Number(n)) : [];
+  const amounts = Array.isArray(input?.amounts) ? input.amounts.map((n) => Number(n)) : [];
+  if (!ids.length) throw new ExpenseError("expense_slip_ids is required", 400);
+  if (ids.length !== amounts.length) throw new ExpenseError("expense_slip_ids and amounts must be the same length", 400);
+
+  const warnings: string[] = [];
+  const total = round2(amounts.reduce((a, b) => a + (Number(b) || 0), 0));
+  if (total <= 0) throw new ExpenseError("Reconciliation amount must be greater than zero", 400);
+  assertAdvanceCapacity(advance, total);
+
+  const advancePayee = String(advance.payee_name_freetext || "").trim().toLowerCase();
+  const prepared = ids.map((id, i) => {
+    const amount = round2(amounts[i]);
+    if (!Number.isFinite(amount) || amount <= 0) throw new ExpenseError(`Amount for expense ${id} must be greater than zero`, 400);
+    const e: any = db.prepare(`SELECT * FROM expense_slips WHERE id = ?`).get(id);
+    if (!e || e.is_deleted) throw new ExpenseError(`Expense ${id} not found`, 404);
+    if (e.expense_type === "advance") throw new ExpenseError(`Expense ${id} is an advance — advances cannot reconcile each other`, 400);
+    const already: any = db.prepare(
+      `SELECT COALESCE(SUM(amount),0) AS t FROM expense_reconciliations WHERE expense_slip_id = ?`,
+    ).get(id);
+    if (round2(Number(already.t) + amount) > round2(e.total_amount) + 0.01) {
+      throw new ExpenseError(
+        `Expense ${e.slip_number || id} is already reconciled for ${formatINR(already.t)} of ${formatINR(e.total_amount)}`,
+        400,
+      );
+    }
+    // Branch/payee mismatches are recorded, not blocked: real advances get spent on
+    // behalf of someone else often enough that a hard stop would be wrong.
+    if (advance.branch_id && e.branch_id && advance.branch_id !== e.branch_id) {
+      warnings.push(`Expense ${e.slip_number || id} is branch ${e.branch_id}, advance is ${advance.branch_id}`);
+    }
+    const ePayee = String(e.payee_name_freetext || "").trim().toLowerCase();
+    if (advancePayee && ePayee && advancePayee !== ePayee) {
+      warnings.push(`Expense ${e.slip_number || id} payee "${e.payee_name_freetext}" differs from advance holder "${advance.payee_name_freetext}"`);
+    }
+    return { id, amount };
+  });
+
+  const now = Date.now();
+  const insert = db.prepare(
+    `INSERT INTO expense_reconciliations
+       (advance_slip_id, expense_slip_id, amount, reconciled_at, reconciled_by, notes, is_legacy)
+     VALUES (?,?,?,?,?,?,0)`,
+  );
+  db.transaction(() => {
+    for (const p of prepared) insert.run(advanceSlipId, p.id, p.amount, now, actor.userName, input?.notes ? String(input.notes).trim() : null);
+    db.prepare(`UPDATE expense_slips SET payment_mode = 'advance' WHERE id IN (${prepared.map(() => "?").join(",")})`)
+      .run(...prepared.map((p) => p.id));
+    recomputeAdvanceTotals(db, advanceSlipId);
+  })();
+
+  return {
+    advance: listAdvances(db, {}).find((a) => a.id === advanceSlipId) || loadAdvanceSlip(db, advanceSlipId),
+    reconciliations: listAdvanceReconciliations(db, advanceSlipId),
+    warnings,
+  };
+}
+
+export function markAdvanceReturned(
+  db: Database,
+  advanceSlipId: number,
+  input: { return_amount?: any; notes?: string },
+): any {
+  const advance = loadAdvanceSlip(db, advanceSlipId);
+  const amount = round2(Number(input?.return_amount));
+  if (!Number.isFinite(amount) || amount <= 0) throw new ExpenseError("return_amount must be greater than zero", 400);
+  const outstanding = advanceOutstanding(advance);
+  if (amount > outstanding + 0.01) {
+    throw new ExpenseError(`Only ${formatINR(outstanding)} is outstanding on this advance`, 400);
+  }
+  db.prepare(
+    `UPDATE expense_slips SET returned_amount = COALESCE(returned_amount,0) + ?, advance_status = 'returned',
+       description = COALESCE(description,'') || ? WHERE id = ?`,
+  ).run(amount, input?.notes ? ` [return: ${String(input.notes).trim()}]` : "", advanceSlipId);
+  return listAdvances(db, {}).find((a) => a.id === advanceSlipId);
+}
+
+// ---------------------------------------------------------------------------
+// R27.36a — bus expenses
+// ---------------------------------------------------------------------------
+export function listBusExpenses(db: Database, filters: ExpenseFilters & { branch_id?: string } = {}): any[] {
+  const rows = listExpenses(db, filters);
+  const branch = filters.branch_id ? String(filters.branch_id).trim() : null;
+  return rows.filter((r) => r.expense_type === "bus" && (!branch || r.branch_id === branch));
+}
+
+// ---------------------------------------------------------------------------
+// R27.36a — cash in hand.
+//
+// Reads the pre-existing R27.6 `cash_in_hand` table rather than a new one, per
+// decision #6. That table has no running-balance column, so the balance is derived
+// from `direction` ('in'/'out'); rows written before the direction column existed
+// are treated as inflows, which is what R27.6's own "add cash receipt" screen meant.
+// ---------------------------------------------------------------------------
+export type CashEntryType = "deposit" | "withdrawal";
+
+function cashDirection(row: any): 1 | -1 {
+  const d = String(row.direction || "").trim().toLowerCase();
+  if (d === "out" || d === "withdrawal") return -1;
+  return 1;
+}
+
+export function listCashEntries(db: Database, branchId?: string): any[] {
+  const where: string[] = [];
+  const params: any[] = [];
+  if (branchId && String(branchId).trim()) { where.push(`branch = ?`); params.push(String(branchId).trim()); }
+  const rows = db.prepare(
+    `SELECT * FROM cash_in_hand ${where.length ? "WHERE " + where.join(" AND ") : ""} ORDER BY date, id`,
+  ).all(...params) as any[];
+  const running = new Map<string, number>();
+  return rows.map((r) => {
+    const branch = r.branch || "Delhi";
+    const signed = round2(cashDirection(r) * (Number(r.amount) || 0));
+    const bal = round2((running.get(branch) || 0) + signed);
+    running.set(branch, bal);
+    return {
+      id: r.id, branch, source: r.source, reference: r.reference, notes: r.notes, date: r.date,
+      direction: cashDirection(r) > 0 ? "in" : "out",
+      entry_type: cashDirection(r) > 0 ? "deposit" : "withdrawal",
+      amount: round2(r.amount), signed_amount: signed, running_balance: bal,
+    };
+  });
+}
+
+export function getCashInHand(db: Database, branchId?: string): {
+  branches: { branch_id: string; total_in: number; total_out: number; balance: number; entry_count: number }[];
+  total_balance: number;
+  entries: any[];
+} {
+  const entries = listCashEntries(db, branchId);
+  const acc = new Map<string, { branch_id: string; total_in: number; total_out: number; balance: number; entry_count: number }>();
+  for (const e of entries) {
+    const cur = acc.get(e.branch) || { branch_id: e.branch, total_in: 0, total_out: 0, balance: 0, entry_count: 0 };
+    if (e.signed_amount >= 0) cur.total_in = round2(cur.total_in + e.amount);
+    else cur.total_out = round2(cur.total_out + e.amount);
+    cur.balance = round2(cur.balance + e.signed_amount);
+    cur.entry_count++;
+    acc.set(e.branch, cur);
+  }
+  const branches = Array.from(acc.values()).sort((a, b) => a.branch_id.localeCompare(b.branch_id));
+  return {
+    branches,
+    total_balance: round2(branches.reduce((s, b) => s + b.balance, 0)),
+    entries: entries.slice().reverse(),
+  };
+}
+
+export function addCashEntry(
+  db: Database,
+  input: { branch_id?: string; entry_type?: string; amount?: any; notes?: string; date?: string; reference?: string },
+  actor: Actor,
+): any {
+  const branch = String(input?.branch_id || "").trim();
+  if (!branch) throw new ExpenseError("branch_id is required", 400);
+  const type = String(input?.entry_type || "").trim().toLowerCase();
+  if (type !== "deposit" && type !== "withdrawal") throw new ExpenseError("entry_type must be deposit or withdrawal", 400);
+  const amount = round2(Number(input?.amount));
+  if (!Number.isFinite(amount) || amount <= 0) throw new ExpenseError("Amount must be greater than zero", 400);
+  if (type === "withdrawal") {
+    const bal = getCashInHand(db, branch).branches.find((b) => b.branch_id === branch)?.balance || 0;
+    if (amount > bal + 0.01) {
+      throw new ExpenseError(`${branch} has only ${formatINR(bal)} in hand — cannot withdraw ${formatINR(amount)}`, 400);
+    }
+  }
+  const date = String(input?.date || "").trim() || epochToDay(Date.now());
+  const res = db.prepare(
+    `INSERT INTO cash_in_hand (source, amount, reference, date, notes, created_by, branch, direction)
+     VALUES (?,?,?,?,?,?,?,?)`,
+  ).run(
+    type === "deposit" ? "cash_deposit" : "cash_withdrawal", amount,
+    input?.reference ? String(input.reference).trim() : null, date,
+    input?.notes ? String(input.notes).trim() : null, actor.userId ?? null, branch,
+    type === "deposit" ? "in" : "out",
+  );
+  const id = Number(res.lastInsertRowid);
+  return listCashEntries(db, branch).find((e) => e.id === id);
+}
+
+// ---------------------------------------------------------------------------
+// R27.36a — person ledger.
+//
+// Grouped by payee name rather than payee_id: legacy rows and most advances only
+// ever had a free-text name, so keying on the id would split one person in two.
+// ---------------------------------------------------------------------------
+export interface PersonLedgerRow {
+  person: string;
+  total_advances_given: number;
+  total_expenses_adjusted: number;
+  cash_returned: number;
+  net_outstanding: number;
+  advance_count: number;
+  open_advance_count: number;
+}
+
+export function getPersonLedger(db: Database): { people: PersonLedgerRow[]; totals: Omit<PersonLedgerRow, "person"> } {
+  const rows = db.prepare(
+    `SELECT COALESCE(p.name, e.payee_name_freetext, '—') AS person,
+            COALESCE(SUM(e.amount), 0)             AS given,
+            COALESCE(SUM(e.reconciled_amount), 0)  AS adjusted,
+            COALESCE(SUM(e.returned_amount), 0)    AS returned,
+            COUNT(*)                               AS advance_count,
+            SUM(CASE WHEN COALESCE(e.advance_status,'open') IN ('open','partial') THEN 1 ELSE 0 END) AS open_count
+     FROM expense_slips e
+     LEFT JOIN expense_payees p ON p.id = e.payee_id
+     WHERE e.expense_type = 'advance' AND e.is_deleted = 0
+     GROUP BY person
+     ORDER BY person COLLATE NOCASE`,
+  ).all() as any[];
+
+  const people: PersonLedgerRow[] = rows.map((r) => ({
+    person: r.person,
+    total_advances_given: round2(r.given),
+    total_expenses_adjusted: round2(r.adjusted),
+    cash_returned: round2(r.returned),
+    net_outstanding: round2(Number(r.given) - Number(r.adjusted) - Number(r.returned)),
+    advance_count: Number(r.advance_count) || 0,
+    open_advance_count: Number(r.open_count) || 0,
+  }));
+
+  const totals = people.reduce(
+    (a, p) => ({
+      total_advances_given: round2(a.total_advances_given + p.total_advances_given),
+      total_expenses_adjusted: round2(a.total_expenses_adjusted + p.total_expenses_adjusted),
+      cash_returned: round2(a.cash_returned + p.cash_returned),
+      net_outstanding: round2(a.net_outstanding + p.net_outstanding),
+      advance_count: a.advance_count + p.advance_count,
+      open_advance_count: a.open_advance_count + p.open_advance_count,
+    }),
+    { total_advances_given: 0, total_expenses_adjusted: 0, cash_returned: 0, net_outstanding: 0, advance_count: 0, open_advance_count: 0 },
+  );
+  return { people, totals };
+}
+
+// Chronological statement for one person: advances debit them, reconciled expenses
+// and returned cash credit them back. The closing balance is what they still hold.
+export function getPersonStatement(db: Database, personName: string): {
+  person: string; entries: any[]; closing_balance: number; summary: PersonLedgerRow;
+} {
+  const name = String(personName || "").trim();
+  if (!name) throw new ExpenseError("A person name is required", 400);
+  const advances = db.prepare(
+    `SELECT e.* FROM expense_slips e
+     LEFT JOIN expense_payees p ON p.id = e.payee_id
+     WHERE e.expense_type = 'advance' AND e.is_deleted = 0
+       AND LOWER(COALESCE(p.name, e.payee_name_freetext, '')) = LOWER(?)
+     ORDER BY e.expense_date, e.id`,
+  ).all(name) as any[];
+
+  const events: { at: number; kind: string; label: string; slip_number: string | null; debit: number; credit: number }[] = [];
+  for (const a of advances) {
+    events.push({
+      at: Number(a.expense_date), kind: "advance_issued",
+      label: a.description || "Advance issued", slip_number: a.slip_number,
+      debit: round2(a.amount), credit: 0,
+    });
+    for (const r of listAdvanceReconciliations(db, a.id)) {
+      events.push({
+        at: Number(r.reconciled_at), kind: "expense_adjusted",
+        label: r.description || "Expense adjusted against advance", slip_number: r.slip_number ?? null,
+        debit: 0, credit: round2(r.amount),
+      });
+    }
+    if ((Number(a.returned_amount) || 0) > 0) {
+      events.push({
+        at: Number(a.expense_date), kind: "cash_returned", label: "Cash returned",
+        slip_number: a.slip_number, debit: 0, credit: round2(a.returned_amount),
+      });
+    }
+  }
+  events.sort((x, y) => x.at - y.at || x.kind.localeCompare(y.kind));
+
+  let balance = 0;
+  const entries = events.map((e) => {
+    balance = round2(balance + e.debit - e.credit);
+    return { ...e, date_display: epochToDay(e.at), balance };
+  });
+
+  const summary = getPersonLedger(db).people.find((p) => p.person.toLowerCase() === name.toLowerCase())
+    || { person: name, total_advances_given: 0, total_expenses_adjusted: 0, cash_returned: 0, net_outstanding: 0, advance_count: 0, open_advance_count: 0 };
+  return { person: name, entries, closing_balance: balance, summary };
 }
 
 // ---------------------------------------------------------------------------
@@ -556,15 +1020,11 @@ export function getLedger(db: Database, filters: LedgerFilters = {}): {
 // ---------------------------------------------------------------------------
 // Slip generation
 // ---------------------------------------------------------------------------
-export function nextExpenseSlipNumber(db: Database, year: number = new Date().getFullYear()): string {
-  const prefix = `EXP/${year}/`;
-  const rows = db.prepare(`SELECT slip_number FROM expense_slips WHERE slip_number LIKE ?`).all(`${prefix}%`) as any[];
-  let max = 0;
-  for (const r of rows) {
-    const m = /\/(\d+)$/.exec(r.slip_number || "");
-    if (m) { const n = parseInt(m[1], 10); if (n > max) max = n; }
-  }
-  return `${prefix}${String(max + 1).padStart(4, "0")}`;
+// R27.36a — three interleaved series, each with its own monthly counter, replacing
+// R27.36's single per-year EXP scan. The month comes from the expense date rather
+// than today so a backdated entry sorts where it belongs.
+export function nextExpenseSlipNumber(db: Database, expenseType: ExpenseType, expenseDate: number): string {
+  return nextSlipNumber(db, SERIES_FOR_TYPE[expenseType] || "EXP", yearMonthOf(expenseDate));
 }
 
 export interface ExpenseSlipData {
@@ -747,7 +1207,9 @@ export function generateExpenseSlip(
   if (row.slip_number) throw new ExpenseError(`Slip ${row.slip_number} already generated for this expense`, 409);
 
   const now = Date.now();
-  const slip = nextExpenseSlipNumber(db, new Date(row.expense_date || now).getFullYear());
+  const expenseType = (row.expense_type || "direct") as ExpenseType;
+  const expenseDateMs = Number(row.expense_date) || now;
+  const slip = nextExpenseSlipNumber(db, expenseType, expenseDateMs);
   const data = buildExpenseSlipData(db, expenseId, slip);
   const jpeg = renderExpenseSlipJpeg(data);
 

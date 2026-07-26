@@ -248,12 +248,12 @@ describe("R27.36 slips", () => {
     }, FINANCE);
   }
 
-  it("(12) slip number is EXP/YYYY/NNNN and increments", () => {
-    expect(nextExpenseSlipNumber(db, 2026)).toBe("EXP/2026/0001");
+  it("(12) slip number is EXP/YYYY-MM/NNNNN and increments per month", () => {
+    // R27.36a: slip format changed to EXP/YYYY-MM/NNNNN (5-digit counter, per-month series).
     const a = generateExpenseSlip(db, approvedExpense().id, uploadsDir);
-    expect(a.slip_number).toBe("EXP/2026/0001");
+    expect(a.slip_number).toBe("EXP/2026-07/00001");
     const b = generateExpenseSlip(db, approvedExpense().id, uploadsDir);
-    expect(b.slip_number).toBe("EXP/2026/0002");
+    expect(b.slip_number).toBe("EXP/2026-07/00002");
   });
 
   it("(12b) the rendered JPG lands on disk and is a real image over 10 KB", () => {
@@ -274,7 +274,7 @@ describe("R27.36 slips", () => {
     expect(() => generateExpenseSlip(db, e.id, uploadsDir)).toThrow(/pending approval/i);
     // Once released it works.
     approveExpense(db, e.id, OWNER);
-    expect(generateExpenseSlip(db, e.id, uploadsDir).slip_number).toMatch(/^EXP\/\d{4}\/\d{4}$/);
+    expect(generateExpenseSlip(db, e.id, uploadsDir).slip_number).toMatch(/^EXP\/\d{4}-\d{2}\/\d{5}$/);
   });
 
   it("(14) cannot generate a slip for a rejected expense", () => {
