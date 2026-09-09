@@ -3067,6 +3067,54 @@ export function runR27_14Migrations() {
 }
 
 // =====================================================================
+// R28 Session 1 — Sales email notifications + R2 backup infra (additive).
+// Two new tables: email_log (per-email audit) and backup_log (nightly R2
+// snapshot audit). Idempotent. Never drops or renames existing objects.
+// =====================================================================
+export function runR28_1Migrations() {
+  console.log("[migrations] R28.1: start");
+  const run = (label: string, sqlStr: string) => {
+    try { sqlite.exec(sqlStr); console.log(`[migrations] R28.1: ${label} ok`); }
+    catch (e: any) { console.log(`[migrations] R28.1: ${label} skip (${e?.message || e})`); }
+  };
+  run("email_log table", `
+    CREATE TABLE IF NOT EXISTS email_log (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      event_type TEXT NOT NULL,
+      entity_id INTEGER,
+      recipient TEXT NOT NULL,
+      cc TEXT,
+      reply_to TEXT,
+      subject TEXT NOT NULL,
+      body_preview TEXT,
+      status TEXT NOT NULL DEFAULT 'pending',
+      error_message TEXT,
+      provider_message_id TEXT,
+      attempts INTEGER NOT NULL DEFAULT 0,
+      created_at INTEGER NOT NULL,
+      sent_at INTEGER
+    );
+  `);
+  run("idx_email_log_event", `CREATE INDEX IF NOT EXISTS idx_email_log_event ON email_log(event_type, created_at DESC);`);
+  run("idx_email_log_entity", `CREATE INDEX IF NOT EXISTS idx_email_log_entity ON email_log(entity_id);`);
+  run("idx_email_log_status", `CREATE INDEX IF NOT EXISTS idx_email_log_status ON email_log(status);`);
+
+  run("backup_log table", `
+    CREATE TABLE IF NOT EXISTS backup_log (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      started_at INTEGER NOT NULL,
+      finished_at INTEGER,
+      status TEXT NOT NULL,
+      file_key TEXT,
+      size_bytes INTEGER,
+      error_message TEXT
+    );
+  `);
+  run("idx_backup_log_started", `CREATE INDEX IF NOT EXISTS idx_backup_log_started ON backup_log(started_at DESC);`);
+  console.log("[migrations] R28.1: complete");
+}
+
+// =====================================================================
 // PartSetu AI v1 — Spare Parts Intelligence Chatbot (additive, idempotent)
 // 7 new tables. Per-statement try/catch with [migrations] PartSetu: markers.
 // Nothing here drops/renames existing tables.

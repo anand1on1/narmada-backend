@@ -1223,3 +1223,38 @@ export const crossTeamEvents = sqliteTable("cross_team_events", {
   createdAt: text("created_at"),
 });
 export type CrossTeamEvent = typeof crossTeamEvents.$inferSelect;
+
+// R28 Session 1 — Sales email notifications audit log.
+// One row per outbound sales notification email (rfq_created, quote_requested,
+// order_placed, test). Additive; never mutates existing tables.
+export const emailLog = sqliteTable("email_log", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  eventType: text("event_type").notNull(),      // 'rfq_created' | 'quote_requested' | 'order_placed' | 'test'
+  entityId: integer("entity_id"),
+  recipient: text("recipient").notNull(),
+  cc: text("cc"),
+  replyTo: text("reply_to"),
+  subject: text("subject").notNull(),
+  bodyPreview: text("body_preview"),
+  status: text("status").notNull().default("pending"), // 'pending' | 'sent' | 'failed' | 'skipped'
+  errorMessage: text("error_message"),
+  providerMessageId: text("provider_message_id"),
+  attempts: integer("attempts").notNull().default(0),
+  createdAt: integer("created_at").notNull(),
+  sentAt: integer("sent_at"),
+});
+export const insertEmailLogSchema = createInsertSchema(emailLog).omit({ id: true, createdAt: true, sentAt: true });
+export type InsertEmailLog = z.infer<typeof insertEmailLogSchema>;
+export type EmailLog = typeof emailLog.$inferSelect;
+
+// R28 Session 1 — R2 nightly backup audit log.
+export const backupLog = sqliteTable("backup_log", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  startedAt: integer("started_at").notNull(),
+  finishedAt: integer("finished_at"),
+  status: text("status").notNull(),              // 'success' | 'failed'
+  fileKey: text("file_key"),
+  sizeBytes: integer("size_bytes"),
+  errorMessage: text("error_message"),
+});
+export type BackupLog = typeof backupLog.$inferSelect;
