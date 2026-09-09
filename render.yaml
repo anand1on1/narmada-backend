@@ -30,3 +30,44 @@ services:
       # $DATA_DIR/partsetu/catalogs (up to 100MB each). Render disks can grow but
       # not shrink. Resize in the Render dashboard if this blueprint isn't re-applied.
       sizeGB: 5
+
+  # R28 Session 1 — Nightly encrypted SQLite backup to Cloudflare R2.
+  # Schedule 0 21 * * * UTC == 02:30 IST (IST = UTC+5:30).
+  # NOTE: Render cron jobs run in a fresh container per invocation, so they cannot
+  # read the web service's persistent disk directly. Two options:
+  #   (a) run the cron INSIDE the same web-service container via a scheduler (not
+  #       supported by Render natively), OR
+  #   (b) share the disk by mounting the same persistent disk to the cron job. As
+  #       of 2025, Render supports attaching a disk to a Cron Job service in the
+  #       same region. This blueprint reserves the config; verify in the Render
+  #       dashboard that the disk mount attaches to the cron before flipping on.
+  # See RENDER-CRON-SETUP.md for the manual UI setup as the fallback.
+  - type: cron
+    name: narmada-nightly-backup
+    runtime: node
+    plan: starter
+    region: singapore
+    branch: main
+    schedule: "0 21 * * *"
+    buildCommand: npm install
+    startCommand: npm run backup
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: DATA_DIR
+        value: /opt/render/project/src/data
+      # Backup-specific env — fill values in the Render dashboard (they are secrets).
+      - key: R2_ACCOUNT_ID
+        sync: false
+      - key: R2_ACCESS_KEY_ID
+        sync: false
+      - key: R2_SECRET_ACCESS_KEY
+        sync: false
+      - key: R2_BUCKET_NAME
+        sync: false
+      - key: R2_ENDPOINT
+        sync: false
+      - key: R2_REGION
+        value: auto
+      - key: BACKUP_ENCRYPTION_PASSPHRASE
+        sync: false

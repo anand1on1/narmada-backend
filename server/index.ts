@@ -229,7 +229,7 @@ app.use((req, res, next) => {
     console.log("[boot] step: post-R27.29 sales-digest-log table");
     runR27_30Migrations();
     console.log("[boot] step: post-R27.30 admin-otp tables");
-    const { runR27_32Migrations, runR27_33Migrations, runR27_33aMigrations, runR27_34aMigrations, runR27_34bMigrations, runR27_35Migrations, runR27_36Migrations, runR27_36aMigrations, runR27_36bMigrations, runR27_36aDataMigration } = await import("./migrations");
+    const { runR27_32Migrations, runR27_33Migrations, runR27_33aMigrations, runR27_34aMigrations, runR27_34bMigrations, runR27_35Migrations, runR27_36Migrations, runR27_36aMigrations, runR27_36bMigrations, runR27_36aDataMigration, runR28_1Migrations } = await import("./migrations");
     runR27_32Migrations();
     console.log("[boot] step: post-R27.32 payment tables");
     runR27_33Migrations();
@@ -250,6 +250,9 @@ app.use((req, res, next) => {
     console.log("[boot] step: post-R27.36b payment-model columns (paid_from + handled_by_staff)");
     runR27_36aDataMigration();
     console.log("[boot] step: post-R27.36a legacy R27.6 expense backfill");
+    // R28 Session 1 — email_log + backup_log audit tables (additive, idempotent).
+    runR28_1Migrations();
+    console.log("[boot] step: post-R28.1 email_log + backup_log tables");
     // R27.32 — Process Payment authorizes admin/procurement/finance. finance was not
     // in the admin-role whitelist before this release; it is added in VALID_ROLES.
     try {

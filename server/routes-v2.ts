@@ -9,6 +9,16 @@ import multer from "multer";
 import { storage, db } from "./storage";
 import * as v2 from "./storage-v2";
 import { sendNotification, buildTrackingLink, sendGenericEmail, emitCrossTeamEvent } from "./notifications";
+// R28 Session 1: sales-team email notifications (fire-and-forget from callers).
+// Separate SMTP path from ./notifications; gated by EMAIL_NOTIFICATIONS_ENABLED
+// so it coexists with R27.34a's disable of the legacy sendGenericEmail -> sales@ path.
+import {
+  sendRfqEmail as salesSendRfqEmail,
+  sendOrderEmail as salesSendOrderEmail,
+  sendTestEmail as salesSendTestEmail,
+  resendFromLog as salesResendFromLog,
+  listEmailLogs as salesListEmailLogs,
+} from "./email";
 import { rawSqlite } from "./storage";
 import * as XLSX from "xlsx";
 import { recordMarketingWhatsAppReceipt } from "./marketing/webhook-hook";
@@ -1502,10 +1512,36 @@ export function registerV2Routes(app: Express, ctx: V2Context) {
     const linkedQuotes = await v2.listQuotes({ rfqId: row.id });
     res.json({ ...row, quotes: linkedQuotes });
   });
+  // ---------- R28 Session 1: ADMIN email-log (list / resend / test) ----------
+  // List recent sales-team notification emails. Any authenticated admin role can view;
+  // handy for debugging why a specific enquiry didn't reach sales@.
+  app.get("/api/admin/email-log", requireAuth, async (req, res) => {
+    const limit = Math.min(parseInt(String(req.query.limit || "50"), 10) || 50, 500);
+    const eventType = (req.query.event_type as string | undefined) || undefined;
+    const status = (req.query.status as string | undefined) || undefined;
+    res.json(salesListEmailLogs({ limit, eventType, status }));
+  });
+  // Resend a specific email_log row (idempotent — creates NO new row; updates attempts).
+  app.post("/api/admin/email-log/:id/resend", requireAuth, async (req, res) => {
+    const id = parseInt(req.params.id as string, 10);
+    if (!id) return res.status(400).json({ error: "invalid id" });
+    const result = await salesResendFromLog(id);
+    res.json(result);
+  });
+  // Fire a test email so ops can verify SMTP without waiting for a real event.
+  app.post("/api/admin/email-log/test", requireAuth, async (req, res) => {
+    const to = (req.body?.to as string | undefined) || undefined;
+    if (!to) return res.status(400).json({ error: "to (recipient) required" });
+    const result = await salesSendTestEmail(to);
+    res.json(result);
+  });
+
   app.post("/api/admin/rfqs", requireRole("sales", "accounts"), async (req, res) => {
     try {
       const parsed = insertRfqSchema.parse(req.body || {});
       const row = await v2.createRfq(parsed);
+      // R28 Session 1: sales@ notification. Fire-and-forget.
+      salesSendRfqEmail(row.id).catch((err) => console.error("[email] rfq send failed", err));
       res.json(row);
     } catch (e: any) { res.status(400).json({ error: e.message, details: e.errors }); }
   });
@@ -1574,6 +1610,8 @@ export function registerV2Routes(app: Express, ctx: V2Context) {
     try {
       const parsed = insertPurchaseOrderSchema.parse(req.body || {});
       const row = await v2.createPurchaseOrder(parsed);
+      // R28 Session 1: sales@ notification for new order. Fire-and-forget.
+      salesSendOrderEmail(row.id).catch((err) => console.error("[email] order send failed", err));
       res.json(row);
     } catch (e: any) { res.status(400).json({ error: e.message, details: e.errors }); }
   });
@@ -1744,6 +1782,8 @@ export function registerV2Routes(app: Express, ctx: V2Context) {
         email: c.email,
       });
       const row = await v2.createRfq(parsed);
+      // R28 Session 1: sales@ notification. Fire-and-forget.
+      salesSendRfqEmail(row.id).catch((err) => console.error("[email] rfq send failed", err));
       res.json(row);
     } catch (e: any) { res.status(400).json({ error: e.message, details: e.errors }); }
   });
@@ -1769,6 +1809,8 @@ export function registerV2Routes(app: Express, ctx: V2Context) {
         customerId: c.customerId,
       });
       const row = await v2.createPurchaseOrder(parsed);
+      // R28 Session 1: sales@ notification for new order. Fire-and-forget.
+      salesSendOrderEmail(row.id).catch((err) => console.error("[email] order send failed", err));
       res.json(row);
     } catch (e: any) { res.status(400).json({ error: e.message, details: e.errors }); }
   });

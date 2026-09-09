@@ -9,7 +9,7 @@ import { randomBytes } from "node:crypto";
 import path from "node:path";
 import fs from "node:fs";
 import Papa from "papaparse";
-import { sendContactEmail } from "./email";
+import { sendContactEmail, sendQuoteRequestEmail as salesSendQuoteRequestEmail } from "./email";
 import { registerBulkRoutes } from "./bulk";
 import { registerV2Routes, TokenMap, TokenInfo, persistAdminSession, rehydrateSession, deleteAdminSession } from "./routes-v2";
 import type { AdminRole } from "@shared/schema";
@@ -530,6 +530,14 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
         message: parsed.message,
       });
       console.log(`[contact] #${created.id} from ${parsed.email} — email: ${mail.ok ? "sent" : "not sent (" + mail.via + (mail.error ? ": " + mail.error : "") + ")"}`);
+      // R28 Session 1: when the contact submission is a product-page quote request
+      // (productInterest set), also emit the sales-team notification. Fire-and-forget.
+      // This runs on a SEPARATE SMTP path (server/email.ts R28 module) that is gated
+      // by EMAIL_NOTIFICATIONS_ENABLED, so it coexists with R27.34a's runtime disable
+      // of the legacy sendGenericEmail -> sales@ path in server/notifications.ts.
+      if (parsed.productInterest) {
+        salesSendQuoteRequestEmail(created.id).catch((err) => console.error("[email] quote-request send failed", err));
+      }
       // R27.34a: disabled per user request — no automated mail to sales@, so report the
       // address only when a send actually happened.
       res.json({ ok: true, id: created.id, deliveredTo: mail.ok ? SALES_EMAIL : null, emailSent: mail.ok });
