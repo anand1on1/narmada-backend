@@ -3119,6 +3119,83 @@ export function runR28_1Migrations() {
 }
 
 // =====================================================================
+// R28 Session 2 — Parts Finder + Chassis Catalog + SurePass RC lookup.
+// Three new tables:
+//   chassis_catalog   — admin-curated vehicle models (soft-delete)
+//   chassis_parts     — parts scoped to a chassis (upsert key: chassis_id + part_number)
+//   surepass_lookups  — 30-day RC-V2 response cache + wallet-cost audit
+// Additive, idempotent, never drops/renames existing objects. Runs after R28.1.
+// =====================================================================
+export function runR28_2Migrations() {
+  console.log("[migrations] R28.2: start");
+  const run = (label: string, sqlStr: string) => {
+    try { sqlite.exec(sqlStr); console.log(`[migrations] R28.2: ${label} ok`); }
+    catch (e: any) { console.log(`[migrations] R28.2: ${label} skip (${e?.message || e})`); }
+  };
+
+  run("chassis_catalog table", `
+    CREATE TABLE IF NOT EXISTS chassis_catalog (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      chassis_code TEXT NOT NULL,
+      chassis_display_name TEXT NOT NULL,
+      make TEXT,
+      model TEXT,
+      variant TEXT,
+      slug TEXT NOT NULL UNIQUE,
+      cover_image_url TEXT,
+      description TEXT,
+      is_active INTEGER NOT NULL DEFAULT 1,
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL
+    );
+  `);
+  run("idx_chassis_slug", `CREATE INDEX IF NOT EXISTS idx_chassis_slug ON chassis_catalog(slug);`);
+  run("idx_chassis_active", `CREATE INDEX IF NOT EXISTS idx_chassis_active ON chassis_catalog(is_active);`);
+  run("idx_chassis_make_model", `CREATE INDEX IF NOT EXISTS idx_chassis_make_model ON chassis_catalog(make, model);`);
+
+  run("chassis_parts table", `
+    CREATE TABLE IF NOT EXISTS chassis_parts (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      chassis_id INTEGER NOT NULL REFERENCES chassis_catalog(id),
+      part_number TEXT NOT NULL,
+      oem_number TEXT,
+      description TEXT NOT NULL,
+      category TEXT,
+      position_notes TEXT,
+      purchase_price REAL,
+      sell_price REAL,
+      stock_qty INTEGER DEFAULT 0,
+      image_url TEXT,
+      product_id INTEGER,
+      is_active INTEGER NOT NULL DEFAULT 1,
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL,
+      UNIQUE(chassis_id, part_number)
+    );
+  `);
+  run("idx_chassis_parts_chassis", `CREATE INDEX IF NOT EXISTS idx_chassis_parts_chassis ON chassis_parts(chassis_id);`);
+  run("idx_chassis_parts_pn", `CREATE INDEX IF NOT EXISTS idx_chassis_parts_pn ON chassis_parts(part_number);`);
+
+  run("surepass_lookups table", `
+    CREATE TABLE IF NOT EXISTS surepass_lookups (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      reg_number TEXT NOT NULL UNIQUE,
+      chassis_number TEXT,
+      raw_response TEXT NOT NULL,
+      status TEXT NOT NULL,
+      requester_ip TEXT,
+      requester_user_id INTEGER,
+      cost_charged INTEGER,
+      created_at INTEGER NOT NULL
+    );
+  `);
+  run("idx_surepass_reg", `CREATE INDEX IF NOT EXISTS idx_surepass_reg ON surepass_lookups(reg_number);`);
+  run("idx_surepass_created", `CREATE INDEX IF NOT EXISTS idx_surepass_created ON surepass_lookups(created_at);`);
+
+  console.log("[migrations] R28.2: complete");
+}
+
+// =====================================================================
 // PartSetu AI v1 — Spare Parts Intelligence Chatbot (additive, idempotent)
 // 7 new tables. Per-statement try/catch with [migrations] PartSetu: markers.
 // Nothing here drops/renames existing tables.

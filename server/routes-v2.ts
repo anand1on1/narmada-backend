@@ -19,6 +19,8 @@ import {
   resendFromLog as salesResendFromLog,
   listEmailLogs as salesListEmailLogs,
 } from "./email";
+// R28 Session 2 — SurePass RC-V2 lookup module (used by public Parts Finder endpoint).
+import { lookupRegistration as surepassLookupRegistration, normalizeRegNumber } from "./surepass";
 import { rawSqlite } from "./storage";
 import * as XLSX from "xlsx";
 import { recordMarketingWhatsAppReceipt } from "./marketing/webhook-hook";
@@ -1535,6 +1537,648 @@ export function registerV2Routes(app: Express, ctx: V2Context) {
     const result = await salesSendTestEmail(to);
     res.json(result);
   });
+
+  // =========================================================================
+  // R28 Session 2 — Parts Finder + Chassis Catalog + SurePass RC lookup.
+  // Admin endpoints (chassis CRUD, parts bulk upload, template) live under
+  // /api/admin/chassis/* and are gated by the standard `requireAuth` admin
+  // middleware — they stay live regardless of PARTS_FINDER_ENABLED so ops can
+  // prep catalog data before flipping the flag.
+  //
+  // Public/customer endpoints live under /api/chassis/* and /api/parts-finder/*
+  // and are gated by isPartsFinderEnabled() — they short-circuit to a 503
+  // {error:'feature_disabled'} response when the flag is off.
+  // =========================================================================
+  const partsUpload = multer({
+    storage: multer.memoryStorage(),
+    limits: { fileSize: 20 * 1024 * 1024 }, // 20 MB is plenty for a parts sheet
+  });
+
+  const isPartsFinderEnabled = (): boolean => {
+    const v = String(process.env.PARTS_FINDER_ENABLED || "").toLowerCase().trim();
+    return v === "1" || v === "true" || v === "yes" || v === "on";
+  };
+  // Route-level gate: attach as middleware on every public/customer route.
+  const requirePartsFinderFlag = (_req: Request, res: Response, next: NextFunction) => {
+    if (!isPartsFinderEnabled()) {
+      return res.status(503).json({ error: "feature_disabled" });
+    }
+    next();
+  };
+
+  // ---- Slug helpers (kebab-case + collision-safe -2/-3/... suffix) ----
+  function ensureUniqueChassisSlug(base: string, ignoreId?: number): string {
+    const cleaned = toSlug(base) || "chassis";
+    let candidate = cleaned;
+    let n = 2;
+    // Cap the loop so pathological data never wedges the request.
+    while (n < 500) {
+      const clash = ignoreId
+        ? rawSqlite.prepare(`SELECT id FROM chassis_catalog WHERE slug = ? AND id != ? LIMIT 1`).get(candidate, ignoreId)
+        : rawSqlite.prepare(`SELECT id FROM chassis_catalog WHERE slug = ? LIMIT 1`).get(candidate);
+      if (!clash) return candidate;
+      candidate = `${cleaned}-${n++}`;
+    }
+    return `${cleaned}-${Date.now()}`;
+  }
+
+  // ---- Row shape helpers (snake_case DB -> camelCase-ish API) ----
+  function chassisRowToApi(r: any): any {
+    if (!r) return r;
+    return {
+      id: r.id,
+      chassis_code: r.chassis_code,
+      chassis_display_name: r.chassis_display_name,
+      make: r.make,
+      model: r.model,
+      variant: r.variant,
+      slug: r.slug,
+      cover_image_url: r.cover_image_url,
+      description: r.description,
+      is_active: r.is_active,
+      created_at: r.created_at,
+      updated_at: r.updated_at,
+    };
+  }
+  function chassisPartRowToApiAdmin(r: any): any {
+    if (!r) return r;
+    return {
+      id: r.id,
+      chassis_id: r.chassis_id,
+      part_number: r.part_number,
+      oem_number: r.oem_number,
+      description: r.description,
+      category: r.category,
+      position_notes: r.position_notes,
+      purchase_price: r.purchase_price,
+      sell_price: r.sell_price,
+      stock_qty: r.stock_qty,
+      image_url: r.image_url,
+      product_id: r.product_id,
+      is_active: r.is_active,
+      created_at: r.created_at,
+      updated_at: r.updated_at,
+    };
+  }
+  // Customer-safe projection: NEVER exposes purchase_price or internal flags.
+  function chassisPartRowToApiPublic(r: any): any {
+    if (!r) return r;
+    return {
+      part_number: r.part_number,
+      oem_number: r.oem_number,
+      description: r.description,
+      category: r.category,
+      position_notes: r.position_notes,
+      sell_price: r.sell_price,
+      stock_qty: r.stock_qty,
+      image_url: r.image_url,
+    };
+  }
+
+  // ---- Bulk row coercion helpers ----
+  const CHASSIS_PARTS_COLUMNS = [
+    "part_number", "oem_number", "description", "category", "position_notes",
+    "purchase_price", "sell_price", "stock_qty", "image_url",
+  ];
+  function toNumberOrNull(v: any): number | null {
+    if (v === undefined || v === null || v === "") return null;
+    const n = typeof v === "number" ? v : parseFloat(String(v).replace(/[^0-9.\-]/g, ""));
+    return isNaN(n) ? null : n;
+  }
+  function toIntOrNull(v: any): number | null {
+    if (v === undefined || v === null || v === "") return null;
+    const n = typeof v === "number" ? Math.trunc(v) : parseInt(String(v).replace(/[^0-9\-]/g, ""), 10);
+    return isNaN(n) ? null : n;
+  }
+
+  // ---- Template download (admins fill in this .xlsx and re-upload) ----
+  // GET /api/admin/chassis/parts-template.xlsx
+  // NOTE: registered BEFORE /api/admin/chassis/:id/* so "parts-template.xlsx"
+  // is never captured as :id (would 400 on parseInt).
+  app.get("/api/admin/chassis/parts-template.xlsx", requireAuth, (_req, res) => {
+    try {
+      const wb = XLSX.utils.book_new();
+      const rows = [CHASSIS_PARTS_COLUMNS];
+      const sheet = XLSX.utils.aoa_to_sheet(rows);
+      XLSX.utils.book_append_sheet(wb, sheet, "parts");
+      const buffer = XLSX.write(wb, { type: "buffer", bookType: "xlsx" });
+      res.setHeader("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
+      res.setHeader("Content-Disposition", `attachment; filename="chassis-parts-template.xlsx"`);
+      res.send(buffer);
+    } catch (e: any) {
+      res.status(500).json({ error: e?.message || "template_generation_failed" });
+    }
+  });
+
+  // ---- Admin: create chassis ----
+  app.post("/api/admin/chassis", requireAuth, async (req, res) => {
+    try {
+      const b = req.body || {};
+      const chassis_code = String(b.chassis_code || "").trim();
+      const chassis_display_name = String(b.chassis_display_name || "").trim();
+      if (!chassis_code) return res.status(400).json({ error: "chassis_code required" });
+      if (!chassis_display_name) return res.status(400).json({ error: "chassis_display_name required" });
+      const slugBase = String(b.slug || "").trim() || chassis_display_name;
+      const slug = ensureUniqueChassisSlug(slugBase);
+      const now = Date.now();
+      const info = rawSqlite
+        .prepare(
+          `INSERT INTO chassis_catalog
+            (chassis_code, chassis_display_name, make, model, variant, slug,
+             cover_image_url, description, is_active, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)`
+        )
+        .run(
+          chassis_code,
+          chassis_display_name,
+          b.make || null,
+          b.model || null,
+          b.variant || null,
+          slug,
+          b.cover_image_url || null,
+          b.description || null,
+          now, now,
+        );
+      const row = rawSqlite.prepare(`SELECT * FROM chassis_catalog WHERE id = ?`).get(info.lastInsertRowid) as any;
+      res.json(chassisRowToApi(row));
+    } catch (e: any) {
+      res.status(500).json({ error: e?.message || "chassis_create_failed" });
+    }
+  });
+
+  // ---- Admin: list chassis (fuzzy search on make/model/display_name) ----
+  app.get("/api/admin/chassis", requireAuth, async (req, res) => {
+    try {
+      const limit = Math.min(Math.max(parseInt(String(req.query.limit || "100"), 10) || 100, 1), 500);
+      const offset = Math.max(parseInt(String(req.query.offset || "0"), 10) || 0, 0);
+      const q = String(req.query.q || "").trim();
+      let sql = `SELECT * FROM chassis_catalog`;
+      const params: any[] = [];
+      if (q) {
+        sql += ` WHERE make LIKE ? OR model LIKE ? OR chassis_display_name LIKE ? OR chassis_code LIKE ?`;
+        const like = `%${q}%`;
+        params.push(like, like, like, like);
+      }
+      sql += ` ORDER BY id DESC LIMIT ? OFFSET ?`;
+      params.push(limit, offset);
+      const rows = rawSqlite.prepare(sql).all(...params) as any[];
+      const total = (rawSqlite.prepare(
+        q
+          ? `SELECT COUNT(*) AS c FROM chassis_catalog WHERE make LIKE ? OR model LIKE ? OR chassis_display_name LIKE ? OR chassis_code LIKE ?`
+          : `SELECT COUNT(*) AS c FROM chassis_catalog`
+      ).get(...(q ? [ `%${q}%`, `%${q}%`, `%${q}%`, `%${q}%` ] : [])) as any).c as number;
+      res.setHeader("X-Total-Count", String(total));
+      res.json(rows.map(chassisRowToApi));
+    } catch (e: any) {
+      res.status(500).json({ error: e?.message || "chassis_list_failed" });
+    }
+  });
+
+  // ---- Admin: get one chassis (with parts_count aggregate) ----
+  app.get("/api/admin/chassis/:id", requireAuth, async (req, res) => {
+    try {
+      const id = parseInt(req.params.id as string, 10);
+      if (!id) return res.status(400).json({ error: "invalid id" });
+      const row = rawSqlite.prepare(`SELECT * FROM chassis_catalog WHERE id = ?`).get(id) as any;
+      if (!row) return res.status(404).json({ error: "chassis_not_found" });
+      const partsCount = (rawSqlite.prepare(
+        `SELECT COUNT(*) AS c FROM chassis_parts WHERE chassis_id = ? AND is_active = 1`
+      ).get(id) as any).c as number;
+      res.json({ ...chassisRowToApi(row), parts_count: partsCount });
+    } catch (e: any) {
+      res.status(500).json({ error: e?.message || "chassis_get_failed" });
+    }
+  });
+
+  // ---- Admin: patch chassis (partial) ----
+  app.patch("/api/admin/chassis/:id", requireAuth, async (req, res) => {
+    try {
+      const id = parseInt(req.params.id as string, 10);
+      if (!id) return res.status(400).json({ error: "invalid id" });
+      const existing = rawSqlite.prepare(`SELECT * FROM chassis_catalog WHERE id = ?`).get(id) as any;
+      if (!existing) return res.status(404).json({ error: "chassis_not_found" });
+      const b = req.body || {};
+      const sets: string[] = [];
+      const params: any[] = [];
+      const allowed: Record<string, string> = {
+        chassis_code: "chassis_code",
+        chassis_display_name: "chassis_display_name",
+        make: "make",
+        model: "model",
+        variant: "variant",
+        cover_image_url: "cover_image_url",
+        description: "description",
+        is_active: "is_active",
+      };
+      for (const [k, col] of Object.entries(allowed)) {
+        if (k in b) { sets.push(`${col} = ?`); params.push(b[k]); }
+      }
+      if (typeof b.slug === "string" && b.slug.trim() && b.slug.trim() !== existing.slug) {
+        const newSlug = ensureUniqueChassisSlug(b.slug.trim(), id);
+        sets.push(`slug = ?`); params.push(newSlug);
+      }
+      if (sets.length === 0) return res.json(chassisRowToApi(existing));
+      sets.push(`updated_at = ?`); params.push(Date.now());
+      params.push(id);
+      rawSqlite.prepare(`UPDATE chassis_catalog SET ${sets.join(", ")} WHERE id = ?`).run(...params);
+      const row = rawSqlite.prepare(`SELECT * FROM chassis_catalog WHERE id = ?`).get(id) as any;
+      res.json(chassisRowToApi(row));
+    } catch (e: any) {
+      res.status(500).json({ error: e?.message || "chassis_update_failed" });
+    }
+  });
+
+  // ---- Admin: soft-delete chassis ----
+  app.delete("/api/admin/chassis/:id", requireAuth, async (req, res) => {
+    try {
+      const id = parseInt(req.params.id as string, 10);
+      if (!id) return res.status(400).json({ error: "invalid id" });
+      const info = rawSqlite
+        .prepare(`UPDATE chassis_catalog SET is_active = 0, updated_at = ? WHERE id = ?`)
+        .run(Date.now(), id);
+      if (info.changes === 0) return res.status(404).json({ error: "chassis_not_found" });
+      res.json({ ok: true, soft_deleted: true, id });
+    } catch (e: any) {
+      res.status(500).json({ error: e?.message || "chassis_delete_failed" });
+    }
+  });
+
+  // ---- Admin: bulk parts upload (multipart/form-data field 'file' = .xlsx | .csv) ----
+  app.post(
+    "/api/admin/chassis/:id/parts/bulk-upload",
+    requireAuth,
+    partsUpload.single("file"),
+    async (req, res) => {
+      try {
+        const id = parseInt(req.params.id as string, 10);
+        if (!id) return res.status(400).json({ error: "invalid id" });
+        const chassis = rawSqlite.prepare(`SELECT id FROM chassis_catalog WHERE id = ?`).get(id) as any;
+        if (!chassis) return res.status(404).json({ error: "chassis_not_found" });
+
+        const file = (req as any).file as { originalname: string; buffer: Buffer } | undefined;
+        if (!file) return res.status(400).json({ error: "file field required (xlsx or csv)" });
+
+        // Parse rows via xlsx (handles .xlsx, .xls, .csv all in one code path).
+        let rows: any[] = [];
+        try {
+          const wb = XLSX.read(file.buffer, { type: "buffer" });
+          const firstSheet = wb.SheetNames[0];
+          if (!firstSheet) return res.status(400).json({ error: "no sheet in file" });
+          const ws = wb.Sheets[firstSheet];
+          rows = XLSX.utils.sheet_to_json(ws, { defval: "", raw: true }) as any[];
+        } catch (e: any) {
+          return res.status(400).json({ error: `parse_failed: ${e?.message || e}` });
+        }
+
+        // Normalize headers so 'Part Number' / 'part_number' / 'PartNumber' all work.
+        const normalize = (r: any) => {
+          const out: any = {};
+          for (const k of Object.keys(r)) {
+            out[String(k).trim().toLowerCase().replace(/\s+/g, "_")] = r[k];
+          }
+          return out;
+        };
+
+        let created = 0;
+        let updated = 0;
+        const errors: { row: number; error: string }[] = [];
+
+        const insert = rawSqlite.prepare(
+          `INSERT INTO chassis_parts
+            (chassis_id, part_number, oem_number, description, category, position_notes,
+             purchase_price, sell_price, stock_qty, image_url, is_active, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)
+           ON CONFLICT(chassis_id, part_number) DO UPDATE SET
+             oem_number      = excluded.oem_number,
+             description     = excluded.description,
+             category        = excluded.category,
+             position_notes  = excluded.position_notes,
+             purchase_price  = excluded.purchase_price,
+             sell_price      = excluded.sell_price,
+             stock_qty       = excluded.stock_qty,
+             image_url       = excluded.image_url,
+             is_active       = 1,
+             updated_at      = excluded.updated_at
+           RETURNING id, (created_at = updated_at) AS was_created`
+        );
+
+        for (let i = 0; i < rows.length; i++) {
+          const r = normalize(rows[i] || {});
+          try {
+            const part_number = String(r.part_number || "").trim();
+            if (!part_number) throw new Error("part_number is required");
+            const description = String(r.description || "").trim() || part_number;
+            const now = Date.now();
+            const result = insert.get(
+              id,
+              part_number,
+              String(r.oem_number || "").trim() || null,
+              description,
+              String(r.category || "").trim() || null,
+              String(r.position_notes || "").trim() || null,
+              toNumberOrNull(r.purchase_price),
+              toNumberOrNull(r.sell_price),
+              toIntOrNull(r.stock_qty) ?? 0,
+              String(r.image_url || "").trim() || null,
+              now, now,
+            ) as any;
+            if (result && result.was_created) created++; else updated++;
+          } catch (e: any) {
+            errors.push({ row: i + 2, error: e?.message || "unknown" }); // +2 = header + 1-based
+          }
+        }
+
+        res.json({ created, updated, errors, total: rows.length });
+      } catch (e: any) {
+        res.status(500).json({ error: e?.message || "bulk_upload_failed" });
+      }
+    }
+  );
+
+  // ---- Admin: list parts for a chassis ----
+  app.get("/api/admin/chassis/:id/parts", requireAuth, async (req, res) => {
+    try {
+      const id = parseInt(req.params.id as string, 10);
+      if (!id) return res.status(400).json({ error: "invalid id" });
+      const limit = Math.min(Math.max(parseInt(String(req.query.limit || "100"), 10) || 100, 1), 1000);
+      const offset = Math.max(parseInt(String(req.query.offset || "0"), 10) || 0, 0);
+      const q = String(req.query.q || "").trim();
+      let sql = `SELECT * FROM chassis_parts WHERE chassis_id = ?`;
+      const params: any[] = [id];
+      if (q) {
+        sql += ` AND (part_number LIKE ? OR oem_number LIKE ? OR description LIKE ?)`;
+        const like = `%${q}%`;
+        params.push(like, like, like);
+      }
+      sql += ` ORDER BY id DESC LIMIT ? OFFSET ?`;
+      params.push(limit, offset);
+      const rows = rawSqlite.prepare(sql).all(...params) as any[];
+      const total = (rawSqlite.prepare(
+        q
+          ? `SELECT COUNT(*) AS c FROM chassis_parts WHERE chassis_id = ? AND (part_number LIKE ? OR oem_number LIKE ? OR description LIKE ?)`
+          : `SELECT COUNT(*) AS c FROM chassis_parts WHERE chassis_id = ?`
+      ).get(...(q ? [id, `%${q}%`, `%${q}%`, `%${q}%`] : [id])) as any).c as number;
+      res.setHeader("X-Total-Count", String(total));
+      res.json(rows.map(chassisPartRowToApiAdmin));
+    } catch (e: any) {
+      res.status(500).json({ error: e?.message || "parts_list_failed" });
+    }
+  });
+
+  // ---- Admin: edit one part ----
+  app.patch("/api/admin/chassis/:id/parts/:partId", requireAuth, async (req, res) => {
+    try {
+      const id = parseInt(req.params.id as string, 10);
+      const partId = parseInt(req.params.partId as string, 10);
+      if (!id || !partId) return res.status(400).json({ error: "invalid id" });
+      const existing = rawSqlite
+        .prepare(`SELECT * FROM chassis_parts WHERE id = ? AND chassis_id = ?`)
+        .get(partId, id) as any;
+      if (!existing) return res.status(404).json({ error: "part_not_found" });
+      const b = req.body || {};
+      const sets: string[] = [];
+      const params: any[] = [];
+      const allowedText = ["part_number", "oem_number", "description", "category", "position_notes", "image_url"];
+      for (const k of allowedText) {
+        if (k in b) { sets.push(`${k} = ?`); params.push(b[k]); }
+      }
+      if ("purchase_price" in b) { sets.push(`purchase_price = ?`); params.push(toNumberOrNull(b.purchase_price)); }
+      if ("sell_price" in b)     { sets.push(`sell_price = ?`);     params.push(toNumberOrNull(b.sell_price)); }
+      if ("stock_qty" in b)      { sets.push(`stock_qty = ?`);      params.push(toIntOrNull(b.stock_qty) ?? 0); }
+      if ("product_id" in b)     { sets.push(`product_id = ?`);     params.push(toIntOrNull(b.product_id)); }
+      if ("is_active" in b)      { sets.push(`is_active = ?`);      params.push(b.is_active ? 1 : 0); }
+      if (sets.length === 0) return res.json(chassisPartRowToApiAdmin(existing));
+      sets.push(`updated_at = ?`); params.push(Date.now());
+      params.push(partId);
+      rawSqlite.prepare(`UPDATE chassis_parts SET ${sets.join(", ")} WHERE id = ?`).run(...params);
+      const row = rawSqlite.prepare(`SELECT * FROM chassis_parts WHERE id = ?`).get(partId) as any;
+      res.json(chassisPartRowToApiAdmin(row));
+    } catch (e: any) {
+      res.status(500).json({ error: e?.message || "part_update_failed" });
+    }
+  });
+
+  // ---- Admin: soft-delete one part ----
+  app.delete("/api/admin/chassis/:id/parts/:partId", requireAuth, async (req, res) => {
+    try {
+      const id = parseInt(req.params.id as string, 10);
+      const partId = parseInt(req.params.partId as string, 10);
+      if (!id || !partId) return res.status(400).json({ error: "invalid id" });
+      const info = rawSqlite
+        .prepare(`UPDATE chassis_parts SET is_active = 0, updated_at = ? WHERE id = ? AND chassis_id = ?`)
+        .run(Date.now(), partId, id);
+      if (info.changes === 0) return res.status(404).json({ error: "part_not_found" });
+      res.json({ ok: true, soft_deleted: true, id: partId });
+    } catch (e: any) {
+      res.status(500).json({ error: e?.message || "part_delete_failed" });
+    }
+  });
+
+  // =========================================================================
+  // R28 Session 2 — PUBLIC customer endpoints (flag-gated).
+  // All calls return 503 {error:'feature_disabled'} when PARTS_FINDER_ENABLED
+  // is not truthy. No auth required.
+  // =========================================================================
+
+  // GET /api/chassis?q= — browse active chassis catalog.
+  app.get("/api/chassis", requirePartsFinderFlag, async (req, res) => {
+    try {
+      const q = String(req.query.q || "").trim();
+      let sql = `
+        SELECT c.id, c.chassis_display_name, c.slug, c.cover_image_url,
+          (SELECT COUNT(*) FROM chassis_parts p WHERE p.chassis_id = c.id AND p.is_active = 1) AS parts_count
+        FROM chassis_catalog c
+        WHERE c.is_active = 1`;
+      const params: any[] = [];
+      if (q) {
+        sql += ` AND (c.chassis_display_name LIKE ? OR c.make LIKE ? OR c.model LIKE ? OR c.chassis_code LIKE ?)`;
+        const like = `%${q}%`;
+        params.push(like, like, like, like);
+      }
+      sql += ` ORDER BY c.chassis_display_name ASC LIMIT 500`;
+      const rows = rawSqlite.prepare(sql).all(...params) as any[];
+      res.json(rows);
+    } catch (e: any) {
+      res.status(500).json({ error: e?.message || "chassis_public_list_failed" });
+    }
+  });
+
+  // GET /api/chassis/:slug — metadata for one active chassis.
+  app.get("/api/chassis/:slug", requirePartsFinderFlag, async (req, res) => {
+    try {
+      const slug = String(req.params.slug || "").trim();
+      if (!slug) return res.status(400).json({ error: "slug required" });
+      const row = rawSqlite.prepare(`SELECT * FROM chassis_catalog WHERE slug = ? AND is_active = 1`).get(slug) as any;
+      if (!row) return res.status(404).json({ error: "chassis_not_found" });
+      const partsCount = (rawSqlite.prepare(
+        `SELECT COUNT(*) AS c FROM chassis_parts WHERE chassis_id = ? AND is_active = 1`
+      ).get(row.id) as any).c as number;
+      res.json({ ...chassisRowToApi(row), parts_count: partsCount });
+    } catch (e: any) {
+      res.status(500).json({ error: e?.message || "chassis_public_get_failed" });
+    }
+  });
+
+  // GET /api/chassis/:slug/parts — active parts for a chassis (customer projection).
+  app.get("/api/chassis/:slug/parts", requirePartsFinderFlag, async (req, res) => {
+    try {
+      const slug = String(req.params.slug || "").trim();
+      if (!slug) return res.status(400).json({ error: "slug required" });
+      const chassis = rawSqlite
+        .prepare(`SELECT id FROM chassis_catalog WHERE slug = ? AND is_active = 1`)
+        .get(slug) as any;
+      if (!chassis) return res.status(404).json({ error: "chassis_not_found" });
+      const limit = Math.min(Math.max(parseInt(String(req.query.limit || "200"), 10) || 200, 1), 1000);
+      const offset = Math.max(parseInt(String(req.query.offset || "0"), 10) || 0, 0);
+      const q = String(req.query.q || "").trim();
+      let sql = `SELECT * FROM chassis_parts WHERE chassis_id = ? AND is_active = 1`;
+      const params: any[] = [chassis.id];
+      if (q) {
+        sql += ` AND (part_number LIKE ? OR oem_number LIKE ? OR description LIKE ?)`;
+        const like = `%${q}%`;
+        params.push(like, like, like);
+      }
+      sql += ` ORDER BY id DESC LIMIT ? OFFSET ?`;
+      params.push(limit, offset);
+      const rows = rawSqlite.prepare(sql).all(...params) as any[];
+      const total = (rawSqlite.prepare(
+        q
+          ? `SELECT COUNT(*) AS c FROM chassis_parts WHERE chassis_id = ? AND is_active = 1 AND (part_number LIKE ? OR oem_number LIKE ? OR description LIKE ?)`
+          : `SELECT COUNT(*) AS c FROM chassis_parts WHERE chassis_id = ? AND is_active = 1`
+      ).get(...(q ? [chassis.id, `%${q}%`, `%${q}%`, `%${q}%`] : [chassis.id])) as any).c as number;
+      res.setHeader("X-Total-Count", String(total));
+      res.json(rows.map(chassisPartRowToApiPublic));
+    } catch (e: any) {
+      res.status(500).json({ error: e?.message || "chassis_public_parts_failed" });
+    }
+  });
+
+  // ---- Parts Finder: rate-limited reg-number lookup ----
+  // In-memory sliding window: 60 lookups/hour/IP. Fine for single-instance Render.
+  const PARTS_FINDER_MAX = 60;
+  const PARTS_FINDER_WINDOW_MS = 60 * 60 * 1000;
+  const partsFinderHits = new Map<string, number[]>();
+  const rateLimitOk = (ip: string): boolean => {
+    const now = Date.now();
+    const cutoff = now - PARTS_FINDER_WINDOW_MS;
+    const hits = (partsFinderHits.get(ip) || []).filter((t) => t >= cutoff);
+    if (hits.length >= PARTS_FINDER_MAX) {
+      partsFinderHits.set(ip, hits);
+      return false;
+    }
+    hits.push(now);
+    partsFinderHits.set(ip, hits);
+    return true;
+  };
+
+  // Fuzzy chassis matcher — tries exact code prefix first, then a make+model
+  // token overlap on the SurePass response. Returns the FIRST active chassis
+  // that scores > 0. Deliberately conservative — the UI can show "no exact
+  // match, browse catalog" when this returns null.
+  function tokenize(s: string): string[] {
+    return String(s || "")
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, " ")
+      .split(/\s+/)
+      .filter((t) => t.length >= 2);
+  }
+  function matchChassisFromLookup(chassisNumber: string | null, raw: any): { id: number; slug: string; chassis_display_name: string } | null {
+    try {
+      // 1) Exact chassis_code match on chassis_number prefix (e.g. code 'TATA-407-EX2' vs
+      //    chassis number 'MAT445123CA123456' — unlikely to match without deliberate coding).
+      if (chassisNumber) {
+        const cn = String(chassisNumber).toUpperCase();
+        const hit = rawSqlite
+          .prepare(
+            `SELECT id, slug, chassis_display_name FROM chassis_catalog
+             WHERE is_active = 1 AND ? LIKE (chassis_code || '%')
+             LIMIT 1`
+          )
+          .get(cn) as any;
+        if (hit) return hit;
+      }
+
+      // 2) Fuzzy make+model match on SurePass fields.
+      const data = raw?.data || {};
+      const makerDesc: string = String(data.maker_description || data.manufacturer || "");
+      const makerModel: string = String(data.maker_model || data.model || "");
+      const combined = `${makerDesc} ${makerModel}`.trim();
+      const tokens = tokenize(combined);
+      if (tokens.length === 0) return null;
+
+      const rows = rawSqlite
+        .prepare(
+          `SELECT id, slug, chassis_display_name, make, model, variant, chassis_display_name AS haystack
+           FROM chassis_catalog WHERE is_active = 1`
+        )
+        .all() as any[];
+      let best: { row: any; score: number } | null = null;
+      for (const row of rows) {
+        const hay = tokenize([row.make, row.model, row.variant, row.chassis_display_name].filter(Boolean).join(" "));
+        if (hay.length === 0) continue;
+        const overlap = tokens.filter((t) => hay.includes(t)).length;
+        if (overlap > 0 && (!best || overlap > best.score)) {
+          best = { row, score: overlap };
+        }
+      }
+      if (best) {
+        return { id: best.row.id, slug: best.row.slug, chassis_display_name: best.row.chassis_display_name };
+      }
+      return null;
+    } catch {
+      return null;
+    }
+  }
+
+  // POST /api/parts-finder/lookup  { reg_number }
+  app.post("/api/parts-finder/lookup", requirePartsFinderFlag, async (req, res) => {
+    try {
+      const reg = normalizeRegNumber(String(req.body?.reg_number || ""));
+      if (!reg) return res.status(400).json({ error: "reg_number required" });
+
+      const ip =
+        (req.headers["x-forwarded-for"] as string | undefined)?.split(",")[0]?.trim() ||
+        req.socket?.remoteAddress ||
+        "unknown";
+
+      if (!rateLimitOk(ip)) {
+        return res.status(429).json({ error: "rate_limited", limit: PARTS_FINDER_MAX, window_ms: PARTS_FINDER_WINDOW_MS });
+      }
+
+      const userId: number | undefined = (req as any).user?.id;
+      const lookup = await surepassLookupRegistration(reg, ip, userId);
+
+      if (!lookup.ok) {
+        return res.json({
+          ok: false,
+          reg_number: reg,
+          error: lookup.error,
+          message: lookup.error === "not_found"
+            ? "Registration not found in SurePass"
+            : "Lookup failed — please try again later",
+        });
+      }
+
+      const matched = matchChassisFromLookup(lookup.chassis_number || null, lookup.raw);
+      return res.json({
+        ok: true,
+        reg_number: reg,
+        chassis_number: lookup.chassis_number || null,
+        matched_chassis: matched,
+        cached: !!lookup.cached,
+        message: matched
+          ? `Chassis matched: ${matched.chassis_display_name}`
+          : "Chassis resolved but no catalog match — browse all chassis instead",
+      });
+    } catch (e: any) {
+      // Never throw — return a friendly error envelope.
+      return res.json({ ok: false, error: e?.message || "internal_error", message: "Lookup failed" });
+    }
+  });
+
+  // =========================================================================
+  // End R28 Session 2 block
+  // =========================================================================
 
   app.post("/api/admin/rfqs", requireRole("sales", "accounts"), async (req, res) => {
     try {
@@ -5535,6 +6179,11 @@ function registerR8Routes(
         console.error(`[R26.2g] notify-delhi rate sync failed for PO ${id}:`, e?.message || e);
       }
       await v2.updatePurchaseOrderV2(id, { notifiedDelhiAt: Date.now(), status: po.status === "draft" ? "open" : po.status } as any);
+      // TODO(session-3): Session 3 will fire autoPublishFromPO() from here.
+      // Per user directive: "the product should be ready to order when notify
+      // delhi is triggered, the quantity should be 10 for each pcs. No RELATION
+      // WITH THE PATNA RECIEVING". Session 2 does NOT implement the publish
+      // itself — see SESSION-2-AUDIT-REPORT.md §"Session 3 hooks".
       res.json({ ok: true, totalCount: po.items.length, assignedCount: confirmed.length, awaitingCount: po.items.length - confirmed.length });
     } catch (e: any) {
       res.status(500).json({ error: e.message });
