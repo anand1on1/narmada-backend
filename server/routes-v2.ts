@@ -25,6 +25,9 @@ import { lookupRegistration as surepassLookupRegistration, normalizeRegNumber } 
 // Feature-flagged behind AUTO_PUBLISH_ENABLED (default false) so notify-Delhi is
 // unchanged until the user opts in.
 import { autoPublishFromPO, listAutoPublishLog } from "./auto-publish";
+// R28.1 — Team Upload feature (passcode-gated public chassis upload).
+// Additive; parallel path to the admin-only /api/admin/chassis endpoints.
+import { registerTeamUploadRoutes } from "./team-upload";
 import {
   listCachedImages as listPartImageCache,
   deleteCachedImage as deletePartImageCache,
@@ -3658,6 +3661,11 @@ export function registerV2Routes(app: Express, ctx: V2Context) {
       });
     } catch (e: any) { res.status(500).json({ error: e.message }); }
   });
+
+  // ============================================================================
+  // R28.1 — Team Upload (public passcode-gated + admin audit log)
+  // ============================================================================
+  registerTeamUploadRoutes(app, { requireAdminRole: requireAuth });
 
   // ============================================================================
   // ROUNDS 4.4 → 7 ROUTES

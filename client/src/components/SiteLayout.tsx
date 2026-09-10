@@ -15,6 +15,9 @@ import { useShopAuth } from "@/lib/shop-auth";
 const NAV = [
   { to: "/", label: "Home" },
   { to: "/products", label: "Catalog" },
+  // R28 Session 2 — Parts Finder + Chassis catalog (public).
+  { to: "/parts-finder", label: "Parts Finder" },
+  { to: "/chassis", label: "Chassis" },
   { to: "/price-checker", label: "Price Checker" },
   { to: "/blog", label: "Insights" },
   { to: "/about", label: "About" },
@@ -300,6 +303,8 @@ function Footer() {
             <li><Link href="/about"><a className="text-[hsl(220_60%_12%)]/80 hover:text-[hsl(212_95%_55%)] transition-colors">About Narmada</a></Link></li>
             <li><Link href="/work-with-us"><a className="text-[hsl(220_60%_12%)]/80 hover:text-[hsl(212_95%_55%)] transition-colors">Work With Us</a></Link></li>
             <li><Link href="/products"><a className="text-[hsl(220_60%_12%)]/80 hover:text-[hsl(212_95%_55%)] transition-colors">Parts Catalog</a></Link></li>
+            <li><Link href="/parts-finder"><a className="text-[hsl(220_60%_12%)]/80 hover:text-[hsl(212_95%_55%)] transition-colors">Parts Finder (by Reg #)</a></Link></li>
+            <li><Link href="/chassis"><a className="text-[hsl(220_60%_12%)]/80 hover:text-[hsl(212_95%_55%)] transition-colors">Chassis Catalog</a></Link></li>
             <li><Link href="/contact"><a className="text-[hsl(220_60%_12%)]/80 hover:text-[hsl(212_95%_55%)] transition-colors">Contact &amp; Quote</a></Link></li>
             <li><Link href="/blog"><a className="text-[hsl(220_60%_12%)]/80 hover:text-[hsl(212_95%_55%)] transition-colors">Insights &amp; Blog</a></Link></li>
             <li><Link href="/price-checker"><a className="text-[hsl(220_60%_12%)]/80 hover:text-[hsl(212_95%_55%)] transition-colors">Price Checker</a></Link></li>

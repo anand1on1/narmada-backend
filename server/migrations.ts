@@ -3298,6 +3298,50 @@ export function runR28_4Migrations() {
 }
 
 // =====================================================================
+// R28.1 — Team Upload feature (additive, idempotent)
+// One new audit table: team_upload_log. Backs the passcode-gated
+// /api/team-upload/chassis endpoint at /team-upload on the frontend.
+// Never mutates existing tables.
+//
+// Verbatim user requirement (from R28.1 brief):
+//   "create a public url with safety net which I can share to my team to
+//    upload chassis files with a single drop down to select brand which for
+//    now only is tata"
+// =====================================================================
+export function runR28_5Migrations() {
+  console.log("[migrations] R28.5: start");
+  const run = (label: string, sqlStr: string) => {
+    try { sqlite.exec(sqlStr); console.log(`[migrations] R28.5: ${label} ok`); }
+    catch (e: any) { console.log(`[migrations] R28.5: ${label} skip (${e?.message || e})`); }
+  };
+
+  run("team_upload_log table", `
+    CREATE TABLE IF NOT EXISTS team_upload_log (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      ip_hash TEXT NOT NULL,
+      passcode_ok INTEGER NOT NULL,
+      chassis_code TEXT,
+      chassis_display_name TEXT,
+      filename TEXT,
+      filesize_bytes INTEGER,
+      parts_created INTEGER DEFAULT 0,
+      parts_updated INTEGER DEFAULT 0,
+      parts_errors INTEGER DEFAULT 0,
+      status TEXT NOT NULL,
+      error_message TEXT,
+      user_agent TEXT,
+      chassis_id INTEGER,
+      created_at INTEGER NOT NULL
+    );
+  `);
+  run("idx_teamupload_ip",      `CREATE INDEX IF NOT EXISTS idx_teamupload_ip      ON team_upload_log(ip_hash);`);
+  run("idx_teamupload_created", `CREATE INDEX IF NOT EXISTS idx_teamupload_created ON team_upload_log(created_at);`);
+  run("idx_teamupload_status",  `CREATE INDEX IF NOT EXISTS idx_teamupload_status  ON team_upload_log(status);`);
+
+  console.log("[migrations] R28.5: complete");
+}
+
+// =====================================================================
 // PartSetu AI v1 — Spare Parts Intelligence Chatbot (additive, idempotent)
 // 7 new tables. Per-statement try/catch with [migrations] PartSetu: markers.
 // Nothing here drops/renames existing tables.

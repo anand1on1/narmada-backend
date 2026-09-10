@@ -11,6 +11,8 @@ import {
   Factory, Search, Target, Megaphone, CheckSquare, Sparkles, Facebook, History,
   Gauge, Radar, Link2, Bug, ShoppingBag, Boxes, ChevronDown, ChevronRight, Calculator,
   BookOpen, ShieldCheck, Receipt,
+  // R28 icons
+  Inbox, Mail, ImageIcon, Sparkles as SparklesR28, BarChart3, WrenchIcon,
 } from "lucide-react";
 
 // Session A V2: 4-role sidebar matrix.
@@ -36,6 +38,8 @@ const ROLE_PAGES: Record<AdminRole, Set<string>> = {
     "/admin/accounts",
     "/admin/expense-approvals",
     "/admin/expenses-unified",
+    // R28 — Session 1..4 admin pages (admin-only)
+    "/admin/email-log", "/admin/chassis", "/admin/auto-publish", "/admin/part-images", "/admin/seo",
   ]),
   // Data Center role: public Products only, no delete (enforced backend + UI).
   data_center: new Set([
@@ -228,6 +232,13 @@ export function AdminLayout({ children, title }: { children: ReactNode; title: s
     { href: "/admin/ads-google", label: "Google Ads", icon: Search, group: "Marketing" },
     { href: "/admin/ai-ledger", label: "AI Ledger", icon: Sparkles, group: "Marketing" },
 
+    // R28 — Session 1..4 features (below Marketing, above System)
+    { href: "/admin/email-log", label: "Email Log", icon: Mail, group: "R28 Features" },
+    { href: "/admin/chassis", label: "Chassis Catalog", icon: WrenchIcon, group: "R28 Features" },
+    { href: "/admin/auto-publish", label: "Auto-Publish", icon: SparklesR28, group: "R28 Features" },
+    { href: "/admin/part-images", label: "Part Images", icon: ImageIcon, group: "R28 Features" },
+    { href: "/admin/seo", label: "SEO Analytics", icon: BarChart3, group: "R28 Features" },
+
     { href: "/admin/settings", label: "Settings", icon: Settings, group: "System" },
     { href: "/admin/integrations", label: "Integrations", icon: Link2, group: "System" },
     { href: "/admin/account-requests", label: "Account Requests", icon: ClipboardList, group: "System" },
@@ -235,7 +246,7 @@ export function AdminLayout({ children, title }: { children: ReactNode; title: s
     { href: "/admin/notification-log", label: "Notification Log", icon: Bell, group: "System" },
     { href: "/admin/webhook-events", label: "Webhook Events", icon: Bug, group: "System" },
   ];
-  const GROUP_ORDER = ["Overview", "Sales", "Procurement", "Inventory", "Logistics", "Web Shop", "Finance", "Accounts", "People", "Marketing", "System"];
+  const GROUP_ORDER = ["Overview", "Sales", "Procurement", "Inventory", "Logistics", "Web Shop", "Finance", "Accounts", "People", "Marketing", "R28 Features", "System"];
 
   // Default to admin if role is somehow missing (legacy sessions)
   const effectiveRole: AdminRole = role || "admin";
