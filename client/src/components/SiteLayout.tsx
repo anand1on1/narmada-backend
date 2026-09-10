@@ -85,13 +85,22 @@ export function SiteLayout({ children }: { children: React.ReactNode }) {
               <span className="hidden md:inline">WhatsApp +91 79090 83806</span>
               <span className="md:hidden">WhatsApp</span>
             </a>
+            {/* R28.4 — Currency selector moved out of the main header into the utility
+                strip. Rarely used control, and its presence in the right cluster was
+                causing "ContaNR" overlap at 1440px viewports. */}
+            <span className="hidden md:inline-flex items-center pl-2 border-l border-slate-200">
+              <CurrencyPicker compact />
+            </span>
           </div>
         </div>
       </div>
 
       {/* ─────────────────────────────────────────────────────────── main nav */}
       <header className="sticky top-0 z-40 bg-white border-b border-slate-200 shadow-sm">
-        <div className="max-w-7xl mx-auto px-4 sm:px-6 h-16 grid grid-cols-[auto_1fr_auto] items-center gap-4">
+        {/* R28.4 — header container widens to max-w-[1500px] at 2xl so the full
+            9-link nav (only shown at 2xl) has room to sit alongside the wordmark
+            and utility cluster without clipping "Contact" or "Home". */}
+        <div className="max-w-7xl 2xl:max-w-[1500px] mx-auto px-4 sm:px-6 h-16 grid grid-cols-[auto_1fr_auto] items-center gap-x-6">
           {/* logo column ── shrink-0 so it can never grow into the nav */}
           <Link href="/">
             <a className="flex items-center shrink-0" data-testid="link-home-logo" aria-label="Narmada Mobility home">
@@ -99,23 +108,37 @@ export function SiteLayout({ children }: { children: React.ReactNode }) {
             </a>
           </Link>
 
-          {/* center nav (lg and up) ── flex, wrap-none, gap-x-6 spec */}
-          <nav className="hidden lg:flex items-center justify-center gap-x-1 min-w-0" aria-label="Primary">
+          {/* center nav (lg and up) ── R28.4:
+                • min-w-0 lets the column shrink instead of pushing the edges.
+                • justify-center at 2xl (≥1536px) where all 9 links fit comfortably.
+                • justify-start at lg/xl so the nav grows to the RIGHT (never eating
+                  the logo on the left).
+                • Below 2xl we hide the 3 least-critical links (Insights,
+                  Work With Us, Price Checker) into the hamburger.
+                • Below xl we additionally hide Brands to give breathing room at
+                  the 1024–1279px range. */}
+          <nav
+            className="hidden lg:flex items-center justify-start 2xl:justify-center gap-x-1 min-w-0 overflow-hidden pl-2"
+            aria-label="Primary"
+          >
             <NavLink to="/" label="Home" />
             <NavLink to="/products" label="Catalog" />
-            <BrandsMenu onPickBrand={(slug) => navigate(`/brand/${slug}`)} />
+            <span className="hidden xl:inline-flex">
+              <BrandsMenu onPickBrand={(slug) => navigate(`/brand/${slug}`)} />
+            </span>
             <NavLink to="/find-parts" label="Find Parts" />
-            <NavLink to="/price-checker" label="Price Checker" />
-            <NavLink to="/blog" label="Insights" />
+            <NavLink to="/price-checker" label="Price Checker" className="hidden 2xl:inline-flex" />
+            <NavLink to="/blog" label="Insights" className="hidden 2xl:inline-flex" />
             <NavLink to="/about" label="About" />
-            <NavLink to="/work-with-us" label="Work With Us" />
+            <NavLink to="/work-with-us" label="Work With Us" className="hidden 2xl:inline-flex" />
             <NavLink to="/contact" label="Contact" />
           </nav>
 
-          {/* right cluster ── gap-x-4 between groups; each control is fixed width */}
-          <div className="flex items-center gap-x-2 sm:gap-x-3 shrink-0 justify-end">
+          {/* right cluster ── R28.4: added ml-6 + a vertical divider so the last
+              nav link ("Contact") is always separated from the utility cluster.
+              Currency picker was moved out to the utility strip. */}
+          <div className="flex items-center gap-x-2 sm:gap-x-3 shrink-0 justify-end pl-6 ml-2 border-l border-slate-200">
             <div className="hidden md:flex items-center gap-1">
-              <CurrencyPicker />
               <CartIcon />
               <SignInLink />
             </div>
@@ -226,17 +249,17 @@ export function SiteLayout({ children }: { children: React.ReactNode }) {
 
 /* ───────────────────────────────────────────────────────── nav sub-components */
 
-function NavLink({ to, label }: { to: string; label: string }) {
+function NavLink({ to, label, className = "" }: { to: string; label: string; className?: string }) {
   const [location] = useLocation();
   const active = location === to;
   return (
     <Link href={to}>
       <a
-        className={`px-3 py-2 text-sm font-medium rounded-md transition-colors whitespace-nowrap relative ${
+        className={`px-3 py-2 text-sm font-medium rounded-md transition-colors whitespace-nowrap relative inline-flex items-center ${
           active
             ? "text-indigo-700"
             : "text-slate-700 hover:text-slate-900 hover:bg-slate-100"
-        }`}
+        } ${className}`}
         data-testid={`nav-${label.toLowerCase().replace(/\s+/g, "-")}`}
       >
         {label}
@@ -312,7 +335,7 @@ function CartIcon() {
   );
 }
 
-function CurrencyPicker() {
+function CurrencyPicker({ compact = false }: { compact?: boolean } = {}) {
   const [cur, setCur] = useState<Currency>(getCurrency());
   const [rate, setRate] = useState<number>(getUsdInr());
   useEffect(() => {
@@ -321,16 +344,22 @@ function CurrencyPicker() {
   }, []);
   const flag = cur === "USD" ? "🇺🇸" : "🇮🇳";
   const code = cur === "USD" ? "USD" : "INR";
+  // Compact variant is used in the utility strip (smaller height + xs text) so
+  // the picker blends with the other utility links (Track Consignment / Get
+  // Quotation / WhatsApp) instead of sitting as a full h-9 button.
+  const triggerClass = compact
+    ? "inline-flex items-center gap-1 h-6 px-1.5 rounded text-xs font-medium text-slate-600 hover:text-slate-900 hover:bg-slate-100 transition-colors"
+    : "inline-flex items-center gap-1 h-9 px-2 rounded-md text-[13px] font-medium text-slate-700 hover:text-slate-900 hover:bg-slate-100 transition-colors";
   return (
     <DropdownMenu>
       <DropdownMenuTrigger
-        className="inline-flex items-center gap-1 h-9 px-2 rounded-md text-[13px] font-medium text-slate-700 hover:text-slate-900 hover:bg-slate-100 transition-colors"
+        className={triggerClass}
         data-testid="currency-picker"
         aria-label="Select currency"
       >
-        <span className="text-sm leading-none" aria-hidden>{flag}</span>
+        <span className={compact ? "text-xs leading-none" : "text-sm leading-none"} aria-hidden>{flag}</span>
         <span className="font-semibold tracking-wide">{code}</span>
-        <ChevronDown className="h-3.5 w-3.5 opacity-70" />
+        <ChevronDown className={compact ? "h-3 w-3 opacity-70" : "h-3.5 w-3.5 opacity-70"} />
       </DropdownMenuTrigger>
       <DropdownMenuContent align="end" className="bg-white border border-slate-200 text-slate-900 min-w-[200px]">
         <div className="px-2 py-1.5 text-[10px] font-mono uppercase tracking-wider text-slate-400">
