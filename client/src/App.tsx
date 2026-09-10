@@ -182,6 +182,17 @@ import AdminShopCustomers from "@/pages/admin/AdminShopCustomers";
 import AdminShopCustomerDetail from "@/pages/admin/AdminShopCustomerDetail";
 import AdminFreight from "@/pages/admin/AdminFreight";
 import AdminStock from "@/pages/admin/AdminStock";
+// R28 — Session 1..4 admin pages (Email Log, Chassis, Auto-Publish, Part Images, SEO Analytics)
+import AdminEmailLog from "@/pages/admin/AdminEmailLog";
+import AdminChassis from "@/pages/admin/AdminChassis";
+import AdminChassisParts from "@/pages/admin/AdminChassisParts";
+import AdminAutoPublish from "@/pages/admin/AdminAutoPublish";
+import AdminPartImages from "@/pages/admin/AdminPartImages";
+import AdminSeoAnalytics from "@/pages/admin/AdminSeoAnalytics";
+// R28 — Session 2 public pages (Parts Finder, Chassis catalog)
+import PartsFinder from "@/pages/PartsFinder";
+import ChassisBrowse from "@/pages/ChassisBrowse";
+import ChassisDetail from "@/pages/ChassisDetail";
 // v1.4a — separate Data Center app (own login, own shell, own routes)
 import { DataCenterAuthProvider } from "@/hooks/useDataCenterAuth";
 import { ShellProvider } from "@/lib/shell";
@@ -267,6 +278,10 @@ function PublicRoutes() {
         <Route path="/price-checker" component={PriceChecker} />
         <Route path="/track-consignment/:docket" component={TrackConsignment} />
         <Route path="/track-consignment" component={TrackConsignment} />
+        {/* R28 Session 2 — public Parts Finder + Chassis catalog (MUST be before catch-all /:slug) */}
+        <Route path="/parts-finder" component={PartsFinder} />
+        <Route path="/chassis/:slug" component={ChassisDetail} />
+        <Route path="/chassis" component={ChassisBrowse} />
         {/* Individual brand pages — MUST be before catch-all /:slug */}
         <Route path="/brand/:slug" component={BrandPage} />
         {/* SEO landing pages: /:brand-spare-parts-:location */}
@@ -376,6 +391,13 @@ function AppRouter() {
         {/* R24.1 — Market Radar rebrand (vendor-discovery → market-radar, keep old URL working) */}
         <Route path="/admin/market-radar" component={AdminVendorDiscovery} />
         <Route path="/admin/discovery" component={MarketRadarRedirect} />
+        {/* R28 — Session 1..4 admin routes. Chassis-parts detail MUST precede the list. */}
+        <Route path="/admin/email-log" component={AdminEmailLog} />
+        <Route path="/admin/chassis/:id/parts" component={AdminChassisParts} />
+        <Route path="/admin/chassis" component={AdminChassis} />
+        <Route path="/admin/auto-publish" component={AdminAutoPublish} />
+        <Route path="/admin/part-images" component={AdminPartImages} />
+        <Route path="/admin/seo" component={AdminSeoAnalytics} />
         <Route component={NotFound} />
       </Switch>
       </ErrorBoundary>
