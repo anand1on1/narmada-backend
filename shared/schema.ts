@@ -1265,3 +1265,73 @@ export const backupLog = sqliteTable("backup_log", {
   errorMessage: text("error_message"),
 });
 export type BackupLog = typeof backupLog.$inferSelect;
+
+// ============================================================================
+// R28 Session 2 — Parts Finder + Chassis Catalog + SurePass RC lookup.
+// Additive tables. Never mutates existing tables. Idempotent CREATE IF NOT EXISTS
+// migrations live in runR28_2Migrations() in server/migrations.ts. All fields
+// mirror the raw SQL in the migration so drizzle stays in sync.
+// ============================================================================
+
+// chassis_catalog — one row per vehicle chassis (model/variant grouping) that
+// customers can look parts up by. Admin-owned; soft-delete via is_active=0.
+export const chassisCatalog = sqliteTable("chassis_catalog", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  chassisCode: text("chassis_code").notNull(),          // e.g. 'TATA-407-EX2' or SurePass model string
+  chassisDisplayName: text("chassis_display_name").notNull(), // 'Tata 407 EX2 BS6'
+  make: text("make"),                                    // 'TATA'
+  model: text("model"),                                  // '407 EX2'
+  variant: text("variant"),                              // 'BS6'
+  slug: text("slug").notNull().unique(),                 // 'tata-407-ex2-bs6' — used in URLs
+  coverImageUrl: text("cover_image_url"),
+  description: text("description"),
+  isActive: integer("is_active").notNull().default(1),
+  createdAt: integer("created_at").notNull(),
+  updatedAt: integer("updated_at").notNull(),
+});
+export const insertChassisCatalogSchema = createInsertSchema(chassisCatalog).omit({
+  id: true, createdAt: true, updatedAt: true,
+});
+export type InsertChassisCatalog = z.infer<typeof insertChassisCatalogSchema>;
+export type ChassisCatalog = typeof chassisCatalog.$inferSelect;
+
+// chassis_parts — one row per part scoped to a specific chassis.
+// UNIQUE(chassis_id, part_number) — the bulk upload upserts on this key.
+export const chassisParts = sqliteTable("chassis_parts", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  chassisId: integer("chassis_id").notNull(),
+  partNumber: text("part_number").notNull(),
+  oemNumber: text("oem_number"),
+  description: text("description").notNull(),
+  category: text("category"),                            // 'engine', 'brake', 'suspension' etc
+  positionNotes: text("position_notes"),                 // 'front left', 'rear axle'
+  purchasePrice: real("purchase_price"),                 // internal reference; NEVER sent to customer
+  sellPrice: real("sell_price"),                         // shown to customer
+  stockQty: integer("stock_qty").default(0),
+  imageUrl: text("image_url"),
+  productId: integer("product_id"),                      // optional link to `products` table
+  isActive: integer("is_active").notNull().default(1),
+  createdAt: integer("created_at").notNull(),
+  updatedAt: integer("updated_at").notNull(),
+});
+export const insertChassisPartSchema = createInsertSchema(chassisParts).omit({
+  id: true, createdAt: true, updatedAt: true,
+});
+export type InsertChassisPart = z.infer<typeof insertChassisPartSchema>;
+export type ChassisPart = typeof chassisParts.$inferSelect;
+
+// surepass_lookups — audit + 30-day cache of SurePass RC-V2 responses so we
+// don't re-charge the wallet on repeat lookups. reg_number is UNIQUE (last
+// successful response wins; errors also logged, see cost_charged=0).
+export const surepassLookups = sqliteTable("surepass_lookups", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  regNumber: text("reg_number").notNull().unique(),
+  chassisNumber: text("chassis_number"),
+  rawResponse: text("raw_response").notNull(),           // full JSON from SurePass
+  status: text("status").notNull(),                      // 'success' | 'not_found' | 'error'
+  requesterIp: text("requester_ip"),
+  requesterUserId: integer("requester_user_id"),
+  costCharged: integer("cost_charged"),                  // 1 if wallet charged, 0 if from cache/error
+  createdAt: integer("created_at").notNull(),
+});
+export type SurepassLookup = typeof surepassLookups.$inferSelect;

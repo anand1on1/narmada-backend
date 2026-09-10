@@ -1,0 +1,4 @@
+part_number,oem_number,description,category,position_notes,purchase_price,sell_price,stock_qty,image_url
+NM-BP-001,278611200172,Front brake pad set (asbestos-free),brake,front axle,1800,2500,25,https://example.com/brake-pad.jpg
+NM-CL-018,6722500001,Clutch plate 350mm organic,clutch,,12500,18500,12,https://example.com/clutch-plate.jpg
+NM-FF-204,BS6-FF-AL-2024,Fuel filter spin-on (10 micron),filter,,320,650,60,
