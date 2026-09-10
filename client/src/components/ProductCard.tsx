@@ -1,9 +1,11 @@
 import { Link } from "wouter";
 import type { Product } from "@shared/schema";
 import { Button } from "@/components/ui/button";
-import { MessageCircle, Package, ArrowUpRight } from "lucide-react";
+import { MessageCircle, Package, ArrowUpRight, Share2 } from "lucide-react";
 import { whatsappLink, buildBuyMessage, formatUSD, parseJsonArray, productHref } from "@/lib/utils-app";
 import { BRANDS } from "@/data/brands";
+// R28 Session 3+4 — representation disclaimer + SEO share link.
+import { isRepresentationalImage, productSeoUrl, copyToClipboardWithToast } from "@/lib/r28-utils";
 import stockTurbo from "@/assets/v2/product-turbo.png";
 import stockBrake from "@/assets/v2/product-brake.png";
 import stockInjector from "@/assets/v2/product-injector.png";
@@ -16,6 +18,9 @@ export function ProductCard({ product, usdInr }: { product: Product; usdInr: num
   const brandInfo = BRANDS[product.brand as keyof typeof BRANDS];
   const images = parseJsonArray(product.imageUrls);
   const cover = images[0] || STOCK_IMAGES[product.id % STOCK_IMAGES.length];
+  // R28: products created by auto-publish may have imageSource='generated'|'placeholder'|'reused'.
+  const imageSource = (product as any).imageSource ?? (product as any).image_source ?? null;
+  const showRepresentationDisclaimer = isRepresentationalImage(imageSource);
   const buyUrl = whatsappLink("7909083806", buildBuyMessage({
     name: product.name, partNumber: product.partNumber || undefined, slug: product.slug,
     brand: brandInfo?.name || product.brand,
@@ -59,12 +64,27 @@ export function ProductCard({ product, usdInr }: { product: Product; usdInr: num
             Fits · {product.model}
           </div>
         )}
+        {showRepresentationDisclaimer && (
+          <div className="text-[10px] italic text-[hsl(220_60%_12%)]/60 leading-tight">* Image is for representation purpose only</div>
+        )}
         <div className="mt-3 flex items-end justify-between gap-2 pt-3 border-t border-[hsl(220_45%_20%)]/8">
           <div>
             <div className="font-mono text-[9px] uppercase tracking-[0.2em] text-[hsl(220_60%_12%)]/40">Price</div>
             <div className="text-xl font-display font-black text-[hsl(220_60%_12%)]" data-testid={`text-price-${product.id}`}>{formatUSD(product.priceInr, usdInr)}</div>
           </div>
           <div className="flex items-center gap-1.5">
+            {product.slug && (
+              <button
+                type="button"
+                onClick={(e) => { e.preventDefault(); copyToClipboardWithToast(productSeoUrl(product.slug!), "Share this page (SEO-friendly link)"); }}
+                className="inline-flex h-8 w-8 items-center justify-center rounded-md border border-[hsl(220_45%_20%)]/15 text-[hsl(220_60%_12%)]/82 hover:text-[hsl(220_60%_12%)] hover:border-[hsl(220_45%_20%)]/30 transition-colors"
+                aria-label="Copy SEO share link"
+                title="Copy SEO share link"
+                data-testid={`button-share-seo-${product.id}`}
+              >
+                <Share2 className="h-3.5 w-3.5" />
+              </button>
+            )}
             <Link href={productHref(product)}>
               <a className="inline-flex h-8 w-8 items-center justify-center rounded-md border border-[hsl(220_45%_20%)]/15 text-[hsl(220_60%_12%)]/82 hover:text-[hsl(220_60%_12%)] hover:border-[hsl(220_45%_20%)]/30 transition-colors" aria-label="View details">
                 <ArrowUpRight className="h-3.5 w-3.5" />
