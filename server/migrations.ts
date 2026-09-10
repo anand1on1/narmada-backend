@@ -3196,6 +3196,69 @@ export function runR28_2Migrations() {
 }
 
 // =====================================================================
+// R28 Session 3 — Auto-Publish on Notify-Delhi + 22% markup + minimal AI images.
+// Two new tables:
+//   auto_publish_log  — one row per (po_id, part_number) publish event (dedupe)
+//   part_image_cache  — cached representational images keyed by category keyword
+// Additive, idempotent, never drops/renames existing objects. Runs after R28.2.
+// Verbatim user requirements enforced by callers:
+//   * publish happens when notify-Delhi is triggered (rates locked)
+//   * quantity is always 10 for each pcs (no relation with Patna receiving)
+//   * 22% markup on purchase price
+//   * representational image + "image is for representation purpose only" disclaimer
+//   * use Perplexity API for minimal image gen (do not burn credits)
+// =====================================================================
+export function runR28_3Migrations() {
+  console.log("[migrations] R28.3: start");
+  const run = (label: string, sqlStr: string) => {
+    try { sqlite.exec(sqlStr); console.log(`[migrations] R28.3: ${label} ok`); }
+    catch (e: any) { console.log(`[migrations] R28.3: ${label} skip (${e?.message || e})`); }
+  };
+
+  run("auto_publish_log table", `
+    CREATE TABLE IF NOT EXISTS auto_publish_log (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      po_id INTEGER NOT NULL,
+      po_line_id INTEGER,
+      part_number TEXT NOT NULL,
+      description TEXT NOT NULL,
+      purchase_price REAL NOT NULL,
+      published_price REAL NOT NULL,
+      markup_pct REAL NOT NULL DEFAULT 22.0,
+      quantity INTEGER NOT NULL DEFAULT 10,
+      product_id INTEGER,
+      image_url TEXT,
+      image_source TEXT,
+      status TEXT NOT NULL,
+      error_message TEXT,
+      triggered_by TEXT NOT NULL,
+      triggered_by_user_id INTEGER,
+      created_at INTEGER NOT NULL,
+      UNIQUE(po_id, part_number)
+    );
+  `);
+  run("idx_autopub_po", `CREATE INDEX IF NOT EXISTS idx_autopub_po ON auto_publish_log(po_id);`);
+  run("idx_autopub_created", `CREATE INDEX IF NOT EXISTS idx_autopub_created ON auto_publish_log(created_at);`);
+  run("idx_autopub_status", `CREATE INDEX IF NOT EXISTS idx_autopub_status ON auto_publish_log(status);`);
+
+  run("part_image_cache table", `
+    CREATE TABLE IF NOT EXISTS part_image_cache (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      cache_key TEXT NOT NULL UNIQUE,
+      image_url TEXT NOT NULL,
+      image_source TEXT NOT NULL,
+      prompt_used TEXT,
+      generated_at INTEGER NOT NULL,
+      usage_count INTEGER NOT NULL DEFAULT 0,
+      last_used_at INTEGER
+    );
+  `);
+  run("idx_partimg_key", `CREATE INDEX IF NOT EXISTS idx_partimg_key ON part_image_cache(cache_key);`);
+
+  console.log("[migrations] R28.3: complete");
+}
+
+// =====================================================================
 // PartSetu AI v1 — Spare Parts Intelligence Chatbot (additive, idempotent)
 // 7 new tables. Per-statement try/catch with [migrations] PartSetu: markers.
 // Nothing here drops/renames existing tables.

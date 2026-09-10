@@ -21,6 +21,16 @@ import {
 } from "./email";
 // R28 Session 2 — SurePass RC-V2 lookup module (used by public Parts Finder endpoint).
 import { lookupRegistration as surepassLookupRegistration, normalizeRegNumber } from "./surepass";
+// R28 Session 3 — Auto-Publish on Notify-Delhi + 22% markup + minimal AI images.
+// Feature-flagged behind AUTO_PUBLISH_ENABLED (default false) so notify-Delhi is
+// unchanged until the user opts in.
+import { autoPublishFromPO, listAutoPublishLog } from "./auto-publish";
+import {
+  listCachedImages as listPartImageCache,
+  deleteCachedImage as deletePartImageCache,
+  replaceCachedImage as replacePartImageCache,
+  backfillPlaceholders as backfillAutoPublishPlaceholders,
+} from "./part-image-gen";
 import { rawSqlite } from "./storage";
 import * as XLSX from "xlsx";
 import { recordMarketingWhatsAppReceipt } from "./marketing/webhook-hook";
@@ -6179,14 +6189,108 @@ function registerR8Routes(
         console.error(`[R26.2g] notify-delhi rate sync failed for PO ${id}:`, e?.message || e);
       }
       await v2.updatePurchaseOrderV2(id, { notifiedDelhiAt: Date.now(), status: po.status === "draft" ? "open" : po.status } as any);
-      // TODO(session-3): Session 3 will fire autoPublishFromPO() from here.
-      // Per user directive: "the product should be ready to order when notify
-      // delhi is triggered, the quantity should be 10 for each pcs. No RELATION
-      // WITH THE PATNA RECIEVING". Session 2 does NOT implement the publish
-      // itself — see SESSION-2-AUDIT-REPORT.md §"Session 3 hooks".
+      // R28 Session 3: fire-and-forget auto-publish on notify-Delhi.
+      // Verbatim user rules preserved:
+      //   "when a client purchase order is processed and rates are locked and
+      //    delhi is notified at that time the publishing should happen"
+      //   "the product should be ready to order when notify delhi is triggered,
+      //    the quantity should br 10 for each pcs. No RELATION WITH THE PATNA
+      //    RECIEVING"
+      //   "every item successfully procured by the team is automatically
+      //    published with 22% markup on purchase price"
+      // Gated by AUTO_PUBLISH_ENABLED (default false — short-circuits inside the
+      // module). No `await` — response to Delhi must not block on publish.
+      autoPublishFromPO(id, (req as any).session?.user?.id, "notify-delhi").catch((err: any) => {
+        console.error("[auto-publish] failed for PO", id, err);
+      });
       res.json({ ok: true, totalCount: po.items.length, assignedCount: confirmed.length, awaitingCount: po.items.length - confirmed.length });
     } catch (e: any) {
       res.status(500).json({ error: e.message });
+    }
+  });
+
+  // =====================================================================
+  // R28 Session 3 — Auto-Publish admin endpoints.
+  //   GET  /api/admin/auto-publish/log             — audit trail
+  //   POST /api/admin/auto-publish/manual/:poId    — re-run for a specific PO
+  //   GET  /api/admin/part-images                  — cached representational images
+  //   POST /api/admin/part-images/:id/replace      — upload manual override (multipart)
+  //   DELETE /api/admin/part-images/:id            — evict; next request regenerates
+  //   POST /api/admin/part-images/backfill         — regenerate top-N placeholders
+  // All require admin auth. Idempotency rules from autoPublishFromPO() apply
+  // to the manual endpoint too.
+  // =====================================================================
+  app.get("/api/admin/auto-publish/log", requireAuth, async (req, res) => {
+    try {
+      const limit = Number(req.query.limit ?? 100);
+      const offset = Number(req.query.offset ?? 0);
+      const poId = req.query.po_id ? Number(req.query.po_id) : undefined;
+      const status = req.query.status ? String(req.query.status) : undefined;
+      const rows = listAutoPublishLog({ limit, offset, poId, status });
+      res.json({ ok: true, rows, count: rows.length });
+    } catch (e: any) {
+      res.status(500).json({ error: e?.message || String(e) });
+    }
+  });
+
+  app.post("/api/admin/auto-publish/manual/:poId", requireAuth, async (req: any, res) => {
+    try {
+      const poId = parseInt(String(req.params.poId), 10);
+      if (!Number.isFinite(poId)) return res.status(400).json({ error: "invalid_po_id" });
+      const result = await autoPublishFromPO(poId, req.session?.user?.id, "manual-admin");
+      res.json(result);
+    } catch (e: any) {
+      res.status(500).json({ error: e?.message || String(e) });
+    }
+  });
+
+  app.get("/api/admin/part-images", requireAuth, async (req, res) => {
+    try {
+      const limit = Number(req.query.limit ?? 100);
+      const offset = Number(req.query.offset ?? 0);
+      const rows = listPartImageCache({ limit, offset });
+      res.json({ ok: true, rows, count: rows.length });
+    } catch (e: any) {
+      res.status(500).json({ error: e?.message || String(e) });
+    }
+  });
+
+  // Multipart upload of a better manual image for a cached key. Field: "image".
+  // memoryStorage so we can push straight to R2 without a temp file.
+  const partImageUpload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 10 * 1024 * 1024 } });
+  app.post("/api/admin/part-images/:id/replace", requireAuth, partImageUpload.single("image"), async (req: any, res) => {
+    try {
+      const id = parseInt(String(req.params.id), 10);
+      if (!Number.isFinite(id)) return res.status(400).json({ error: "invalid_id" });
+      const file = req.file;
+      if (!file || !file.buffer) return res.status(400).json({ error: "image file required (field name: image)" });
+      const out = await replacePartImageCache(id, new Uint8Array(file.buffer));
+      if (!out.ok) return res.status(500).json({ error: out.error || "replace_failed" });
+      res.json({ ok: true, url: out.url });
+    } catch (e: any) {
+      res.status(500).json({ error: e?.message || String(e) });
+    }
+  });
+
+  app.delete("/api/admin/part-images/:id", requireAuth, async (req, res) => {
+    try {
+      const id = parseInt(String(req.params.id), 10);
+      if (!Number.isFinite(id)) return res.status(400).json({ error: "invalid_id" });
+      const ok = deletePartImageCache(id);
+      if (!ok) return res.status(404).json({ error: "not_found" });
+      res.json({ ok: true });
+    } catch (e: any) {
+      res.status(500).json({ error: e?.message || String(e) });
+    }
+  });
+
+  app.post("/api/admin/part-images/backfill", requireAuth, async (req, res) => {
+    try {
+      const limit = Number(req.query.limit ?? 10);
+      const results = await backfillAutoPublishPlaceholders(limit);
+      res.json({ ok: true, processed: results.length, results });
+    } catch (e: any) {
+      res.status(500).json({ error: e?.message || String(e) });
     }
   });
 
