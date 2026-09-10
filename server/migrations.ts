@@ -3342,6 +3342,67 @@ export function runR28_5Migrations() {
 }
 
 // =====================================================================
+// R28.6 — Get-Quotation flow (OTP + RFQ audit tables).
+//
+// Two additive, idempotent tables:
+//   * quote_otp     — email-OTP challenges for the public /get-quote wizard.
+//                     One row per send; hashed code, TTL, attempt counter.
+//   * quote_request — final RFQ submissions from the /get-quote wizard.
+//                     Full contact block + serialized cart JSON + reference #.
+//
+// Never mutates any existing table — safe to run whether the feature is
+// enabled or not. The server/quote-rfq.ts module owns all reads/writes.
+// =====================================================================
+export function runR28_6Migrations() {
+  console.log("[migrations] R28.6: start");
+  const run = (label: string, sqlStr: string) => {
+    try { sqlite.exec(sqlStr); console.log(`[migrations] R28.6: ${label} ok`); }
+    catch (e: any) { console.log(`[migrations] R28.6: ${label} skip (${e?.message || e})`); }
+  };
+
+  run("quote_otp table", `
+    CREATE TABLE IF NOT EXISTS quote_otp (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      email TEXT NOT NULL,
+      code_hash TEXT NOT NULL,
+      attempts INTEGER DEFAULT 0,
+      verified INTEGER DEFAULT 0,
+      expires_at INTEGER NOT NULL,
+      ip_hash TEXT,
+      created_at INTEGER NOT NULL
+    );
+  `);
+  run("idx_qotp_email",   `CREATE INDEX IF NOT EXISTS idx_qotp_email   ON quote_otp(email);`);
+  run("idx_qotp_expires", `CREATE INDEX IF NOT EXISTS idx_qotp_expires ON quote_otp(expires_at);`);
+
+  run("quote_request table", `
+    CREATE TABLE IF NOT EXISTS quote_request (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      reference TEXT NOT NULL UNIQUE,
+      company_name TEXT NOT NULL,
+      contact_name TEXT NOT NULL,
+      email TEXT NOT NULL,
+      country TEXT NOT NULL,
+      currency TEXT NOT NULL,
+      country_code TEXT NOT NULL,
+      mobile TEXT NOT NULL,
+      cart_json TEXT NOT NULL,
+      timeframe TEXT NOT NULL,
+      delivery_location TEXT,
+      notes TEXT,
+      status TEXT DEFAULT 'new',
+      ip_hash TEXT,
+      user_agent TEXT,
+      created_at INTEGER NOT NULL
+    );
+  `);
+  run("idx_qreq_email",   `CREATE INDEX IF NOT EXISTS idx_qreq_email   ON quote_request(email);`);
+  run("idx_qreq_created", `CREATE INDEX IF NOT EXISTS idx_qreq_created ON quote_request(created_at);`);
+
+  console.log("[migrations] R28.6: complete");
+}
+
+// =====================================================================
 // PartSetu AI v1 — Spare Parts Intelligence Chatbot (additive, idempotent)
 // 7 new tables. Per-statement try/catch with [migrations] PartSetu: markers.
 // Nothing here drops/renames existing tables.

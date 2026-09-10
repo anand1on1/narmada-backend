@@ -15,9 +15,8 @@ import { useShopAuth } from "@/lib/shop-auth";
 const NAV = [
   { to: "/", label: "Home" },
   { to: "/products", label: "Catalog" },
-  // R28 Session 2 — Parts Finder + Chassis catalog (public).
-  { to: "/parts-finder", label: "Parts Finder" },
-  { to: "/chassis", label: "Chassis" },
+  // R28.2 — unified Find Parts (was /parts-finder + /chassis, both still work via redirect).
+  { to: "/find-parts", label: "Find Parts" },
   { to: "/price-checker", label: "Price Checker" },
   { to: "/blog", label: "Insights" },
   { to: "/about", label: "About" },
@@ -46,6 +45,8 @@ export function SiteLayout({ children }: { children: React.ReactNode }) {
         </div>
         <div className="flex items-center gap-5">
           <Link href="/track-consignment"><a className="inline-flex items-center gap-1.5 text-[hsl(220_60%_12%)]/85 hover:text-[hsl(212_95%_65%)] transition-colors" data-testid="link-track-top"><MapPinned className="h-3 w-3" /> Track Consignment</a></Link>
+          {/* R28.2 — Get Quotation link (utility bar), matches Track Consignment style. */}
+          <Link href="/get-quote"><a className="inline-flex items-center gap-1.5 text-[hsl(220_60%_12%)]/85 hover:text-[hsl(212_95%_65%)] transition-colors" data-testid="link-getquote-top"><MessageCircle className="h-3 w-3" /> Get Quotation</a></Link>
           <span className="inline-flex items-center gap-1.5"><span className="signal-dot" /> Live · Serving 60+ countries</span>
           <a href={whatsappLink("7909083806", "Hello, I'm interested in spare parts.")} target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1.5 text-[hsl(220_60%_12%)]/85 hover:text-[hsl(212_95%_65%)] transition-colors" data-testid="link-whatsapp-top">
             <MessageCircle className="h-3 w-3" /> WhatsApp +91 79090 83806
@@ -55,13 +56,16 @@ export function SiteLayout({ children }: { children: React.ReactNode }) {
 
       {/* Main nav */}
       <header className={`sticky top-0 z-40 transition-all border-b ${scrolled ? "bg-[hsl(210_30%_96%)]/92 backdrop-blur-xl border-[hsl(220_45%_20%)]/10 shadow-sm" : "bg-[hsl(210_30%_96%)]/75 backdrop-blur-md border-[hsl(220_45%_20%)]/8"}`}>
-        <div className="max-w-7xl mx-auto px-4 sm:px-6 h-[68px] flex items-center justify-between gap-3">
+        <div className="max-w-7xl mx-auto px-4 sm:px-6 h-[68px] flex items-center justify-between gap-4">
           {/* R27.5 #2 — logo constrained with shrink-0 + max-width so its wordmark can
               no longer bleed into / overlap the nav. Nav lives in its own min-w-0
-              flex container and collapses to a hamburger below xl (1280px). */}
-          <Link href="/"><a className="flex items-center shrink-0 max-w-[230px] overflow-hidden" data-testid="link-home-logo"><Logo /></a></Link>
+              flex container and collapses to a hamburger below xl (1280px).
+              R28.2 — tightened logo cap and item spacing so the compressed nav
+              (Home/Catalog/Brands/Find Parts/Price/Insights/About/Work/Contact)
+              stops overlapping the right-hand actions between 1280–1440px. */}
+          <Link href="/"><a className="flex items-center shrink-0 max-w-[210px] overflow-hidden" data-testid="link-home-logo"><Logo /></a></Link>
 
-          <nav className="hidden xl:flex items-center gap-0.5 min-w-0 flex-1 justify-center">
+          <nav className="hidden xl:flex items-center gap-x-0.5 min-w-0 flex-1 justify-center">
             {NAV.slice(0, 2).map((n) => <NavLink key={n.to} {...n} />)}
             <DropdownMenu>
               <DropdownMenuTrigger className="px-2.5 py-2 text-[13px] font-medium rounded-md text-[hsl(220_60%_12%)]/82 hover:text-[hsl(220_60%_12%)] hover:bg-[hsl(220_45%_20%)]/5 inline-flex items-center gap-1 transition-colors whitespace-nowrap" data-testid="menu-brands">
@@ -103,8 +107,9 @@ export function SiteLayout({ children }: { children: React.ReactNode }) {
 
           <div className="hidden md:flex items-center gap-2 shrink-0">
             <HeaderActions />
+            {/* R28.2 — header CTA now points at the 5-step /get-quote wizard. */}
             <Button asChild size="sm" className="hidden xl:inline-flex bg-[hsl(212_95%_55%)] hover:bg-[hsl(212_95%_50%)] text-[hsl(220_60%_12%)] font-semibold rounded-md shadow-none" data-testid="btn-quote">
-              <Link href="/contact">Request a Quote</Link>
+              <Link href="/get-quote">Request a Quote</Link>
             </Button>
           </div>
 
@@ -150,8 +155,9 @@ export function SiteLayout({ children }: { children: React.ReactNode }) {
                     <Link href="/portal/register"><a onClick={() => setOpen(false)}>Register</a></Link>
                   </Button>
                 </div>
+                {/* R28.2 — mobile Request-a-Quote now points to the wizard. */}
                 <Button asChild className="mt-3 bg-[hsl(212_95%_55%)] text-[hsl(220_60%_12%)] hover:bg-[hsl(212_95%_50%)] font-semibold" data-testid="btn-mobile-quote">
-                  <Link href="/contact"><a onClick={() => setOpen(false)}>Request a Quote</a></Link>
+                  <Link href="/get-quote"><a onClick={() => setOpen(false)}>Get Quotation</a></Link>
                 </Button>
               </div>
             </SheetContent>
