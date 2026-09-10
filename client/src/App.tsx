@@ -81,6 +81,10 @@ function SeoLandingResolver() {
   return <SeoLandingPage __brand={m[1]} __location={m[2]} />;
 }
 
+// R28.1 — Team Upload page (public passcode-gated). Intentionally NOT linked
+// from nav; access via direct URL only. Piyush shares the link + passcode.
+import TeamUpload from "@/pages/TeamUpload";
+
 import AdminLogin from "@/pages/admin/AdminLogin";
 import AdminDashboard from "@/pages/admin/AdminDashboard";
 import AdminProducts from "@/pages/admin/AdminProducts";
@@ -297,6 +301,15 @@ function AppRouter() {
   // Per-route boundary: a render crash in one page shows a recoverable screen
   // (Go back / Reload) instead of a blank white page. Keyed by location so a
   // crashed page clears its error state once the user navigates elsewhere.
+  // R28.1 — Team Upload: bare layout (no public nav/footer, no admin auth).
+  // Handled BEFORE admin so /team-upload never renders the admin shell.
+  if (location.startsWith("/team-upload")) {
+    return (
+      <ErrorBoundary key={location} label="team-upload">
+        <TeamUpload />
+      </ErrorBoundary>
+    );
+  }
   // Admin routes get a bare layout (no public nav/footer)
   if (location.startsWith("/admin")) {
     return (

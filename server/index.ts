@@ -229,7 +229,7 @@ app.use((req, res, next) => {
     console.log("[boot] step: post-R27.29 sales-digest-log table");
     runR27_30Migrations();
     console.log("[boot] step: post-R27.30 admin-otp tables");
-    const { runR27_32Migrations, runR27_33Migrations, runR27_33aMigrations, runR27_34aMigrations, runR27_34bMigrations, runR27_35Migrations, runR27_36Migrations, runR27_36aMigrations, runR27_36bMigrations, runR27_36aDataMigration, runR28_1Migrations, runR28_2Migrations, runR28_3Migrations, runR28_4Migrations } = await import("./migrations");
+    const { runR27_32Migrations, runR27_33Migrations, runR27_33aMigrations, runR27_34aMigrations, runR27_34bMigrations, runR27_35Migrations, runR27_36Migrations, runR27_36aMigrations, runR27_36bMigrations, runR27_36aDataMigration, runR28_1Migrations, runR28_2Migrations, runR28_3Migrations, runR28_4Migrations, runR28_5Migrations } = await import("./migrations");
     runR27_32Migrations();
     console.log("[boot] step: post-R27.32 payment tables");
     runR27_33Migrations();
@@ -264,6 +264,12 @@ app.use((req, res, next) => {
     // module. Safe to run whether SEO_PAGES_ENABLED is true or false.
     runR28_4Migrations();
     console.log("[boot] step: post-R28.4 seo_page_views table");
+    // R28.1 — team_upload_log (additive, idempotent). Backs the passcode-gated
+    // /api/team-upload/chassis endpoint. Safe to run whether TEAM_UPLOAD_ENABLED
+    // is true or false; the table exists so audit rows can be written the
+    // moment the flag is flipped on.
+    runR28_5Migrations();
+    console.log("[boot] step: post-R28.5 team_upload_log table");
     // R27.32 — Process Payment authorizes admin/procurement/finance. finance was not
     // in the admin-role whitelist before this release; it is added in VALID_ROLES.
     try {
