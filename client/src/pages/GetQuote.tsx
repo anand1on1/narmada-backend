@@ -1,24 +1,37 @@
-// R28.2 — Get-Quotation 5-step wizard (public).
+// R28.3 — Get-Quotation 5-step wizard (public). Full Step-3 redesign per user
+// feedback ("shitiest ui" screenshot review). Layout for Step 3 is now:
 //
-//   Step 1  contact form  (company, contact name, email, country, currency, phone)
-//   Step 2  OTP entry     (6 digits, resend, change email)
-//   Step 3  parts + cart  (search /api/parts/search → add to local wizard cart)
-//   Step 4  order details (timeframe radio, delivery, notes)
-//   Step 5  success       (reference number, WhatsApp deep link)
+//   ┌──────────────────────────────────────────────────────────────────────┐
+//   │ Wizard stepper (5 pills)                                             │
+//   │ Step title "Add parts to your quote"                                 │
+//   ├────────────────────────┬─────────────────────────────────────────────┤
+//   │ LEFT 30% sticky cart   │ RIGHT 70% FindPartsEmbed (4 tabs)           │
+//   │  header + qty +/-      │  Registration | Chassis | Model | Part #    │
+//   │  empty state           │  results grid + Add-to-quote per card        │
+//   │  trash icon per row    │  collapsible "Don't see your part?" below   │
+//   ├────────────────────────┴─────────────────────────────────────────────┤
+//   │  [Back]                                                    [Continue]│
+//   └──────────────────────────────────────────────────────────────────────┘
 //
-// State is kept in React (component-local) only — no localStorage — per user
-// spec. The verification token from step 2 is required for step 5's submit.
-// Step is driven by internal state; on step 5 we blow away all wizard state
-// via the "Start a new quote" button.
+// Mobile: single column. The cart becomes a bottom Sheet drawer; a floating
+// "🛒 View cart (N)" button on the bottom-right opens it. Continue is inside
+// the drawer footer AND below the finder.
+//
+// Steps 1, 2, 4, 5 are visually upgraded (card shadows, spacing, larger type,
+// bigger stepper pills, gradient background) but their flow logic is unchanged.
 import { useMemo, useState } from "react";
 import { Link } from "wouter";
 import { apiRequest } from "@/lib/queryClient";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { Badge } from "@/components/ui/badge";
+import { Sheet, SheetContent, SheetHeader, SheetTitle } from "@/components/ui/sheet";
+import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
 import { toast } from "@/hooks/use-toast";
 import { COUNTRIES, CURRENCIES, DIAL_CODES, findCountry } from "@/data/countries";
 import { formatINR } from "@/lib/r28-utils";
-import { Search, Plus, Minus, Trash2, MessageCircle, Loader2 } from "lucide-react";
+import { Plus, Minus, Trash2, MessageCircle, Loader2, ShoppingCart, ChevronDown, ChevronRight, ArrowRight, Check, ImageOff, ArrowLeft } from "lucide-react";
+import { FindPartsEmbed, AddablePart } from "@/components/FindPartsEmbed";
 
 const WHATSAPP = "917909083806";
 
@@ -31,10 +44,13 @@ interface Contact {
   country_code: string; // dial code (+91)
   mobile: string;
 }
-interface WizardCartItem {
+export interface WizardCartItem {
   part_id?: number;
   part_number: string;
+  oem_number?: string | null;
   description: string;
+  image_url?: string | null;
+  image_source?: string | null;
   chassis_slug?: string | null;
   chassis_display_name?: string | null;
   sell_price?: number | null;
@@ -73,12 +89,14 @@ export default function GetQuote() {
   };
 
   return (
-    <div className="min-h-screen bg-gradient-to-b from-indigo-50 via-slate-50 to-white">
-      <div className="max-w-4xl mx-auto px-4 sm:px-6 py-8 sm:py-12">
-        <div className="text-center mb-6">
-          <div className="inline-block px-3 py-1 rounded-full bg-indigo-100 text-indigo-700 text-xs font-mono uppercase mb-3">R28.2 · Get Quotation</div>
-          <h1 className="text-3xl sm:text-4xl font-bold text-slate-900">Request a formal quotation</h1>
-          <p className="text-slate-600 mt-2 text-sm sm:text-base">Verified email · secure form · sales team responds within 24 hours.</p>
+    <div className="min-h-screen bg-gradient-to-b from-slate-50 to-white">
+      <div className="max-w-6xl mx-auto py-8 md:py-12 px-4 sm:px-6">
+        <div className="text-center mb-8">
+          <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-indigo-100 text-indigo-700 text-xs font-mono uppercase mb-3">
+            <span className="h-1.5 w-1.5 rounded-full bg-indigo-600 animate-pulse" /> Formal Quotation
+          </div>
+          <h1 className="text-2xl md:text-3xl font-bold text-slate-900">Request a formal quotation</h1>
+          <p className="text-slate-600 mt-2 text-base">Verified email · secure form · sales team responds within 24 hours.</p>
         </div>
 
         <StepIndicator current={step} />
@@ -97,7 +115,6 @@ export default function GetQuote() {
             onCart={setCart}
             onBack={() => setStep(2)}
             onNext={() => setStep(4)}
-            currency={contact.currency}
           />
         )}
         {step === 4 && (
@@ -127,23 +144,29 @@ export default function GetQuote() {
   );
 }
 
+/* ─────────────────────────────────────────────────────────── Stepper (bigger) */
 function StepIndicator({ current }: { current: 1 | 2 | 3 | 4 | 5 }) {
-  const labels = ["Contact", "Verify email", "Parts", "Details", "Done"];
+  const labels = ["Contact", "Verify", "Parts", "Details", "Done"];
   return (
-    <ol className="flex items-center justify-center gap-1 sm:gap-2 mb-6 text-[11px] sm:text-xs font-mono" aria-label="Wizard progress">
+    <ol className="flex items-center justify-center gap-1 sm:gap-2 mb-8 flex-wrap" aria-label="Wizard progress">
       {labels.map((label, i) => {
         const idx = i + 1;
         const active = current === idx;
         const done = current > idx;
         return (
           <li key={label} className="flex items-center gap-1 sm:gap-2">
-            <span className={`inline-flex items-center justify-center h-6 w-6 rounded-full text-[11px] font-bold ${
-              done ? "bg-emerald-500 text-white"
-              : active ? "bg-indigo-600 text-white"
-              : "bg-slate-200 text-slate-500"
-            }`} data-testid={`step-dot-${idx}`}>{idx}</span>
-            <span className={`uppercase tracking-wider ${active ? "text-indigo-700" : done ? "text-emerald-700" : "text-slate-400"}`}>{label}</span>
-            {idx < labels.length && <span className="text-slate-300">·</span>}
+            <span
+              className={`inline-flex items-center justify-center h-8 min-w-[2rem] px-4 rounded-full text-xs font-bold gap-1.5 transition-colors ${
+                done ? "bg-emerald-500 text-white"
+                : active ? "bg-indigo-600 text-white shadow-md shadow-indigo-600/30"
+                : "bg-slate-200 text-slate-500"
+              }`}
+              data-testid={`step-dot-${idx}`}
+            >
+              {done ? <Check className="h-3.5 w-3.5" /> : <span>{idx}</span>}
+              <span className="uppercase tracking-wider text-[11px] hidden sm:inline">{label}</span>
+            </span>
+            {idx < labels.length && <span className="text-slate-300 hidden sm:inline">·</span>}
           </li>
         );
       })}
@@ -151,11 +174,10 @@ function StepIndicator({ current }: { current: 1 | 2 | 3 | 4 | 5 }) {
   );
 }
 
-/* -------------------------------------------------------------- Step 1 */
+/* ─────────────────────────────────────────────────────────────────── Step 1 */
 function Step1Contact({ contact, onContact, onNext }: { contact: Contact; onContact: (c: Contact) => void; onNext: () => void }) {
   const [sending, setSending] = useState(false);
 
-  // Update dial code + currency when country changes.
   const onCountryChange = (code: string) => {
     const c = findCountry(code);
     if (!c) return onContact({ ...contact, country: code });
@@ -182,7 +204,11 @@ function Step1Contact({ contact, onContact, onNext }: { contact: Contact; onCont
   };
 
   return (
-    <form onSubmit={submit} className="bg-white rounded-2xl shadow-sm border p-4 sm:p-6 space-y-4" data-testid="step-1">
+    <form onSubmit={submit} className="bg-card rounded-xl shadow-md border p-6 md:p-8 space-y-5 max-w-3xl mx-auto" data-testid="step-1">
+      <div>
+        <h2 className="text-xl md:text-2xl font-bold text-slate-900">Tell us who you are</h2>
+        <p className="text-sm text-slate-500 mt-1">We'll send a 6-digit code to your email to verify.</p>
+      </div>
       <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
         <Field label="Company name">
           <Input value={contact.company_name} onChange={(e) => onContact({ ...contact, company_name: e.target.value })} data-testid="input-company" required />
@@ -218,6 +244,7 @@ function Step1Contact({ contact, onContact, onNext }: { contact: Contact; onCont
         <Button type="submit" size="lg" disabled={!canProceed || sending} data-testid="btn-send-otp">
           {sending && <Loader2 className="w-4 h-4 mr-2 animate-spin" />}
           Send verification code
+          <ArrowRight className="w-4 h-4 ml-2" />
         </Button>
       </div>
     </form>
@@ -227,13 +254,13 @@ function Step1Contact({ contact, onContact, onNext }: { contact: Contact; onCont
 function Field({ label, full, children }: { label: string; full?: boolean; children: React.ReactNode }) {
   return (
     <div className={full ? "sm:col-span-2" : ""}>
-      <label className="block text-xs uppercase text-slate-500 mb-1.5 font-mono">{label}</label>
+      <label className="block text-xs uppercase text-slate-500 mb-1.5 font-mono tracking-wider">{label}</label>
       {children}
     </div>
   );
 }
 
-/* -------------------------------------------------------------- Step 2 */
+/* ─────────────────────────────────────────────────────────────────── Step 2 */
 function Step2Otp({ email, onBack, onVerified }: { email: string; onBack: () => void; onVerified: (tok: string) => void }) {
   const [digits, setDigits] = useState<string[]>(Array(6).fill(""));
   const [verifying, setVerifying] = useState(false);
@@ -243,7 +270,6 @@ function Step2Otp({ email, onBack, onVerified }: { email: string; onBack: () => 
   const setDigit = (i: number, v: string) => {
     const d = v.replace(/\D/g, "").slice(-1);
     const next = [...digits]; next[i] = d; setDigits(next);
-    // auto-focus next
     if (d) {
       const nextEl = document.getElementById(`otp-${i + 1}`);
       if (nextEl) (nextEl as HTMLInputElement).focus();
@@ -285,11 +311,11 @@ function Step2Otp({ email, onBack, onVerified }: { email: string; onBack: () => 
   };
 
   return (
-    <form onSubmit={verify} className="bg-white rounded-2xl shadow-sm border p-6 sm:p-8 text-center space-y-5" data-testid="step-2">
+    <form onSubmit={verify} className="bg-card rounded-xl shadow-md border p-6 md:p-8 text-center space-y-6 max-w-xl mx-auto" data-testid="step-2">
       <div>
-        <div className="text-xs uppercase text-slate-500 font-mono mb-1">Step 2 — Verify email</div>
-        <div className="text-lg font-semibold text-slate-900">We sent a 6-digit code to</div>
-        <div className="text-base text-indigo-700 font-mono">{email}</div>
+        <div className="text-xs uppercase text-slate-500 font-mono tracking-wider mb-2">Step 2 — Verify email</div>
+        <h2 className="text-xl md:text-2xl font-bold text-slate-900">We sent a 6-digit code to</h2>
+        <div className="text-base text-indigo-700 font-mono mt-1">{email}</div>
       </div>
       <div className="flex justify-center gap-2">
         {digits.map((d, i) => (
@@ -318,152 +344,287 @@ function Step2Otp({ email, onBack, onVerified }: { email: string; onBack: () => 
   );
 }
 
-/* -------------------------------------------------------------- Step 3 */
-function Step3Parts({ cart, onCart, onBack, onNext, currency }: { cart: WizardCartItem[]; onCart: (c: WizardCartItem[]) => void; onBack: () => void; onNext: () => void; currency: string }) {
-  const [q, setQ] = useState("");
-  const [results, setResults] = useState<any[]>([]);
-  const [loading, setLoading] = useState(false);
-  const [manualPn, setManualPn] = useState("");
-  const [manualDesc, setManualDesc] = useState("");
+/* ─────────────────────────────────────────────────────────────────── Step 3 */
+function Step3Parts({ cart, onCart, onBack, onNext }: { cart: WizardCartItem[]; onCart: (c: WizardCartItem[]) => void; onBack: () => void; onNext: () => void }) {
+  const [mobileCartOpen, setMobileCartOpen] = useState(false);
 
-  const search = async (e?: React.FormEvent) => {
-    e?.preventDefault();
-    const s = q.trim();
-    if (s.length < 2) return;
-    setLoading(true);
-    try {
-      const r = await apiRequest("GET", `/api/parts/search?q=${encodeURIComponent(s)}&limit=25`);
-      const data = await r.json();
-      setResults(data.results || []);
-    } catch (e: any) {
-      toast({ title: "Search failed", description: e?.message || String(e), variant: "destructive" });
-    } finally { setLoading(false); }
-  };
+  const addedPartIds = useMemo(() => {
+    const s = new Set<number>();
+    cart.forEach((c) => { if (c.part_id != null) s.add(c.part_id); });
+    return s;
+  }, [cart]);
 
-  const add = (row: any) => {
-    const existing = cart.find((c) => c.part_number === row.part_number && c.chassis_slug === row.fits_chassis?.slug);
+  const handleAdd = (p: AddablePart) => {
+    // Match on part_number + chassis_slug so a single part_number can appear
+    // twice if it fits two different chassis models.
+    const key = (c: WizardCartItem) => `${c.part_number}::${c.chassis_slug || ""}`;
+    const incomingKey = `${p.part_number}::${p.fits_chassis?.slug || ""}`;
+    const existing = cart.find((c) => key(c) === incomingKey);
     if (existing) {
       onCart(cart.map((c) => c === existing ? { ...c, qty: c.qty + 1 } : c));
     } else {
       onCart([...cart, {
-        part_id: row.part_id,
-        part_number: row.part_number,
-        description: row.description || "",
-        chassis_slug: row.fits_chassis?.slug || null,
-        chassis_display_name: row.fits_chassis?.display_name || null,
-        sell_price: row.sell_price,
+        part_id: p.part_id,
+        part_number: p.part_number,
+        oem_number: p.oem_number || null,
+        description: p.description || "",
+        image_url: p.image_url || null,
+        image_source: p.image_source || null,
+        chassis_slug: p.fits_chassis?.slug || null,
+        chassis_display_name: p.fits_chassis?.display_name || null,
+        sell_price: p.sell_price ?? null,
         qty: 1,
       }]);
     }
+    toast({ title: "Added to your quote", description: `${p.part_number}${p.description ? " — " + p.description : ""}` });
   };
 
-  const addManual = () => {
-    const pn = manualPn.trim(); const desc = manualDesc.trim();
-    if (!pn) return;
-    onCart([...cart, { part_number: pn, description: desc, qty: 1, sell_price: null, chassis_slug: null, chassis_display_name: null }]);
-    setManualPn(""); setManualDesc("");
+  const addManual = (pn: string, desc: string) => {
+    onCart([...cart, {
+      part_number: pn,
+      description: desc,
+      image_source: "manual",
+      qty: 1,
+      sell_price: null,
+      chassis_slug: null,
+      chassis_display_name: null,
+    }]);
   };
   const setQty = (i: number, qty: number) => onCart(cart.map((c, idx) => idx === i ? { ...c, qty: Math.max(1, qty) } : c));
   const remove = (i: number) => onCart(cart.filter((_, idx) => idx !== i));
 
-  const subtotal = cart.reduce((s, c) => s + (Number(c.sell_price) || 0) * c.qty, 0);
+  const totalItems = cart.reduce((s, c) => s + c.qty, 0);
 
   return (
-    <div className="grid grid-cols-1 lg:grid-cols-[2fr_1fr] gap-4" data-testid="step-3">
-      {/* Search panel */}
-      <div className="bg-white rounded-2xl shadow-sm border p-4 sm:p-6">
-        <form onSubmit={search} className="mb-4">
-          <label className="block text-xs uppercase text-slate-500 mb-2 font-mono">Search parts to add</label>
-          <div className="flex gap-2">
-            <Input value={q} onChange={(e) => setQ(e.target.value)} placeholder="Part number, OEM or description" className="flex-1 h-11 font-mono" data-testid="input-part-search" />
-            <Button type="submit" className="h-11" disabled={loading || q.trim().length < 2} data-testid="btn-part-search">
-              <Search className="w-4 h-4 mr-2" /> {loading ? "…" : "Search"}
+    <div data-testid="step-3">
+      <div className="mb-6 text-center">
+        <h2 className="text-2xl md:text-3xl font-bold text-slate-900">Add parts to your quote</h2>
+        <p className="text-slate-600 mt-2 text-base">Use any of the four tabs — Registration, Chassis Number, Model, or Part Number — to find parts, then add them to your quote.</p>
+      </div>
+
+      {/* ── 2-column layout: LEFT 30% cart, RIGHT 70% finder */}
+      <div className="grid grid-cols-1 md:grid-cols-[minmax(0,30%)_minmax(0,70%)] gap-6">
+        {/* LEFT — sticky cart (hidden on mobile; a floating button + Sheet handles mobile) */}
+        <aside className="hidden md:block">
+          <div className="sticky top-24">
+            <CartCard cart={cart} onSetQty={setQty} onRemove={remove} />
+          </div>
+        </aside>
+
+        {/* RIGHT — Find Parts + manual-entry collapsible */}
+        <div className="space-y-6 min-w-0">
+          <FindPartsEmbed
+            initialTab="reg"
+            isEmbeddedWizard
+            onAddToCart={handleAdd}
+            addedPartIds={addedPartIds}
+          />
+          <ManualEntry onAdd={addManual} />
+        </div>
+      </div>
+
+      {/* ── Bottom action row (full width, below the 2-col grid) */}
+      <div className="mt-8 pt-6 border-t border-slate-200 flex flex-col-reverse sm:flex-row items-stretch sm:items-center justify-between gap-3">
+        <Button variant="outline" size="lg" onClick={onBack} data-testid="btn-back-2">
+          <ArrowLeft className="w-4 h-4 mr-2" /> Back
+        </Button>
+        <Button
+          size="lg"
+          onClick={onNext}
+          disabled={cart.length === 0}
+          className="min-w-[200px]"
+          data-testid="btn-next-4"
+        >
+          Continue <ArrowRight className="w-4 h-4 ml-2" />
+        </Button>
+      </div>
+
+      {/* ── Mobile: floating "View cart (N)" button + Sheet drawer */}
+      <button
+        type="button"
+        onClick={() => setMobileCartOpen(true)}
+        className="md:hidden fixed bottom-24 right-5 z-40 inline-flex items-center gap-2 rounded-full bg-indigo-600 text-white px-5 py-3 font-semibold text-sm shadow-lg shadow-indigo-600/40 hover:bg-indigo-700 transition-all"
+        data-testid="btn-mobile-cart"
+        aria-label={`View cart with ${totalItems} items`}
+      >
+        <ShoppingCart className="h-4 w-4" />
+        View cart ({totalItems})
+      </button>
+      <Sheet open={mobileCartOpen} onOpenChange={setMobileCartOpen}>
+        <SheetContent side="bottom" className="max-h-[85vh] overflow-hidden flex flex-col p-0">
+          <SheetHeader className="p-4 border-b">
+            <SheetTitle>Your Quote ({totalItems} item{totalItems === 1 ? "" : "s"})</SheetTitle>
+          </SheetHeader>
+          <div className="flex-1 overflow-y-auto p-4">
+            <CartCard cart={cart} onSetQty={setQty} onRemove={remove} embedded />
+          </div>
+          <div className="border-t p-4 grid grid-cols-2 gap-3">
+            <Button variant="outline" onClick={() => setMobileCartOpen(false)} data-testid="btn-mobile-cart-close">Close</Button>
+            <Button
+              onClick={() => { setMobileCartOpen(false); onNext(); }}
+              disabled={cart.length === 0}
+              data-testid="btn-mobile-cart-continue"
+            >
+              Continue <ArrowRight className="w-4 h-4 ml-2" />
             </Button>
           </div>
-        </form>
-
-        <div className="space-y-2 max-h-[480px] overflow-y-auto">
-          {results.map((row) => (
-            <div key={row.part_id} className="border rounded-lg p-3 flex items-center gap-3 hover:border-indigo-300 transition-colors">
-              <div className="flex-1 min-w-0">
-                <div className="font-mono text-sm font-semibold text-slate-900 truncate">{row.part_number}</div>
-                <div className="text-xs text-slate-600 truncate">{row.description}</div>
-                {row.fits_chassis && <div className="text-[10px] text-indigo-600 font-mono uppercase mt-0.5">fits {row.fits_chassis.display_name}</div>}
-              </div>
-              {row.sell_price != null && row.sell_price > 0 && (
-                <div className="text-sm text-slate-900 font-semibold whitespace-nowrap">{formatINR(row.sell_price)}</div>
-              )}
-              <Button size="sm" onClick={() => add(row)} data-testid={`btn-add-${row.part_id}`}>
-                <Plus className="w-4 h-4" />
-              </Button>
-            </div>
-          ))}
-          {!loading && q.trim().length >= 2 && results.length === 0 && (
-            <div className="text-sm text-slate-500 text-center py-4">
-              No matches — add it manually below.
-            </div>
-          )}
-        </div>
-
-        <div className="mt-4 pt-4 border-t space-y-2">
-          <div className="text-xs uppercase text-slate-500 font-mono">Or add a part manually</div>
-          <div className="flex flex-col sm:flex-row gap-2">
-            <Input value={manualPn} onChange={(e) => setManualPn(e.target.value)} placeholder="Part number" className="font-mono" data-testid="input-manual-pn" />
-            <Input value={manualDesc} onChange={(e) => setManualDesc(e.target.value)} placeholder="Description (optional)" data-testid="input-manual-desc" />
-            <Button type="button" onClick={addManual} disabled={!manualPn.trim()} data-testid="btn-manual-add">Add</Button>
-          </div>
-        </div>
-      </div>
-
-      {/* Cart panel */}
-      <div className="bg-white rounded-2xl shadow-sm border p-4 sm:p-6 self-start lg:sticky lg:top-24">
-        <div className="flex items-center justify-between mb-3">
-          <div className="font-semibold text-slate-900">Your cart</div>
-          <div className="text-xs text-slate-500">{cart.length} item{cart.length === 1 ? "" : "s"}</div>
-        </div>
-        {cart.length === 0 && <div className="text-sm text-slate-500 py-4">No parts yet.</div>}
-        <div className="space-y-2 max-h-[420px] overflow-y-auto">
-          {cart.map((c, i) => (
-            <div key={i} className="border rounded-lg p-2.5">
-              <div className="flex items-start justify-between gap-2">
-                <div className="min-w-0 flex-1">
-                  <div className="font-mono text-xs font-semibold truncate">{c.part_number}</div>
-                  {c.description && <div className="text-[11px] text-slate-600 truncate">{c.description}</div>}
-                  {c.chassis_display_name && <div className="text-[10px] text-indigo-600 font-mono truncate">{c.chassis_display_name}</div>}
-                </div>
-                <button onClick={() => remove(i)} className="text-slate-400 hover:text-red-600" data-testid={`cart-remove-${i}`}>
-                  <Trash2 className="w-3.5 h-3.5" />
-                </button>
-              </div>
-              <div className="flex items-center justify-between mt-2">
-                <div className="inline-flex items-center border rounded-md">
-                  <button onClick={() => setQty(i, c.qty - 1)} className="px-2 py-1 text-slate-600 hover:bg-slate-100" data-testid={`cart-minus-${i}`}><Minus className="w-3 h-3" /></button>
-                  <span className="px-2 text-xs font-mono w-8 text-center">{c.qty}</span>
-                  <button onClick={() => setQty(i, c.qty + 1)} className="px-2 py-1 text-slate-600 hover:bg-slate-100" data-testid={`cart-plus-${i}`}><Plus className="w-3 h-3" /></button>
-                </div>
-                {c.sell_price != null && c.sell_price > 0 && (
-                  <div className="text-xs font-semibold text-slate-900">{formatINR(c.sell_price * c.qty)}</div>
-                )}
-              </div>
-            </div>
-          ))}
-        </div>
-        {subtotal > 0 && (
-          <div className="mt-3 pt-3 border-t flex items-center justify-between text-sm">
-            <span className="text-slate-600">Est. subtotal ({currency === "INR" ? "INR" : currency})</span>
-            <span className="font-semibold text-slate-900">{formatINR(subtotal)}</span>
-          </div>
-        )}
-        <div className="mt-4 flex gap-2">
-          <Button variant="outline" onClick={onBack} className="flex-1" data-testid="btn-back-2">Back</Button>
-          <Button onClick={onNext} disabled={cart.length === 0} className="flex-1" data-testid="btn-next-4">Next</Button>
-        </div>
-      </div>
+        </SheetContent>
+      </Sheet>
     </div>
   );
 }
 
-/* -------------------------------------------------------------- Step 4 */
+/* ─────────────────────────────────────────── Cart card (used desktop + mobile) */
+function CartCard({ cart, onSetQty, onRemove, embedded }: { cart: WizardCartItem[]; onSetQty: (i: number, q: number) => void; onRemove: (i: number) => void; embedded?: boolean }) {
+  const totalItems = cart.reduce((s, c) => s + c.qty, 0);
+  return (
+    <div
+      className={`bg-card rounded-lg border shadow-md p-4 ${embedded ? "" : "max-h-[calc(100vh-8rem)] overflow-y-auto"}`}
+      data-testid="cart-card"
+    >
+      <div className="flex items-center justify-between mb-3">
+        <div className="flex items-center gap-2">
+          <ShoppingCart className="h-5 w-5 text-indigo-600" />
+          <h3 className="font-bold text-slate-900 text-lg">Your Quote</h3>
+        </div>
+        <Badge variant="secondary" data-testid="cart-count">{totalItems} item{totalItems === 1 ? "" : "s"}</Badge>
+      </div>
+
+      {cart.length === 0 ? (
+        <div className="py-8 text-center">
+          <div className="inline-flex items-center justify-center h-16 w-16 rounded-full bg-slate-100 text-slate-400 mb-3">
+            <ShoppingCart className="h-7 w-7" />
+          </div>
+          <div className="text-sm font-medium text-slate-700">Your quote is empty</div>
+          <div className="text-xs text-slate-500 mt-1 flex items-center justify-center gap-1">
+            Add parts using the finder <ArrowRight className="h-3 w-3" />
+          </div>
+        </div>
+      ) : (
+        <ul className="space-y-3">
+          {cart.map((c, i) => (
+            <CartLine key={`${c.part_number}-${c.chassis_slug || ""}-${i}`} item={c} idx={i} onSetQty={onSetQty} onRemove={onRemove} />
+          ))}
+        </ul>
+      )}
+
+      {cart.length > 0 && (
+        <div className="mt-4 pt-3 border-t text-xs text-slate-500 text-center">
+          Prices are shown on the formal quotation you'll receive by email.
+        </div>
+      )}
+    </div>
+  );
+}
+
+function CartLine({ item, idx, onSetQty, onRemove }: { item: WizardCartItem; idx: number; onSetQty: (i: number, q: number) => void; onRemove: (i: number) => void }) {
+  const [imgOk, setImgOk] = useState(!!item.image_url);
+  return (
+    <li className="flex gap-3 pb-3 border-b border-slate-100 last:border-b-0 last:pb-0" data-testid={`cart-line-${idx}`}>
+      <div className="h-16 w-16 rounded bg-slate-100 shrink-0 flex items-center justify-center overflow-hidden">
+        {item.image_url && imgOk ? (
+          <img src={item.image_url} alt={item.part_number} className="h-full w-full object-contain" onError={() => setImgOk(false)} />
+        ) : (
+          <ImageOff className="h-4 w-4 text-slate-400" />
+        )}
+      </div>
+      <div className="flex-1 min-w-0">
+        <div className="font-mono text-xs font-bold text-slate-900 truncate">{item.part_number}</div>
+        {item.oem_number && <div className="font-mono text-[10px] text-slate-500 truncate">OEM {item.oem_number}</div>}
+        {item.description && <div className="text-[11px] text-slate-600 line-clamp-2">{item.description}</div>}
+        {item.chassis_display_name && (
+          <div className="text-[10px] text-indigo-600 font-mono truncate mt-0.5">{item.chassis_display_name}</div>
+        )}
+        <div className="flex items-center justify-between mt-2 gap-2">
+          <div className="inline-flex items-center border rounded-md bg-white">
+            <button
+              type="button"
+              onClick={() => onSetQty(idx, item.qty - 1)}
+              className="px-2 py-1 text-slate-600 hover:bg-slate-100 disabled:opacity-40"
+              disabled={item.qty <= 1}
+              aria-label="Decrease quantity"
+              data-testid={`cart-minus-${idx}`}
+            >
+              <Minus className="w-3 h-3" />
+            </button>
+            <span className="px-2 text-xs font-mono w-8 text-center" data-testid={`cart-qty-${idx}`}>{item.qty}</span>
+            <button
+              type="button"
+              onClick={() => onSetQty(idx, item.qty + 1)}
+              className="px-2 py-1 text-slate-600 hover:bg-slate-100"
+              aria-label="Increase quantity"
+              data-testid={`cart-plus-${idx}`}
+            >
+              <Plus className="w-3 h-3" />
+            </button>
+          </div>
+          <button
+            type="button"
+            onClick={() => onRemove(idx)}
+            className="text-slate-400 hover:text-red-600 p-1"
+            aria-label={`Remove ${item.part_number}`}
+            data-testid={`cart-remove-${idx}`}
+          >
+            <Trash2 className="w-4 h-4" />
+          </button>
+        </div>
+      </div>
+    </li>
+  );
+}
+
+/* ────────────────────────────────── Manual entry collapsible (closed default) */
+function ManualEntry({ onAdd }: { onAdd: (pn: string, desc: string) => void }) {
+  const [open, setOpen] = useState(false);
+  const [pn, setPn] = useState("");
+  const [desc, setDesc] = useState("");
+  const submit = (e: React.FormEvent) => {
+    e.preventDefault();
+    const cleaned = pn.trim();
+    if (!cleaned) return;
+    onAdd(cleaned, desc.trim());
+    setPn(""); setDesc("");
+    toast({ title: "Added to your quote", description: cleaned });
+  };
+  return (
+    <Collapsible open={open} onOpenChange={setOpen}>
+      <CollapsibleTrigger asChild>
+        <button
+          type="button"
+          className="w-full inline-flex items-center justify-between gap-2 px-4 py-3 rounded-lg border border-dashed border-slate-300 bg-slate-50/50 text-sm font-medium text-slate-700 hover:bg-slate-100 hover:border-slate-400 transition-colors"
+          data-testid="manual-entry-trigger"
+        >
+          <span className="inline-flex items-center gap-2">
+            <Plus className="h-4 w-4 text-slate-500" />
+            Don't see your part? Add it manually
+          </span>
+          {open ? <ChevronDown className="h-4 w-4" /> : <ChevronRight className="h-4 w-4" />}
+        </button>
+      </CollapsibleTrigger>
+      <CollapsibleContent>
+        <form onSubmit={submit} className="mt-3 bg-card rounded-lg border shadow-sm p-4 space-y-3">
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+            <div>
+              <label className="block text-xs uppercase text-slate-500 mb-1 font-mono tracking-wider">Part number *</label>
+              <Input value={pn} onChange={(e) => setPn(e.target.value)} placeholder="e.g. 251434100121" className="font-mono" data-testid="input-manual-pn" required />
+            </div>
+            <div>
+              <label className="block text-xs uppercase text-slate-500 mb-1 font-mono tracking-wider">Description</label>
+              <Input value={desc} onChange={(e) => setDesc(e.target.value)} placeholder="Optional" data-testid="input-manual-desc" />
+            </div>
+          </div>
+          <div className="flex justify-end">
+            <Button type="submit" disabled={!pn.trim()} data-testid="btn-manual-add">
+              <Plus className="w-4 h-4 mr-2" /> Add to quote
+            </Button>
+          </div>
+        </form>
+      </CollapsibleContent>
+    </Collapsible>
+  );
+}
+
+/* ─────────────────────────────────────────────────────────────────── Step 4 */
 function Step4Details({ cart, contact, timeframe, delivery, notes, otpToken, onTimeframe, onDelivery, onNotes, onBack, onSuccess }: {
   cart: WizardCartItem[];
   contact: Contact;
@@ -494,9 +655,6 @@ function Step4Details({ cart, contact, timeframe, delivery, notes, otpToken, onT
     if (notes.length > 2000) return toast({ title: "Notes too long", description: "Max 2000 characters.", variant: "destructive" });
     setSubmitting(true);
     try {
-      // NOTE: server expects the verification token in the x-quote-token
-      // HEADER (not the JSON body). apiRequest can't add custom headers so
-      // fetch directly here.
       const body = {
         email: contact.email.trim().toLowerCase(),
         company_name: contact.company_name,
@@ -532,17 +690,22 @@ function Step4Details({ cart, contact, timeframe, delivery, notes, otpToken, onT
   };
 
   return (
-    <form onSubmit={submit} className="bg-white rounded-2xl shadow-sm border p-4 sm:p-6 space-y-5" data-testid="step-4">
+    <form onSubmit={submit} className="bg-card rounded-xl shadow-md border p-6 md:p-8 space-y-6 max-w-3xl mx-auto" data-testid="step-4">
       <div>
-        <div className="text-xs uppercase text-slate-500 font-mono mb-2">Cart summary</div>
-        <div className="rounded-lg border divide-y">
+        <h2 className="text-xl md:text-2xl font-bold text-slate-900">Order details</h2>
+        <p className="text-sm text-slate-500 mt-1">Tell us when you need parts and where to deliver.</p>
+      </div>
+
+      <div>
+        <div className="text-xs uppercase text-slate-500 font-mono tracking-wider mb-2">Cart summary</div>
+        <div className="rounded-lg border divide-y bg-white">
           {cart.map((c, i) => (
-            <div key={i} className="p-2.5 flex items-center justify-between text-sm">
+            <div key={i} className="p-3 flex items-center justify-between text-sm">
               <div className="min-w-0 flex-1">
                 <div className="font-mono text-xs font-semibold truncate">{c.part_number}</div>
                 <div className="text-xs text-slate-600 truncate">{c.description}</div>
               </div>
-              <div className="text-xs text-slate-500 font-mono">× {c.qty}</div>
+              <div className="text-xs text-slate-600 font-mono">× {c.qty}</div>
             </div>
           ))}
         </div>
@@ -550,10 +713,10 @@ function Step4Details({ cart, contact, timeframe, delivery, notes, otpToken, onT
       </div>
 
       <div>
-        <div className="text-xs uppercase text-slate-500 font-mono mb-2">When do you need it?</div>
+        <div className="text-xs uppercase text-slate-500 font-mono tracking-wider mb-2">When do you need it?</div>
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
           {TIMEFRAMES.map((t) => (
-            <label key={t.id} className={`flex items-center gap-2 border rounded-lg p-3 text-sm cursor-pointer ${
+            <label key={t.id} className={`flex items-center gap-2 border rounded-lg p-3 text-sm cursor-pointer transition-colors ${
               timeframe === t.id ? "border-indigo-500 bg-indigo-50 text-indigo-900" : "border-slate-200 text-slate-700 hover:border-slate-300"
             }`}>
               <input type="radio" name="tf" checked={timeframe === t.id} onChange={() => onTimeframe(t.id)} data-testid={`tf-${t.id}`} />
@@ -568,7 +731,7 @@ function Step4Details({ cart, contact, timeframe, delivery, notes, otpToken, onT
       </Field>
 
       <div>
-        <label className="block text-xs uppercase text-slate-500 mb-1.5 font-mono">Notes (optional, max 2000 chars)</label>
+        <label className="block text-xs uppercase text-slate-500 mb-1.5 font-mono tracking-wider">Notes (optional, max 2000 chars)</label>
         <textarea
           value={notes}
           onChange={(e) => onNotes(e.target.value)}
@@ -581,8 +744,10 @@ function Step4Details({ cart, contact, timeframe, delivery, notes, otpToken, onT
         <div className={`text-[11px] mt-1 text-right ${notesLeft < 100 ? "text-amber-600" : "text-slate-400"}`}>{notesLeft} chars remaining</div>
       </div>
 
-      <div className="flex gap-2 justify-end">
-        <Button type="button" variant="outline" onClick={onBack} data-testid="btn-back-3">Back</Button>
+      <div className="flex flex-col-reverse sm:flex-row gap-3 justify-between pt-2 border-t">
+        <Button type="button" variant="outline" size="lg" onClick={onBack} data-testid="btn-back-3">
+          <ArrowLeft className="w-4 h-4 mr-2" /> Back
+        </Button>
         <Button type="submit" size="lg" disabled={submitting} data-testid="btn-submit">
           {submitting && <Loader2 className="w-4 h-4 mr-2 animate-spin" />} Submit request
         </Button>
@@ -591,20 +756,22 @@ function Step4Details({ cart, contact, timeframe, delivery, notes, otpToken, onT
   );
 }
 
-/* -------------------------------------------------------------- Step 5 */
+/* ─────────────────────────────────────────────────────────────────── Step 5 */
 function Step5Success({ reference, contact, onReset }: { reference: string; contact: Contact; onReset: () => void }) {
   const waMsg = `Hi Narmada Mobility, tracking my quote reference ${reference}.`;
   const waHref = `https://wa.me/${WHATSAPP}?text=${encodeURIComponent(waMsg)}`;
   return (
-    <div className="bg-white rounded-2xl shadow-sm border p-6 sm:p-8 text-center space-y-5" data-testid="step-5">
-      <div className="inline-flex items-center justify-center h-14 w-14 rounded-full bg-emerald-100 text-emerald-700 mx-auto">✓</div>
+    <div className="bg-card rounded-xl shadow-md border p-6 md:p-8 text-center space-y-5 max-w-xl mx-auto" data-testid="step-5">
+      <div className="inline-flex items-center justify-center h-16 w-16 rounded-full bg-emerald-100 text-emerald-700 mx-auto">
+        <Check className="w-7 h-7" />
+      </div>
       <div>
-        <div className="text-lg font-semibold text-slate-900">Request received</div>
+        <div className="text-xl font-bold text-slate-900">Request received</div>
         <div className="text-sm text-slate-600 mt-1">Our sales team will respond to <span className="font-mono">{contact.email}</span> within 24 hours.</div>
       </div>
       <div className="rounded-lg bg-slate-50 border p-4 inline-block">
-        <div className="text-xs uppercase text-slate-500 font-mono mb-1">Your reference</div>
-        <div className="text-xl font-mono font-bold text-slate-900" data-testid="quote-reference">{reference}</div>
+        <div className="text-xs uppercase text-slate-500 font-mono tracking-wider mb-1">Your reference</div>
+        <div className="text-2xl font-mono font-bold text-slate-900" data-testid="quote-reference">{reference}</div>
       </div>
       <div className="flex flex-col sm:flex-row gap-3 justify-center pt-2">
         <Button variant="outline" onClick={onReset} data-testid="btn-new-quote">Start a new quote</Button>
