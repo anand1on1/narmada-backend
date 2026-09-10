@@ -403,7 +403,7 @@ function Step3Parts({ cart, onCart, onBack, onNext }: { cart: WizardCartItem[]; 
       </div>
 
       {/* ── 2-column layout: LEFT 30% cart, RIGHT 70% finder */}
-      <div className="grid grid-cols-1 md:grid-cols-[minmax(0,30%)_minmax(0,70%)] gap-6">
+      <div className="grid grid-cols-1 md:grid-cols-[minmax(320px,26%)_minmax(0,74%)] gap-6">
         {/* LEFT — sticky cart (hidden on mobile; a floating button + Sheet handles mobile) */}
         <aside className="hidden md:block">
           <div className="sticky top-24">
@@ -413,12 +413,16 @@ function Step3Parts({ cart, onCart, onBack, onNext }: { cart: WizardCartItem[]; 
 
         {/* RIGHT — Find Parts + manual-entry collapsible */}
         <div className="space-y-6 min-w-0">
-          <FindPartsEmbed
-            initialTab="reg"
-            isEmbeddedWizard
-            onAddToCart={handleAdd}
-            addedPartIds={addedPartIds}
-          />
+          {/* R28.4 — finder wrapped in a matching card so the visual boundary
+              between cart and finder reads clearly at wide viewports. */}
+          <div className="bg-card border shadow-md rounded-xl p-5 md:p-6" data-testid="finder-card">
+            <FindPartsEmbed
+              initialTab="reg"
+              isEmbeddedWizard
+              onAddToCart={handleAdd}
+              addedPartIds={addedPartIds}
+            />
+          </div>
           <ManualEntry onAdd={addManual} />
         </div>
       </div>
@@ -479,15 +483,20 @@ function CartCard({ cart, onSetQty, onRemove, embedded }: { cart: WizardCartItem
   const totalItems = cart.reduce((s, c) => s + c.qty, 0);
   return (
     <div
-      className={`bg-card rounded-lg border shadow-md p-4 ${embedded ? "" : "max-h-[calc(100vh-8rem)] overflow-y-auto"}`}
+      className={`bg-card rounded-xl border shadow-md p-5 md:p-6 ${embedded ? "" : "max-h-[calc(100vh-8rem)] overflow-y-auto"}`}
       data-testid="cart-card"
     >
-      <div className="flex items-center justify-between mb-3">
+      <div className="flex items-center justify-between mb-4">
         <div className="flex items-center gap-2">
           <ShoppingCart className="h-5 w-5 text-indigo-600" />
           <h3 className="font-bold text-slate-900 text-lg">Your Quote</h3>
+          <span
+            className="inline-flex items-center rounded-full bg-indigo-100 text-indigo-700 text-[10px] font-mono uppercase tracking-wider px-2 py-0.5"
+            data-testid="cart-count"
+          >
+            {totalItems} item{totalItems === 1 ? "" : "s"}
+          </span>
         </div>
-        <Badge variant="secondary" data-testid="cart-count">{totalItems} item{totalItems === 1 ? "" : "s"}</Badge>
       </div>
 
       {cart.length === 0 ? (
@@ -673,13 +682,8 @@ function Step4Details({ cart, contact, timeframe, delivery, notes, otpToken, onT
           qty: c.qty,
         })),
       };
-      const r = await fetch("/api/quote/submit", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "x-quote-token": otpToken,
-        },
-        body: JSON.stringify(body),
+      const r = await apiRequest("POST", "/api/quote/submit", body, {
+        "x-quote-token": otpToken,
       });
       const data = await r.json();
       if (!data.ok || !data.reference) throw new Error(data.error || "Submission failed");
