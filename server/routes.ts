@@ -2,7 +2,7 @@ import type { Express, Request, Response, NextFunction } from "express";
 import express from "express";
 import { createServer } from "node:http";
 import type { Server } from "node:http";
-import { storage } from "./storage";
+import { storage, rawSqlite } from "./storage";
 import { insertProductSchema, insertContactSchema } from "@shared/schema";
 import { z } from "zod";
 import { randomBytes } from "node:crypto";
@@ -81,7 +81,9 @@ export function renderSitemapXml(urls: string[]): string {
 // R27.31a — absolute Sitemap URL (Google requires absolute, not relative) built from
 // the canonical base so it always advertises narmadamobility.com, never the Render host.
 export function buildRobotsTxt(): string {
-  return `User-agent: *\nAllow: /\nDisallow: /admin\nDisallow: /api/\nSitemap: ${sitemapCanonicalBase()}/sitemap.xml\n`;
+  // R28 Session 4 — add `Disallow: /team/` per spec so bots stay out of the
+  // team console. Existing /admin + /api/ disallows preserved verbatim.
+  return `User-agent: *\nAllow: /\nDisallow: /api/\nDisallow: /admin/\nDisallow: /admin\nDisallow: /team/\nSitemap: ${sitemapCanonicalBase()}/sitemap.xml\n`;
 }
 export const ROBOTS_TXT = buildRobotsTxt();
 
@@ -117,6 +119,28 @@ export function buildSitemapUrls(allProducts: Awaited<ReturnType<typeof storage.
     const pn = (p as any).partNumber || (p as any).part_number;
     if (pn) add(`/#/product/${encodeURIComponent(String(pn))}/${p.slug}`, "0.6");
     else add(`/#/product/${p.slug}`, "0.6");
+  }
+  // R28 Session 4 — also emit the SSR /p/{slug} URLs so Google can crawl the
+  // full-HTML product pages (the hash routes above are for the SPA experience).
+  // These are the URLs the Session 4 SSR routes at /p/:slug serve.
+  for (const p of allProducts) {
+    if (!p.active) continue;
+    if (p.slug) add(`/p/${encodeURIComponent(String(p.slug))}`, "0.7", "weekly");
+  }
+  // R28 Session 4 — chassis catalogue SSR pages (/c/{slug}). Best-effort read;
+  // if the chassis_catalog table isn't populated the loop is a no-op.
+  try {
+    const rows = rawSqlite
+      .prepare(`SELECT slug FROM chassis_catalog WHERE is_active = 1 AND slug IS NOT NULL AND slug != ''`).all() as any[];
+    for (const r of rows) add(`/c/${encodeURIComponent(String(r.slug))}`, "0.6", "weekly");
+  } catch { /* chassis_catalog table may not exist in older DBs */ }
+  // R28 Session 4 — SSR category pages (/cat/{slug}) derived from distinct
+  // product categories. Complements the SPA /category/{slug} entries above.
+  const seenCats = new Set<string>();
+  for (const p of allProducts) {
+    if (!p.active) continue;
+    const c = (p as any).category;
+    if (c && !seenCats.has(c)) { seenCats.add(c); add(`/cat/${encodeURIComponent(String(c))}`, "0.6", "weekly"); }
   }
   return urls;
 }
@@ -611,6 +635,33 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
     if (!fs.existsSync(p)) return res.status(404).json({ error: "Generate first" });
     res.download(p, "sitemap.xml");
   });
+
+  // -------- R28 Session 4: SEO SSR pages + sitemap-seo.xml + robots-seo.txt --------
+  // Additive-only. Mounts /p/:slug /c/:slug /cat/:category (all gated by
+  // SEO_PAGES_ENABLED, default false → 503 feature_disabled) plus a Session-4
+  // sitemap and robots served on separate paths so nothing pre-existing changes.
+  // Admin analytics endpoints ride on a locally-defined admin auth middleware
+  // that reuses the same adminTokens map as registerV2Routes.
+  try {
+    const { registerSeoRoutes } = await import("./seo-routes");
+    const seoRequireAdmin = (req: Request, res: Response, next: NextFunction) => {
+      const token = req.headers["x-admin-token"] as string | undefined;
+      if (!token) { res.status(401).json({ error: "Unauthorized" }); return; }
+      let info = adminTokens.get(token);
+      if (!info) {
+        const rehydrated = rehydrateSession(adminTokens, token);
+        if (!rehydrated) { res.status(401).json({ error: "Unauthorized" }); return; }
+        info = rehydrated;
+      }
+      if (info.role !== "admin") { res.status(403).json({ error: "Admin role required" }); return; }
+      (req as any).user = info;
+      next();
+    };
+    registerSeoRoutes(app, { requireAdminRole: seoRequireAdmin });
+    console.log("[R28.4] SEO routes registered (SEO_PAGES_ENABLED=" + (process.env.SEO_PAGES_ENABLED || "false") + ")");
+  } catch (e: any) {
+    console.error("[R28.4] failed to register SEO routes:", e?.message || e);
+  }
 
   // -------- Phase 3: CMS / Price Checker / Consignments / Sub-users / SEO helpers --------
   registerV2Routes(app, {

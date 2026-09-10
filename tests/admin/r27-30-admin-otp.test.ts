@@ -189,9 +189,14 @@ describe("R27.31 dynamic sitemap + robots", () => {
       anyProduct({ active: false, slug: "hidden-part", partNumber: "ZZ9" }),
     ];
     const urls = buildSitemapUrls(products, "https://narmadamobility.com");
-    expect(urls.length).toBe(base + 2); // inactive skipped
+    // R28.4: 2 URLs per active product now (SPA hash-route + SSR /p/{slug} for Google),
+    // so 2 active products → base + 4. Inactive still skipped.
+    expect(urls.length).toBe(base + 4);
     expect(urls.some((u) => u.includes("/#/product/BP%20100%2FA/brake-pad"))).toBe(true);
     expect(urls.some((u) => u.includes("/#/product/oil-filter"))).toBe(true);
+    // R28.4: also asserts the new SSR /p/{slug} URLs are in the sitemap.
+    expect(urls.some((u) => u.includes("/p/brake-pad"))).toBe(true);
+    expect(urls.some((u) => u.includes("/p/oil-filter"))).toBe(true);
     expect(urls.some((u) => u.includes("hidden-part"))).toBe(false);
   });
 

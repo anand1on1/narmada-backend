@@ -3259,6 +3259,45 @@ export function runR28_3Migrations() {
 }
 
 // =====================================================================
+// R28 Session 4 — SEO Product Pages + Sitemap + Robots (BACKEND ONLY)
+// One new analytics table: seo_page_views. Additive, idempotent.
+// Runs AFTER runR28_3Migrations(). Never mutates existing tables.
+//
+// Verbatim user requirement (from Session 4 brief):
+//   "EACH PRODUCT CREATED BY EXCEL UPLOAD OF THE CHASIS CREATES A SEPARATE
+//    PAGE WHICH FOLLOWS LATEST GOOGLE SEO NORMS"
+//
+// The seo_page_views table lets admins see which products bots (Googlebot,
+// Bingbot, etc.) are crawling and which pages get human traffic. IP hashed for
+// GDPR-safe analytics — we never store raw IPs.
+// =====================================================================
+export function runR28_4Migrations() {
+  console.log("[migrations] R28.4: start");
+  const run = (label: string, sqlStr: string) => {
+    try { sqlite.exec(sqlStr); console.log(`[migrations] R28.4: ${label} ok`); }
+    catch (e: any) { console.log(`[migrations] R28.4: ${label} skip (${e?.message || e})`); }
+  };
+
+  run("seo_page_views table", `
+    CREATE TABLE IF NOT EXISTS seo_page_views (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      page_type TEXT NOT NULL,
+      page_slug TEXT NOT NULL,
+      user_agent TEXT,
+      referer TEXT,
+      ip_hash TEXT,
+      is_bot INTEGER NOT NULL DEFAULT 0,
+      created_at INTEGER NOT NULL
+    );
+  `);
+  run("idx_seopv_slug",    `CREATE INDEX IF NOT EXISTS idx_seopv_slug    ON seo_page_views(page_slug);`);
+  run("idx_seopv_created", `CREATE INDEX IF NOT EXISTS idx_seopv_created ON seo_page_views(created_at);`);
+  run("idx_seopv_bot",     `CREATE INDEX IF NOT EXISTS idx_seopv_bot     ON seo_page_views(is_bot);`);
+
+  console.log("[migrations] R28.4: complete");
+}
+
+// =====================================================================
 // PartSetu AI v1 — Spare Parts Intelligence Chatbot (additive, idempotent)
 // 7 new tables. Per-statement try/catch with [migrations] PartSetu: markers.
 // Nothing here drops/renames existing tables.
