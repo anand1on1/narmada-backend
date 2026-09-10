@@ -4,7 +4,7 @@
 //   POST   /api/admin/chassis
 //   PATCH  /api/admin/chassis/:id
 //   DELETE /api/admin/chassis/:id
-import { useMemo, useState } from "react";
+import { useMemo, useRef, useState } from "react";
 import { AdminLayout } from "./AdminLayout";
 import { adminFetch, useAdminAuth } from "@/lib/admin-auth";
 import { useQuery } from "@tanstack/react-query";
@@ -13,7 +13,7 @@ import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Switch } from "@/components/ui/switch";
-import { Plus, Pencil, Trash2, Package, RefreshCw, Search } from "lucide-react";
+import { Plus, Pencil, Trash2, Package, RefreshCw, Search, Upload, FileSpreadsheet, Loader2, CheckCircle2, X } from "lucide-react";
 import { toast } from "@/hooks/use-toast";
 import { Link } from "wouter";
 
@@ -60,6 +60,8 @@ export default function AdminChassis() {
   const [form, setForm] = useState<ChassisForm>(empty());
   const [slugDirty, setSlugDirty] = useState(false);
   const [saving, setSaving] = useState(false);
+  // R28.2 — new upload-first "Add Chassis" flow (separate from the edit dialog).
+  const [uploadOpen, setUploadOpen] = useState(false);
 
   const params = new URLSearchParams();
   params.set("limit", "200");
@@ -77,10 +79,9 @@ export default function AdminChassis() {
   const rows: Chassis[] = useMemo(() => (Array.isArray(data) ? data : (data?.rows ?? [])), [data]);
 
   const openCreate = () => {
-    setEditing(null);
-    setForm(empty());
-    setSlugDirty(false);
-    setDialogOpen(true);
+    // R28.2 — "Add Chassis" now opens the auto-populate upload dialog.
+    // (The old 8-field form is still used for Edit — openEdit — unchanged.)
+    setUploadOpen(true);
   };
   const openEdit = (c: Chassis) => {
     setEditing(c);
@@ -227,6 +228,14 @@ export default function AdminChassis() {
         </div>
       </div>
 
+      {/* R28.2 — upload-first Add Chassis dialog. */}
+      <ChassisUploadDialog
+        open={uploadOpen}
+        onOpenChange={setUploadOpen}
+        token={token}
+        onCreated={() => { setUploadOpen(false); refetch(); }}
+      />
+
       <Dialog open={dialogOpen} onOpenChange={setDialogOpen}>
         <DialogContent className="max-w-lg max-h-[85vh] overflow-y-auto">
           <DialogHeader><DialogTitle>{editing ? "Edit chassis" : "Add chassis"}</DialogTitle></DialogHeader>
@@ -270,5 +279,203 @@ export default function AdminChassis() {
         </DialogContent>
       </Dialog>
     </AdminLayout>
+  );
+}
+
+/* -------------------------------------------------------------------------- */
+/* R28.2 — Chassis auto-populate upload dialog.                                */
+/* -------------------------------------------------------------------------- */
+interface Detected {
+  chassis_code: string;
+  display_name: string;
+  make: string;
+  model: string;
+  variant: string;
+  description: string;
+  parts_count?: number;
+}
+interface SamplePart {
+  part_number: string;
+  description?: string | null;
+  oem_number?: string | null;
+  category?: string | null;
+  sell_price?: number | null;
+  stock_qty?: number | null;
+}
+
+function ChassisUploadDialog({ open, onOpenChange, token, onCreated }: {
+  open: boolean;
+  onOpenChange: (v: boolean) => void;
+  token: string | null;
+  onCreated: () => void;
+}) {
+  const inputRef = useRef<HTMLInputElement>(null);
+  const [file, setFile] = useState<File | null>(null);
+  const [previewing, setPreviewing] = useState(false);
+  const [creating, setCreating] = useState(false);
+  const [detected, setDetected] = useState<Detected | null>(null);
+  const [sample, setSample] = useState<SamplePart[]>([]);
+  const [dragOver, setDragOver] = useState(false);
+
+  const reset = () => {
+    setFile(null); setDetected(null); setSample([]);
+    setPreviewing(false); setCreating(false); setDragOver(false);
+  };
+
+  const onClose = () => { reset(); onOpenChange(false); };
+
+  const onFile = async (f: File) => {
+    setFile(f); setDetected(null); setSample([]); setPreviewing(true);
+    try {
+      const fd = new FormData(); fd.append("file", f);
+      const r = await adminFetch(token, "/api/admin/chassis/preview", { method: "POST", body: fd });
+      const data = await r.json();
+      if (!r.ok || !data.ok) throw new Error(data.error || `HTTP ${r.status}`);
+      setDetected(data.detected);
+      setSample(data.sample_parts || []);
+    } catch (e: any) {
+      toast({ title: "Preview failed", description: e?.message || String(e), variant: "destructive" });
+      setFile(null);
+    } finally { setPreviewing(false); }
+  };
+
+  const submit = async () => {
+    if (!file || !detected) return;
+    setCreating(true);
+    try {
+      const fd = new FormData();
+      fd.append("file", file);
+      fd.append("chassis_code", detected.chassis_code);
+      fd.append("display_name", detected.display_name);
+      fd.append("model", detected.model);
+      fd.append("variant", detected.variant);
+      fd.append("description", detected.description);
+      const r = await adminFetch(token, "/api/admin/chassis/create-from-upload", { method: "POST", body: fd });
+      const data = await r.json();
+      if (!r.ok || !data.ok) throw new Error(data.error || `HTTP ${r.status}`);
+      toast({ title: "Chassis created", description: `${data.display_name} · ${data.parts_created} parts · ${data.parts_updated} updated${data.parts_errors ? ` · ${data.parts_errors} errors` : ""}` });
+      reset();
+      onCreated();
+    } catch (e: any) {
+      toast({ title: "Create failed", description: e?.message || String(e), variant: "destructive" });
+    } finally { setCreating(false); }
+  };
+
+  return (
+    <Dialog open={open} onOpenChange={(v) => { if (!v) reset(); onOpenChange(v); }}>
+      <DialogContent className="max-w-2xl max-h-[90vh] overflow-y-auto">
+        <DialogHeader>
+          <DialogTitle className="flex items-center gap-2">
+            <Upload className="w-5 h-5 text-indigo-600" /> Add Chassis · upload sheet
+          </DialogTitle>
+        </DialogHeader>
+
+        <div className="space-y-4 text-sm">
+          <div className="rounded-md bg-indigo-50 border border-indigo-100 text-indigo-800 text-xs p-3">
+            Brand is locked to <b>Tata</b>. Upload an .xlsx / .xls / .csv and we'll auto-fill
+            chassis code, display name, model, variant, and description from the sheet or filename.
+          </div>
+
+          {/* Dropzone */}
+          {!file && (
+            <div
+              className={`border-2 border-dashed rounded-xl p-8 text-center cursor-pointer transition-colors ${dragOver ? "border-indigo-500 bg-indigo-50" : "border-slate-300 hover:border-indigo-400"}`}
+              onClick={() => inputRef.current?.click()}
+              onDragOver={(e) => { e.preventDefault(); setDragOver(true); }}
+              onDragLeave={() => setDragOver(false)}
+              onDrop={(e) => {
+                e.preventDefault(); setDragOver(false);
+                const f = e.dataTransfer.files?.[0]; if (f) onFile(f);
+              }}
+              data-testid="chassis-dropzone"
+            >
+              <FileSpreadsheet className="w-10 h-10 mx-auto text-slate-400 mb-3" />
+              <div className="text-slate-700 font-medium">Drop file here or click to select</div>
+              <div className="text-xs text-slate-500 mt-1">.xlsx · .xls · .csv up to 5 MB</div>
+              <input
+                ref={inputRef}
+                type="file"
+                accept=".xlsx,.xls,.csv"
+                className="hidden"
+                onChange={(e) => { const f = e.target.files?.[0]; if (f) onFile(f); }}
+              />
+            </div>
+          )}
+
+          {file && (
+            <div className="flex items-center gap-3 rounded-md border p-3 bg-slate-50">
+              <FileSpreadsheet className="w-5 h-5 text-indigo-600 shrink-0" />
+              <div className="flex-1 min-w-0">
+                <div className="font-medium truncate">{file.name}</div>
+                <div className="text-xs text-slate-500">{(file.size / 1024).toFixed(1)} KB</div>
+              </div>
+              <button className="text-slate-400 hover:text-red-600" onClick={reset} aria-label="Remove file"><X className="w-4 h-4" /></button>
+            </div>
+          )}
+
+          {previewing && (
+            <div className="flex items-center gap-2 text-slate-600 text-sm">
+              <Loader2 className="w-4 h-4 animate-spin" /> Parsing sheet…
+            </div>
+          )}
+
+          {detected && (
+            <>
+              <div className="rounded-md border p-4 space-y-3 bg-white">
+                <div className="flex items-center gap-2 text-emerald-700 text-xs uppercase font-mono">
+                  <CheckCircle2 className="w-4 h-4" /> Detected — edit any field before creating
+                </div>
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                  <label className="text-xs">Chassis code
+                    <Input value={detected.chassis_code} onChange={(e) => setDetected({ ...detected, chassis_code: e.target.value })} className="mt-1 font-mono" data-testid="detected-code" />
+                  </label>
+                  <label className="text-xs">Variant
+                    <Input value={detected.variant} onChange={(e) => setDetected({ ...detected, variant: e.target.value })} className="mt-1" />
+                  </label>
+                  <label className="text-xs sm:col-span-2">Display name
+                    <Input value={detected.display_name} onChange={(e) => setDetected({ ...detected, display_name: e.target.value })} className="mt-1" data-testid="detected-name" />
+                  </label>
+                  <label className="text-xs">Make
+                    <Input value="TATA" disabled className="mt-1 font-mono bg-slate-100" />
+                  </label>
+                  <label className="text-xs">Model
+                    <Input value={detected.model} onChange={(e) => setDetected({ ...detected, model: e.target.value })} className="mt-1" />
+                  </label>
+                  <label className="text-xs sm:col-span-2">Description
+                    <Textarea value={detected.description} onChange={(e) => setDetected({ ...detected, description: e.target.value })} rows={2} className="mt-1" />
+                  </label>
+                </div>
+                <div className="text-xs text-slate-500">
+                  <b>{detected.parts_count ?? 0}</b> parts will be inserted.
+                </div>
+              </div>
+
+              {sample.length > 0 && (
+                <div>
+                  <div className="text-xs uppercase text-slate-500 font-mono mb-2">Sample parts</div>
+                  <div className="rounded-md border divide-y text-xs">
+                    {sample.map((p, i) => (
+                      <div key={i} className="p-2.5 flex items-center gap-2">
+                        <span className="font-mono font-semibold w-40 truncate">{p.part_number}</span>
+                        <span className="flex-1 truncate text-slate-600">{p.description || "—"}</span>
+                        {p.oem_number && <span className="font-mono text-slate-400 text-[10px]">OEM {p.oem_number}</span>}
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+            </>
+          )}
+
+          <div className="flex justify-end gap-2 pt-2">
+            <Button variant="outline" onClick={onClose}>Cancel</Button>
+            <Button onClick={submit} disabled={!file || !detected || creating || previewing} data-testid="btn-create-from-upload">
+              {creating && <Loader2 className="w-4 h-4 mr-2 animate-spin" />}
+              Create chassis + import parts
+            </Button>
+          </div>
+        </div>
+      </DialogContent>
+    </Dialog>
   );
 }

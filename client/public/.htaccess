@@ -1,26 +1,5 @@
 DirectoryIndex index.html
 
-# R28 Session 4 — proxy the server-side rendered SEO pages, sitemap, and robots.txt
-# from GoDaddy to the Render backend so external crawlers (Google, Bing, WhatsApp preview)
-# see clean HTML with meta/OG/JSON-LD tags. Requires mod_proxy + mod_proxy_http enabled
-# on the GoDaddy account (available on cPanel shared hosting via .htaccess).
-<IfModule mod_proxy.c>
-  ProxyRequests Off
-  ProxyPreserveHost On
-  # SEO product / chassis / category SSR pages.
-  ProxyPass        /p/ https://narmada-backend.onrender.com/p/
-  ProxyPassReverse /p/ https://narmada-backend.onrender.com/p/
-  ProxyPass        /c/ https://narmada-backend.onrender.com/c/
-  ProxyPassReverse /c/ https://narmada-backend.onrender.com/c/
-  ProxyPass        /cat/ https://narmada-backend.onrender.com/cat/
-  ProxyPassReverse /cat/ https://narmada-backend.onrender.com/cat/
-  # Sitemap + robots.
-  ProxyPass        /sitemap.xml https://narmada-backend.onrender.com/sitemap.xml
-  ProxyPassReverse /sitemap.xml https://narmada-backend.onrender.com/sitemap.xml
-  ProxyPass        /robots.txt https://narmada-backend.onrender.com/robots.txt
-  ProxyPassReverse /robots.txt https://narmada-backend.onrender.com/robots.txt
-</IfModule>
-
 <IfModule mod_rewrite.c>
   RewriteEngine On
   RewriteBase /
@@ -29,13 +8,6 @@ DirectoryIndex index.html
   RewriteCond %{REQUEST_FILENAME} -f [OR]
   RewriteCond %{REQUEST_FILENAME} -d
   RewriteRule ^ - [L]
-
-  # Do not fall through to the SPA for R28 SEO paths — mod_proxy owns them.
-  RewriteRule ^p/          - [L]
-  RewriteRule ^c/          - [L]
-  RewriteRule ^cat/        - [L]
-  RewriteRule ^sitemap\.xml$ - [L]
-  RewriteRule ^robots\.txt$  - [L]
 
   # SPA fallback — everything else to index.html (app uses hash routing).
   RewriteRule ^ index.html [L]

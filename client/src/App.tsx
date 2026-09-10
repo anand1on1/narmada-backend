@@ -197,6 +197,9 @@ import AdminSeoAnalytics from "@/pages/admin/AdminSeoAnalytics";
 import PartsFinder from "@/pages/PartsFinder";
 import ChassisBrowse from "@/pages/ChassisBrowse";
 import ChassisDetail from "@/pages/ChassisDetail";
+// R28.2 — unified Find Parts + Get Quotation wizard.
+import FindParts from "@/pages/FindParts";
+import GetQuote from "@/pages/GetQuote";
 // v1.4a — separate Data Center app (own login, own shell, own routes)
 import { DataCenterAuthProvider } from "@/hooks/useDataCenterAuth";
 import { ShellProvider } from "@/lib/shell";
@@ -283,6 +286,11 @@ function PublicRoutes() {
         <Route path="/track-consignment/:docket" component={TrackConsignment} />
         <Route path="/track-consignment" component={TrackConsignment} />
         {/* R28 Session 2 — public Parts Finder + Chassis catalog (MUST be before catch-all /:slug) */}
+        {/* R28.2 — primary UI (unified). */}
+        <Route path="/find-parts" component={FindParts} />
+        <Route path="/get-quote" component={GetQuote} />
+        {/* R28 Session 2 — legacy routes kept live for bookmark / SEO parity.
+            Old-page components now show a small banner nudging users to /find-parts. */}
         <Route path="/parts-finder" component={PartsFinder} />
         <Route path="/chassis/:slug" component={ChassisDetail} />
         <Route path="/chassis" component={ChassisBrowse} />

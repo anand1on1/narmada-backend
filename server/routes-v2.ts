@@ -28,6 +28,9 @@ import { autoPublishFromPO, listAutoPublishLog } from "./auto-publish";
 // R28.1 — Team Upload feature (passcode-gated public chassis upload).
 // Additive; parallel path to the admin-only /api/admin/chassis endpoints.
 import { registerTeamUploadRoutes } from "./team-upload";
+// R28.2 — Get-Quotation flow (public OTP + RFQ submission).
+// Additive; three endpoints under /api/quote/*.
+import { registerQuoteRfqRoutes } from "./quote-rfq";
 import {
   listCachedImages as listPartImageCache,
   deleteCachedImage as deletePartImageCache,
@@ -1908,6 +1911,351 @@ export function registerV2Routes(app: Express, ctx: V2Context) {
     }
   );
 
+  // ============================================================================
+  // R28.2 — Admin chassis "auto-populate" flow (upload-first UX).
+  //
+  // The old Add Chassis dialog asked for 8 fields; the new one only asks for
+  // brand (locked to Tata) and a file. These two endpoints back that UX:
+  //
+  //   POST /api/admin/chassis/preview
+  //     Multipart body { file: .xlsx | .xls | .csv, max 5 MB }.
+  //     Parses the sheet, tries to pull chassis metadata out of a metadata
+  //     sheet / top-row key-value pairs, and falls back to filename parsing
+  //     (`TATA-407-EX2-BS6.xlsx` → chassis_code, display_name, variant).
+  //     Returns { detected: {...}, parts_count, sample_parts: [...] }.
+  //
+  //   POST /api/admin/chassis/create-from-upload
+  //     Multipart body { file, ...detected fields }.
+  //     Creates the chassis and bulk-inserts parts in one transaction.
+  //     Reuses the same insert prepared-statement as the old bulk-upload path.
+  //
+  // Both routes force make = 'TATA' per user rule ("brand name which is only
+  // tata"). Magic-byte check mirrors the team-upload module so a PDF renamed
+  // .xlsx returns 415, not 500.
+  // ============================================================================
+
+  const AUTO_CHASSIS_MAX_BYTES = 5 * 1024 * 1024;
+  const AUTO_ALLOWED_EXT = new Set(["xlsx", "xls", "csv"]);
+
+  function autoFileExt(name: string): string {
+    const i = name.lastIndexOf(".");
+    return i >= 0 ? name.slice(i + 1).toLowerCase() : "";
+  }
+  function autoCheckMagic(buf: Buffer, ext: string): boolean {
+    if (!buf || buf.length < 4) return false;
+    if (ext === "xlsx") {
+      // ZIP header: PK\x03\x04
+      return buf[0] === 0x50 && buf[1] === 0x4B && buf[2] === 0x03 && buf[3] === 0x04;
+    }
+    if (ext === "xls") {
+      // OLE compound file header: D0 CF 11 E0
+      return buf[0] === 0xD0 && buf[1] === 0xCF && buf[2] === 0x11 && buf[3] === 0xE0;
+    }
+    if (ext === "csv") {
+      // Reject binary content that includes a NUL byte in the first 4 KB.
+      const sniff = buf.slice(0, Math.min(4096, buf.length));
+      for (let i = 0; i < sniff.length; i++) if (sniff[i] === 0) return false;
+      return true;
+    }
+    return false;
+  }
+
+  // Try to extract chassis metadata from the workbook. Detection strategy:
+  //   1. If sheet 0 has a column named `key` and `value` (case-insensitive), or
+  //      the first N rows look like { key, value } pairs, read them.
+  //   2. Otherwise, if a sheet named "metadata" / "meta" / "chassis" exists,
+  //      parse it as key/value.
+  //   3. Fall back to filename: `TATA-407-EX2-BS6.xlsx`
+  //         → chassis_code = "TATA-407-EX2", variant = "BS6",
+  //           display_name = "Tata 407 EX2", model = "407 EX2".
+  //   4. Force make = "TATA" always.
+  function detectChassisMeta(wb: any, filename: string) {
+    const detected: Record<string, string> = {};
+    // Helper: read key/value pairs from a sheet.
+    const readKV = (sheetName: string) => {
+      const ws = wb.Sheets[sheetName];
+      if (!ws) return;
+      const rows = XLSX.utils.sheet_to_json(ws, { defval: "", raw: true, header: 1 }) as any[][];
+      for (const row of rows) {
+        if (!row || row.length < 2) continue;
+        const k = String(row[0] || "").trim().toLowerCase().replace(/\s+/g, "_");
+        const v = String(row[1] || "").trim();
+        if (!k || !v) continue;
+        if (["chassis_code", "display_name", "chassis_display_name", "model", "variant", "description"].includes(k)) {
+          const norm = k === "display_name" ? "display_name" : k;
+          if (!detected[norm]) detected[norm] = v;
+        }
+      }
+    };
+    // 1. metadata-ish sheet name
+    for (const name of wb.SheetNames as string[]) {
+      const lower = name.toLowerCase();
+      if (["metadata", "meta", "chassis", "info"].includes(lower)) readKV(name);
+    }
+    // 2. inspect sheet 0 top rows for a key/value pattern if we still don't
+    //    have chassis_code or display_name.
+    if (!detected.chassis_code || !detected.display_name) {
+      const sheet0 = wb.Sheets[wb.SheetNames[0]];
+      if (sheet0) {
+        const raw = XLSX.utils.sheet_to_json(sheet0, { defval: "", raw: true, header: 1 }) as any[][];
+        for (let i = 0; i < Math.min(raw.length, 12); i++) {
+          const row = raw[i];
+          if (!row || row.length < 2) continue;
+          const k = String(row[0] || "").trim().toLowerCase().replace(/\s+/g, "_");
+          const v = String(row[1] || "").trim();
+          if (!k || !v) continue;
+          if (["chassis_code", "display_name", "chassis_display_name", "model", "variant", "description"].includes(k)) {
+            const norm = k === "chassis_display_name" ? "display_name" : k;
+            if (!detected[norm]) detected[norm] = v;
+          }
+        }
+      }
+    }
+    // 3. filename fallback
+    const bareName = String(filename || "").replace(/\.[^.]+$/, "").trim();
+    if (bareName) {
+      const parts = bareName.split(/[-_\s]+/).filter(Boolean);
+      // Common pattern: TATA-407-EX2-BS6  →  code=TATA-407-EX2, variant=BS6
+      if (!detected.chassis_code && parts.length >= 2) {
+        const isVariantTail = /^bs\d+$|^bs6$|^bs4$|^bs3$|^cng$|^lpg$|^ev$/i.test(parts[parts.length - 1]);
+        const codeParts = isVariantTail ? parts.slice(0, -1) : parts;
+        detected.chassis_code = codeParts.join("-").toUpperCase();
+        if (isVariantTail && !detected.variant) detected.variant = parts[parts.length - 1].toUpperCase();
+      }
+      if (!detected.display_name && parts.length) {
+        // "TATA 407 EX2" style: first token title-cased, rest as-is upper.
+        const first = parts[0].toLowerCase();
+        const rest = parts.slice(1).map((p) => p.toUpperCase());
+        detected.display_name = [first.charAt(0).toUpperCase() + first.slice(1), ...rest].join(" ");
+      }
+      if (!detected.model && parts.length >= 2) {
+        // Skip the brand token; if last is a variant, drop it too.
+        const rest = parts.slice(1);
+        const isVariantTail = /^bs\d+$|^bs6$|^bs4$|^bs3$|^cng$|^lpg$|^ev$/i.test(rest[rest.length - 1] || "");
+        const modelParts = isVariantTail ? rest.slice(0, -1) : rest;
+        if (modelParts.length) detected.model = modelParts.join(" ").toUpperCase();
+      }
+    }
+
+    return {
+      chassis_code: detected.chassis_code || "",
+      display_name: detected.display_name || "",
+      make: "TATA",
+      model: detected.model || "",
+      variant: detected.variant || "",
+      description: detected.description || "",
+    };
+  }
+
+  // Shared: read the file, run magic-byte check, parse first sheet into parts
+  // rows (skipping any leading metadata rows that don't look like part rows).
+  function readAutoWorkbook(file: { originalname: string; buffer: Buffer; size: number }) {
+    if (file.size > AUTO_CHASSIS_MAX_BYTES) return { error: "file_too_large" as const };
+    const ext = autoFileExt(file.originalname);
+    if (!AUTO_ALLOWED_EXT.has(ext)) return { error: "invalid_file_type" as const };
+    if (!autoCheckMagic(file.buffer, ext)) return { error: "file_content_does_not_match_extension" as const };
+    let wb: any;
+    try { wb = XLSX.read(file.buffer, { type: "buffer" }); }
+    catch (e: any) { return { error: "parse_failed" as const, detail: String(e?.message || e) }; }
+    if (!wb.SheetNames.length) return { error: "no_sheet_in_file" as const };
+    return { wb, ext };
+  }
+
+  // Given a parsed workbook, return the actual part rows (an array of
+  // normalized-key objects) by skipping the first sheet’s metadata rows if
+  // the header row appears further down.
+  function extractPartRows(wb: any): any[] {
+    const sheetName = wb.SheetNames[0];
+    const ws = wb.Sheets[sheetName];
+    if (!ws) return [];
+    // First try the natural sheet_to_json (assumes row 1 is header).
+    const naive = XLSX.utils.sheet_to_json(ws, { defval: "", raw: true }) as any[];
+    const normalize = (r: any) => {
+      const out: any = {};
+      for (const k of Object.keys(r)) out[String(k).trim().toLowerCase().replace(/\s+/g, "_")] = r[k];
+      return out;
+    };
+    // If we see a `part_number` key on any row, we're good.
+    const normNaive = naive.map(normalize);
+    if (normNaive.some((r) => r.part_number && String(r.part_number).trim())) {
+      return normNaive.filter((r) => r.part_number && String(r.part_number).trim());
+    }
+    // Otherwise, walk the sheet as an array-of-arrays and find the header row.
+    const raw = XLSX.utils.sheet_to_json(ws, { defval: "", raw: true, header: 1 }) as any[][];
+    let headerIdx = -1;
+    for (let i = 0; i < Math.min(raw.length, 40); i++) {
+      const row = raw[i];
+      if (!row) continue;
+      const lower = row.map((c) => String(c || "").trim().toLowerCase());
+      if (lower.some((c) => c === "part_number" || c === "part number" || c === "partnumber" || c === "pn")) {
+        headerIdx = i;
+        break;
+      }
+    }
+    if (headerIdx < 0) return normNaive;  // give up gracefully
+    const headers = raw[headerIdx].map((c) => String(c || "").trim().toLowerCase().replace(/\s+/g, "_"));
+    const out: any[] = [];
+    for (let i = headerIdx + 1; i < raw.length; i++) {
+      const row = raw[i];
+      if (!row) continue;
+      const rec: any = {};
+      for (let c = 0; c < headers.length; c++) {
+        const k = headers[c] || `col_${c}`;
+        rec[k] = row[c] ?? "";
+      }
+      if (rec.part_number && String(rec.part_number).trim()) out.push(rec);
+    }
+    return out;
+  }
+
+  app.post(
+    "/api/admin/chassis/preview",
+    requireAuth,
+    partsUpload.single("file"),
+    async (req, res) => {
+      try {
+        const file = (req as any).file as { originalname: string; buffer: Buffer; size: number } | undefined;
+        if (!file) return res.status(400).json({ error: "file field required (xlsx | xls | csv)" });
+        const parsed = readAutoWorkbook(file);
+        if ("error" in parsed) {
+          const status = parsed.error === "file_too_large" ? 413
+            : parsed.error === "invalid_file_type" || parsed.error === "file_content_does_not_match_extension" ? 415
+            : 400;
+          return res.status(status).json({ error: parsed.error, detail: (parsed as any).detail });
+        }
+        const detected = detectChassisMeta(parsed.wb, file.originalname);
+        const rows = extractPartRows(parsed.wb);
+        const sample = rows.slice(0, 3).map((r) => ({
+          part_number: String(r.part_number || "").trim(),
+          description: String(r.description || "").trim(),
+          oem_number: String(r.oem_number || "").trim() || null,
+          category: String(r.category || "").trim() || null,
+          sell_price: toNumberOrNull(r.sell_price),
+          stock_qty: toIntOrNull(r.stock_qty),
+        }));
+        return res.json({
+          ok: true,
+          detected: { ...detected, parts_count: rows.length },
+          sample_parts: sample,
+        });
+      } catch (e: any) {
+        return res.status(500).json({ error: e?.message || "preview_failed" });
+      }
+    },
+  );
+
+  app.post(
+    "/api/admin/chassis/create-from-upload",
+    requireAuth,
+    partsUpload.single("file"),
+    async (req, res) => {
+      try {
+        const file = (req as any).file as { originalname: string; buffer: Buffer; size: number } | undefined;
+        if (!file) return res.status(400).json({ error: "file field required (xlsx | xls | csv)" });
+        const parsed = readAutoWorkbook(file);
+        if ("error" in parsed) {
+          const status = parsed.error === "file_too_large" ? 413
+            : parsed.error === "invalid_file_type" || parsed.error === "file_content_does_not_match_extension" ? 415
+            : 400;
+          return res.status(status).json({ error: parsed.error, detail: (parsed as any).detail });
+        }
+
+        // Confirmed fields from the client (edited by the admin in the preview
+        // step). If any are missing, re-run detection and fall back to that.
+        const b = req.body || {};
+        const auto = detectChassisMeta(parsed.wb, file.originalname);
+        const chassis_code = String(b.chassis_code || auto.chassis_code || "").trim();
+        const display_name = String(b.display_name || auto.display_name || "").trim();
+        const model = String(b.model || auto.model || "").trim() || null;
+        const variant = String(b.variant || auto.variant || "").trim() || null;
+        const description = String(b.description || auto.description || "").trim() || null;
+        if (!chassis_code) return res.status(400).json({ error: "chassis_code_required" });
+        if (!display_name) return res.status(400).json({ error: "display_name_required" });
+
+        const rows = extractPartRows(parsed.wb);
+
+        const slug = ensureUniqueChassisSlug(display_name);
+        const insertPart = rawSqlite.prepare(
+          `INSERT INTO chassis_parts
+            (chassis_id, part_number, oem_number, description, category, position_notes,
+             purchase_price, sell_price, stock_qty, image_url, is_active, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)
+           ON CONFLICT(chassis_id, part_number) DO UPDATE SET
+             oem_number      = excluded.oem_number,
+             description     = excluded.description,
+             category        = excluded.category,
+             position_notes  = excluded.position_notes,
+             purchase_price  = excluded.purchase_price,
+             sell_price      = excluded.sell_price,
+             stock_qty       = excluded.stock_qty,
+             image_url       = excluded.image_url,
+             is_active       = 1,
+             updated_at      = excluded.updated_at
+           RETURNING id, (created_at = updated_at) AS was_created`,
+        );
+
+        let chassisId = 0;
+        let created = 0;
+        let updated = 0;
+        const errors: { row: number; error: string }[] = [];
+        try {
+          const tx = rawSqlite.transaction(() => {
+            const now = Date.now();
+            const info = rawSqlite.prepare(
+              `INSERT INTO chassis_catalog
+                (chassis_code, chassis_display_name, make, model, variant, slug,
+                 cover_image_url, description, is_active, created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)`,
+            ).run(chassis_code, display_name, "TATA", model, variant, slug, null, description, now, now);
+            chassisId = Number(info.lastInsertRowid);
+            for (let i = 0; i < rows.length; i++) {
+              const r = rows[i];
+              try {
+                const part_number = String(r.part_number || "").trim();
+                if (!part_number) throw new Error("part_number is required");
+                const desc = String(r.description || "").trim() || part_number;
+                const result = insertPart.get(
+                  chassisId,
+                  part_number,
+                  String(r.oem_number || "").trim() || null,
+                  desc,
+                  String(r.category || "").trim() || null,
+                  String(r.position_notes || "").trim() || null,
+                  toNumberOrNull(r.purchase_price),
+                  toNumberOrNull(r.sell_price),
+                  toIntOrNull(r.stock_qty) ?? 0,
+                  String(r.image_url || "").trim() || null,
+                  now, now,
+                ) as any;
+                if (result && result.was_created) created++; else updated++;
+              } catch (e: any) {
+                errors.push({ row: i + 2, error: e?.message || "unknown" });
+              }
+            }
+          });
+          tx();
+        } catch (e: any) {
+          return res.status(500).json({ error: "create_failed", detail: String(e?.message || e) });
+        }
+
+        return res.json({
+          ok: true,
+          chassis_id: chassisId,
+          slug,
+          chassis_code,
+          display_name,
+          parts_created: created,
+          parts_updated: updated,
+          parts_errors: errors.length,
+          errors: errors.slice(0, 25),
+          total_rows: rows.length,
+        });
+      } catch (e: any) {
+        return res.status(500).json({ error: e?.message || "create_from_upload_failed" });
+      }
+    },
+  );
+
   // ---- Admin: list parts for a chassis ----
   app.get("/api/admin/chassis/:id/parts", requireAuth, async (req, res) => {
     try {
@@ -2186,6 +2534,101 @@ export function registerV2Routes(app: Express, ctx: V2Context) {
     } catch (e: any) {
       // Never throw — return a friendly error envelope.
       return res.json({ ok: false, error: e?.message || "internal_error", message: "Lookup failed" });
+    }
+  });
+
+  // =========================================================================
+  // R28.2 — additive public endpoints for the unified Find Parts page.
+  //
+  //   POST /api/parts-finder/lookup-chassis  { chassis_number }
+  //     Direct VIN lookup — skips SurePass entirely. Returns the same shape
+  //     as /api/parts-finder/lookup so the client can share result rendering.
+  //
+  //   GET  /api/parts/search?q=&limit=&offset=
+  //     Search across all chassis_parts by part_number / oem / description.
+  //     Each hit includes which chassis it fits (id, slug, display name),
+  //     so the client can render "fits: Tata 407 EX2" chips.
+  // =========================================================================
+
+  app.post("/api/parts-finder/lookup-chassis", requirePartsFinderFlag, async (req, res) => {
+    try {
+      const cn = String(req.body?.chassis_number || "").trim().toUpperCase();
+      if (!cn) return res.status(400).json({ error: "chassis_number required" });
+      // Basic sanity: VINs are 11–17 alphanumeric characters.
+      if (!/^[A-Z0-9]{6,20}$/.test(cn)) {
+        return res.status(400).json({ error: "chassis_number_invalid", message: "Chassis number must be alphanumeric" });
+      }
+      const ip = (req.headers["x-forwarded-for"] as string | undefined)?.split(",")[0]?.trim()
+        || req.socket?.remoteAddress || "unknown";
+      if (!rateLimitOk(ip)) {
+        return res.status(429).json({ error: "rate_limited", limit: PARTS_FINDER_MAX, window_ms: PARTS_FINDER_WINDOW_MS });
+      }
+      const matched = matchChassisFromLookup(cn, {});
+      return res.json({
+        ok: true,
+        reg_number: null,
+        chassis_number: cn,
+        matched_chassis: matched,
+        cached: false,
+        message: matched ? `Chassis matched: ${matched.chassis_display_name}`
+                         : "No catalog match — browse all chassis instead",
+      });
+    } catch (e: any) {
+      return res.json({ ok: false, error: e?.message || "internal_error", message: "Lookup failed" });
+    }
+  });
+
+  app.get("/api/parts/search", async (req, res) => {
+    try {
+      const q = String(req.query.q || "").trim();
+      if (!q || q.length < 2) return res.json({ ok: true, q, total: 0, results: [] });
+      const limit = Math.min(Math.max(parseInt(String(req.query.limit || "25"), 10) || 25, 1), 100);
+      const offset = Math.max(parseInt(String(req.query.offset || "0"), 10) || 0, 0);
+      const like = `%${q}%`;
+      // Join chassis_parts → chassis_catalog so the client sees which chassis fits.
+      const sql = `
+        SELECT p.id AS part_id, p.part_number, p.oem_number, p.description, p.category,
+               p.sell_price, p.stock_qty, p.image_url,
+               c.id AS chassis_id, c.slug AS chassis_slug, c.chassis_display_name AS chassis_display_name,
+               c.make AS chassis_make, c.model AS chassis_model
+          FROM chassis_parts p
+          JOIN chassis_catalog c ON c.id = p.chassis_id
+         WHERE p.is_active = 1 AND c.is_active = 1
+           AND (p.part_number LIKE ? OR p.oem_number LIKE ? OR p.description LIKE ?)
+         ORDER BY (CASE WHEN p.part_number LIKE ? THEN 0 ELSE 1 END), p.part_number
+         LIMIT ? OFFSET ?`;
+      const startsLike = `${q}%`;
+      const rows = rawSqlite.prepare(sql).all(like, like, like, startsLike, limit, offset) as any[];
+      const total = (rawSqlite.prepare(
+        `SELECT COUNT(*) AS c FROM chassis_parts p JOIN chassis_catalog c ON c.id = p.chassis_id
+          WHERE p.is_active = 1 AND c.is_active = 1
+            AND (p.part_number LIKE ? OR p.oem_number LIKE ? OR p.description LIKE ?)`
+      ).get(like, like, like) as any).c as number;
+      res.setHeader("X-Total-Count", String(total));
+      return res.json({
+        ok: true,
+        q,
+        total,
+        results: rows.map((r) => ({
+          part_id: r.part_id,
+          part_number: r.part_number,
+          oem_number: r.oem_number,
+          description: r.description,
+          category: r.category,
+          sell_price: r.sell_price,
+          stock_qty: r.stock_qty,
+          image_url: r.image_url,
+          fits_chassis: {
+            id: r.chassis_id,
+            slug: r.chassis_slug,
+            display_name: r.chassis_display_name,
+            make: r.chassis_make,
+            model: r.chassis_model,
+          },
+        })),
+      });
+    } catch (e: any) {
+      return res.status(500).json({ ok: false, error: e?.message || "search_failed" });
     }
   });
 
@@ -3666,6 +4109,11 @@ export function registerV2Routes(app: Express, ctx: V2Context) {
   // R28.1 — Team Upload (public passcode-gated + admin audit log)
   // ============================================================================
   registerTeamUploadRoutes(app, { requireAdminRole: requireAuth });
+
+  // ============================================================================
+  // R28.2 — Get-Quotation flow (public /api/quote/otp/send | otp/verify | submit)
+  // ============================================================================
+  registerQuoteRfqRoutes(app);
 
   // ============================================================================
   // ROUNDS 4.4 → 7 ROUTES
