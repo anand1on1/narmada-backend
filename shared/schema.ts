@@ -1335,3 +1335,61 @@ export const surepassLookups = sqliteTable("surepass_lookups", {
   createdAt: integer("created_at").notNull(),
 });
 export type SurepassLookup = typeof surepassLookups.$inferSelect;
+
+// =====================================================================
+// R28 Session 3 — Auto-Publish on Notify-Delhi + 22% markup + minimal AI images
+// Two additive tables:
+//   auto_publish_log  — one row per (po_id, part_number) publish event
+//   part_image_cache  — cached representational images keyed by category / description
+// Verbatim user requirements (preserve as inline comments in code):
+//  * "when a client purchase order is processed and rates are locked and delhi
+//     is notified at that time the publishing should happen"
+//  * "the product should be ready to order when notify delhi is triggered,
+//     the quantity should br 10 for each pcs. No RELATION WITH THE PATNA
+//     RECIEVING"
+//  * "every item successfully procured by the team is automatically published
+//     with 22% markup on purchase price"
+//  * "on the image section an image resembling the item i.e if its a uj cross
+//     then a cross image should be used with disclaimer the image is only for
+//     representation purpose"
+//  * "I GUESS YOU CAN YOU PERPLEXITY API TO GENERATE MINIMAL IMAGES WHICH DOES
+//     NOT BURN CONSIDERABLE CREDITS"
+// =====================================================================
+export const autoPublishLog = sqliteTable("auto_publish_log", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  poId: integer("po_id").notNull(),
+  poLineId: integer("po_line_id"),                       // po_items.id if resolvable
+  partNumber: text("part_number").notNull(),
+  description: text("description").notNull(),
+  purchasePrice: real("purchase_price").notNull(),
+  publishedPrice: real("published_price").notNull(),     // purchase_price * 1.22
+  markupPct: real("markup_pct").notNull().default(22.0),
+  quantity: integer("quantity").notNull().default(10),   // verbatim: "quantity should br 10 for each pcs"
+  productId: integer("product_id"),                      // id of products row created/updated
+  imageUrl: text("image_url"),                           // generated / reused / placeholder
+  imageSource: text("image_source"),                     // 'generated' | 'reused' | 'placeholder'
+  status: text("status").notNull(),                      // 'published' | 'updated' | 'skipped' | 'error'
+  errorMessage: text("error_message"),
+  triggeredBy: text("triggered_by").notNull(),           // 'notify-delhi' | 'manual-admin'
+  triggeredByUserId: integer("triggered_by_user_id"),
+  createdAt: integer("created_at").notNull(),
+  // NOTE: composite uniqueness (po_id, part_number) is enforced in the CREATE TABLE
+  // SQL in migrations.ts (drizzle-sqlite table-level UNIQUE support is limited).
+});
+export type AutoPublishLog = typeof autoPublishLog.$inferSelect;
+export const insertAutoPublishLogSchema = createInsertSchema(autoPublishLog).omit({ id: true, createdAt: true });
+export type InsertAutoPublishLog = z.infer<typeof insertAutoPublishLogSchema>;
+
+export const partImageCache = sqliteTable("part_image_cache", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  cacheKey: text("cache_key").notNull().unique(),        // normalized keyword e.g. 'uj-cross', 'clutch-plate'
+  imageUrl: text("image_url").notNull(),
+  imageSource: text("image_source").notNull(),           // 'generated' | 'manual-upload'
+  promptUsed: text("prompt_used"),
+  generatedAt: integer("generated_at").notNull(),
+  usageCount: integer("usage_count").notNull().default(0),
+  lastUsedAt: integer("last_used_at"),
+});
+export type PartImageCache = typeof partImageCache.$inferSelect;
+export const insertPartImageCacheSchema = createInsertSchema(partImageCache).omit({ id: true });
+export type InsertPartImageCache = z.infer<typeof insertPartImageCacheSchema>;

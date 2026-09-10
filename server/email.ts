@@ -870,3 +870,77 @@ export async function resendFromLog(logId: number): Promise<{ ok: boolean; error
     return { ok: false, error: msg };
   }
 }
+
+// =====================================================================
+// R28 Session 3 — sendGenericSalesEmail
+// Small, generic email helper used by auto-publish (and any future feature
+// that wants to notify sales@narmadamobility.com without owning its own SMTP
+// setup). Uses the same SMTP env + rate-limit bucket as the typed helpers.
+// Never throws. Respects EMAIL_NOTIFICATIONS_ENABLED. Fire-and-forget from
+// callers — do NOT `await`.
+// =====================================================================
+export interface GenericSalesEmailPayload {
+  eventType: string;              // event_type column value (stored as-is)
+  entityId?: number | null;       // optional entity id for cross-reference
+  subject: string;
+  text: string;
+  html?: string;                  // optional; auto-wrapped from `text` if omitted
+  to?: string;                    // override recipient; defaults to SALES_NOTIFY_EMAIL
+}
+
+export async function sendGenericSalesEmail(
+  payload: GenericSalesEmailPayload,
+): Promise<{ ok: boolean; error?: string; messageId?: string }> {
+  try {
+    const env = loadSalesEnv();
+    const to = payload.to || env.to;
+    const subject = payload.subject;
+    const text = payload.text;
+    const html = payload.html || shellHtml(
+      `<pre style="font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px;white-space:pre-wrap;color:#111827;">${escape(text)}</pre>`,
+      env.siteUrl,
+    );
+    const bodyPreview = trim500(text);
+    const logId = insertEmailLog({
+      event_type: payload.eventType,
+      entity_id: payload.entityId ?? null,
+      recipient: to,
+      cc: null,
+      reply_to: env.replyTo,
+      subject,
+      body_preview: bodyPreview,
+      status: "pending",
+      error_message: null,
+      provider_message_id: null,
+      attempts: 0,
+    });
+    if (!env.enabled) {
+      updateEmailLog(logId, { status: "skipped", error_message: "email_notifications_disabled" });
+      return { ok: false, error: "notifications disabled" };
+    }
+    const transport = getSalesTransport(env);
+    if (!transport) {
+      updateEmailLog(logId, { status: "failed", error_message: "smtp_unconfigured", attempts: 1 });
+      return { ok: false, error: "SMTP not configured" };
+    }
+    try {
+      const info = await transport.sendMail({
+        from: `"${env.fromName}" <${env.fromEmail}>`,
+        to,
+        replyTo: env.replyTo,
+        subject,
+        html,
+        text,
+      });
+      updateEmailLog(logId, { status: "sent", provider_message_id: info.messageId || null, attempts: 1, sent_at: Date.now() });
+      return { ok: true, messageId: info.messageId };
+    } catch (e: any) {
+      const msg = e?.message || String(e);
+      updateEmailLog(logId, { status: "failed", error_message: msg, attempts: 1 });
+      return { ok: false, error: msg };
+    }
+  } catch (e: any) {
+    console.error("[email] sendGenericSalesEmail unexpected:", e?.message || e);
+    return { ok: false, error: e?.message || String(e) };
+  }
+}
