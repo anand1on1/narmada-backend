@@ -1393,3 +1393,26 @@ export const partImageCache = sqliteTable("part_image_cache", {
 export type PartImageCache = typeof partImageCache.$inferSelect;
 export const insertPartImageCacheSchema = createInsertSchema(partImageCache).omit({ id: true });
 export type InsertPartImageCache = z.infer<typeof insertPartImageCacheSchema>;
+
+// =====================================================================
+// R28 Session 4 — SEO Product Pages + Sitemap + Robots (BACKEND ONLY)
+// seo_page_views: analytics for SSR product / chassis / category pages. IP is
+// hashed (SHA-256 of ip + APP_URL salt) for GDPR safety. is_bot inferred from
+// UA. Nothing here mutates existing tables.
+// Verbatim user requirement:
+//   "EACH PRODUCT CREATED BY EXCEL UPLOAD OF THE CHASIS CREATES A SEPARATE
+//    PAGE WHICH FOLLOWS LATEST GOOGLE SEO NORMS"
+// =====================================================================
+export const seoPageViews = sqliteTable("seo_page_views", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  pageType: text("page_type").notNull(),                 // 'product' | 'chassis' | 'category'
+  pageSlug: text("page_slug").notNull(),
+  userAgent: text("user_agent"),
+  referer: text("referer"),
+  ipHash: text("ip_hash"),
+  isBot: integer("is_bot").notNull().default(0),         // 1 if UA matches known bot list
+  createdAt: integer("created_at").notNull(),
+});
+export type SeoPageView = typeof seoPageViews.$inferSelect;
+export const insertSeoPageViewSchema = createInsertSchema(seoPageViews).omit({ id: true });
+export type InsertSeoPageView = z.infer<typeof insertSeoPageViewSchema>;

@@ -229,7 +229,7 @@ app.use((req, res, next) => {
     console.log("[boot] step: post-R27.29 sales-digest-log table");
     runR27_30Migrations();
     console.log("[boot] step: post-R27.30 admin-otp tables");
-    const { runR27_32Migrations, runR27_33Migrations, runR27_33aMigrations, runR27_34aMigrations, runR27_34bMigrations, runR27_35Migrations, runR27_36Migrations, runR27_36aMigrations, runR27_36bMigrations, runR27_36aDataMigration, runR28_1Migrations, runR28_2Migrations, runR28_3Migrations } = await import("./migrations");
+    const { runR27_32Migrations, runR27_33Migrations, runR27_33aMigrations, runR27_34aMigrations, runR27_34bMigrations, runR27_35Migrations, runR27_36Migrations, runR27_36aMigrations, runR27_36bMigrations, runR27_36aDataMigration, runR28_1Migrations, runR28_2Migrations, runR28_3Migrations, runR28_4Migrations } = await import("./migrations");
     runR27_32Migrations();
     console.log("[boot] step: post-R27.32 payment tables");
     runR27_33Migrations();
@@ -260,6 +260,10 @@ app.use((req, res, next) => {
     // Backs the Auto-Publish-on-Notify-Delhi feature (default OFF via AUTO_PUBLISH_ENABLED).
     runR28_3Migrations();
     console.log("[boot] step: post-R28.3 auto_publish_log + part_image_cache tables");
+    // R28 Session 4 — seo_page_views (additive, idempotent). Backs the SEO product-page
+    // module. Safe to run whether SEO_PAGES_ENABLED is true or false.
+    runR28_4Migrations();
+    console.log("[boot] step: post-R28.4 seo_page_views table");
     // R27.32 — Process Payment authorizes admin/procurement/finance. finance was not
     // in the admin-role whitelist before this release; it is added in VALID_ROLES.
     try {
