@@ -35,7 +35,11 @@ app.use((req, res, next) => {
       // R27.16 — added x-datacenter-token (v1.4a Data Center shell uploads were
       // rejected by the GoDaddy→Render CORS preflight, surfacing as "Failed to
       // fetch" on Data Center upload routes from /datacenter/*).
-      "Content-Type, Authorization, X-Requested-With, x-admin-token, x-customer-token, x-team-token, x-sales-token, x-finance-token, x-hr-token, x-consignment-token, x-shop-token, x-store-token, x-dispatch-token, x-datacenter-token",
+      // R28.5 — added x-quote-token. R28.4 shipped the OTP-gated quote submit
+      // (POST /api/quote/submit) which sends the OTP verification token as
+      // x-quote-token. Without it in this list, the GoDaddy→Render preflight
+      // rejected the request and users saw "Failed to fetch" on submit.
+      "Content-Type, Authorization, X-Requested-With, x-admin-token, x-customer-token, x-team-token, x-sales-token, x-finance-token, x-hr-token, x-consignment-token, x-shop-token, x-store-token, x-dispatch-token, x-datacenter-token, x-quote-token",
     );
   }
   if (req.method === "OPTIONS") {
