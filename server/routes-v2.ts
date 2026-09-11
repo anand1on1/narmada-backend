@@ -1982,37 +1982,55 @@ export function registerV2Routes(app: Express, ctx: V2Context) {
         .replace(/\s+/g, "_");
     };
 
-    // R28.6: map a normalized metadata key onto the canonical detected field name.
+    // R28.7: map a normalized metadata key onto the canonical detected field name.
     // Returns null if the key isn't a recognized metadata field.
-    // The caller separately tracks which "chassis_code" source "wins" — VC No
-    // is preferred over Chassis Type when both are present on Tata sheets.
+    //
+    // Correct Tata mapping (user-confirmed, R28.7):
+    //   "Chassis Type"      → chassis_code   (physical chassis platform, e.g. "466611")
+    //   "VC No" / "VC No."  → DISCARDED       (build variant, not a platform ID)
+    //   "Model Name"        → display_name
+    //   "Model Category"    → model
+    //   "Model_Version"     → variant
+    //   "Model Description" → description
+    //
+    // "vc_no" is intentionally NOT mapped here — it is used only as a Tata-brand
+    // detection signal (see tataKeyPresent below) and is never stored on the
+    // returned object.
     const mapMetaKey = (k: string): { field: string; priority: number } | null => {
-      // chassis_code: VC No is the primary chassis identifier for Tata; Chassis
-      // Type is a fallback (lower priority).
-      if (k === "vc_no" || k === "chassis_code") return { field: "chassis_code", priority: 10 };
-      if (k === "chassis_type") return { field: "chassis_code", priority: 5 };
+      // chassis_code: Chassis Type is the primary and ONLY source from Tata sheets.
+      // A raw "chassis_code" key (if a non-Tata sheet uses it) is also honored.
+      if (k === "chassis_type" || k === "chassis_code") return { field: "chassis_code", priority: 10 };
       // display_name
       if (k === "model_name" || k === "display_name" || k === "chassis_display_name") return { field: "display_name", priority: 10 };
       // model
       if (k === "model_category" || k === "model") return { field: "model", priority: 10 };
-      // variant
+      // variant (Model_Version only — Chassis Type must NOT become variant)
       if (k === "model_version" || k === "variant") return { field: "variant", priority: 10 };
       // description
       if (k === "model_description" || k === "description") return { field: "description", priority: 10 };
-      // (Chassis Type doubles as "variant" when VC No is present as chassis_code.
-      // We handle that after the initial pass below.)
       return null;
     };
 
-    // Track priorities per detected field so that VC No wins over Chassis Type.
+    // R28.7: Tata-brand detection keys (used only to force make = "TATA";
+    // these keys' values are NOT stored on the returned object).
+    const TATA_SIGNAL_KEYS = new Set([
+      "vc_no",
+      "chassis_type",
+      "model_name",
+      "model_category",
+      "model_version",
+      "model_description",
+    ]);
+    let tataKeyPresent = false;
+
+    // Track priorities per detected field (kept for future overlap resolution).
     const detectedPriority: Record<string, number> = {};
-    let chassisTypeValue = "";  // raw Chassis Type value, used as variant when VC No claims chassis_code
 
     const consider = (rawKey: any, rawVal: any) => {
       const k = normKey(rawKey);
       const v = String(rawVal || "").trim();
       if (!k || !v) return;
-      if (k === "chassis_type") chassisTypeValue = v;
+      if (TATA_SIGNAL_KEYS.has(k)) tataKeyPresent = true;
       const mapped = mapMetaKey(k);
       if (!mapped) return;
       const cur = detectedPriority[mapped.field] ?? -1;
@@ -2053,11 +2071,10 @@ export function registerV2Routes(app: Express, ctx: V2Context) {
       }
     }
 
-    // R28.6: If Chassis Type is present alongside VC No, prefer VC No as chassis_code
-    // and expose Chassis Type as variant (unless Model_Version already claimed variant).
-    if (chassisTypeValue && detected.chassis_code && detected.chassis_code !== chassisTypeValue && !detected.variant) {
-      detected.variant = chassisTypeValue;
-    }
+    // R28.7: Chassis Type is now the sole source for chassis_code. VC No is
+    // discarded entirely. variant comes only from Model_Version. No promotion
+    // of Chassis Type into variant.
+    void tataKeyPresent; // make is always forced to "TATA" below (see return value)
     // 3. filename fallback
     const bareName = String(filename || "").replace(/\.[^.]+$/, "").trim();
     if (bareName) {
