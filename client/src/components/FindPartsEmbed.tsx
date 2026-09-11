@@ -16,14 +16,14 @@
 // In wizard mode (isEmbeddedWizard=true) we surface "matched chassis" and
 // deep-link to the model tab pre-filled with the chassis code so the visitor
 // can add parts without leaving the wizard.
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Link, useLocation } from "wouter";
-import { apiRequest } from "@/lib/queryClient";
+import { apiRequest, apiUrl } from "@/lib/queryClient";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
-import { Search, MessageCircle, ArrowRight, ListChecks, Package, Hash, Truck, Plus, ImageOff, CheckCircle2 } from "lucide-react";
+import { Search, MessageCircle, ArrowRight, ListChecks, Package, Hash, Truck, Plus, ImageOff, CheckCircle2, Loader2 } from "lucide-react";
 import { toast } from "@/hooks/use-toast";
 import { waLink, NARMADA_WA_NUMBER, isFeatureDisabledError, isRateLimitedError, isRepresentationalImage, formatINR } from "@/lib/r28-utils";
 
@@ -387,26 +387,122 @@ function ModelTab({ isEmbeddedWizard, onAddToCart, addedPartIds }: FindPartsEmbe
 }
 
 /* ───────────────────────────────────────────────────────── Part-number tab */
+// R28.8 — Debounced live part suggestions.
+//
+// Behavior:
+//  - As the user types (>= 2 chars), we debounce 300ms then hit
+//    /api/parts/search?q=...&limit=10 for a lightweight suggestion list.
+//  - Manual Search (Enter or button click) still calls limit=30 and shows the
+//    full results/skeleton exactly as before.
+//  - Live search shows a subtle inline spinner inside the input — NOT the big
+//    skeleton (that is reserved for a manual Search).
+//  - Stale live-search responses are cancelled via AbortController + a request
+//    id guard so "AB" never overwrites the results for a later "ABC".
+//  - After a manual Search, live search is suppressed until the user edits the
+//    input again (prevents flicker between manual and debounced results).
+//  - Empty / <2 chars => no live request.
+//  - Zero live-result hint is a small "Keep typing…" line under the input, not
+//    a big empty state.
 function PartTab({ isEmbeddedWizard, onAddToCart, addedPartIds }: FindPartsEmbedProps) {
   const [q, setQ] = useState("");
   const [rows, setRows] = useState<AddablePart[]>([]);
   const [total, setTotal] = useState(0);
+  // "loading" == manual full-search (uses the big skeleton, unchanged behavior).
   const [loading, setLoading] = useState(false);
   const [searched, setSearched] = useState(false);
+  // Live-suggestion state (independent from manual Search state).
+  const [liveLoading, setLiveLoading] = useState(false);
+  const [liveEmpty, setLiveEmpty] = useState(false);
+  // Suppress live search until the user edits the input again after a manual
+  // Search — prevents flicker between the manual (limit=30) result set and a
+  // debounced (limit=10) response that would arrive right after.
+  const [suppressLive, setSuppressLive] = useState(false);
+
+  // Stale-request guards: AbortController tears down in-flight fetches; the
+  // numeric id ensures a late response cannot overwrite a newer one even if
+  // the abort doesn't win the race.
+  const liveAbortRef = useRef<AbortController | null>(null);
+  const liveReqIdRef = useRef(0);
+
+  const runLiveSearch = async (query: string) => {
+    // Cancel any in-flight live request.
+    if (liveAbortRef.current) liveAbortRef.current.abort();
+    const ctrl = new AbortController();
+    liveAbortRef.current = ctrl;
+    const reqId = ++liveReqIdRef.current;
+    setLiveLoading(true);
+    setLiveEmpty(false);
+    try {
+      const res = await fetch(apiUrl(`/api/parts/search?q=${encodeURIComponent(query)}&limit=10`), {
+        method: "GET",
+        signal: ctrl.signal,
+      });
+      if (!res.ok) throw new Error(`${res.status}`);
+      const data = await res.json();
+      // Stale-check: only apply if this is still the latest request.
+      if (reqId !== liveReqIdRef.current) return;
+      const results: AddablePart[] = data.results || [];
+      setRows(results);
+      setTotal(data.total || results.length);
+      setSearched(true);
+      setLiveEmpty(results.length === 0);
+    } catch (err: any) {
+      if (err?.name === "AbortError") return; // expected on newer keystroke
+      if (reqId !== liveReqIdRef.current) return;
+      // Silent failure for the live path — the user still has the manual
+      // Search button available and we don't want a toast on every keystroke.
+    } finally {
+      if (reqId === liveReqIdRef.current) setLiveLoading(false);
+    }
+  };
+
+  // Debounced live-search effect.
+  useEffect(() => {
+    const cleaned = q.trim();
+    // Rules 5 + 6 + 3: no live search when short, empty, currently doing a
+    // manual Search, or right after a manual Search (until the user re-edits).
+    if (cleaned.length < 2 || loading || suppressLive) {
+      // Cancel any lingering request and reset live indicators when the input
+      // becomes ineligible for live search.
+      if (liveAbortRef.current) liveAbortRef.current.abort();
+      setLiveLoading(false);
+      setLiveEmpty(false);
+      return;
+    }
+    const t = window.setTimeout(() => { runLiveSearch(cleaned); }, 300);
+    return () => { window.clearTimeout(t); };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [q, loading, suppressLive]);
+
+  // Abort on unmount.
+  useEffect(() => () => { if (liveAbortRef.current) liveAbortRef.current.abort(); }, []);
 
   const submit = async (e?: React.FormEvent) => {
     e?.preventDefault();
     const cleaned = q.trim();
     if (cleaned.length < 2) return;
+    // Rule 4: cancel any pending live search — the manual Search wins.
+    if (liveAbortRef.current) liveAbortRef.current.abort();
+    liveReqIdRef.current += 1; // invalidate any in-flight live response
+    setLiveLoading(false);
+    setLiveEmpty(false);
     setLoading(true); setSearched(true);
     try {
       const r = await apiRequest("GET", `/api/parts/search?q=${encodeURIComponent(cleaned)}&limit=30`);
       const data = await r.json();
       setRows(data.results || []);
       setTotal(data.total || (data.results?.length ?? 0));
+      // Rule 6: don't fire live search again until the user modifies the input.
+      setSuppressLive(true);
     } catch (e: any) {
       toast({ title: "Search failed", description: e?.message || String(e), variant: "destructive" });
     } finally { setLoading(false); }
+  };
+
+  const onInputChange = (value: string) => {
+    setQ(value);
+    // Any edit re-enables the live-search path (rule 6).
+    if (suppressLive) setSuppressLive(false);
   };
 
   return (
@@ -414,12 +510,32 @@ function PartTab({ isEmbeddedWizard, onAddToCart, addedPartIds }: FindPartsEmbed
       <form onSubmit={submit} className="bg-card rounded-xl border shadow-sm p-5 sm:p-6 mb-4">
         <label className="block text-xs uppercase text-slate-500 mb-2 font-mono tracking-wider">Part number, OEM number or description</label>
         <div className="flex flex-col sm:flex-row gap-2">
-          <Input value={q} onChange={(e) => setQ(e.target.value)} placeholder="e.g. 251434100121 or brake pad" className="flex-1 h-12 text-base sm:text-lg font-mono" data-testid="input-part" />
+          <div className="relative flex-1">
+            <Input
+              value={q}
+              onChange={(e) => onInputChange(e.target.value)}
+              placeholder="e.g. 251434100121 or brake pad"
+              className="h-12 text-base sm:text-lg font-mono pr-10"
+              data-testid="input-part"
+            />
+            {liveLoading && (
+              <Loader2
+                className="absolute right-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400 animate-spin"
+                data-testid="live-spinner"
+                aria-label="Loading suggestions"
+              />
+            )}
+          </div>
           <Button type="submit" size="lg" className="h-12 px-6" disabled={loading || q.trim().length < 2} data-testid="btn-part-search">
             <Search className="w-4 h-4 mr-2" /> {loading ? "Searching…" : "Search"}
           </Button>
         </div>
         <p className="text-xs text-slate-500 mt-2">Searches across every chassis in the catalog. Each result shows which chassis it fits.</p>
+        {/* Subtle live-search zero-result hint (rule 7). Never shown while a
+            manual Search skeleton is up or while a live fetch is in flight. */}
+        {!loading && !liveLoading && liveEmpty && q.trim().length >= 2 && !suppressLive && (
+          <p className="text-xs text-slate-400 mt-1" data-testid="live-empty-hint">Keep typing…</p>
+        )}
       </form>
 
       {!searched && !loading && (
@@ -434,7 +550,7 @@ function PartTab({ isEmbeddedWizard, onAddToCart, addedPartIds }: FindPartsEmbed
         isEmbeddedWizard={!!isEmbeddedWizard}
         onAddToCart={onAddToCart}
         addedPartIds={addedPartIds}
-        emptyMessage={searched && !loading ? `No parts found for "${q}". Try another tab or add manually below.` : ""}
+        emptyMessage={searched && !loading && suppressLive && rows.length === 0 ? `No parts found for "${q}". Try another tab or add manually below.` : ""}
       />
     </div>
   );
