@@ -1971,6 +1971,57 @@ export function registerV2Routes(app: Express, ctx: V2Context) {
   //   4. Force make = "TATA" always.
   function detectChassisMeta(wb: any, filename: string) {
     const detected: Record<string, string> = {};
+
+    // R28.6: normalize a metadata key — lowercase, trim, strip trailing punctuation
+    // (e.g. "VC No." → "vc_no"), collapse whitespace to underscores.
+    const normKey = (raw: any): string => {
+      return String(raw || "")
+        .trim()
+        .toLowerCase()
+        .replace(/[.:;\-]+$/g, "")
+        .replace(/\s+/g, "_");
+    };
+
+    // R28.6: map a normalized metadata key onto the canonical detected field name.
+    // Returns null if the key isn't a recognized metadata field.
+    // The caller separately tracks which "chassis_code" source "wins" — VC No
+    // is preferred over Chassis Type when both are present on Tata sheets.
+    const mapMetaKey = (k: string): { field: string; priority: number } | null => {
+      // chassis_code: VC No is the primary chassis identifier for Tata; Chassis
+      // Type is a fallback (lower priority).
+      if (k === "vc_no" || k === "chassis_code") return { field: "chassis_code", priority: 10 };
+      if (k === "chassis_type") return { field: "chassis_code", priority: 5 };
+      // display_name
+      if (k === "model_name" || k === "display_name" || k === "chassis_display_name") return { field: "display_name", priority: 10 };
+      // model
+      if (k === "model_category" || k === "model") return { field: "model", priority: 10 };
+      // variant
+      if (k === "model_version" || k === "variant") return { field: "variant", priority: 10 };
+      // description
+      if (k === "model_description" || k === "description") return { field: "description", priority: 10 };
+      // (Chassis Type doubles as "variant" when VC No is present as chassis_code.
+      // We handle that after the initial pass below.)
+      return null;
+    };
+
+    // Track priorities per detected field so that VC No wins over Chassis Type.
+    const detectedPriority: Record<string, number> = {};
+    let chassisTypeValue = "";  // raw Chassis Type value, used as variant when VC No claims chassis_code
+
+    const consider = (rawKey: any, rawVal: any) => {
+      const k = normKey(rawKey);
+      const v = String(rawVal || "").trim();
+      if (!k || !v) return;
+      if (k === "chassis_type") chassisTypeValue = v;
+      const mapped = mapMetaKey(k);
+      if (!mapped) return;
+      const cur = detectedPriority[mapped.field] ?? -1;
+      if (mapped.priority > cur) {
+        detected[mapped.field] = v;
+        detectedPriority[mapped.field] = mapped.priority;
+      }
+    };
+
     // Helper: read key/value pairs from a sheet.
     const readKV = (sheetName: string) => {
       const ws = wb.Sheets[sheetName];
@@ -1978,13 +2029,7 @@ export function registerV2Routes(app: Express, ctx: V2Context) {
       const rows = XLSX.utils.sheet_to_json(ws, { defval: "", raw: true, header: 1 }) as any[][];
       for (const row of rows) {
         if (!row || row.length < 2) continue;
-        const k = String(row[0] || "").trim().toLowerCase().replace(/\s+/g, "_");
-        const v = String(row[1] || "").trim();
-        if (!k || !v) continue;
-        if (["chassis_code", "display_name", "chassis_display_name", "model", "variant", "description"].includes(k)) {
-          const norm = k === "display_name" ? "display_name" : k;
-          if (!detected[norm]) detected[norm] = v;
-        }
+        consider(row[0], row[1]);
       }
     };
     // 1. metadata-ish sheet name
@@ -1998,18 +2043,20 @@ export function registerV2Routes(app: Express, ctx: V2Context) {
       const sheet0 = wb.Sheets[wb.SheetNames[0]];
       if (sheet0) {
         const raw = XLSX.utils.sheet_to_json(sheet0, { defval: "", raw: true, header: 1 }) as any[][];
-        for (let i = 0; i < Math.min(raw.length, 12); i++) {
+        // R28.6: Tata sheets have 8 metadata rows before the header row —
+        // scan a bit further (up to 15) to be safe.
+        for (let i = 0; i < Math.min(raw.length, 15); i++) {
           const row = raw[i];
           if (!row || row.length < 2) continue;
-          const k = String(row[0] || "").trim().toLowerCase().replace(/\s+/g, "_");
-          const v = String(row[1] || "").trim();
-          if (!k || !v) continue;
-          if (["chassis_code", "display_name", "chassis_display_name", "model", "variant", "description"].includes(k)) {
-            const norm = k === "chassis_display_name" ? "display_name" : k;
-            if (!detected[norm]) detected[norm] = v;
-          }
+          consider(row[0], row[1]);
         }
       }
+    }
+
+    // R28.6: If Chassis Type is present alongside VC No, prefer VC No as chassis_code
+    // and expose Chassis Type as variant (unless Model_Version already claimed variant).
+    if (chassisTypeValue && detected.chassis_code && detected.chassis_code !== chassisTypeValue && !detected.variant) {
+      detected.variant = chassisTypeValue;
     }
     // 3. filename fallback
     const bareName = String(filename || "").replace(/\.[^.]+$/, "").trim();
@@ -2068,11 +2115,51 @@ export function registerV2Routes(app: Express, ctx: V2Context) {
     const sheetName = wb.SheetNames[0];
     const ws = wb.Sheets[sheetName];
     if (!ws) return [];
+
+    // R28.6: canonicalize a raw column-header string onto our internal field name.
+    // We accept Tata's "Part No", "Part Description", "MRP", "Qty", "Group Name",
+    // etc. alongside the older "part_number", "description" conventions.
+    // Input is a raw header cell; output is a canonical key (or the raw normalized
+    // key if no alias matches, so we don't drop unrelated columns).
+    const canonicalizeHeader = (raw: any): string => {
+      const norm = String(raw || "")
+        .trim()
+        .toLowerCase()
+        .replace(/[.:;]+$/g, "")   // strip trailing punctuation
+        .replace(/\s+/g, " ")
+        .trim();
+      const underscored = norm.replace(/\s+/g, "_");
+      // Part number aliases
+      if (["part_number", "part number", "partnumber", "pn", "part no", "part_no", "partno", "part-no"].includes(norm)
+          || ["part_number", "partnumber", "pn", "part_no", "partno", "part-no"].includes(underscored)) return "part_number";
+      // Description aliases
+      if (["description", "part description", "part_desc", "desc"].includes(norm)
+          || ["description", "part_description", "part_desc", "desc"].includes(underscored)) return "description";
+      // OEM number aliases
+      if (["oem no", "oem_no", "oem number", "oem_number"].includes(norm)
+          || ["oem_no", "oem_number"].includes(underscored)) return "oem_number";
+      // Quantity aliases
+      if (["qty", "quantity", "stock_qty", "stock qty"].includes(norm)
+          || ["qty", "quantity", "stock_qty"].includes(underscored)) return "stock_qty";
+      // Sell price aliases
+      if (["mrp", "price", "sell price", "sell_price", "selling price", "selling_price"].includes(norm)
+          || ["mrp", "price", "sell_price", "selling_price"].includes(underscored)) return "sell_price";
+      // Category aliases (Tata: Group Name)
+      if (["category", "group name", "group_name"].includes(norm)
+          || ["category", "group_name"].includes(underscored)) return "category";
+      return underscored;
+    };
+
     // First try the natural sheet_to_json (assumes row 1 is header).
     const naive = XLSX.utils.sheet_to_json(ws, { defval: "", raw: true }) as any[];
     const normalize = (r: any) => {
       const out: any = {};
-      for (const k of Object.keys(r)) out[String(k).trim().toLowerCase().replace(/\s+/g, "_")] = r[k];
+      for (const k of Object.keys(r)) {
+        const canonical = canonicalizeHeader(k);
+        // Don't clobber an already-populated canonical field (e.g. if both
+        // "part_number" and "Part No" columns exist, the first non-empty wins).
+        if (out[canonical] === undefined || out[canonical] === "") out[canonical] = r[k];
+      }
       return out;
     };
     // If we see a `part_number` key on any row, we're good.
@@ -2086,14 +2173,15 @@ export function registerV2Routes(app: Express, ctx: V2Context) {
     for (let i = 0; i < Math.min(raw.length, 40); i++) {
       const row = raw[i];
       if (!row) continue;
-      const lower = row.map((c) => String(c || "").trim().toLowerCase());
-      if (lower.some((c) => c === "part_number" || c === "part number" || c === "partnumber" || c === "pn")) {
+      // R28.6: match any recognized part-number alias, including Tata's "Part No".
+      const anyPartNumberCol = row.some((c) => canonicalizeHeader(c) === "part_number");
+      if (anyPartNumberCol) {
         headerIdx = i;
         break;
       }
     }
     if (headerIdx < 0) return normNaive;  // give up gracefully
-    const headers = raw[headerIdx].map((c) => String(c || "").trim().toLowerCase().replace(/\s+/g, "_"));
+    const headers = raw[headerIdx].map((c) => canonicalizeHeader(c));
     const out: any[] = [];
     for (let i = headerIdx + 1; i < raw.length; i++) {
       const row = raw[i];
@@ -2101,7 +2189,8 @@ export function registerV2Routes(app: Express, ctx: V2Context) {
       const rec: any = {};
       for (let c = 0; c < headers.length; c++) {
         const k = headers[c] || `col_${c}`;
-        rec[k] = row[c] ?? "";
+        // First occurrence of a canonical key wins (protects against duplicate columns).
+        if (rec[k] === undefined || rec[k] === "") rec[k] = row[c] ?? "";
       }
       if (rec.part_number && String(rec.part_number).trim()) out.push(rec);
     }

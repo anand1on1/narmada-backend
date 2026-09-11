@@ -130,7 +130,16 @@ export async function adminFetch(token: string | null, url: string, init: Reques
   const headers = new Headers(init.headers);
   const t = token || memToken;
   if (t) headers.set("x-admin-token", t);
-  if (init.body && !headers.has("Content-Type")) headers.set("Content-Type", "application/json");
+  // R28.6: Do NOT force JSON Content-Type when body is FormData or Blob — the browser must
+  // auto-set multipart/form-data with a boundary; overriding it breaks multer parsing on the backend.
+  if (
+    init.body &&
+    !headers.has("Content-Type") &&
+    !(init.body instanceof FormData) &&
+    !(init.body instanceof Blob)
+  ) {
+    headers.set("Content-Type", "application/json");
+  }
   return fetch(apiUrl(url), { ...init, headers });
 }
 
