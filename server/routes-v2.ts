@@ -2231,6 +2231,8 @@ export function registerV2Routes(app: Express, ctx: V2Context) {
         }
         const detected = detectChassisMeta(parsed.wb, file.originalname);
         const rows = extractPartRows(parsed.wb);
+        // R28.10 Bug 2 diagnostic: prove the parser sees the full row set.
+        console.log("[chassis-preview] extracted rows:", rows.length, "from file:", file.originalname);
         const sample = rows.slice(0, 3).map((r) => ({
           part_number: String(r.part_number || "").trim(),
           description: String(r.description || "").trim(),
@@ -2367,7 +2369,9 @@ export function registerV2Routes(app: Express, ctx: V2Context) {
     try {
       const id = parseInt(req.params.id as string, 10);
       if (!id) return res.status(400).json({ error: "invalid id" });
-      const limit = Math.min(Math.max(parseInt(String(req.query.limit || "100"), 10) || 100, 1), 1000);
+      // R28.10 Bug 2: raise upper bound from 1000 → 5000 so large chassis
+      // catalogs (Tata's 2898-part BOM) can be listed in one page.
+      const limit = Math.min(Math.max(parseInt(String(req.query.limit || "100"), 10) || 100, 1), 5000);
       const offset = Math.max(parseInt(String(req.query.offset || "0"), 10) || 0, 0);
       const q = String(req.query.q || "").trim();
       let sql = `SELECT * FROM chassis_parts WHERE chassis_id = ?`;
@@ -2687,10 +2691,35 @@ export function registerV2Routes(app: Express, ctx: V2Context) {
   app.get("/api/parts/search", async (req, res) => {
     try {
       const q = String(req.query.q || "").trim();
-      if (!q || q.length < 2) return res.json({ ok: true, q, total: 0, results: [] });
+      // R28.10 Bug 3: the Parts Finder "Model" tab calls this endpoint with only
+      // ?chassis=<slug> (no q). Previously we returned 0 results in that case.
+      // Now we allow (a) q-only, (b) chassis-only, or (c) both.
+      const chassisFilter = String(req.query.chassis || "").trim();
+      if ((!q || q.length < 2) && !chassisFilter) {
+        return res.json({ ok: true, q, total: 0, results: [] });
+      }
       const limit = Math.min(Math.max(parseInt(String(req.query.limit || "25"), 10) || 25, 1), 100);
       const offset = Math.max(parseInt(String(req.query.offset || "0"), 10) || 0, 0);
       const like = `%${q}%`;
+      const startsLike = `${q}%`;
+      const hasQ = q.length >= 2;
+
+      // Build the WHERE conditionally so we can support chassis-only lookups.
+      const clauses: string[] = ["p.is_active = 1", "c.is_active = 1"];
+      const whereParams: any[] = [];
+      if (hasQ) {
+        clauses.push("(p.part_number LIKE ? OR p.oem_number LIKE ? OR p.description LIKE ?)");
+        whereParams.push(like, like, like);
+      }
+      if (chassisFilter) {
+        clauses.push("c.slug = ?");
+        whereParams.push(chassisFilter);
+      }
+      const whereSql = clauses.join(" AND ");
+      const orderSql = hasQ
+        ? `ORDER BY (CASE WHEN p.part_number LIKE ? THEN 0 ELSE 1 END), p.part_number`
+        : `ORDER BY p.part_number`;
+
       // Join chassis_parts → chassis_catalog so the client sees which chassis fits.
       const sql = `
         SELECT p.id AS part_id, p.part_number, p.oem_number, p.description, p.category,
@@ -2699,17 +2728,17 @@ export function registerV2Routes(app: Express, ctx: V2Context) {
                c.make AS chassis_make, c.model AS chassis_model
           FROM chassis_parts p
           JOIN chassis_catalog c ON c.id = p.chassis_id
-         WHERE p.is_active = 1 AND c.is_active = 1
-           AND (p.part_number LIKE ? OR p.oem_number LIKE ? OR p.description LIKE ?)
-         ORDER BY (CASE WHEN p.part_number LIKE ? THEN 0 ELSE 1 END), p.part_number
+         WHERE ${whereSql}
+         ${orderSql}
          LIMIT ? OFFSET ?`;
-      const startsLike = `${q}%`;
-      const rows = rawSqlite.prepare(sql).all(like, like, like, startsLike, limit, offset) as any[];
+      const selectParams: any[] = [...whereParams];
+      if (hasQ) selectParams.push(startsLike);
+      selectParams.push(limit, offset);
+      const rows = rawSqlite.prepare(sql).all(...selectParams) as any[];
       const total = (rawSqlite.prepare(
         `SELECT COUNT(*) AS c FROM chassis_parts p JOIN chassis_catalog c ON c.id = p.chassis_id
-          WHERE p.is_active = 1 AND c.is_active = 1
-            AND (p.part_number LIKE ? OR p.oem_number LIKE ? OR p.description LIKE ?)`
-      ).get(like, like, like) as any).c as number;
+          WHERE ${whereSql}`
+      ).get(...whereParams) as any).c as number;
       res.setHeader("X-Total-Count", String(total));
       return res.json({
         ok: true,

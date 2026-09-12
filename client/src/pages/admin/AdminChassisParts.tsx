@@ -84,7 +84,9 @@ export default function AdminChassisParts() {
   });
 
   const params = new URLSearchParams();
-  params.set("limit", "500");
+  // R28.10 Bug 2: bumped from 500 → 5000 so Tata chassis uploads (2898 parts)
+  // display in full instead of being silently capped at 500 in the UI.
+  params.set("limit", "5000");
   if (q) params.set("q", q);
 
   const { data, isLoading, refetch, isFetching } = useQuery<any>({

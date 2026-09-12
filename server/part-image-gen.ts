@@ -18,7 +18,7 @@
 //      upload result to R2 (reuses Session 1 R2 env vars), cache and return
 //      {url, source:'generated'}.
 //   4. Miss + flag off (or any error) → return
-//      {url:'/images/placeholder-part.png', source:'placeholder'}.
+//      {url:'/images/placeholder-part.jpg', source:'placeholder'}.
 //   5. NEVER throws. Wrapped end-to-end in try/catch — falls back to placeholder.
 //   6. 30-second hard timeout on the external image call (Promise.race with an
 //      AbortController). This function IS awaited by the caller so a stuck API
@@ -28,7 +28,9 @@
 import { S3Client, PutObjectCommand } from "@aws-sdk/client-s3";
 import { rawSqlite } from "./storage";
 
-export const DEFAULT_PLACEHOLDER_URL = "/images/placeholder-part.png";
+// R28.10 Bug 5: swapped from placeholder-part.png (basic gear silhouette) to a
+// premium JPG (vibrant 3D chrome gear+wrench+piston on indigo/teal/rose gradient).
+export const DEFAULT_PLACEHOLDER_URL = "/images/placeholder-part.jpg";
 const IMAGE_GEN_TIMEOUT_MS = 30_000;
 
 // ---- Prompt template (kept minimal per "does not burn considerable credits" rule)
