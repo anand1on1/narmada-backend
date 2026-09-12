@@ -74,6 +74,23 @@ function inferCategory(description: string): string {
   return "other";
 }
 
+// R28.10 Bug 4: infer a real brand slug from the description so auto-published
+// products actually appear when the /products catalog is filtered by brand.
+// Falls back to "other" (which is a valid enum value in the schema) if we
+// can't guess. Slugs match those used by client/src/data/brands.ts / BRAND_WALL.
+function inferBrand(description: string, partNumber: string): string {
+  const s = `${description || ""} ${partNumber || ""}`.toLowerCase();
+  if (/\btata\b|tml|prima|signa|lpt|lpk|lps|lpo|ultra/.test(s)) return "tata";
+  if (/bharat[\s-]?benz|bharatbenz/.test(s)) return "bharatbenz";
+  if (/ashok[\s-]?leyland|leyland|dost/.test(s)) return "ashok-leyland";
+  if (/\beicher\b|pro[\s-]?series/.test(s)) return "eicher";
+  if (/\bvolvo\b/.test(s)) return "volvo";
+  if (/\bmahindra\b/.test(s)) return "mahindra";
+  if (/\bscania\b/.test(s)) return "scania";
+  if (/mercedes|benz/.test(s)) return "other";
+  return "other";
+}
+
 function existingLogRow(poId: number, partNumber: string): { id: number; status: string; product_id: number | null } | undefined {
   try {
     return rawSqlite
@@ -135,7 +152,10 @@ async function upsertProduct(args: {
   const { partNumber, description, publishedPrice, quantity, imageUrl } = args;
   const existing = await (storage as any).getProductByPartNumber(partNumber);
   const imageUrlsJson = JSON.stringify([imageUrl]);
+  const inferredBrand = inferBrand(description, partNumber);
   if (existing) {
+    // R28.10 Bug 4: force `active: true` (in case an admin previously hid the
+    // product) and leave brand/category untouched to preserve any manual edits.
     await storage.updateProduct(existing.id, {
       priceInr: publishedPrice,
       stockQty: quantity,
@@ -143,6 +163,7 @@ async function upsertProduct(args: {
       active: true,
       description: existing.description || description,
     } as any);
+    console.log("[auto-publish] upserted product:", { id: existing.id, partNumber, action: "update", active: true, slug: existing.slug });
     return { id: existing.id, created: false };
   }
   const category = inferCategory(description);
@@ -157,7 +178,9 @@ async function upsertProduct(args: {
   const created = await storage.createProduct({
     slug,
     name: description || partNumber,
-    brand: "other",
+    // R28.10 Bug 4: use a real brand slug so /products?brand=<x> filters surface
+    // the item; falls back to "other" when we can't guess.
+    brand: inferredBrand,
     model: null,
     category,
     partNumber,
@@ -174,6 +197,7 @@ async function upsertProduct(args: {
     featured: false,
     active: true,
   } as any);
+  console.log("[auto-publish] upserted product:", { id: created.id, partNumber, action: "create", active: true, slug, brand: inferredBrand });
   return { id: created.id, created: true };
 }
 
@@ -263,7 +287,8 @@ export async function autoPublishFromPO(
     try {
       img = await getRepresentationalImage(partNumber, description);
     } catch (e: any) {
-      img = { url: "/images/placeholder-part.png", source: "placeholder" };
+      // R28.10 Bug 5: point to premium JPG placeholder.
+      img = { url: "/images/placeholder-part.jpg", source: "placeholder" };
     }
 
     // Upsert product row.
@@ -360,7 +385,26 @@ export function listAutoPublishLog(opts: { limit?: number; offset?: number; poId
     const rows = rawSqlite
       .prepare(`SELECT * FROM auto_publish_log ${where} ORDER BY created_at DESC LIMIT ? OFFSET ?`)
       .all(...params, limit, offset);
-    return rows as any[];
+    // R28.10 Bug 1: map snake_case sqlite columns to camelCase so the frontend log page renders values.
+    return (rows as any[]).map((r) => ({
+      id: r.id,
+      poId: r.po_id,
+      poLineId: r.po_line_id,
+      partNumber: r.part_number,
+      description: r.description,
+      purchasePrice: r.purchase_price,
+      publishedPrice: r.published_price,
+      markupPct: r.markup_pct,
+      quantity: r.quantity,
+      productId: r.product_id,
+      imageUrl: r.image_url,
+      imageSource: r.image_source,
+      status: r.status,
+      errorMessage: r.error_message,
+      triggeredByUserId: r.triggered_by_user_id,
+      triggeredBy: r.triggered_by,
+      createdAt: r.created_at,
+    }));
   } catch (e: any) {
     console.error("[auto-publish] listAutoPublishLog failed:", e?.message || e);
     return [];
