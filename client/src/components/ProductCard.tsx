@@ -30,7 +30,22 @@ export function ProductCard({ product, usdInr }: { product: Product; usdInr: num
       <Link href={productHref(product)}>
         <a className="block aspect-[4/3] relative overflow-hidden bg-[hsl(210_22%_90%)]" data-testid={`link-product-${product.id}`}>
           {cover ? (
-            <img src={cover} alt={product.name} loading="lazy" className="w-full h-full object-cover transition-transform duration-700 group-hover:scale-110" />
+            <img
+              src={cover}
+              alt={product.name}
+              loading="lazy"
+              className="w-full h-full object-cover transition-transform duration-700 group-hover:scale-110"
+              onError={(e) => {
+                const img = e.currentTarget;
+                if (img.dataset.fallback !== "1" && img.dataset.fallback !== "2") {
+                  img.dataset.fallback = "1";
+                  img.src = "/images/placeholder-part.jpg";
+                } else if (img.dataset.fallback === "1") {
+                  img.dataset.fallback = "2";
+                  img.style.display = "none";
+                }
+              }}
+            />
           ) : (
             <div className="w-full h-full flex items-center justify-center text-[hsl(220_60%_12%)]/30">
               <Package className="h-12 w-12" />

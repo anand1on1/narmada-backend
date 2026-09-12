@@ -293,6 +293,60 @@ app.use((req, res, next) => {
     console.error("[migrations] boot setup failed:", e?.message || e);
   }
 
+  // R28.10a: one-shot boot backfills — safe to run multiple times.
+  // (1) Rewrite legacy /images/placeholder-part.png URLs (R28.10 renamed the
+  //     asset to .jpg; old product rows still point at the deleted .png).
+  // (2) Re-infer brand for auto-published products still marked "other" so
+  //     /products?brand=<x> surfaces them.
+  try {
+    const { rawSqlite } = await import("./storage");
+    const { inferBrand } = await import("./auto-publish");
+
+    // (1) Legacy placeholder URL: .png → .jpg (R28.10 renamed the asset)
+    const OLD_PLACEHOLDER = "/images/placeholder-part.png";
+    const NEW_PLACEHOLDER = "/images/placeholder-part.jpg";
+    const legacyRows = rawSqlite
+      .prepare(`SELECT id, image_urls FROM products WHERE image_urls LIKE ?`)
+      .all(`%${OLD_PLACEHOLDER}%`) as any[];
+    let placeholderFixed = 0;
+    const txPh = rawSqlite.transaction(() => {
+      const upd = rawSqlite.prepare(`UPDATE products SET image_urls = ? WHERE id = ?`);
+      for (const r of legacyRows) {
+        const next = String(r.image_urls).split(OLD_PLACEHOLDER).join(NEW_PLACEHOLDER);
+        if (next !== r.image_urls) { upd.run(next, r.id); placeholderFixed++; }
+      }
+    });
+    txPh();
+    if (placeholderFixed > 0) {
+      console.log(`[r28.10a-boot] placeholder-url backfill: scanned=${legacyRows.length} updated=${placeholderFixed}`);
+    }
+
+    // (2) Brand re-inference: products currently marked brand="other" that were
+    // touched by auto-publish (i.e. appear in auto_publish_log). Rerun inferBrand
+    // on their (description, part_number) — if it now returns a specific brand,
+    // update it so /products?brand=<x> surfaces them.
+    const brandCandidates = rawSqlite.prepare(`
+      SELECT DISTINCT p.id, p.part_number, p.description, p.brand
+        FROM products p
+        JOIN auto_publish_log l ON l.product_id = p.id
+       WHERE p.brand = 'other'
+    `).all() as any[];
+    let brandFixed = 0;
+    const txBrand = rawSqlite.transaction(() => {
+      const upd = rawSqlite.prepare(`UPDATE products SET brand = ? WHERE id = ?`);
+      for (const r of brandCandidates) {
+        const inferred = inferBrand(r.description || "", r.part_number || "");
+        if (inferred && inferred !== "other") { upd.run(inferred, r.id); brandFixed++; }
+      }
+    });
+    txBrand();
+    if (brandFixed > 0) {
+      console.log(`[r28.10a-boot] brand backfill: candidates=${brandCandidates.length} updated=${brandFixed}`);
+    }
+  } catch (e: any) {
+    console.error("[r28.10a-boot] backfill failed:", e?.message || e);
+  }
+
   // ---- R26.3: session + passport (OAuth). After body parsers, BEFORE routes. ----
   // SQLite-backed session store on the same persistent disk as the app DB (Render mounts
   // DATA_DIR), so sessions survive restarts. The project uses better-sqlite3, not Postgres,

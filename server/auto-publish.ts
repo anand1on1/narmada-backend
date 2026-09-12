@@ -78,7 +78,7 @@ function inferCategory(description: string): string {
 // products actually appear when the /products catalog is filtered by brand.
 // Falls back to "other" (which is a valid enum value in the schema) if we
 // can't guess. Slugs match those used by client/src/data/brands.ts / BRAND_WALL.
-function inferBrand(description: string, partNumber: string): string {
+export function inferBrand(description: string, partNumber: string): string {
   const s = `${description || ""} ${partNumber || ""}`.toLowerCase();
   if (/\btata\b|tml|prima|signa|lpt|lpk|lps|lpo|ultra/.test(s)) return "tata";
   if (/bharat[\s-]?benz|bharatbenz/.test(s)) return "bharatbenz";
@@ -156,14 +156,19 @@ async function upsertProduct(args: {
   if (existing) {
     // R28.10 Bug 4: force `active: true` (in case an admin previously hid the
     // product) and leave brand/category untouched to preserve any manual edits.
+    // R28.10a: exception — if brand is still the placeholder "other", re-infer
+    // it. Manual admin edits (any specific brand like "tata") are preserved
+    // because the guard only fires on the sentinel "other".
+    const shouldFixBrand = existing.brand === "other" && inferredBrand && inferredBrand !== "other";
     await storage.updateProduct(existing.id, {
       priceInr: publishedPrice,
       stockQty: quantity,
       imageUrls: imageUrlsJson,
       active: true,
       description: existing.description || description,
+      ...(shouldFixBrand ? { brand: inferredBrand } : {}),
     } as any);
-    console.log("[auto-publish] upserted product:", { id: existing.id, partNumber, action: "update", active: true, slug: existing.slug });
+    console.log("[auto-publish] upserted product:", { id: existing.id, partNumber, action: "update", active: true, slug: existing.slug, ...(shouldFixBrand ? { brandFixed: `other→${inferredBrand}` } : {}) });
     return { id: existing.id, created: false };
   }
   const category = inferCategory(description);
