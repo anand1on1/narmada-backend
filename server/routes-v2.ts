@@ -1878,6 +1878,9 @@ export function registerV2Routes(app: Express, ctx: V2Context) {
            RETURNING id, (created_at = updated_at) AS was_created`
         );
 
+        // R28.13: collect normalized rows so we can also publish them as products.
+        const productRows: import("./chassis-to-products").ChassisPartRow[] = [];
+
         for (let i = 0; i < rows.length; i++) {
           const r = normalize(rows[i] || {});
           try {
@@ -1899,14 +1902,89 @@ export function registerV2Routes(app: Express, ctx: V2Context) {
               now, now,
             ) as any;
             if (result && result.was_created) created++; else updated++;
+            productRows.push({
+              partNumber: part_number,
+              description,
+              oemNumber: String(r.oem_number || "").trim() || null,
+              category: String(r.category || "").trim() || null,
+              sellPrice: toNumberOrNull(r.sell_price),
+              purchasePrice: toNumberOrNull(r.purchase_price),
+              imageUrl: String(r.image_url || "").trim() || null,
+            });
           } catch (e: any) {
             errors.push({ row: i + 2, error: e?.message || "unknown" }); // +2 = header + 1-based
           }
         }
 
-        res.json({ created, updated, errors, total: rows.length });
+        // R28.13 Fire-and-forget: publish each part as an individual product.
+        // Response must not wait on image generation / DB writes for thousands
+        // of parts. Progress is visible in server logs + auto_publish log stays
+        // dedicated to purchase-order publishing.
+        void (async () => {
+          try {
+            const { publishChassisPartsBatch } = await import("./chassis-to-products");
+            const chassisMeta = rawSqlite.prepare(
+              `SELECT id, chassis_display_name AS displayName, make, model, variant, slug FROM chassis_catalog WHERE id = ?`
+            ).get(id) as any;
+            if (chassisMeta) {
+              await publishChassisPartsBatch(chassisMeta, productRows);
+            }
+          } catch (e: any) {
+            console.error("[chassis-to-products] bulk-upload publish failed:", e?.message || e);
+          }
+        })();
+
+        res.json({ created, updated, errors, total: rows.length, products_publish: "queued" });
       } catch (e: any) {
         res.status(500).json({ error: e?.message || "bulk_upload_failed" });
+      }
+    }
+  );
+
+  // ---- R28.13: Admin backfill — publish existing chassis parts as products ----
+  // One-shot endpoint for chassis that were uploaded BEFORE R28.13 shipped.
+  // POST /api/admin/chassis/:id/publish-parts-as-products
+  // Body: {} (no params). Returns { queued: true, chassis_id, parts_count }.
+  // Publishing runs fire-and-forget; progress in server logs.
+  app.post(
+    "/api/admin/chassis/:id/publish-parts-as-products",
+    requireAuth,
+    async (req, res) => {
+      try {
+        const id = parseInt(req.params.id as string, 10);
+        if (!id) return res.status(400).json({ error: "invalid id" });
+        const chassis = rawSqlite.prepare(
+          `SELECT id, chassis_display_name AS displayName, make, model, variant, slug
+           FROM chassis_catalog WHERE id = ?`
+        ).get(id) as any;
+        if (!chassis) return res.status(404).json({ error: "chassis_not_found" });
+
+        const parts = rawSqlite.prepare(
+          `SELECT part_number AS partNumber, oem_number AS oemNumber, description,
+                  category, sell_price AS sellPrice, purchase_price AS purchasePrice,
+                  image_url AS imageUrl
+           FROM chassis_parts WHERE chassis_id = ? AND is_active = 1`
+        ).all(id) as any[];
+
+        // Fire-and-forget: reply immediately, publish in background.
+        void (async () => {
+          try {
+            const { publishChassisPartsBatch } = await import("./chassis-to-products");
+            await publishChassisPartsBatch(chassis, parts);
+          } catch (e: any) {
+            console.error("[chassis-to-products] backfill publish failed:", e?.message || e);
+          }
+        })();
+
+        res.json({
+          queued: true,
+          chassis_id: id,
+          chassis_display_name: chassis.displayName,
+          parts_count: parts.length,
+          note: "Publishing runs in background. Watch server logs for [chassis-to-products] batch done.",
+        });
+      } catch (e: any) {
+        res.status(500).json({ error: e?.message || "backfill_failed" });
       }
     }
   );
@@ -2306,6 +2384,8 @@ export function registerV2Routes(app: Express, ctx: V2Context) {
         let created = 0;
         let updated = 0;
         const errors: { row: number; error: string }[] = [];
+        // R28.13: collect normalized rows so we can also publish them as products.
+        const productRows: import("./chassis-to-products").ChassisPartRow[] = [];
         try {
           const tx = rawSqlite.transaction(() => {
             const now = Date.now();
@@ -2336,6 +2416,15 @@ export function registerV2Routes(app: Express, ctx: V2Context) {
                   now, now,
                 ) as any;
                 if (result && result.was_created) created++; else updated++;
+                productRows.push({
+                  partNumber: part_number,
+                  description: desc,
+                  oemNumber: String(r.oem_number || "").trim() || null,
+                  category: String(r.category || "").trim() || null,
+                  sellPrice: toNumberOrNull(r.sell_price),
+                  purchasePrice: toNumberOrNull(r.purchase_price),
+                  imageUrl: String(r.image_url || "").trim() || null,
+                });
               } catch (e: any) {
                 errors.push({ row: i + 2, error: e?.message || "unknown" });
               }
@@ -2357,7 +2446,21 @@ export function registerV2Routes(app: Express, ctx: V2Context) {
           parts_errors: errors.length,
           errors: errors.slice(0, 25),
           total_rows: rows.length,
+          products_publish: "queued",
         });
+
+        // R28.13 Fire-and-forget: publish each part as an individual product.
+        void (async () => {
+          try {
+            const { publishChassisPartsBatch } = await import("./chassis-to-products");
+            await publishChassisPartsBatch(
+              { id: chassisId, displayName: display_name, make: "TATA", model, variant, slug },
+              productRows,
+            );
+          } catch (e: any) {
+            console.error("[chassis-to-products] create-from-upload publish failed:", e?.message || e);
+          }
+        })();
       } catch (e: any) {
         return res.status(500).json({ error: e?.message || "create_from_upload_failed" });
       }

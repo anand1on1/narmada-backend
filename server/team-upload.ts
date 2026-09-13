@@ -536,6 +536,8 @@ export function registerTeamUploadRoutes(app: Express, opts: {
     let created = 0;
     let updated = 0;
     const errorDetails: { row: number; error: string }[] = [];
+    // R28.13: collect normalized rows so we can also publish them as products.
+    const productRows: import("./chassis-to-products").ChassisPartRow[] = [];
     const insertRows = rawSqlite.transaction((list: any[]) => {
       for (let i = 0; i < list.length; i++) {
         const r = normalize(list[i]);
@@ -558,6 +560,15 @@ export function registerTeamUploadRoutes(app: Express, opts: {
             now, now,
           ) as any;
           if (result && result.was_created) created++; else updated++;
+          productRows.push({
+            partNumber: part_number,
+            description: desc,
+            oemNumber: String(r.oem_number || "").trim() || null,
+            category: String(r.category || "").trim() || null,
+            sellPrice: toNum(r.sell_price),
+            purchasePrice: toNum(r.purchase_price),
+            imageUrl: String(r.image_url || "").trim() || null,
+          });
         } catch (e: any) {
           errorDetails.push({ row: i + 2, error: e?.message || "unknown" });
         }
@@ -618,6 +629,19 @@ export function registerTeamUploadRoutes(app: Express, opts: {
       }
     })();
 
+    // R28.13 Fire-and-forget: publish each part as an individual product.
+    void (async () => {
+      try {
+        const { publishChassisPartsBatch } = await import("./chassis-to-products");
+        await publishChassisPartsBatch(
+          { id: chassisId, displayName, make: "TATA", model: displayName, variant, slug },
+          productRows,
+        );
+      } catch (e: any) {
+        console.error("[chassis-to-products] team-upload publish failed:", e?.message || e);
+      }
+    })();
+
     // Step 7 — success response.
     return res.status(200).json({
       ok: true,
@@ -628,6 +652,7 @@ export function registerTeamUploadRoutes(app: Express, opts: {
         errors: errorDetails.length,
         error_details: errorDetails.slice(0, 50),  // cap detail list length
       },
+      products_publish: "queued",
       processing_ms: processingMs,
     });
   });

@@ -53,15 +53,15 @@ export interface AutoPublishResult {
   details: AutoPublishDetail[];
 }
 
-function toSlug(s: string): string {
+export function toSlug(s: string): string {
   return String(s || "").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/(^-|-$)/g, "");
 }
 
-function round2(n: number): number {
+export function round2(n: number): number {
   return Math.round(n * 100) / 100;
 }
 
-function inferCategory(description: string): string {
+export function inferCategory(description: string): string {
   const d = String(description || "").toLowerCase();
   if (/clutch/.test(d)) return "clutch";
   if (/brake/.test(d)) return "brake";
