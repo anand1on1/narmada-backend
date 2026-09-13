@@ -35,8 +35,9 @@ export function whatsappLink(phone: string, message: string): string {
 }
 
 export function buildBuyMessage(product: { name: string; partNumber?: string | null; slug: string; brand: string }): string {
-  // R27.7 #10 — share the part-number-first URL in WhatsApp enquiries too.
-  const link = `https://narmadamobility.com/#${productHref({ slug: product.slug, partNumber: product.partNumber })}`;
+  // R28.12 — path-routed URLs. Was /#{productHref} which broke WhatsApp
+  // recipients (they land on the home page). Now emits clean /product/... paths.
+  const link = `https://narmadamobility.com${productHref({ slug: product.slug, partNumber: product.partNumber })}`;
   return `Hello Narmada Mobility, I'd like to enquire about:\n\n*${product.name}*${product.partNumber ? `\nPart No.: ${product.partNumber}` : ""}\nBrand: ${product.brand}\nLink: ${link}\n\nPlease share availability, price and delivery time.`;
 }
 

@@ -1069,7 +1069,7 @@ export function registerV2Routes(app: Express, ctx: V2Context) {
       brand: { "@type": "Brand", name: product.brand.charAt(0).toUpperCase() + product.brand.slice(1) },
       offers: {
         "@type": "Offer",
-        url: `https://${SITE_HOST}/#/products/${product.slug}`,
+        url: `https://${SITE_HOST}/products/${product.slug}`,
         priceCurrency: "INR",
         price: product.priceInr,
         availability: (product.stockQty || 0) > 0 ? "https://schema.org/InStock" : "https://schema.org/OutOfStock",
@@ -10062,7 +10062,7 @@ function registerR8Routes(
         <div style="background:#001a4d;color:#fff;padding:18px;border-radius:8px 8px 0 0;"><h2 style="margin:0;">Welcome${name ? ", " + escapeHtml(name) : ""}!</h2></div>
         <div style="border:1px solid #e5e7eb;border-top:none;padding:24px;border-radius:0 0 8px 8px;">
           <p>Your Narmada Mobility account is verified and ready. You can now shop genuine spare parts, save addresses, and track your orders.</p>
-          <p style="margin-top:14px;"><a href="https://narmadamobility.com/#/products" style="background:#001a4d;color:#fff;padding:10px 18px;border-radius:6px;text-decoration:none;">Start shopping</a></p>
+          <p style="margin-top:14px;"><a href="https://narmadamobility.com/products" style="background:#001a4d;color:#fff;padding:10px 18px;border-radius:6px;text-decoration:none;">Start shopping</a></p>
         </div></div>`,
       text: `Welcome to Narmada Mobility${name ? ", " + name : ""}! Your account is verified and ready.`,
       event: "shop_welcome",
@@ -10226,7 +10226,7 @@ function registerR8Routes(
               <p style="text-align:right;margin:4px 0;">Freight: ₹${Number(order!.freightInr).toLocaleString("en-IN")}</p>
               <p style="text-align:right;margin:4px 0;font-size:16px;"><strong>Total: ₹${Number(order!.totalInr).toLocaleString("en-IN")}</strong> (Cash on Delivery)</p>
               <p style="margin-top:14px;"><strong>Ship to:</strong><br/>${escapeHtml(s.fullName || "")}, ${escapeHtml(s.phone || "")}<br/>${escapeHtml(s.line1 || "")}${s.line2 ? ", " + escapeHtml(s.line2) : ""}<br/>${escapeHtml(s.city || "")}, ${escapeHtml(s.state || "")} - ${escapeHtml(s.pincode || "")}</p>
-              <p style="margin-top:14px;">Track your order at <a href="https://narmadamobility.com/#/customer/orders/${order!.id}">narmadamobility.com</a></p>
+              <p style="margin-top:14px;">Track your order at <a href="https://narmadamobility.com/customer/orders/${order!.id}">narmadamobility.com</a></p>
             </div></div>`,
           text: `Your order ${order!.orderNumber} has been placed. Total ₹${Number(order!.totalInr).toLocaleString("en-IN")} (Cash on Delivery).`,
           event: "shop_order_confirm",
@@ -10298,7 +10298,7 @@ function registerR8Routes(
               <h2 style="color:#001a4d;">${c.heading}</h2>
               <p>Order <strong>${escapeHtml(o.orderNumber)}</strong> — ${c.body}</p>
               ${tracking}
-              <p>Track at <a href="https://narmadamobility.com/#/customer/orders/${o.id}">narmadamobility.com</a></p>
+              <p>Track at <a href="https://narmadamobility.com/customer/orders/${o.id}">narmadamobility.com</a></p>
             </div>`,
             text: `${c.heading}. Order ${o.orderNumber}: ${c.body}`,
             event: `shop_order_${status}`,
