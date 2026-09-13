@@ -595,4 +595,40 @@ ${rows.join("\n")}
   } catch (e: any) {
     log(`[cron] R27.36: failed to arm expense recurring job — ${e?.message || e}`);
   }
+
+  // ---- R28.14 Nightly R2 backup — 02:30 IST daily ----
+  // Runs in-process (not a separate Render Cron service) because the SQLite
+  // file lives on THIS service's persistent disk. Same self-scheduling pattern
+  // as sales-digest above.
+  const BACKUP_INTERVAL_MS = 24 * 60 * 60 * 1000;
+  const BACKUP_HOUR_IST = 2;
+  const BACKUP_MIN_IST = 30;
+  function msUntilNextBackup(): number {
+    const nowUtc = Date.now();
+    const nowIst = nowUtc + IST_OFFSET_MS;
+    const d = new Date(nowIst);
+    const target = new Date(nowIst);
+    target.setUTCHours(BACKUP_HOUR_IST, BACKUP_MIN_IST, 0, 0);
+    if (target.getTime() <= d.getTime()) target.setUTCDate(target.getUTCDate() + 1);
+    return target.getTime() - d.getTime();
+  }
+  async function runBackupJob() {
+    try {
+      const { runBackup } = await import("../scripts/backup-to-r2");
+      const res = await runBackup();
+      if (res.status === "success") {
+        log(`[backup] done: ${res.file_key} (${res.size_bytes} bytes)`);
+      } else {
+        log(`[backup] FAILED: ${res.error || "unknown"}`);
+      }
+    } catch (e: any) {
+      log(`[backup] Error: ${e?.message || e}`);
+    }
+  }
+  const firstBackupDelay = msUntilNextBackup();
+  log(`[backup] first R2 backup in ~${Math.round(firstBackupDelay / 60000)} min (02:30 IST)`);
+  setTimeout(() => {
+    runBackupJob();
+    setInterval(runBackupJob, BACKUP_INTERVAL_MS);
+  }, firstBackupDelay);
 })();

@@ -93,7 +93,6 @@ function snapshotSqlite(src: string, dst: string): void {
   // Fallback: better-sqlite3 backup API is async but returns a Promise-like object.
   log("snapshot.fallback", { note: "sqlite3 CLI not found; using better-sqlite3 backup API" });
   const db = new Database(src, { readonly: true, fileMustExist: true });
-  // @ts-expect-error better-sqlite3 types miss .backup at 11.x but the API exists at runtime.
   const p = db.backup(dst);
   if (p && typeof (p as Promise<unknown>).then === "function") {
     // top-level await workaround via deasync-ish: block on a tiny loop is not clean;
@@ -221,6 +220,35 @@ async function applyRetention(client: S3Client, bucket: string): Promise<{ kept:
 }
 
 // ---- main ----
+export async function runBackup(): Promise<{ status: "success" | "failed"; file_key: string | null; size_bytes: number | null; error?: string }> {
+  const result: { status: "success" | "failed"; file_key: string | null; size_bytes: number | null; error?: string } = { status: "failed", file_key: null, size_bytes: null };
+  try {
+    await main();
+    // main() writes its own backup_log row; read the latest to return details
+    try {
+      const dbPath = getDbPath();
+      if (existsSync(dbPath)) {
+        const dbModule = await import("better-sqlite3");
+        const Database = dbModule.default;
+        const db = new Database(dbPath, { readonly: true });
+        const row = db.prepare("SELECT status, file_key, size_bytes, error_message FROM backup_log ORDER BY id DESC LIMIT 1").get() as any;
+        db.close();
+        if (row) {
+          result.status = row.status;
+          result.file_key = row.file_key || null;
+          result.size_bytes = row.size_bytes || null;
+          if (row.error_message) result.error = row.error_message;
+        }
+      }
+    } catch {}
+    if (result.status === "failed" && !result.error) result.error = "unknown";
+    return result;
+  } catch (e: any) {
+    result.error = e?.message || String(e);
+    return result;
+  }
+}
+
 async function main(): Promise<void> {
   const startedAt = Date.now();
 

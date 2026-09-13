@@ -1989,6 +1989,47 @@ export function registerV2Routes(app: Express, ctx: V2Context) {
     }
   );
 
+  // ---- R28.14: Admin backup control endpoints ----
+  // GET /api/admin/backup/log?limit=20 — recent backup runs
+  // POST /api/admin/backup/run-now — trigger a manual backup (fire-and-forget)
+  app.get("/api/admin/backup/log", requireAuth, async (req, res) => {
+    try {
+      const limit = Math.min(parseInt((req.query.limit as string) || "20", 10) || 20, 100);
+      const rows = rawSqlite.prepare(
+        `SELECT id, started_at, finished_at, status, file_key, size_bytes, error_message
+         FROM backup_log ORDER BY id DESC LIMIT ?`
+      ).all(limit) as any[];
+      res.json({ rows });
+    } catch (e: any) {
+      res.status(500).json({ error: e?.message || "backup_log_failed" });
+    }
+  });
+
+  app.post("/api/admin/backup/run-now", requireAuth, async (_req, res) => {
+    try {
+      // Fire-and-forget: respond immediately, run backup in background.
+      void (async () => {
+        try {
+          const { runBackup } = await import("../scripts/backup-to-r2");
+          const result = await runBackup();
+          if (result.status === "success") {
+            console.log(`[backup] manual run done: ${result.file_key} (${result.size_bytes} bytes)`);
+          } else {
+            console.error(`[backup] manual run FAILED: ${result.error}`);
+          }
+        } catch (e: any) {
+          console.error("[backup] manual run error:", e?.message || e);
+        }
+      })();
+      res.json({
+        queued: true,
+        note: "Backup running in background. Check /api/admin/backup/log in ~30s, or watch server logs for [backup] done.",
+      });
+    } catch (e: any) {
+      res.status(500).json({ error: e?.message || "backup_run_failed" });
+    }
+  });
+
   // ============================================================================
   // R28.2 — Admin chassis "auto-populate" flow (upload-first UX).
   //
