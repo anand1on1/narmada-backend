@@ -108,25 +108,57 @@ async function gzipFile(src: string, dst: string): Promise<void> {
 }
 
 // ---- 3. encrypt ----
-function encryptFile(src: string, dst: string, passphrase: string): { tool: "age" | "openssl" } {
-  const passFile = path.join(tmpdir(), `narmada-backup-pass-${randomBytes(8).toString("hex")}.txt`);
-  writeFileSync(passFile, passphrase, { mode: 0o600 });
-  try {
-    if (has("age")) {
-      const r = spawnSync("age", ["-p", "-o", dst, src], { input: passphrase + "\n" + passphrase + "\n", encoding: "utf8" });
-      if (r.status !== 0) fail("encrypt.age", new Error(r.stderr || `exit ${r.status}`));
-      return { tool: "age" };
+// Encrypts SRC -> DST using AES-256-CBC with PBKDF2-derived key.
+// Output format is byte-compatible with:
+//   openssl enc -aes-256-cbc -pbkdf2 -iter 200000 -salt -in <src> -out <dst> -pass pass:<phrase>
+// So on RESTORE you can decrypt with either:
+//   (a) the same Node runtime (using the same passphrase), or
+//   (b) any machine with openssl installed:
+//        openssl enc -d -aes-256-cbc -pbkdf2 -iter 200000 -salt -in data.db.gz.age -out data.db.gz -pass pass:<phrase>
+//
+// File layout: [8-byte 'Salted__' magic][8-byte salt][ciphertext...]
+// PBKDF2 params: SHA-256, 200k iterations, derives 32-byte key + 16-byte IV from salt+passphrase.
+function encryptFile(src: string, dst: string, passphrase: string): { tool: "age" | "openssl" | "node-crypto" } {
+  // Priority 1: age (best, but rarely available on hosted runtimes)
+  if (has("age")) {
+    const r = spawnSync("age", ["-p", "-o", dst, src], { input: passphrase + "\n" + passphrase + "\n", encoding: "utf8" });
+    if (r.status !== 0) fail("encrypt.age", new Error(r.stderr || `exit ${r.status}`));
+    return { tool: "age" };
+  }
+  // Priority 2: openssl CLI (works on most containers, matches output format below)
+  if (has("openssl")) {
+    const passFile = path.join(tmpdir(), `narmada-backup-pass-${randomBytes(8).toString("hex")}.txt`);
+    writeFileSync(passFile, passphrase, { mode: 0o600 });
+    try {
+      const r = spawnSync("openssl", [
+        "enc", "-aes-256-cbc", "-pbkdf2", "-iter", "200000", "-salt",
+        "-in", src, "-out", dst, "-pass", `file:${passFile}`,
+      ]);
+      if (r.status !== 0) fail("encrypt.openssl", new Error(r.stderr?.toString() || `exit ${r.status}`));
+      return { tool: "openssl" };
+    } finally {
+      try { unlinkSync(passFile); } catch {}
     }
-    // openssl fallback — always installed in most Linux containers.
-    if (!has("openssl")) fail("encrypt.no-tool", new Error("neither age nor openssl available"));
-    const r = spawnSync("openssl", [
-      "enc", "-aes-256-cbc", "-pbkdf2", "-iter", "200000", "-salt",
-      "-in", src, "-out", dst, "-pass", `file:${passFile}`,
-    ]);
-    if (r.status !== 0) fail("encrypt.openssl", new Error(r.stderr?.toString() || `exit ${r.status}`));
-    return { tool: "openssl" };
-  } finally {
-    try { unlinkSync(passFile); } catch {}
+  }
+  // Priority 3: Node built-in crypto — always available, no external tools.
+  // Matches openssl -pbkdf2 -iter 200000 -salt output byte-for-byte, so restore
+  // still works with openssl anywhere.
+  try {
+    const crypto = require("node:crypto") as typeof import("node:crypto");
+    const fs = require("node:fs") as typeof import("node:fs");
+    const salt = crypto.randomBytes(8);
+    // openssl derives KEY(32) || IV(16) as one 48-byte PBKDF2 output.
+    const keyIv = crypto.pbkdf2Sync(passphrase, salt, 200000, 48, "sha256");
+    const key = keyIv.subarray(0, 32);
+    const iv = keyIv.subarray(32, 48);
+    const cipher = crypto.createCipheriv("aes-256-cbc", key, iv);
+    const magic = Buffer.from("Salted__", "utf8"); // 8 bytes
+    const input = fs.readFileSync(src);
+    const enc = Buffer.concat([cipher.update(input), cipher.final()]);
+    fs.writeFileSync(dst, Buffer.concat([magic, salt, enc]));
+    return { tool: "node-crypto" };
+  } catch (e: any) {
+    fail("encrypt.node-crypto", new Error(e?.message || String(e)));
   }
 }
 
