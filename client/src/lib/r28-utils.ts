@@ -41,7 +41,10 @@ export function productSeoUrl(slug: string): string {
 
 /** SEO chassis share URL. */
 export function chassisSeoUrl(slug: string): string {
-  return `${PUBLIC_SITE_HOST}/c/${encodeURIComponent(slug)}`;
+  // R28.11 — was /c/{slug} (SSR route on backend, gated by SEO_PAGES_ENABLED
+  // and unreachable on GoDaddy static host). Switched to /chassis/{slug} which
+  // matches the SPA route in App.tsx and works via the .htaccess SPA fallback.
+  return `${PUBLIC_SITE_HOST}/chassis/${encodeURIComponent(slug)}`;
 }
 
 /** SEO category share URL. */
