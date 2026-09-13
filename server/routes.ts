@@ -127,12 +127,15 @@ export function buildSitemapUrls(allProducts: Awaited<ReturnType<typeof storage.
     if (!p.active) continue;
     if (p.slug) add(`/p/${encodeURIComponent(String(p.slug))}`, "0.7", "weekly");
   }
-  // R28 Session 4 — chassis catalogue SSR pages (/c/{slug}). Best-effort read;
-  // if the chassis_catalog table isn't populated the loop is a no-op.
+  // R28.11 — chassis catalogue SPA pages (/chassis/{slug}). Was /c/{slug} which
+  // is an SSR route only reachable on the backend host; changed to /chassis/{slug}
+  // which is the SPA route registered in client/src/App.tsx and reachable via
+  // the GoDaddy .htaccess SPA fallback. Best-effort read; if the chassis_catalog
+  // table isn't populated the loop is a no-op.
   try {
     const rows = rawSqlite
       .prepare(`SELECT slug FROM chassis_catalog WHERE is_active = 1 AND slug IS NOT NULL AND slug != ''`).all() as any[];
-    for (const r of rows) add(`/c/${encodeURIComponent(String(r.slug))}`, "0.6", "weekly");
+    for (const r of rows) add(`/chassis/${encodeURIComponent(String(r.slug))}`, "0.7", "weekly");
   } catch { /* chassis_catalog table may not exist in older DBs */ }
   // R28 Session 4 — SSR category pages (/cat/{slug}) derived from distinct
   // product categories. Complements the SPA /category/{slug} entries above.
@@ -664,20 +667,36 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
   }
 
   // -------- Phase 3: CMS / Price Checker / Consignments / Sub-users / SEO helpers --------
+  const regenSitemapFn = async () => {
+    const baseUrl = `https://${process.env.SITE_HOST || "narmadamobility.com"}`;
+    const allProducts = await storage.listProducts({ activeOnly: true });
+    const urls = buildSitemapUrls(allProducts, baseUrl);
+    const xml = `<?xml version="1.0" encoding="UTF-8"?>\n<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n${urls.join("\n")}\n</urlset>`;
+    fs.writeFileSync(path.join(PUBLIC_DIR, "sitemap.xml"), xml);
+    await storage.logSitemapRun(urls.length);
+    return { urlCount: urls.length };
+  };
+
   registerV2Routes(app, {
     tokenMap: adminTokens,
     primaryAdminUsername: ADMIN_USERNAME,
     primaryAdminPassword: ADMIN_PASSWORD,
     uploadsDir: UPLOADS_DIR,
-    regenSitemap: async () => {
-      const baseUrl = `https://${process.env.SITE_HOST || "narmadamobility.com"}`;
-      const allProducts = await storage.listProducts({ activeOnly: true });
-      const urls = buildSitemapUrls(allProducts, baseUrl);
-      const xml = `<?xml version="1.0" encoding="UTF-8"?>\n<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n${urls.join("\n")}\n</urlset>`;
-      fs.writeFileSync(path.join(PUBLIC_DIR, "sitemap.xml"), xml);
-      await storage.logSitemapRun(urls.length);
-      return { urlCount: urls.length };
-    },
+    regenSitemap: regenSitemapFn,
+  });
+
+  // R28.11 — boot-time sitemap regen so /sitemap.xml always reflects newly
+  // uploaded chassis, auto-published products, and any DB rows that landed
+  // between deploys without a manual admin trigger. Wrapped in setImmediate so
+  // it doesn't block registerRoutes returning; wrapped in try/catch so a bad
+  // sitemap can never stop the server from starting.
+  setImmediate(async () => {
+    try {
+      const r = await regenSitemapFn();
+      console.log(`[r28.11-boot] sitemap regenerated on boot: ${r.urlCount} URLs`);
+    } catch (e: any) {
+      console.error("[r28.11-boot] sitemap regen failed:", e?.message || e);
+    }
   });
 
   return httpServer;

@@ -78,8 +78,10 @@ export default function AdminSeoAnalytics() {
   };
 
   const buildLoc = (rowType: string, slug: string) => {
+    // R28.11 — chassis uses /chassis/ (SPA route) not /c/ (SSR-only). Product
+    // /p/ + category /cat/ stay for now (SSR-only, admin-visible even when off).
     if (rowType === "product") return `${PUBLIC_SITE_HOST}/p/${slug}`;
-    if (rowType === "chassis") return `${PUBLIC_SITE_HOST}/c/${slug}`;
+    if (rowType === "chassis") return `${PUBLIC_SITE_HOST}/chassis/${slug}`;
     if (rowType === "category") return `${PUBLIC_SITE_HOST}/cat/${slug}`;
     return `${PUBLIC_SITE_HOST}/${slug}`;
   };
