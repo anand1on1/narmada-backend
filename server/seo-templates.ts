@@ -241,8 +241,8 @@ function renderHeader(cfg: SeoConfig): string {
   return `<header class="site" role="banner">
   <a class="brand" href="${attr(cfg.baseUrl)}/">${esc(site)}</a>
   <nav aria-label="Primary">
-    <a href="${attr(cfg.baseUrl)}/#/products">Products</a>
-    <a href="${attr(cfg.baseUrl)}/#/contact">Contact</a>
+    <a href="${attr(cfg.baseUrl)}/products">Products</a>
+    <a href="${attr(cfg.baseUrl)}/contact">Contact</a>
   </nav>
 </header>`;
 }
@@ -252,8 +252,8 @@ function renderFooter(cfg: SeoConfig): string {
   const year = new Date().getFullYear();
   return `<footer class="site" role="contentinfo">
   &copy; ${year} ${esc(site)}. All rights reserved.
-  &middot; <a href="${attr(cfg.baseUrl)}/#/privacy">Privacy</a>
-  &middot; <a href="${attr(cfg.baseUrl)}/#/contact">Contact</a>
+  &middot; <a href="${attr(cfg.baseUrl)}/privacy">Privacy</a>
+  &middot; <a href="${attr(cfg.baseUrl)}/contact">Contact</a>
 </footer>`;
 }
 
@@ -270,7 +270,7 @@ export function renderProductPage(
   const primaryImage = images[0];
   const primaryImageAbs = primaryImage ? absUrl(cfg.baseUrl, primaryImage) : "";
   const canonical = `${cfg.baseUrl.replace(/\/$/, "")}/p/${encodeURIComponent(product.slug)}`;
-  const spaAlt    = `${spaBase.replace(/\/$/, "")}/#/product/${encodeURIComponent(product.partNumber || product.slug)}/${encodeURIComponent(product.slug)}`;
+  const spaAlt    = `${spaBase.replace(/\/$/, "")}/product/${encodeURIComponent(product.partNumber || product.slug)}/${encodeURIComponent(product.slug)}`;
   const title    = buildTitle(product, site);
   const desc     = shortDesc(product);
   const keywords = buildKeywords(product);
@@ -308,7 +308,7 @@ export function renderProductPage(
     "@type": "BreadcrumbList",
     itemListElement: [
       { "@type": "ListItem", position: 1, name: "Home", item: cfg.baseUrl },
-      { "@type": "ListItem", position: 2, name: "Products", item: `${cfg.baseUrl}/#/products` },
+      { "@type": "ListItem", position: 2, name: "Products", item: `${cfg.baseUrl}/products` },
       { "@type": "ListItem", position: 3, name: product.category || "Category", item: `${cfg.baseUrl}/cat/${encodeURIComponent(product.category || "other")}` },
       { "@type": "ListItem", position: 4, name: product.name, item: canonical },
     ],
@@ -360,7 +360,7 @@ ${renderHeader(cfg)}
 <main class="container" role="main">
   <nav class="breadcrumb" aria-label="Breadcrumb">
     <a href="${attr(cfg.baseUrl)}/">Home</a> &raquo;
-    <a href="${attr(cfg.baseUrl)}/#/products">Products</a> &raquo;
+    <a href="${attr(cfg.baseUrl)}/products">Products</a> &raquo;
     <a href="${attr(cfg.baseUrl)}/cat/${attr(product.category || "other")}">${esc(product.category || "Category")}</a> &raquo;
     <span aria-current="page">${esc(product.name)}</span>
   </nav>
@@ -395,7 +395,7 @@ ${renderHeader(cfg)}
     <p>Chat with us on WhatsApp with your chassis number and we'll confirm fitment before you order.</p>
     <div class="cta-row">
       <a class="btn btn-wa" href="${attr(waHref)}" rel="nofollow noopener" target="_blank">Chat on WhatsApp</a>
-      <a class="btn btn-ghost" href="${attr(cfg.baseUrl)}/#/contact">Contact form</a>
+      <a class="btn btn-ghost" href="${attr(cfg.baseUrl)}/contact">Contact form</a>
     </div>
   </section>
 </main>
@@ -414,7 +414,7 @@ export function renderChassisPage(
   const site = cfg.siteName || "Narmada Mobility";
   const wa = cfg.whatsappNumber || "917909083806";
   const canonical = `${cfg.baseUrl.replace(/\/$/, "")}/c/${encodeURIComponent(chassis.slug)}`;
-  const spaAlt    = `${cfg.baseUrl.replace(/\/$/, "")}/#/chassis/${encodeURIComponent(chassis.slug)}`;
+  const spaAlt    = `${cfg.baseUrl.replace(/\/$/, "")}/chassis/${encodeURIComponent(chassis.slug)}`;
   const title  = `${chassis.chassisDisplayName} spare parts catalogue | ${site}`;
   const desc   = (chassis.description || `Genuine and OE-grade spare parts for ${chassis.chassisDisplayName}. Browse ${parts.length} verified part numbers with fast dispatch and WhatsApp support.`).slice(0, 155);
   const kws    = [chassis.make, chassis.model, chassis.variant, chassis.chassisCode, "spare parts", "commercial vehicle parts"].filter(Boolean).join(", ");
@@ -427,7 +427,7 @@ export function renderChassisPage(
     "@type": "BreadcrumbList",
     itemListElement: [
       { "@type": "ListItem", position: 1, name: "Home", item: cfg.baseUrl },
-      { "@type": "ListItem", position: 2, name: "Chassis catalogue", item: `${cfg.baseUrl}/#/parts-finder` },
+      { "@type": "ListItem", position: 2, name: "Chassis catalogue", item: `${cfg.baseUrl}/parts-finder` },
       { "@type": "ListItem", position: 3, name: chassis.chassisDisplayName, item: canonical },
     ],
   };
@@ -469,7 +469,7 @@ ${renderHeader(cfg)}
 <main class="container" role="main">
   <nav class="breadcrumb" aria-label="Breadcrumb">
     <a href="${attr(cfg.baseUrl)}/">Home</a> &raquo;
-    <a href="${attr(cfg.baseUrl)}/#/parts-finder">Chassis catalogue</a> &raquo;
+    <a href="${attr(cfg.baseUrl)}/parts-finder">Chassis catalogue</a> &raquo;
     <span aria-current="page">${esc(chassis.chassisDisplayName)}</span>
   </nav>
   <h1>${esc(chassis.chassisDisplayName)} spare parts</h1>
@@ -498,7 +498,7 @@ export function renderCategoryPage(
   const site = cfg.siteName || "Narmada Mobility";
   const wa = cfg.whatsappNumber || "917909083806";
   const canonical = `${cfg.baseUrl.replace(/\/$/, "")}/cat/${encodeURIComponent(category)}`;
-  const spaAlt    = `${cfg.baseUrl.replace(/\/$/, "")}/#/category/${encodeURIComponent(category)}`;
+  const spaAlt    = `${cfg.baseUrl.replace(/\/$/, "")}/category/${encodeURIComponent(category)}`;
   const label     = category.replace(/[-_]/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
   const title  = `${label} — commercial vehicle spare parts | ${site}`;
   const desc   = `Browse ${products.length} ${label.toLowerCase()} spare parts for Indian commercial vehicles. Genuine + OE-grade, dispatched from Delhi.`.slice(0, 155);
@@ -511,7 +511,7 @@ export function renderCategoryPage(
     "@type": "BreadcrumbList",
     itemListElement: [
       { "@type": "ListItem", position: 1, name: "Home", item: cfg.baseUrl },
-      { "@type": "ListItem", position: 2, name: "Products", item: `${cfg.baseUrl}/#/products` },
+      { "@type": "ListItem", position: 2, name: "Products", item: `${cfg.baseUrl}/products` },
       { "@type": "ListItem", position: 3, name: label, item: canonical },
     ],
   };
@@ -554,7 +554,7 @@ ${renderHeader(cfg)}
 <main class="container" role="main">
   <nav class="breadcrumb" aria-label="Breadcrumb">
     <a href="${attr(cfg.baseUrl)}/">Home</a> &raquo;
-    <a href="${attr(cfg.baseUrl)}/#/products">Products</a> &raquo;
+    <a href="${attr(cfg.baseUrl)}/products">Products</a> &raquo;
     <span aria-current="page">${esc(label)}</span>
   </nav>
   <h1>${esc(label)} spare parts</h1>

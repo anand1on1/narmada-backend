@@ -1,6 +1,7 @@
 import { useEffect } from "react";
 import { Switch, Route, Router, useLocation } from "wouter";
 import { useHashLocation } from "wouter/use-hash-location";
+import { useSyncExternalStore } from "react";
 import { queryClient } from "./lib/queryClient";
 import { QueryClientProvider } from "@tanstack/react-query";
 import { Toaster } from "@/components/ui/toaster";
@@ -32,13 +33,78 @@ import { useParams } from "wouter";
 // never matches and the deep-link from a lead card falls through to NotFound
 // (the "stuck on loading" symptom). Strip the query for route MATCHING only;
 // pages that need the params still read window.location.hash directly.
+
+// R28.12 — Switched from hash routing to path routing so Google, sitemap.xml,
+// and shared /product/... links land on the correct SPA page. Previously the
+// app used useHashLocation which required URLs like /#/product/... — sitemap
+// URLs (which have no #) always fell back to the homepage because wouter read
+// window.location.hash (empty) instead of the path.
+//
+// This is a hybrid hook to keep the ~15 places that still call
+// window.location.hash = "#/foo" (admin/team/datacenter navigation) working:
+//   1. Subscribes to both popstate AND hashchange so wouter re-renders when
+//      old code assigns window.location.hash.
+//   2. If the URL has a #/path fragment on read, it's treated as the location
+//      (with a one-time history.replaceState to the clean path form so the
+//      browser bar shows the proper URL).
+//   3. navigate() uses history.pushState/replaceState — no # in new URLs.
+//   4. hrefs helper returns clean paths so <Link href="/foo"> renders <a href="/foo">.
+// Query-string parsing in downstream pages (AdminMarketingCampaignComposer,
+// AdminLedger, DataCenterLogin, ShopLogin, ShopVerify) reads window.location.hash
+// first and falls back to window.location.search — both keep working.
+function readCurrentPath(): string {
+  if (typeof window === "undefined") return "/";
+  const hash = window.location.hash || "";
+  if (hash.startsWith("#/")) {
+    // Migrate legacy hash URL to clean path form (one-time per page load).
+    const withoutHash = hash.slice(1);
+    try {
+      const url = window.location.pathname + window.location.search;
+      if (url !== withoutHash) {
+        window.history.replaceState(null, "", withoutHash);
+      }
+    } catch { /* ignore */ }
+    // Return path portion only (matcher strips query separately below).
+    const qIdx = withoutHash.indexOf("?");
+    return qIdx === -1 ? withoutHash : withoutHash.slice(0, qIdx);
+  }
+  return window.location.pathname || "/";
+}
+
+function subscribeToLocation(cb: () => void): () => void {
+  window.addEventListener("popstate", cb);
+  window.addEventListener("hashchange", cb);
+  return () => {
+    window.removeEventListener("popstate", cb);
+    window.removeEventListener("hashchange", cb);
+  };
+}
+
+function usePathLocation(): [string, (to: string, opts?: { replace?: boolean; state?: any }) => void] {
+  const path = useSyncExternalStore(subscribeToLocation, readCurrentPath, () => "/");
+  const navigate = (to: string, opts?: { replace?: boolean; state?: any }) => {
+    // Accept both "/foo" and "#/foo" (some callers still emit #/...).
+    const target = to.startsWith("#") ? to.slice(1) : to;
+    if (opts?.replace) {
+      window.history.replaceState(opts?.state ?? null, "", target);
+    } else {
+      window.history.pushState(opts?.state ?? null, "", target);
+    }
+    // popstate doesn't fire on pushState/replaceState, so trigger our subscribers manually.
+    window.dispatchEvent(new PopStateEvent("popstate"));
+  };
+  return [path, navigate];
+}
+// wouter's <Link> reads this to build hrefs. Empty prefix keeps them as clean paths.
+(usePathLocation as any).hrefs = (href: string) => href;
+
+// Legacy export kept for any old imports (unused after R28.12).
 function useHashLocationNoQuery(opts?: { ssrPath?: string }): [string, (to: string, opts?: { replace?: boolean; state?: any }) => void] {
   const [loc, navigate] = useHashLocation(opts as any) as any;
   const qIdx = loc.indexOf("?");
   const path = qIdx === -1 ? loc : loc.slice(0, qIdx);
   return [path, navigate];
 }
-// Preserve wouter's hrefs helper so <Link>/navigate keep producing hash hrefs.
 (useHashLocationNoQuery as any).hrefs = (href: string) => "#" + href;
 
 // R10 — the old PO "Assign" page was merged into the detail page. Redirect the
@@ -634,7 +700,7 @@ function App() {
               <ShopAuthProvider>
                 <TeamAuthProvider>
                   <Toaster />
-                  <Router hook={useHashLocationNoQuery}>
+                  <Router hook={usePathLocation}>
                     <AppRouter />
                   </Router>
                 </TeamAuthProvider>

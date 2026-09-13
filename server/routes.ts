@@ -111,14 +111,16 @@ export function buildSitemapUrls(allProducts: Awaited<ReturnType<typeof storage.
   for (const b of BRAND_SLUGS) {
     for (const c of COUNTRIES) add(`/${b}-spare-parts-${toSlug(c)}`, "0.7");
   }
-  // R27.6 #5 — product URLs are part-number-FIRST and hash-routed so the part
-  // number is unmistakably present and the link actually resolves in the SPA:
-  //   /#/product/{partNumber}/{slug}   (falls back to /#/product/{slug})
+  // R28.12 — SPA URLs are now path-routed (Router hook switched from
+  // useHashLocation to a path/history hook). Sitemap emits clean /product/...
+  // URLs so Google indexes them and shared links resolve correctly. Was
+  // /#/product/... which always fell back to the homepage when Google or a
+  // WhatsApp preview crawler followed the link.
   for (const p of allProducts) {
     if (!p.active) continue;
     const pn = (p as any).partNumber || (p as any).part_number;
-    if (pn) add(`/#/product/${encodeURIComponent(String(pn))}/${p.slug}`, "0.6");
-    else add(`/#/product/${p.slug}`, "0.6");
+    if (pn) add(`/product/${encodeURIComponent(String(pn))}/${p.slug}`, "0.7", "weekly");
+    else add(`/product/${p.slug}`, "0.7", "weekly");
   }
   // R28 Session 4 — also emit the SSR /p/{slug} URLs so Google can crawl the
   // full-HTML product pages (the hash routes above are for the SPA experience).
