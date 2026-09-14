@@ -3792,6 +3792,16 @@ export function registerV2Routes(app: Express, ctx: V2Context) {
           upsertPartFromQuotation(item.partNumber, item.productName, item.hsn, item.gstPct, item.brand, item.mrp);
         }
       }
+      // R28.16 — fire-and-forget: publish each quoted line as a product
+      // Skip existing products (part number match), create new for others.
+      void (async () => {
+        try {
+          const { publishQuotationItemsAsProducts } = await import("./quotation-to-products");
+          await publishQuotationItemsAsProducts(quotation.id, savedItems as any);
+        } catch (e: any) {
+          console.error("[quotation-to-products] team create publish failed:", e?.message || e);
+        }
+      })();
       await v2.writeAuditLog({ actorType: "data_team", actorId: String(teamUser.id), action: "create_quotation", entityType: "quotation", entityId: String(quotation.id), afterJson: JSON.stringify(quotation) });
       // R26.6g — A3: credit the quotation amount into matching active quotation-type targets.
       // Best-effort; must never break quotation creation.
@@ -3832,6 +3842,15 @@ export function registerV2Routes(app: Express, ctx: V2Context) {
             upsertPartFromQuotation(item.partNumber, item.productName, item.hsn, item.gstPct, item.brand, item.mrp);
           }
         }
+        // R28.16 — fire-and-forget: publish each quoted line as a product
+        void (async () => {
+          try {
+            const { publishQuotationItemsAsProducts } = await import("./quotation-to-products");
+            await publishQuotationItemsAsProducts(id, savedItems as any);
+          } catch (e: any) {
+            console.error("[quotation-to-products] team update publish failed:", e?.message || e);
+          }
+        })();
         // R26.2h — if this quotation was already converted to a PO (e.g. rates were set by
         // AI autofill AFTER conversion), push the new mrp values down into any po_items whose
         // unit_price is still 0, then refresh line/header totals. No-op when no linked PO exists.
@@ -8212,6 +8231,15 @@ function registerR8Routes(
       );
       try { v2.syncQuotationToTargets(quotation.id); }
       catch (err: any) { console.error("[R26.6g] quotation→target sync skipped:", err?.message || err); }
+      // R28.16 — fire-and-forget: publish each quoted line as a product
+      void (async () => {
+        try {
+          const { publishQuotationItemsAsProducts } = await import("./quotation-to-products");
+          await publishQuotationItemsAsProducts(quotation.id, savedItems as any);
+        } catch (e: any) {
+          console.error("[quotation-to-products] admin create publish failed:", e?.message || e);
+        }
+      })();
       res.json({ quotation, items: savedItems });
     } catch (e: any) { res.status(400).json({ error: e.message }); }
   });
@@ -8224,6 +8252,17 @@ function registerR8Routes(
       if (!updated) return res.status(404).json({ error: "Quotation not found" });
       let savedItems = undefined;
       if (Array.isArray(rawItems)) savedItems = await v2.updateQuotationItems(id, rawItems);
+      // R28.16 — fire-and-forget: publish each quoted line as a product
+      if (Array.isArray(rawItems) && savedItems) {
+        void (async () => {
+          try {
+            const { publishQuotationItemsAsProducts } = await import("./quotation-to-products");
+            await publishQuotationItemsAsProducts(id, savedItems as any);
+          } catch (e: any) {
+            console.error("[quotation-to-products] admin update publish failed:", e?.message || e);
+          }
+        })();
+      }
       res.json({ quotation: updated, items: savedItems });
     } catch (e: any) { res.status(400).json({ error: e.message }); }
   });
