@@ -25,6 +25,7 @@ import { lookupRegistration as surepassLookupRegistration, normalizeRegNumber } 
 // Feature-flagged behind AUTO_PUBLISH_ENABLED (default false) so notify-Delhi is
 // unchanged until the user opts in.
 import { autoPublishFromPO, listAutoPublishLog } from "./auto-publish";
+import { registerOrderSlipRoutes } from "./order-slips";
 // R28.1 — Team Upload feature (passcode-gated public chassis upload).
 // Additive; parallel path to the admin-only /api/admin/chassis endpoints.
 import { registerTeamUploadRoutes } from "./team-upload";
@@ -321,6 +322,19 @@ export interface V2Context {
   primaryAdminPassword: string;
   regenSitemap: () => Promise<{ urlCount: number }>;
   uploadsDir: string;
+}
+
+// Shared, unchanged team-session guard, exported for focused route integration tests.
+export async function requireDataTeam(req: Request, res: Response, next: NextFunction) {
+  const token = (req.headers["x-team-token"] as string | undefined)
+    || (req.headers["authorization"] as string | undefined)?.replace("Bearer ", "");
+  if (!token) return res.status(401).json({ error: "Unauthorized" });
+  const session = await v2.getDataTeamSession(token);
+  if (!session) return res.status(401).json({ error: "Unauthorized" });
+  const user = await v2.getDataTeamUser(session.userId);
+  if (!user || !user.active) return res.status(401).json({ error: "Unauthorized" });
+  (req as any).teamUser = user;
+  next();
 }
 
 export function registerV2Routes(app: Express, ctx: V2Context) {
@@ -3227,18 +3241,6 @@ export function registerV2Routes(app: Express, ctx: V2Context) {
   // =============================================================
 
   // -------- DATA TEAM AUTH (/api/team) --------
-  async function requireDataTeam(req: Request, res: Response, next: NextFunction) {
-    const token = (req.headers["x-team-token"] as string | undefined)
-      || (req.headers["authorization"] as string | undefined)?.replace("Bearer ", "");
-    if (!token) return res.status(401).json({ error: "Unauthorized" });
-    const session = await v2.getDataTeamSession(token);
-    if (!session) return res.status(401).json({ error: "Unauthorized" });
-    const user = await v2.getDataTeamUser(session.userId);
-    if (!user || !user.active) return res.status(401).json({ error: "Unauthorized" });
-    (req as any).teamUser = user;
-    next();
-  }
-
   app.post("/api/team/login", async (req, res) => {
     try {
       const { username, password } = req.body || {};
@@ -3287,6 +3289,7 @@ export function registerV2Routes(app: Express, ctx: V2Context) {
       res.json({ ok: true });
     } catch (e: any) { res.status(500).json({ error: e.message }); }
   });
+  registerOrderSlipRoutes(app, rawSqlite, requireDataTeam);
 
   app.get("/api/team/me", requireDataTeam, async (req, res) => {
     const user = (req as any).teamUser as any;

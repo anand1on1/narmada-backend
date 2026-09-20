@@ -124,7 +124,13 @@ function insertAutoPublishLogRow(row: {
                                      published_price, markup_pct, quantity, product_id, image_url,
                                      image_source, status, error_message, triggered_by,
                                      triggered_by_user_id, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT(po_id, part_number) DO UPDATE SET
+         po_line_id=excluded.po_line_id, purchase_price=excluded.purchase_price,
+         published_price=excluded.published_price, product_id=excluded.product_id,
+         image_url=excluded.image_url, image_source=excluded.image_source,
+         status=excluded.status, error_message=excluded.error_message, created_at=excluded.created_at
+       WHERE auto_publish_log.status NOT IN ('published', 'updated')`,
     )
     .run(
       row.po_id, row.po_line_id, row.part_number, row.description, row.purchase_price,
@@ -141,8 +147,8 @@ function insertAutoPublishLogRow(row: {
 //   description, short_description, price_inr, stock_qty, image_urls (JSON),
 //   compatible_models, meta_*, featured, active, created_at
 // We match by part_number first (there is a helper storage.getProductByPartNumber).
-// If no product exists, we create one. If one exists, we update price/qty/image.
-async function upsertProduct(args: {
+// If no product exists, create one. Existing entries are never overwritten.
+async function createMissingProduct(args: {
   partNumber: string;
   description: string;
   publishedPrice: number;
@@ -154,21 +160,8 @@ async function upsertProduct(args: {
   const imageUrlsJson = JSON.stringify([imageUrl]);
   const inferredBrand = inferBrand(description, partNumber);
   if (existing) {
-    // R28.10 Bug 4: force `active: true` (in case an admin previously hid the
-    // product) and leave brand/category untouched to preserve any manual edits.
-    // R28.10a: exception — if brand is still the placeholder "other", re-infer
-    // it. Manual admin edits (any specific brand like "tata") are preserved
-    // because the guard only fires on the sentinel "other".
-    const shouldFixBrand = existing.brand === "other" && inferredBrand && inferredBrand !== "other";
-    await storage.updateProduct(existing.id, {
-      priceInr: publishedPrice,
-      stockQty: quantity,
-      imageUrls: imageUrlsJson,
-      active: true,
-      description: existing.description || description,
-      ...(shouldFixBrand ? { brand: inferredBrand } : {}),
-    } as any);
-    console.log("[auto-publish] upserted product:", { id: existing.id, partNumber, action: "update", active: true, slug: existing.slug, ...(shouldFixBrand ? { brandFixed: `other→${inferredBrand}` } : {}) });
+    // A matching catalog entry belongs to its existing publisher/admin.
+    // Never overwrite prices, stock, images, visibility or editorial fields.
     return { id: existing.id, created: false };
   }
   const category = inferCategory(description);
@@ -204,6 +197,23 @@ async function upsertProduct(args: {
   } as any);
   console.log("[auto-publish] upserted product:", { id: created.id, partNumber, action: "create", active: true, slug, brand: inferredBrand });
   return { id: created.id, created: true };
+}
+
+// Repeated Notify Delhi clicks and overlapping POs can reach image completion
+// together. Serialize only this publisher's same-part final check/create; do not
+// change the quotation publisher or add a catalog-wide unique constraint.
+const publishingParts = new Map<string, Promise<void>>();
+async function upsertProduct(args: Parameters<typeof createMissingProduct>[0]) {
+  const previous = publishingParts.get(args.partNumber);
+  let release!: () => void;
+  const current = new Promise<void>(resolve => { release = resolve; });
+  publishingParts.set(args.partNumber, current);
+  await previous;
+  try { return await createMissingProduct(args); }
+  finally {
+    release();
+    if (publishingParts.get(args.partNumber) === current) publishingParts.delete(args.partNumber);
+  }
 }
 
 // ---- Main entry point ---------------------------------------------------
@@ -264,26 +274,40 @@ export async function autoPublishFromPO(
       continue;
     }
 
-    // Purchase price: prefer per-line purchaseCost, then vendorRate, then unitPrice.
+    // PO selling amount must be entered. Do not substitute price-list MRP.
+    // The existing final price source remains purchaseCost ?? vendorRate ?? unitPrice,
+    // with the configured markup; zero in a preferred field is NOT a fallback.
     const purchasePrice = Number(it.purchaseCost ?? it.vendorRate ?? it.unitPrice ?? 0);
-    if (!Number.isFinite(purchasePrice) || purchasePrice <= 0) {
-      // Log an error row so the admin log shows why nothing was published.
+    const unitPrice = Number(it.unitPrice);
+    if (!Number.isFinite(unitPrice) || unitPrice <= 0 || !Number.isFinite(purchasePrice) || purchasePrice <= 0) {
+      // A retryable skip is not a successful publication.
       try {
         insertAutoPublishLogRow({
           po_id: poId, po_line_id: it.id ?? null, part_number: partNumber,
           description: String(it.description || partNumber),
           purchase_price: 0, published_price: 0, markup_pct: markupPct, quantity: defaultQty,
           product_id: null, image_url: null, image_source: null,
-          status: "error", error_message: "purchase_price_missing_or_zero",
+          status: "skipped_price", error_message: "PO unit price or purchase price must be finite and positive",
           triggered_by: triggeredBy, triggered_by_user_id: triggeredByUserId ?? null,
         });
       } catch { /* ignore duplicate-key */ }
-      errors += 1;
-      details.push({ part_number: partNumber, status: "error", error: "purchase_price_missing" });
+      skipped += 1;
+      details.push({ part_number: partNumber, status: "skipped_price" });
       continue;
     }
 
     const publishedPrice = round2(purchasePrice * multiplier);
+    if (!Number.isFinite(publishedPrice) || publishedPrice <= 0) {
+      skipped += 1;
+      details.push({ part_number: partNumber, status: "skipped_price" });
+      continue;
+    }
+    const existing = await storage.getProductByPartNumber(partNumber);
+    if (existing) {
+      skipped += 1;
+      details.push({ part_number: partNumber, status: "skipped_existing", product_id: existing.id });
+      continue;
+    }
     const description = String(it.description || partNumber);
 
     // Fetch representational image. Awaited, but bounded by internal 30s
@@ -325,7 +349,7 @@ export async function autoPublishFromPO(
     }
 
     // Log outcome.
-    const status = created ? "published" : "updated";
+    const status = created ? "published" : "skipped_existing";
     try {
       insertAutoPublishLogRow({
         po_id: poId, po_line_id: it.id ?? null, part_number: partNumber, description,
@@ -341,7 +365,7 @@ export async function autoPublishFromPO(
       continue;
     }
 
-    if (created) published += 1; else updated += 1;
+    if (created) published += 1; else skipped += 1;
     details.push({ part_number: partNumber, status, product_id: productId ?? undefined });
   }
 

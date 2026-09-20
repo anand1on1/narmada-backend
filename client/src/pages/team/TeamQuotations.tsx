@@ -5,6 +5,7 @@ import { Plus, Search, ChevronLeft, ChevronRight, X, Calendar, Trash2 } from "lu
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link } from "wouter";
 import { useToast } from "@/hooks/use-toast";
+import { useResultParams, useResultsNavigation } from "@/lib/results-navigation";
 
 interface Quotation {
   id: number;
@@ -75,13 +76,13 @@ export default function TeamQuotations() {
   const { toast } = useToast();
   const queryClient = useQueryClient();
   const [deletingId, setDeletingId] = useState<number | null>(null);
-  const [status, setStatus] = useState("");
-  const [search, setSearch] = useState("");
-  const [searchActive, setSearchActive] = useState(""); // committed search term
-  const [customerId, setCustomerId] = useState<string>("");
-  const [fromDate, setFromDate] = useState<string>("");
-  const [toDate, setToDate] = useState<string>("");
-  const [page, setPage] = useState(1);
+  const { params: routeParams, update, page, setPage } = useResultParams();
+  const status = routeParams.get("status") || "", setStatus = (status: string) => update({ status });
+  const search = routeParams.get("q") || "", setSearch = (q: string) => update({ q });
+  const [searchActive, setSearchActive] = useState(search);
+  const customerId = routeParams.get("customer_id") || "", setCustomerId = (customer_id: string) => update({ customer_id });
+  const fromDate = routeParams.get("from") || "", setFromDate = (from: string) => update({ from });
+  const toDate = routeParams.get("to") || "", setToDate = (to: string) => update({ to });
 
   // Load customers for dropdown
   const { data: customersData } = useQuery<{ customers: Customer[] } | Customer[]>({
@@ -109,7 +110,8 @@ export default function TeamQuotations() {
   }, [status, searchActive, customerId, fromDate, toDate, page]);
 
   const { data, isLoading } = useQuery<{ quotations: Quotation[]; total: number; pages: number } | Quotation[]>({
-    queryKey: ["team-quotations", params.toString()],
+    queryKey: ["team-quotations", token, params.toString()],
+    staleTime: 0,
     queryFn: async () => {
       const r = await teamFetch(token, `/api/team/quotations?${params}`);
       if (!r.ok) throw new Error("Failed to load");
@@ -123,10 +125,10 @@ export default function TeamQuotations() {
   const totalCount: number = Array.isArray(data) ? items.length : (data as any)?.total || 0;
   // R27.34b — "Showing X of Y": Y is every live quotation, not the filtered subset.
   const grandCount: number = Array.isArray(data) ? items.length : ((data as any)?.total_count ?? totalCount);
+  const navigation = useResultsNavigation("/team/quotations", !!data && searchActive === search, token);
 
   function doSearch() {
     setSearchActive(search);
-    setPage(1);
   }
 
   // R27.34b — debounce the search box so typing a part number does not fire a query
@@ -295,7 +297,7 @@ export default function TeamQuotations() {
               {items.map((q) => (
                 <tr key={q.id} className="hover:bg-muted/30">
                   <td className="px-4 py-3">
-                    <Link href={`/team/quotations/${q.id}`}>
+                    <Link href={navigation.detailHref(q.id)} onClick={navigation.remember}>
                       <a className="font-mono font-semibold text-accent hover:underline">{q.quoteNo}</a>
                     </Link>
                   </td>
@@ -325,7 +327,7 @@ export default function TeamQuotations() {
                   </td>
                   <td className="px-4 py-3 text-right">
                     <div className="inline-flex items-center gap-2">
-                      <Link href={`/team/quotations/${q.id}`}>
+                      <Link href={navigation.detailHref(q.id)} onClick={navigation.remember}>
                         <a className="px-3 py-1.5 border rounded-lg text-xs hover:bg-muted">Edit</a>
                       </Link>
                       <button

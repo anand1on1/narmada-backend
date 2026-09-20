@@ -12,6 +12,7 @@ import Papa from "papaparse";
 import { sendContactEmail, sendQuoteRequestEmail as salesSendQuoteRequestEmail } from "./email";
 import { registerBulkRoutes } from "./bulk";
 import { registerV2Routes, TokenMap, TokenInfo, persistAdminSession, rehydrateSession, deleteAdminSession } from "./routes-v2";
+import { productsListHandler } from "./product-pagination";
 import type { AdminRole } from "@shared/schema";
 
 const ADMIN_USERNAME = "narmadamobility123";
@@ -421,17 +422,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
   });
 
   // -------- PRODUCTS (public) --------
-  app.get("/api/products", async (req, res) => {
-    const { brand, category, q, featured } = req.query;
-    const list = await storage.listProducts({
-      brand: typeof brand === "string" ? brand : undefined,
-      category: typeof category === "string" ? category : undefined,
-      q: typeof q === "string" ? q : undefined,
-      featured: featured === "1" || featured === "true",
-      activeOnly: true,
-    });
-    res.json(list);
-  });
+  app.get("/api/products", productsListHandler(storage));
   app.get("/api/products/:slug", async (req, res) => {
     // R27.6 #5 — resolve by slug first; fall back to part number so the new
     // part-number-first URLs (/product/{partNumber}/{slug}) still load even if a

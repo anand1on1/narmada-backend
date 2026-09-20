@@ -967,6 +967,9 @@ export function autoCreateProductsForPo(poId: number): { created: number; skippe
     if (exists) { skipped++; continue; }
     const vendorPrice = Number(it.purchase_cost ?? it.unit_price) || 0;
     const sell = Math.round(vendorPrice * (1 + markup / 100));
+    // PO-only publication gate. Existing zero-price catalog entries are untouched.
+    if (!Number.isFinite(Number(it.unit_price)) || Number(it.unit_price) <= 0 ||
+        !Number.isFinite(vendorPrice) || vendorPrice <= 0 || !Number.isFinite(sell) || sell <= 0) { skipped++; continue; }
     const name = String(it.description || pn).slice(0, 200);
     // R27.5 #7 — populate brand so the public product page shows it. Priority:
     // PO line item brand → seller (vendor) default brand (vendors.brands, first entry).

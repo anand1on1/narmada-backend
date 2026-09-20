@@ -34,6 +34,7 @@ const baseNavItems = [
 export function TeamLayout({ children, title }: { children: ReactNode; title: string }) {
   const { token, user, clear, ready } = useTeamAuth();
   const [, navigate] = useLocation();
+  const [menuOpen, setMenuOpen] = useState(false);
 
   // R27.32c — insert Process Payment (after Purchase Orders) only for payment roles.
   const navItems = (() => {
@@ -100,7 +101,8 @@ export function TeamLayout({ children, title }: { children: ReactNode; title: st
 
   return (
     <div className="panel-team min-h-screen flex bg-slate-50 dark:bg-slate-950">
-      <aside className="w-64 bg-white border-r border-slate-200 flex flex-col flex-shrink-0">
+      {menuOpen && <button aria-label="Close navigation" className="fixed inset-0 bg-black/30 z-30 md:hidden" onClick={() => setMenuOpen(false)} />}
+      <aside className={`${menuOpen ? "flex fixed inset-y-0 left-0 z-40 shadow-xl" : "hidden"} md:static md:flex w-64 bg-white border-r border-slate-200 flex-col flex-shrink-0`}>
         <div className="p-6 border-b border-slate-200">
           <Logo />
           <div className="mt-2 text-[10px] uppercase tracking-widest text-violet-600 font-bold">Data Team</div>
@@ -121,7 +123,7 @@ export function TeamLayout({ children, title }: { children: ReactNode; title: st
           </button>
         </div>
       </aside>
-      <main className="flex-1 overflow-x-auto flex flex-col">
+      <main className="flex-1 min-w-0 flex flex-col">
         {announcement && !bannerDismissed && (
           <div className="bg-amber-50 border-b border-amber-200 px-4 py-2.5 flex items-start gap-3">
             <Megaphone className="w-4 h-4 text-amber-600 flex-shrink-0 mt-0.5" />
@@ -135,9 +137,10 @@ export function TeamLayout({ children, title }: { children: ReactNode; title: st
           </div>
         )}
         <header className="bg-white border-b border-slate-200 px-6 py-4 sticky top-0 z-20">
+          <button className="md:hidden text-sm border rounded-lg px-3 py-1.5 mb-2" aria-expanded={menuOpen} onClick={() => setMenuOpen(!menuOpen)}>Menu</button>
           <h1 className="font-display text-2xl font-bold text-slate-900">{title}</h1>
         </header>
-        <div className="p-6 flex-1">{children}</div>
+        <div className="p-3 sm:p-6 flex-1 min-w-0">{children}</div>
       </main>
     </div>
   );

@@ -607,6 +607,31 @@ export interface IStorage {
 }
 
 export class DatabaseStorage implements IStorage {
+  async pageProducts(filters: { brand?: string; category?: string; q?: string; featured?: boolean }, paging: { page: number; limit: number; offset: number }) {
+    if (!Number.isSafeInteger(paging.limit) || paging.limit < 1 || paging.limit > 100 || !Number.isSafeInteger(paging.offset) || paging.offset < 0) {
+      throw new Error("Invalid product pagination");
+    }
+    const conditions = [eq(products.active, true)];
+    if (filters.brand) conditions.push(eq(products.brand, filters.brand));
+    if (filters.category) {
+      // Older PO publishers and the admin catalog use different category slugs.
+      // Match both in SQL without changing any existing catalog rows.
+      const aliases = [["engine", "engine-parts"], ["brake", "brake-system"], ["filter", "filters"], ["body", "body-parts"]];
+      const names = aliases.find(group => group.includes(filters.category!)) || [filters.category];
+      conditions.push(or(...names.map(name => eq(products.category, name)))!);
+    }
+    if (filters.featured) conditions.push(eq(products.featured, true));
+    if (filters.q) {
+      const q = `%${filters.q.toLowerCase()}%`;
+      conditions.push(or(like(products.name, q), like(products.description, q), like(products.model, q), like(products.partNumber, q), like(products.oemNumber, q))!);
+    }
+    const where = and(...conditions);
+    // COUNT and LIMIT run in SQLite; never materialize the full catalog.
+    const total = db.select({ count: sql<number>`count(*)` }).from(products).where(where).get()!.count;
+    const rows = db.select().from(products).where(where)
+      .orderBy(desc(products.createdAt), desc(products.id)).limit(paging.limit).offset(paging.offset).all();
+    return { products: rows, total, page: paging.page, limit: paging.limit, pages: Math.ceil(total / paging.limit) };
+  }
   async listProducts(filters: { brand?: string; category?: string; q?: string; featured?: boolean; activeOnly?: boolean } = {}): Promise<Product[]> {
     const conditions = [];
     if (filters.brand) conditions.push(eq(products.brand, filters.brand));

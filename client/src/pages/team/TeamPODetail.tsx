@@ -7,6 +7,7 @@
  */
 import { useState } from "react";
 import { TeamLayout } from "./TeamLayout";
+import { BackToResults } from "@/lib/results-navigation";
 import { teamFetch, useTeamAuth, getTeamToken } from "@/lib/team-auth";
 import { useToast } from "@/hooks/use-toast";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
@@ -458,6 +459,7 @@ export default function TeamPODetail() {
   if (isLoading || !po) {
     return (
       <TeamLayout title="Purchase Order">
+        <BackToResults base="/team/purchase-orders" />
         <div className="p-12 text-center text-muted-foreground">
           <Loader2 className="w-6 h-6 animate-spin inline mb-2" />
           <div>Loading…</div>
@@ -481,6 +483,7 @@ export default function TeamPODetail() {
 
   return (
     <TeamLayout title={`PO ${po.poNumber}`}>
+      <BackToResults base="/team/purchase-orders" />
       {/* R21.2 — deviation banner (shown when any line was changed by Delhi) */}
       {po.items.some((it) => Number(it.isDeviated) === 1) && (
         <div className="bg-orange-50 border border-orange-200 rounded-lg px-4 py-3 mb-3 flex items-center justify-between gap-3">
