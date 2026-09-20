@@ -1914,7 +1914,7 @@ export async function listPurchaseOrdersV2(opts: { status?: string; customerId?:
   // older dates, until a newer PO is created/dated.
   const order = sql`COALESCE(${purchaseOrdersV2.poDate}, ${purchaseOrdersV2.createdAt}) DESC`;
   const base = db.select().from(purchaseOrdersV2);
-  return conds.length ? base.where(and(...conds)).orderBy(order).all() : base.orderBy(order).all();
+  return conds.length ? base.where(and(...conds)).orderBy(order, desc(purchaseOrdersV2.id)).all() : base.orderBy(order, desc(purchaseOrdersV2.id)).all();
 }
 // R10 — list with live customer/cost totals + customer name for the team PO list.
 export async function listPurchaseOrdersV2WithTotals(opts: { status?: string; customerId?: number; q?: string; from?: string; to?: string } = {}): Promise<Array<PurchaseOrderV2 & { customerName: string | null; companyName: string | null; companyLogoUrl: string | null; custTotal: number; costTotal: number }>> {
@@ -1938,7 +1938,7 @@ export async function listPurchaseOrdersV2WithTotals(opts: { status?: string; cu
   const filtered = q
     ? mapped.filter((po: any) => {
         const haystack: string[] = [
-          po.customerPoNumber, po.internalPoNumber, `po-${po.id}`,
+          po.poNumber, po.customerPoNumber, po.internalPoNumber, `po-${po.id}`,
           po.customerName, po.companyName,
         ].filter(Boolean) as string[];
         for (const it of (po.items || [])) {

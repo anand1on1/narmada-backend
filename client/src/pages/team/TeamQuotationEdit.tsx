@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef } from "react";
 import { useLocation, useParams } from "wouter";
 import { TeamLayout } from "./TeamLayout";
+import { BackToResults } from "@/lib/results-navigation";
 import { teamFetch, useTeamAuth } from "@/lib/team-auth";
 import { useToast } from "@/hooks/use-toast";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
@@ -452,6 +453,7 @@ export default function TeamQuotationEdit() {
   if (isLoading) {
     return (
       <TeamLayout title="Quotation">
+        <BackToResults base="/team/quotations" />
         <div className="p-12 text-center text-muted-foreground">Loading…</div>
       </TeamLayout>
     );
@@ -460,6 +462,7 @@ export default function TeamQuotationEdit() {
   if (!quotation) {
     return (
       <TeamLayout title="Quotation">
+        <BackToResults base="/team/quotations" />
         <div className="p-12 text-center text-muted-foreground">Quotation not found.</div>
       </TeamLayout>
     );
@@ -470,6 +473,7 @@ export default function TeamQuotationEdit() {
 
   return (
     <TeamLayout title={quotation.quoteNo}>
+      <BackToResults base="/team/quotations" />
       {/* Header */}
       <div className="flex flex-wrap items-center gap-3 mb-6">
         <div>

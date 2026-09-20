@@ -1,8 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { useSearch } from "wouter";
 import type { Product } from "@shared/schema";
-import { BRANDS, BRAND_WALL, PRODUCT_CATEGORIES } from "@/data/brands";
+import { BRAND_WALL, PRODUCT_CATEGORIES } from "@/data/brands";
 import { ProductCard } from "@/components/ProductCard";
 import { SeoHead } from "@/components/SeoHead";
 import { Input } from "@/components/ui/input";
@@ -11,26 +10,36 @@ import { Button } from "@/components/ui/button";
 import { Search, FilterX } from "lucide-react";
 import { apiRequest } from "@/lib/queryClient";
 import partsFlatlay from "@/assets/v2/parts-flatlay.png";
+import { useResultParams } from "@/lib/results-navigation";
 
 export default function ProductsPage() {
-  const search = useSearch();
-  const initial = new URLSearchParams(search);
-  const [brand, setBrand] = useState(initial.get("brand") || "all");
-  const [category, setCategory] = useState(initial.get("category") || "all");
-  const [q, setQ] = useState(initial.get("q") || "");
+  const { params, update, page, setPage } = useResultParams();
+  const brand = params.get("brand") || "all", setBrand = (brand: string) => update({ brand: brand === "all" ? "" : brand });
+  const category = params.get("category") || "all", setCategory = (category: string) => update({ category: category === "all" ? "" : category });
+  const q = params.get("q") || "", setQ = (q: string) => update({ q });
+  const [debouncedQ, setDebouncedQ] = useState(q);
+  useEffect(() => { const timer = setTimeout(() => setDebouncedQ(q), 300); return () => clearTimeout(timer); }, [q]);
 
   const queryUrl = useMemo(() => {
     const p = new URLSearchParams();
     if (brand !== "all") p.set("brand", brand);
     if (category !== "all") p.set("category", category);
-    if (q) p.set("q", q);
+    if (debouncedQ) p.set("q", debouncedQ);
+    p.set("page", String(page)); p.set("limit", "24");
     return `/api/products${p.toString() ? `?${p}` : ""}`;
-  }, [brand, category, q]);
+  }, [brand, category, debouncedQ, page]);
 
-  const { data: products = [], isLoading } = useQuery<Product[]>({
+  const { data, isLoading, isError, refetch } = useQuery<{ products: Product[]; total: number; pages: number }>({
     queryKey: [queryUrl],
-    queryFn: async () => { try { const r = await apiRequest("GET", queryUrl); return await r.json(); } catch { return []; } },
+    staleTime: 30_000,
+    queryFn: async () => { const r = await apiRequest("GET", queryUrl); return await r.json(); },
   });
+  const products = data?.products || [];
+  const total = data?.total || 0;
+  const pages = Math.max(1, data?.pages || 1);
+  useEffect(() => {
+    if (data && page > Math.max(1, data.pages)) setPage(Math.max(1, data.pages));
+  }, [data, page]);
   const { data: fx } = useQuery<{ usdInr: number }>({ queryKey: ["/api/settings/fx"] });
   const usdInr = fx?.usdInr || 83.5;
 
@@ -65,8 +74,7 @@ export default function ProductsPage() {
             <SelectContent>
               <SelectItem value="all">All Brands</SelectItem>
               {BRAND_WALL.map((b) => {
-                const slug = b.name.toLowerCase().replace(/\s+/g, "-");
-                return <SelectItem key={b.name} value={slug}>{b.name}</SelectItem>;
+                return <SelectItem key={b.name} value={b.slug}>{b.name}</SelectItem>;
               })}
             </SelectContent>
           </Select>
@@ -86,7 +94,7 @@ export default function ProductsPage() {
       </section>
 
       <section className="surface-obsidian max-w-7xl mx-auto px-4 sm:px-6 pb-24">
-        {isLoading ? (
+        {isError ? <div role="alert" className="text-center py-12">Unable to load products. <Button variant="outline" onClick={() => refetch()}>Try again</Button></div> : isLoading ? (
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-5">
             {Array.from({ length: 8 }).map((_, i) => (<div key={i} className="aspect-[3/4] rounded-xl bg-[hsl(220_45%_20%)]/5 animate-pulse" />))}
           </div>
@@ -98,10 +106,15 @@ export default function ProductsPage() {
           </div>
         ) : (
           <>
-            <div className="font-mono text-[11px] uppercase tracking-wider text-[hsl(220_60%_12%)]/82 mb-5">{products.length} product{products.length !== 1 ? "s" : ""} found</div>
+            <div className="font-mono text-[11px] uppercase tracking-wider text-[hsl(220_60%_12%)]/82 mb-5" data-testid="products-count">{total} product{total !== 1 ? "s" : ""} found · Showing {(page - 1) * 24 + 1}–{Math.min(page * 24, total)}</div>
             <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-5">
               {products.map((p) => <ProductCard key={p.id} product={p} usdInr={usdInr} />)}
             </div>
+            <nav className="flex justify-between items-center gap-3 mt-8" aria-label="Products pagination">
+              <Button variant="outline" disabled={page <= 1} onClick={() => { setPage(page - 1); window.scrollTo(0, 400); }}>Previous</Button>
+              <span className="text-sm">Page {page} of {pages}</span>
+              <Button variant="outline" disabled={page >= pages} onClick={() => { setPage(page + 1); window.scrollTo(0, 400); }}>Next</Button>
+            </nav>
           </>
         )}
       </section>

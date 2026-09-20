@@ -6,6 +6,8 @@ import { FileText, Trash2, Loader2, Eye, Search, Copy } from "lucide-react";
 import { useState, useEffect } from "react";
 import { useToast } from "@/hooks/use-toast";
 import { DeviationSummaryModal } from "@/components/team/DeviationSummaryModal";
+import { useResultParams, useResultsNavigation } from "@/lib/results-navigation";
+import { OrderSlipSelection } from "@/components/team/OrderSlipSelection";
 
 interface PO {
   id: number; poNumber: string; customerId: number | null; customerName: string | null;
@@ -31,13 +33,16 @@ export default function TeamPOs() {
   const [confirmDel, setConfirmDel] = useState<PO | null>(null);
   const [deviationPo, setDeviationPo] = useState<PO | null>(null);
   // R27.1b BUG-4 — PO search (debounced) + date range, mirroring admin PO Dashboard.
-  const [q, setQ] = useState("");
-  const [dq, setDq] = useState("");
-  const [fromDate, setFromDate] = useState("");
-  const [toDate, setToDate] = useState("");
+  const { params, update, page, setPage } = useResultParams();
+  const q = params.get("q") || "", setQ = (q: string) => update({ q });
+  const [dq, setDq] = useState(q);
+  const fromDate = params.get("from") || "", setFromDate = (from: string) => update({ from });
+  const toDate = params.get("to") || "", setToDate = (to: string) => update({ to });
   // R27.34b — status + customer filters, matching the quotation list.
-  const [status, setStatus] = useState("");
-  const [customerId, setCustomerId] = useState("");
+  const status = params.get("status") || "", setStatus = (status: string) => update({ status });
+  const customerId = params.get("customer_id") || "", setCustomerId = (customer_id: string) => update({ customer_id });
+  const [selecting, setSelecting] = useState(false);
+  const [selected, setSelected] = useState<Set<number>>(new Set());
   useEffect(() => { const t = setTimeout(() => setDq(q), 300); return () => clearTimeout(t); }, [q]);
 
   const { data: customers = [] } = useQuery<Array<{ id: number; name: string }>>({
@@ -51,8 +56,8 @@ export default function TeamPOs() {
     enabled: !!token,
   });
 
-  const { data: result } = useQuery<{ rows: PO[]; unfiltered: number }>({
-    queryKey: ["team-pos", dq, fromDate, toDate, status, customerId],
+  const { data: result, isLoading, isError } = useQuery<{ rows: PO[]; unfiltered: number; total: number }>({
+    queryKey: ["team-pos", token, dq, fromDate, toDate, status, customerId, page],
     queryFn: async () => {
       const p = new URLSearchParams();
       if (dq) p.set("q", dq);
@@ -60,17 +65,21 @@ export default function TeamPOs() {
       if (toDate) p.set("to", toDate);
       if (status) p.set("status", status);
       if (customerId) p.set("customer_id", customerId);
+      p.set("limit", "25"); p.set("offset", String((page - 1) * 25));
       const r = await teamFetch(token, `/api/team/purchase-orders?${p.toString()}`);
-      if (!r.ok) return { rows: [], unfiltered: 0 };
+      if (!r.ok) throw new Error("Unable to load purchase orders");
       const rows = await r.json();
-      return { rows, unfiltered: Number(r.headers.get("X-Unfiltered-Count") || rows.length) };
+      return { rows, unfiltered: Number(r.headers.get("X-Unfiltered-Count") || rows.length), total: Number(r.headers.get("X-Total-Count") || rows.length) };
     },
     enabled: !!token,
     refetchInterval: 30000, // R24.5 — 30s auto-refresh, no page reload
+    staleTime: 0,
   });
   const pos: PO[] = result?.rows || [];
   const unfilteredCount = result?.unfiltered ?? pos.length;
   const hasActiveFilter = !!(q || fromDate || toDate || status || customerId);
+  const navigation = useResultsNavigation("/team/purchase-orders", !!result && dq === q, token);
+  const pages = Math.max(1, Math.ceil((result?.total || 0) / 25));
 
   const dupMut = useMutation({
     mutationFn: async (id: number) => {
@@ -101,6 +110,8 @@ export default function TeamPOs() {
 
   return (
     <TeamLayout title="Purchase Orders">
+      <OrderSlipSelection token={token} selecting={selecting} setSelecting={setSelecting} selected={selected} setSelected={setSelected}
+        onStart={() => update({ q: "", from: "", to: "", status: "", customer_id: "" })} />
       <div className="flex flex-wrap items-center gap-2 mb-4">
         <div className="relative flex-1 min-w-56">
           <Search className="w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground" />
@@ -131,9 +142,10 @@ export default function TeamPOs() {
         </div>
       )}
       <div className="bg-card border rounded-xl overflow-x-auto shadow-sm">
-        {pos.length === 0 ? <div className="p-12 text-center text-muted-foreground">{hasActiveFilter ? "No purchase orders match your search." : "No purchase orders yet. Convert a quotation to a PO to get started."}</div> : (
+        {isLoading ? <div className="p-8">Loading purchase orders…</div> : isError ? <div role="alert" className="p-8">Unable to load purchase orders. Please retry.</div> : pos.length === 0 ? <div className="p-12 text-center text-muted-foreground">{hasActiveFilter ? "No purchase orders match your search." : "No purchase orders yet. Convert a quotation to a PO to get started."}</div> : (
           <table className="w-full text-sm">
             <thead><tr className="bg-muted/50 text-left">
+              {selecting && <th className="px-3 py-3">Select</th>}
               <th className="px-3 py-3 font-semibold">PO Number</th>
               <th className="px-3 py-3 font-semibold">Customer</th>
               <th className="px-3 py-3 font-semibold">Company</th>
@@ -148,6 +160,9 @@ export default function TeamPOs() {
             </tr></thead>
             <tbody className="divide-y">{pos.map((p) => (
               <tr key={p.id} className="hover:bg-muted/30">
+                {selecting && <td className="px-3 py-3"><input type="checkbox" aria-label={`Select PO ${p.poNumber}`} checked={selected.has(p.id)}
+                  disabled={!selected.has(p.id) && selected.size >= 100}
+                  onChange={() => setSelected(previous => { const next = new Set(previous); if (next.has(p.id)) next.delete(p.id); else next.add(p.id); return next; })} /></td>}
                 <td className="px-3 py-3 font-semibold">{p.poNumber}</td>
                 <td className="px-3 py-3">{p.customerName ?? (p.customerId ?? "—")}</td>
                 <td className="px-3 py-3 text-xs">
@@ -191,7 +206,7 @@ export default function TeamPOs() {
                 <td className="px-3 py-3 text-xs text-muted-foreground">{fmt(p.createdAt)}</td>
                 <td className="px-3 py-3 text-right">
                   <div className="flex items-center justify-end gap-3">
-                    <Link href={`/team/purchase-orders/${p.id}`}>
+                    <Link href={navigation.detailHref(p.id)} onClick={navigation.remember}>
                       <a className="text-accent font-semibold inline-flex items-center gap-1 hover:underline text-xs"><FileText className="w-3.5 h-3.5" /> Open</a>
                     </Link>
                     <button onClick={() => dupMut.mutate(p.id)} disabled={dupMut.isPending}
@@ -208,6 +223,11 @@ export default function TeamPOs() {
             ))}</tbody>
           </table>
         )}
+      </div>
+      <div className="flex items-center justify-between gap-3 mt-4 text-sm">
+        <button className="border rounded-lg px-3 py-2 disabled:opacity-40" disabled={page <= 1} onClick={() => setPage(page - 1)}>Previous</button>
+        <span>Page {page} of {pages} · {result?.total ?? 0} results</span>
+        <button className="border rounded-lg px-3 py-2 disabled:opacity-40" disabled={page >= pages} onClick={() => setPage(page + 1)}>Next</button>
       </div>
 
       {deviationPo && (
