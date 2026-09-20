@@ -3,3 +3,4 @@ Allow: /
 Disallow: /admin
 Disallow: /api/
 Sitemap: https://narmadamobility.com/sitemap.xml
+Sitemap: https://narmadamobility.com/sitemap-blog.xml

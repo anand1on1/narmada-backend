@@ -23,7 +23,7 @@ import {
 const ROLE_PAGES: Record<AdminRole, Set<string>> = {
   admin: new Set([
     "/admin/command-center", "/admin/chats", "/admin/ai-bar", "/admin/operations",
-    "/admin/dashboard", "/admin/products", "/admin/blog", "/admin/price-lists",
+    "/admin/dashboard", "/admin/products", "/admin/blog", "/admin/auto-blogger", "/admin/price-lists",
     "/admin/consignments", "/admin/contacts", "/admin/sitemap", "/admin/team", "/admin/settings",
     "/admin/customers", "/admin/ledger", "/admin/payments", "/admin/process-payment",
     "/admin/rfqs", "/admin/quotes", "/admin/parts", "/admin/purchase-orders", "/admin/purchase-history", "/admin/bank",
@@ -83,10 +83,12 @@ const ROLE_BADGE: Record<AdminRole, string> = {
   finance: "bg-teal-500/15 text-teal-700",
 };
 
-export function AdminLayout({ children, title }: { children: ReactNode; title: string }) {
+export function AdminLayout({ children, title, responsiveSidebar = false }: { children: ReactNode; title: string; responsiveSidebar?: boolean }) {
   const { token, username, role, displayName, clear, ready } = useAdminAuth();
   const [location, navigate] = useLocation();
   const [unreadChats, setUnreadChats] = useState(0);
+  // Opt-in for the new editorial dashboard only; existing Accounts/admin layouts stay unchanged.
+  const [mobileMenu, setMobileMenu] = useState(false);
   // R27.35 — payment slips over ₹5,000 waiting for release.
   const [pendingApprovals, setPendingApprovals] = useState(0);
   // R27.36 — expense slips over ₹5,000 waiting for release. Counted separately from
@@ -207,6 +209,7 @@ export function AdminLayout({ children, title }: { children: ReactNode; title: s
     { href: "/admin/chats", label: "Chats", icon: MessageSquare, badge: unreadChats, group: "Web Shop" },
     { href: "/admin/contacts", label: "Enquiries", icon: MessageSquare, group: "Web Shop" },
     { href: "/admin/blog", label: "Blog", icon: FileText, group: "Web Shop" },
+    { href: "/admin/auto-blogger", label: "Auto Blogger", icon: Sparkles, group: "Web Shop" },
     { href: "/admin/sitemap", label: "Sitemap & SEO", icon: Map, group: "Web Shop" },
 
     { href: "/admin/ledger", label: "Ledger", icon: Wallet, group: "Finance" },
@@ -254,9 +257,14 @@ export function AdminLayout({ children, title }: { children: ReactNode; title: s
   const navItems = allItems.filter((i) => allowed.has(i.href));
 
   return (
-    <div className="panel-admin min-h-screen flex bg-slate-50 dark:bg-slate-950">
+    <div className={`panel-admin min-h-screen flex bg-slate-50 dark:bg-slate-950 ${responsiveSidebar ? "flex-col md:flex-row" : ""}`}>
+      {responsiveSidebar && <button className="md:hidden text-left bg-white border-b px-5 py-3 font-semibold text-indigo-700"
+        aria-expanded={mobileMenu} aria-controls="editorial-admin-menu" onClick={() => setMobileMenu(!mobileMenu)}>
+        {mobileMenu ? "Close admin menu" : "Open admin menu"}
+      </button>}
       {/* Sidebar */}
-      <aside className="w-64 bg-white border-r border-slate-200 flex flex-col flex-shrink-0">
+      <aside id={responsiveSidebar ? "editorial-admin-menu" : undefined}
+        className={`bg-white border-r border-slate-200 flex-col flex-shrink-0 ${responsiveSidebar ? `w-full md:w-64 ${mobileMenu ? "flex" : "hidden md:flex"}` : "w-64 flex"}`}>
         <div className="p-6 border-b border-slate-200">
           <Logo />
           <div className="mt-2 text-[10px] uppercase tracking-widest text-indigo-600 font-bold">Admin Panel</div>
@@ -378,12 +386,12 @@ export function AdminLayout({ children, title }: { children: ReactNode; title: s
       </aside>
 
       {/* Main */}
-      <main className="flex-1 overflow-auto">
-        <header className="bg-white border-b border-slate-200 px-8 py-5 sticky top-0 z-20 flex items-center justify-between">
+      <main className={`flex-1 overflow-auto ${responsiveSidebar ? "min-w-0" : ""}`}>
+        <header className={`bg-white border-b border-slate-200 py-5 sticky top-0 z-20 flex items-center justify-between ${responsiveSidebar ? "px-5 md:px-8" : "px-8"}`}>
           <h1 className="font-display text-2xl font-bold text-slate-900">{title}</h1>
           <AdminNotificationsBell adminToken={token} />
         </header>
-        <div className="p-8">{children}</div>
+        <div className={responsiveSidebar ? "p-5 md:p-8" : "p-8"}>{children}</div>
       </main>
     </div>
   );

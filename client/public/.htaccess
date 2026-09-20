@@ -4,18 +4,24 @@ DirectoryIndex index.html
   RewriteEngine On
   RewriteBase /
 
+  # R28.18: read-only dynamic blog HTML/sitemap, BEFORE existing files so stale
+  # prerendered blog directories cannot hide newly published articles.
+  # No ProxyPass: PHP fetches only the fixed Render public-blog upstream.
+  RewriteRule ^blog(?:/.*)?$ blog-bridge.php [END,QSA]
+  RewriteRule ^sitemap-blog\.xml$ blog-bridge.php [END,QSA]
+
   # Serve existing files/directories as-is.
   RewriteCond %{REQUEST_FILENAME} -f [OR]
   RewriteCond %{REQUEST_FILENAME} -d
   RewriteRule ^ - [L]
 
-  # SPA fallback — everything else to index.html (app uses hash routing).
+  # SPA fallback — existing path/hybrid routing. Product paths are unchanged.
   RewriteRule ^ index.html [L]
 </IfModule>
 
 <IfModule mod_headers.c>
-  # Never cache index.html so new deploys are picked up immediately.
-  <FilesMatch "index\.html$">
+  # Never cache the entry point or release marker so new deploys are identifiable.
+  <FilesMatch "(?:index\.html|version\.json)$">
     Header set Cache-Control "no-cache, no-store, must-revalidate"
   </FilesMatch>
 
