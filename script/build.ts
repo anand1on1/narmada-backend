@@ -1,6 +1,7 @@
 import { build as esbuild } from "esbuild";
 import { build as viteBuild } from "vite";
-import { rm, readFile, cp, access } from "node:fs/promises";
+import { rm, readFile, cp, access, writeFile } from "node:fs/promises";
+import { execFileSync } from "node:child_process";
 
 // server deps to bundle to reduce openat(2) syscalls
 // which helps cold start times
@@ -35,6 +36,10 @@ async function buildAll() {
 
   console.log("building client...");
   await viteBuild();
+  // Release identity, not credentials. Detect uploading an older GoDaddy ZIP.
+  const commit = execFileSync("git", ["rev-parse", "HEAD"], { encoding: "utf8" }).trim();
+  const dirty = !!execFileSync("git", ["status", "--porcelain"], { encoding: "utf8" }).trim();
+  await writeFile("dist/public/version.json", JSON.stringify({ release: "R28.18", commit, dirty, builtAt: new Date().toISOString() }, null, 2) + "\n");
 
   // Vite's publicDir copy skips dotfiles, so .htaccess (SPA rewrite + cache headers
   // for the GoDaddy frontend) is copied explicitly into dist/public.

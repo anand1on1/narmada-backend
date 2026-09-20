@@ -158,6 +158,7 @@ import AdminContacts from "@/pages/admin/AdminContacts";
 import AdminSettings from "@/pages/admin/AdminSettings";
 import AdminSitemap from "@/pages/admin/AdminSitemap";
 import AdminBlog from "@/pages/admin/AdminBlog";
+import AdminAutoBlogger from "@/pages/admin/AdminAutoBlogger";
 import AdminPriceList from "@/pages/admin/AdminPriceList";
 import AdminConsignments from "@/pages/admin/AdminConsignments";
 import AdminTeam from "@/pages/admin/AdminTeam";
@@ -396,6 +397,7 @@ function AppRouter() {
         <Route path="/admin/settings" component={AdminSettings} />
         <Route path="/admin/sitemap" component={AdminSitemap} />
         <Route path="/admin/blog" component={AdminBlog} />
+        <Route path="/admin/auto-blogger" component={AdminAutoBlogger} />
         <Route path="/admin/price-lists" component={AdminPriceList} />
         <Route path="/admin/consignments" component={AdminConsignments} />
         <Route path="/admin/team" component={AdminTeam} />

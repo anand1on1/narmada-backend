@@ -119,6 +119,7 @@ export default function AdminBlog() {
 
   return (
     <AdminLayout title="Content / Blog">
+      <div className="mb-5 p-4 border rounded-xl bg-card text-sm">Scheduled, evidence-led publishing now lives in <a href="/admin/auto-blogger" className="font-semibold text-indigo-600 underline">Auto Blogger</a>. Managed articles must be edited there to retain validation and revision history.</div>
       <div className="flex gap-2 mb-6 flex-wrap items-center">
         {(["all", "blog", "spotlight"] as const).map((f) => (
           <button

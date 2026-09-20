@@ -1,125 +1,51 @@
+import { useEffect } from "react";
 import { useParams, Link } from "wouter";
 import { useQuery } from "@tanstack/react-query";
 import { SeoHead } from "@/components/SeoHead";
-import { apiUrl } from "@/lib/queryClient";
-import { Calendar, User, ArrowLeft, Package } from "lucide-react";
-
-interface Post {
-  id: number; slug: string; title: string; excerpt: string | null; content: string;
-  coverImageUrl: string | null; type: "blog" | "spotlight"; productSlug: string | null;
-  authorName: string | null; metaTitle: string | null; metaDescription: string | null;
-  publishedAt: string | null; createdAt: string;
-}
+import { apiRequest } from "@/lib/queryClient";
+import { ArrowLeft } from "lucide-react";
 
 export default function BlogDetail() {
   const { slug } = useParams<{ slug: string }>();
-  const { data: post, isLoading, isError } = useQuery<Post>({
-    queryKey: ["/api/posts", slug],
-    queryFn: async () => {
-      const r = await fetch(apiUrl(`/api/posts/${slug}`));
-      if (!r.ok) throw new Error("Not found");
-      return r.json();
-    },
+  const { data: post, isLoading, isError } = useQuery<any>({
+    queryKey: ["/api/blog/posts", slug],
+    queryFn: async () => (await apiRequest("GET", `/api/blog/posts/${encodeURIComponent(slug || "")}`)).json(),
   });
-
-  if (isLoading) return <div className="container mx-auto px-4 py-20 text-center text-muted-foreground">Loading…</div>;
-  if (isError || !post) return (
-    <div className="container mx-auto px-4 py-20 text-center">
-      <h1 className="font-display text-3xl font-bold mb-3">Article not found</h1>
-      <Link href="/blog" className="text-accent font-semibold inline-flex items-center gap-1"><ArrowLeft className="w-4 h-4" /> Back to all articles</Link>
-    </div>
-  );
-
-  const jsonLd = {
-    "@context": "https://schema.org",
-    "@type": post.type === "spotlight" ? "Product" : "BlogPosting",
-    headline: post.title,
-    description: post.excerpt || post.metaDescription || "",
-    image: post.coverImageUrl ? [post.coverImageUrl] : undefined,
-    author: { "@type": "Organization", name: post.authorName || "Narmada Mobility" },
-    publisher: { "@type": "Organization", name: "Narmada Mobility" },
-    datePublished: post.publishedAt || post.createdAt,
-  };
-
-  return (
-    <>
-      <SeoHead
-        title={post.metaTitle || `${post.title} — Narmada Mobility`}
-        description={post.metaDescription || post.excerpt || post.title}
-        jsonLd={jsonLd}
-      />
-
-      <article className="bg-background">
-        {/* Hero */}
-        <section className="relative surface-obsidian text-foreground py-14 lg:py-20 overflow-hidden border-b border-border">
-          <div className="absolute inset-0 pattern-grid opacity-30" />
-          <div className="container mx-auto px-4 relative max-w-4xl">
-            <Link href="/blog" className="text-sm text-muted-foreground hover:text-foreground inline-flex items-center gap-1 mb-6">
-              <ArrowLeft className="w-4 h-4" /> All articles
-            </Link>
-            <span className={`eyebrow inline-flex items-center gap-2 mb-4`}>
-              <span className="signal-dot" /> {post.type === "spotlight" ? "Product Spotlight" : "Article"}
-            </span>
-            <h1 className="font-display text-3xl md:text-5xl font-semibold leading-[1.1] tracking-tight mb-6">{post.title}</h1>
-            <div className="flex items-center gap-5 text-sm text-muted-foreground">
-              <span className="inline-flex items-center gap-1.5"><User className="w-4 h-4" /> {post.authorName || "Narmada Mobility"}</span>
-              <span className="inline-flex items-center gap-1.5"><Calendar className="w-4 h-4" /> {new Date(post.publishedAt || post.createdAt).toLocaleDateString("en-IN", { year: "numeric", month: "long", day: "numeric" })}</span>
-            </div>
-          </div>
-        </section>
-
-        {/* Cover image */}
-        {post.coverImageUrl && (
-          <div className="container mx-auto px-4 max-w-4xl -mt-8 mb-8 relative">
-            <img src={post.coverImageUrl} alt={post.title} className="w-full aspect-[16/9] object-cover rounded-2xl shadow-2xl border" />
-          </div>
-        )}
-
-        {/* Content */}
-        <div className="container mx-auto px-4 max-w-3xl py-8 lg:py-12">
-          {post.excerpt && (
-            <p className="text-xl text-muted-foreground leading-relaxed mb-8 font-medium">{post.excerpt}</p>
-          )}
-          <div className="prose-narmada" dangerouslySetInnerHTML={{ __html: post.content }} />
-
-          {post.productSlug && (
-            <Link href={`/product/${post.productSlug}`}
-              className="mt-10 block bg-accent/10 border border-accent/30 rounded-2xl p-6 hover:bg-accent/15 transition"
-              data-testid="link-related-product">
-              <div className="flex items-center gap-4">
-                <Package className="w-8 h-8 text-accent flex-shrink-0" />
-                <div>
-                  <div className="text-xs uppercase tracking-wider text-accent font-bold mb-1">View Featured Product</div>
-                  <div className="font-display text-lg font-semibold">/{post.productSlug}</div>
-                </div>
-              </div>
-            </Link>
-          )}
-
-          <div className="mt-12 pt-8 border-t flex items-center justify-between">
-            <Link href="/blog" className="text-sm font-semibold inline-flex items-center gap-1 text-muted-foreground hover:text-foreground">
-              <ArrowLeft className="w-4 h-4" /> More articles
-            </Link>
-            <Link href="/contact" className="px-5 py-2.5 bg-accent text-accent-foreground rounded-lg font-semibold text-sm">
-              Get a Quote
-            </Link>
-          </div>
-        </div>
-      </article>
-
-      <style>{`
-        .prose-narmada { font-size: 1.05rem; line-height: 1.75; color: hsl(var(--foreground)); }
-        .prose-narmada h2 { font-family: var(--font-display); font-size: 1.875rem; font-weight: 700; margin: 2rem 0 1rem; line-height: 1.2; }
-        .prose-narmada h3 { font-family: var(--font-display); font-size: 1.375rem; font-weight: 600; margin: 1.5rem 0 0.75rem; }
-        .prose-narmada p { margin: 1rem 0; }
-        .prose-narmada ul, .prose-narmada ol { margin: 1rem 0; padding-left: 1.5rem; }
-        .prose-narmada li { margin: 0.4rem 0; }
-        .prose-narmada a { color: hsl(var(--accent)); font-weight: 600; text-decoration: underline; text-underline-offset: 3px; }
-        .prose-narmada strong { color: hsl(var(--foreground)); font-weight: 700; }
-        .prose-narmada blockquote { border-left: 3px solid hsl(var(--accent)); padding-left: 1rem; margin: 1.25rem 0; color: hsl(var(--muted-foreground)); font-style: italic; }
-        .prose-narmada img { max-width: 100%; border-radius: 0.75rem; margin: 1.5rem 0; }
-        .prose-narmada code { background: hsl(var(--muted)); padding: 0.15rem 0.4rem; border-radius: 0.3rem; font-size: 0.9em; }
-      `}</style>
-    </>
-  );
+  useEffect(() => {
+    let el = document.querySelector('link[rel="canonical"]') as HTMLLinkElement | null;
+    const prior = el?.href;
+    if (!el) { el = document.createElement("link"); el.rel = "canonical"; document.head.appendChild(el); }
+    el.href = `https://narmadamobility.com/blog/${encodeURIComponent(slug || "")}`;
+    return () => { if (prior) el!.href = prior; else el?.remove(); };
+  }, [slug]);
+  if (isLoading) return <p className="p-16 text-center" role="status">Loading article…</p>;
+  if (isError || !post) return <section className="container mx-auto px-5 py-20"><h1 className="text-3xl font-semibold mb-4">Article not found</h1><p className="text-muted-foreground mb-4">It may be unpublished or temporarily unavailable.</p><Link href="/blog" className="underline">Browse insights</Link></section>;
+  const date = (n: number) => new Date(n).toLocaleDateString("en-IN", { dateStyle: "long", timeZone: "Asia/Kolkata" });
+  const canonical = `https://narmadamobility.com/blog/${encodeURIComponent(post.slug)}`;
+  return <>
+    <SeoHead title={`${post.metaTitle || post.title} — Narmada Mobility`} description={post.metaDescription || post.excerpt} jsonLd={[
+      { "@context": "https://schema.org", "@type": "Article", headline: post.title, mainEntityOfPage: canonical,
+        datePublished: new Date(post.publishedAt).toISOString(), dateModified: new Date(post.updatedAt).toISOString(),
+        author: { "@type": "Organization", name: post.authorName }, publisher: { "@type": "Organization", name: "Narmada Mobility" } },
+      { "@context": "https://schema.org", "@type": "BreadcrumbList", itemListElement: [
+        { "@type": "ListItem", position: 1, name: "Home", item: "https://narmadamobility.com" },
+        { "@type": "ListItem", position: 2, name: "Insights", item: "https://narmadamobility.com/blog" },
+        { "@type": "ListItem", position: 3, name: post.title, item: canonical },
+      ] },
+    ]} />
+    <article className="container mx-auto max-w-4xl px-5 py-10 md:py-16">
+      <Link href="/blog" className="text-sm text-muted-foreground inline-flex items-center gap-2"><ArrowLeft className="w-4 h-4" />All insights</Link>
+      <p className="text-xs uppercase tracking-widest font-bold text-indigo-600 dark:text-indigo-300 mt-8">{post.category}</p>
+      <h1 className="font-display text-3xl md:text-5xl font-semibold tracking-tight leading-tight my-5">{post.title}</h1>
+      <p className="text-xl text-muted-foreground leading-relaxed">{post.excerpt}</p>
+      <p className="text-sm text-muted-foreground my-6">{post.authorName}<br />Published <time dateTime={new Date(post.publishedAt).toISOString()}>{date(post.publishedAt)}</time> · Updated <time dateTime={new Date(post.updatedAt).toISOString()}>{date(post.updatedAt)}</time></p>
+      {post.aiAssisted && <p className="text-sm text-muted-foreground border-l-2 pl-4 mb-8">AI-assisted editorial content, checked automatically against cited references. This is not a claim of human technical review. Confirm vehicle-specific requirements with the manufacturer and our team.</p>}
+      {/* API output is allowlist-sanitized server-side, including legacy articles. */}
+      <div className="prose prose-slate dark:prose-invert max-w-none prose-a:text-indigo-600 prose-headings:font-display break-words" dangerouslySetInnerHTML={{ __html: post.content }} />
+      {!!post.sources.length && <section className="mt-10 border-t pt-8"><h2 className="text-2xl font-semibold mb-4">Sources & further reading</h2><ul className="space-y-3">{post.sources.map((s: any) => <li key={s.url} className="text-sm break-words"><a href={s.url} rel="noopener noreferrer" className="underline text-indigo-600 dark:text-indigo-300">{s.title}</a> · Accessed {date(s.accessedAt)}</li>)}</ul></section>}
+      {!!post.products.length && <section className="mt-10"><h2 className="text-2xl font-semibold mb-4">Explore the catalog</h2><ul className="space-y-3">{post.products.map((p: any) => <li key={p.slug}><Link href={`/product/${p.slug}`} className="underline text-indigo-600 dark:text-indigo-300">{p.name}</Link></li>)}</ul><p className="text-sm text-muted-foreground mt-3">Catalog references do not confirm fitment or current availability.</p></section>}
+      <section className="mt-10 bg-slate-50 dark:bg-slate-900 border rounded-2xl p-6 md:p-8"><h2 className="text-2xl font-semibold">Make your next enquiry more useful.</h2><p className="mt-3 text-muted-foreground">Share your vehicle details, part number and requirements. Our team can help confirm fitment and availability before quoting.</p><div className="flex flex-wrap gap-4 mt-5"><Link href="/contact" className="bg-indigo-600 text-white rounded-lg px-5 py-3 font-semibold">Request a quote</Link><a href="https://wa.me/917909083806?text=Hello%20Narmada%20Mobility%2C%20I%20have%20a%20parts%20enquiry." className="border rounded-lg px-5 py-3 font-semibold">WhatsApp the team</a></div></section>
+      {!!post.related.length && <section className="mt-10"><h2 className="text-2xl font-semibold mb-4">Continue reading</h2><ul className="space-y-3">{post.related.map((p: any) => <li key={p.slug}><Link href={`/blog/${p.slug}`} className="underline">{p.title}</Link></li>)}</ul></section>}
+    </article>
+  </>;
 }

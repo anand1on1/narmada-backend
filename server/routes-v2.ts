@@ -26,6 +26,8 @@ import { lookupRegistration as surepassLookupRegistration, normalizeRegNumber } 
 // unchanged until the user opts in.
 import { autoPublishFromPO, listAutoPublishLog } from "./auto-publish";
 import { registerOrderSlipRoutes } from "./order-slips";
+import { registerAutoBloggerRoutes } from "./auto-blogger-routes";
+import { cleanHtml } from "./auto-blogger-safety";
 // R28.1 — Team Upload feature (passcode-gated public chassis upload).
 // Additive; parallel path to the admin-only /api/admin/chassis endpoints.
 import { registerTeamUploadRoutes } from "./team-upload";
@@ -582,17 +584,20 @@ export function registerV2Routes(app: Express, ctx: V2Context) {
   });
 
   // ============== BLOG / POSTS ==============
+  registerAutoBloggerRoutes(app, rawSqlite, requireAdminRole);
+  // Managed posts use the versioned, validated editor, not the legacy bypass.
+  const managedPost = (id: number) => !!rawSqlite.prepare("SELECT post_id FROM blog_articles WHERE post_id=?").get(id);
   // Public — only published posts
   app.get("/api/posts", async (req, res) => {
     const type = (req.query.type as string) || undefined;
     const limit = req.query.limit ? parseInt(req.query.limit as string, 10) : undefined;
     const list = await v2.listPosts({ publishedOnly: true, type, limit });
-    res.json(list);
+    res.json(list.map(p => ({ ...p, content: cleanHtml(p.content) })));
   });
   app.get("/api/posts/:slug", async (req, res) => {
     const post = await v2.getPostBySlug(req.params.slug);
     if (!post || !post.published) return res.status(404).json({ error: "Post not found" });
-    res.json(post);
+    res.json({ ...post, content: cleanHtml(post.content) });
   });
 
   // Admin
@@ -609,6 +614,7 @@ export function registerV2Routes(app: Express, ctx: V2Context) {
   app.post("/api/admin/posts", requireAdminRole, async (req, res) => {
     try {
       const body = normalizeDateFields(req.body || {});
+      if (typeof body.content === "string") body.content = cleanHtml(body.content);
       if (!body.slug && body.title) body.slug = toSlug(body.title);
       const parsed = insertPostSchema.parse(body);
       const post = await v2.createPost(parsed);
@@ -623,7 +629,10 @@ export function registerV2Routes(app: Express, ctx: V2Context) {
   app.patch("/api/admin/posts/:id", requireAdminRole, async (req, res) => {
     try {
       const id = parseInt(req.params.id as string, 10);
-      const post = await v2.updatePost(id, normalizeDateFields(req.body || {}));
+      if (managedPost(id)) return res.status(409).json({ error: "Use Auto Blogger to edit versioned articles" });
+      const body = normalizeDateFields(req.body || {});
+      if (typeof body.content === "string") body.content = cleanHtml(body.content);
+      const post = await v2.updatePost(id, body);
       triggerSitemapRegen(regenSitemap);
       Promise.resolve(v2.writeAuditLog({
         actorType: "admin", actorId: (req as any).user?.username, action: "update_post",
@@ -634,6 +643,7 @@ export function registerV2Routes(app: Express, ctx: V2Context) {
   });
   app.delete("/api/admin/posts/:id", requireAdminRole, async (req, res) => {
     const id = parseInt(req.params.id as string, 10);
+    if (managedPost(id)) return res.status(409).json({ error: "Use Auto Blogger to unpublish versioned articles" });
     await v2.deletePost(id);
     triggerSitemapRegen(regenSitemap);
     Promise.resolve(v2.writeAuditLog({
