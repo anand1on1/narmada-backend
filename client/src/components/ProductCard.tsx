@@ -1,4 +1,5 @@
 import { Link } from "wouter";
+import { publicMedia } from "@shared/public-urls";
 import type { Product } from "@shared/schema";
 import { Button } from "@/components/ui/button";
 import { MessageCircle, Package, ArrowUpRight, Share2 } from "lucide-react";
@@ -16,7 +17,7 @@ const STOCK_IMAGES = [stockTurbo, stockBrake, stockInjector, stockFlatlay];
 
 export function ProductCard({ product, usdInr }: { product: Product; usdInr: number }) {
   const brandInfo = BRANDS[product.brand as keyof typeof BRANDS];
-  const images = parseJsonArray(product.imageUrls);
+  const images = parseJsonArray(product.imageUrls).map(publicMedia).filter(Boolean);
   const cover = images[0] || STOCK_IMAGES[product.id % STOCK_IMAGES.length];
   // R28: products created by auto-publish may have imageSource='generated'|'placeholder'|'reused'.
   const imageSource = (product as any).imageSource ?? (product as any).image_source ?? null;
@@ -91,7 +92,7 @@ export function ProductCard({ product, usdInr }: { product: Product; usdInr: num
             {product.slug && (
               <button
                 type="button"
-                onClick={(e) => { e.preventDefault(); copyToClipboardWithToast(productSeoUrl(product.slug!), "Share this page (SEO-friendly link)"); }}
+                onClick={(e) => { e.preventDefault(); copyToClipboardWithToast(productSeoUrl(product.slug!, product.partNumber), "Share this page (SEO-friendly link)"); }}
                 className="inline-flex h-8 w-8 items-center justify-center rounded-md border border-[hsl(220_45%_20%)]/15 text-[hsl(220_60%_12%)]/82 hover:text-[hsl(220_60%_12%)] hover:border-[hsl(220_45%_20%)]/30 transition-colors"
                 aria-label="Copy SEO share link"
                 title="Copy SEO share link"

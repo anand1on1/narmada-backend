@@ -4,6 +4,7 @@ import { AdminLayout } from "./AdminLayout";
 import { adminFetch, useAdminAuth } from "@/lib/admin-auth";
 import { CalendarClock, BookOpen, ArrowUpRight, RefreshCw, ShieldCheck, X } from "lucide-react";
 import type { BloggerSettings } from "@shared/auto-blogger";
+import { blogAction } from "@shared/blog-diagnostics";
 
 type Status = {
   settings: BloggerSettings; providers: { ready: boolean; generation: boolean; research: boolean };
@@ -11,6 +12,7 @@ type Status = {
   nextSchedule?: { slot: string; at: number }; today: { published: number; usage: { calls: number; tokens: number } };
   jobs: any[]; topics: any[]; clusters: any[]; articles: any[];
   articlePage: number; articlePages: number; articleTotal: number;
+  diagnostics?: { nextAction: string; providerNotice: string; connectivity: string; lastSuccessfulJobAt: number | null; budgetWarning: string | null };
 };
 const base = "/api/admin/auto-blogger";
 const when = (n?: number) => n ? new Date(n).toLocaleString("en-IN", { timeZone: "Asia/Kolkata", dateStyle: "medium", timeStyle: "short" }) : "—";
@@ -60,7 +62,7 @@ export default function AdminAutoBlogger() {
       <header className="flex flex-wrap items-start justify-between gap-4">
         <div><p className="text-xs font-bold uppercase tracking-widest text-indigo-600 mb-2">Narmada Mobility / Editorial operations</p>
           <h1 className="text-3xl font-semibold tracking-tight">Useful insights. On a schedule.</h1>
-          <p className="text-muted-foreground mt-2 max-w-2xl">Two new posts each day, plus one evidence-led improvement. Failed checks never go live.</p></div>
+          <p className="text-muted-foreground mt-2 max-w-2xl">Targets two new posts each day, plus one evidence-led improvement when supported. Failed checks never go live.</p></div>
         <a href="/blog" target="_blank" rel="noreferrer" className={button}>View insights <ArrowUpRight className="w-4 h-4" /></a>
       </header>
       {status.isLoading && <p role="status" className="p-8 border rounded-xl">Loading editorial controls…</p>}
@@ -71,7 +73,11 @@ export default function AdminAutoBlogger() {
           <div className="flex gap-3"><ShieldCheck className="w-5 h-5 shrink-0 mt-1" /><div>
             <h2 className="font-semibold">{data.available ? (data.settings.mode === "pause" ? "Automation paused" : data.settings.mode === "draft" ? "Draft mode — nothing auto-publishes" : "Auto mode — validated articles publish automatically") : "Automation unavailable — no articles will be generated"}</h2>
             <p className="text-sm mt-1">Generation: {data.providers.generation ? "configured" : "not configured"} · Research: {data.providers.research ? "configured" : "not configured"} · Deployment gate: {data.deploymentEnabled ? "enabled" : "off"}</p>
-            {!data.available && <p className="text-sm mt-2">Server setup required. Use an existing Claude key and either Perplexity or Tavily research. Enable the deployment gate only after approval; no secret values are shown here.</p>}
+            {data.reason && <p className="text-sm font-semibold mt-2">{data.reason.replace(/_/g, " ")}: {data.diagnostics?.nextAction || blogAction(data.reason)}</p>}
+            <p className="text-sm mt-2">{data.diagnostics?.providerNotice || "Configured means key presence, not verified connectivity or available credits."}</p>
+            <p className="text-sm mt-1">Last successful engine job: {when(data.diagnostics?.lastSuccessfulJobAt || undefined)}. A manually written legacy post is not evidence that automation is running.</p>
+            <p className="text-sm mt-1">One-time deployment check: <a href="https://narmadamobility.com/version.json" target="_blank" rel="noreferrer" className="underline">Public release marker</a> must show R28.19; verify <a href="https://narmadamobility.com/blog" target="_blank" rel="noreferrer" className="underline">public Insights</a> and <a href="https://narmadamobility.com/sitemap-blog.xml" target="_blank" rel="noreferrer" className="underline">blog XML</a> before enabling Render.</p>
+            {data.diagnostics?.budgetWarning && <p role="alert" className="text-sm font-semibold mt-2">{data.diagnostics.budgetWarning}</p>}
           </div></div>
         </section>
         <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
@@ -99,7 +105,7 @@ export default function AdminAutoBlogger() {
                 ["dailyDraftCap", "Manual draft jobs / day", 0, 3], ["maxAttempts", "Attempts per slot", 1, 3]] as const).map(([key, title, min, max]) =>
                 <label key={key} className="text-sm font-medium">{title}<input required type="number" min={min} max={max} className={`${field} mt-2`} value={settings[key]} onChange={e => setSettings({ ...settings, [key]: Number(e.target.value) })} /></label>)}
             </div>
-            <p className="text-xs text-muted-foreground">Fixed caps: 2 new publications + 1 improvement slot per IST day. Each attempt reserves 3 API calls and 60,000 tokens. Older articles must be at least 7 days unchanged; unsupported updates are skipped. Provider outages may leave slots unfilled, never replaced by filler.</p>
+            <p className="text-xs text-muted-foreground">Fixed caps: 2 new publications + 1 improvement slot per IST day. Each provider attempt reserves 3 API calls and 60,000 tokens; skips before research spend nothing. First attempts for new posts are protected from optional work and retries. Older articles must be more than 7 days unchanged; unsupported updates are skipped. Provider outages may leave slots unfilled, never replaced by filler.</p>
             <button disabled={busy} className={`${button} bg-indigo-600 text-white hover:bg-indigo-700`} data-testid="blogger-save-settings">Save controls</button>
           </form>
         </details>
@@ -133,7 +139,7 @@ export default function AdminAutoBlogger() {
         </section>}
         {tab === "jobs" && <section className="overflow-x-auto border rounded-xl bg-card"><p className="p-4 text-xs text-muted-foreground">Latest 80 jobs. Full durable history remains in the backend database.</p><table className="w-full text-sm text-left min-w-[680px]">
           <thead className="bg-muted"><tr>{["IST day / slot", "Job type", "Status", "Attempts", "Sanitized diagnostic"].map(h => <th className="p-4" key={h}>{h}</th>)}</tr></thead>
-          <tbody>{data.jobs.map(j => <tr key={j.id} className="border-t"><td className="p-4">{j.day}<br /><span className="text-xs text-muted-foreground">{j.slot}</span></td><td className="p-4">{j.kind}</td><td className="p-4">{j.status}{j.status === "retry" && <p className="text-xs">{when(j.retry_at)}</p>}</td><td className="p-4">{j.attempts}</td><td className="p-4">{j.error_code ? label(j.error_code) : "—"}</td></tr>)}</tbody>
+          <tbody>{data.jobs.map(j => <tr key={j.id} className="border-t"><td className="p-4">{j.day}<br /><span className="text-xs text-muted-foreground">{j.slot}</span></td><td className="p-4">{j.kind}</td><td className="p-4">{j.status}{j.status === "retry" && <p className="text-xs">{when(j.retry_at)}</p>}</td><td className="p-4">{j.attempts}</td><td className="p-4">{j.error_code ? label(j.error_code) : "—"}{j.error_code && <p className="text-xs text-muted-foreground mt-1 max-w-sm">{j.nextAction || blogAction(j.error_code)}</p>}</td></tr>)}</tbody>
         </table>{!data.jobs.length && <p className="p-8 text-muted-foreground">No jobs yet. Scheduled work starts only when deployment and providers are enabled.</p>}</section>}
       </>}
     </div>

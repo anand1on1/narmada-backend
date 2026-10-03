@@ -4,6 +4,7 @@ import { request } from "node:https";
 import { isIP } from "node:net";
 import type { Database } from "better-sqlite3";
 import { articleDraftSchema, type ArticleDraft, type BlogSource } from "../shared/auto-blogger";
+import { productPath } from "../shared/public-urls";
 
 export const authoritativeDomains = [
   "tatamotors.com", "tatacommercialvehicles.com", "ashokleyland.com", "eichertrucksandbuses.com",
@@ -46,34 +47,53 @@ export function publicAddress(ip: string): boolean {
     (a === 100 && b >= 64 && b <= 127) || a === 198);
 }
 // Fixed hostname allowlist + public DNS + pinned lookup prevents redirect/rebinding SSRF.
-// No cookies/authorization; no redirects; finite bytes/time; HTML/text only.
+// No cookies/authorization; every redirect revalidates host/DNS and pins a public
+// address. A whole source (including DNS/redirects) gets 12 seconds and <=3 hops.
 export async function readEvidence(input: string): Promise<BlogSource> {
-  const url = assertPublicSource(input);
+  let url = assertPublicSource(input);
+  const deadline = Date.now() + 12000, seen = new Set<string>();
+  let html = "";
+  for (let hop = 0; hop <= 3; hop++) {
+  if (seen.has(url.href)) throw new Error("SOURCE_REDIRECT_REJECTED");
+  seen.add(url.href);
+  const remaining = deadline - Date.now();
+  if (remaining <= 0) throw new Error("SOURCE_TIMEOUT");
   const addresses = await Promise.race([
     lookup(url.hostname, { all: true, family: 4 }),
-    new Promise<never>((_, reject) => { const t = setTimeout(() => reject(new Error("SOURCE_DNS_TIMEOUT")), 5000); t.unref(); }),
+    new Promise<never>((_, reject) => { const t = setTimeout(() => reject(new Error("SOURCE_DNS_TIMEOUT")), Math.min(5000, remaining)); t.unref(); }),
   ]);
   if (!addresses.length || addresses.some(a => !publicAddress(a.address))) throw new Error("SOURCE_ADDRESS_REJECTED");
-  const html = await new Promise<string>((resolve, reject) => {
+  const result = await new Promise<{ html?: string; redirect?: string }>((resolve, reject) => {
     const req = request(url, {
       method: "GET", headers: { "User-Agent": "NarmadaMobilityEditorial/1.0", Accept: "text/html,text/plain" },
       lookup: ((_host: any, opts: any, cb: any) => opts?.all
         ? cb(null, [{ address: addresses[0].address, family: 4 }])
         : cb(null, addresses[0].address, 4)) as any,
     }, res => {
+      if ([301, 302, 303, 307, 308].includes(res.statusCode || 0) && res.headers.location) {
+        res.resume(); resolve({ redirect: res.headers.location }); return;
+      }
       if (res.statusCode !== 200 || !/text\/(html|plain)/i.test(String(res.headers["content-type"]))) {
         res.resume(); reject(new Error("SOURCE_UNREACHABLE")); return;
       }
       const chunks: Buffer[] = []; let size = 0;
       res.on("data", c => { size += c.length; if (size > 750000) req.destroy(new Error("SOURCE_TOO_LARGE")); else chunks.push(c); });
-      res.on("end", () => resolve(Buffer.concat(chunks).toString("utf8")));
+      res.on("end", () => resolve({ html: Buffer.concat(chunks).toString("utf8") }));
       res.on("error", () => reject(new Error("SOURCE_UNREACHABLE")));
     });
-    const timer = setTimeout(() => req.destroy(new Error("SOURCE_TIMEOUT")), 12000);
+    const timer = setTimeout(() => req.destroy(new Error("SOURCE_TIMEOUT")), Math.max(1, deadline - Date.now()));
     req.on("close", () => clearTimeout(timer));
     req.on("error", () => reject(new Error("SOURCE_UNREACHABLE")));
     req.end();
   });
+  if (result.redirect) {
+    if (hop === 3) throw new Error("SOURCE_REDIRECT_REJECTED");
+    url = assertPublicSource(new URL(result.redirect, url).href);
+    continue;
+  }
+  html = result.html || "";
+  break;
+  }
   const text = textOnly(html).slice(0, 14000);
   if (text.length < 250) throw new Error("EVIDENCE_INSUFFICIENT");
   // Redact phone/email text from public research pages before generation.
@@ -98,8 +118,8 @@ export function overlap(a: string, b: string): number {
 }
 export function internalLinks(db: Database): string[] {
   return ["/products", "/contact", "/blog",
-    ...(db.prepare("SELECT slug FROM products WHERE active=1 AND slug GLOB '[a-zA-Z0-9]*' LIMIT 10000").all() as any[])
-      .filter(r => /^[a-zA-Z0-9_-]+$/.test(r.slug)).map(r => `/product/${r.slug}`),
+    ...(db.prepare("SELECT slug,part_number FROM products WHERE active=1 AND slug GLOB '[a-zA-Z0-9]*' LIMIT 10000").all() as any[])
+      .filter(r => /^[a-zA-Z0-9_-]+$/.test(r.slug)).flatMap(r => [productPath(r), `/product/${r.slug}`]),
     ...(db.prepare("SELECT slug FROM posts WHERE published=1 LIMIT 10000").all() as any[])
       .filter(r => /^[a-zA-Z0-9_-]+$/.test(r.slug)).map(r => `/blog/${r.slug}`)];
 }

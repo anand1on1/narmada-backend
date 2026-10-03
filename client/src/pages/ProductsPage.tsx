@@ -42,12 +42,19 @@ export default function ProductsPage() {
   }, [data, page]);
   const { data: fx } = useQuery<{ usdInr: number }>({ queryKey: ["/api/settings/fx"] });
   const usdInr = fx?.usdInr || 83.5;
+  const pageHref = (n: number) => {
+    const next = new URLSearchParams(params);
+    n > 1 ? next.set("page", String(n)) : next.delete("page");
+    return `/products${next.size ? `?${next}` : ""}`;
+  };
 
   return (
     <>
       <SeoHead
-        title="All Spare Parts — Tata, BharatBenz, Ashok Leyland, Eicher, Volvo | Narmada Mobility"
-        description="Search 50,000+ commercial vehicle and construction equipment spare parts across five flagship brands. Genuine OEM and matched-quality grades."
+        title={`Commercial vehicle parts${page > 1 ? ` — Page ${page}` : ""} | Narmada Mobility`}
+        description="Browse the Narmada Mobility parts catalog. Confirm fitment, price and availability before ordering."
+        noindex={!!q || brand !== "all" || category !== "all"}
+        canonicalPath={`/products${page > 1 ? `?page=${page}` : ""}`}
         keywords="truck spare parts catalog, commercial vehicle parts india, heavy duty spare parts exporter"
       />
       <section className="surface-obsidian relative overflow-hidden border-b border-[hsl(220_45%_20%)]/8">
@@ -59,7 +66,7 @@ export default function ProductsPage() {
         <div className="relative max-w-7xl mx-auto px-4 sm:px-6 py-20">
           <div className="eyebrow text-[hsl(212_95%_55%)] mb-3">Catalog</div>
           <h1 className="font-display font-black text-[hsl(220_60%_12%)] text-4xl md:text-5xl lg:text-6xl tracking-tight leading-[1.05] max-w-3xl">Spare parts for every commercial vehicle in your fleet.</h1>
-          <p className="text-[hsl(220_60%_12%)]/75 mt-5 max-w-2xl text-[15px] leading-relaxed">50,000+ active SKUs · Genuine OEM and matched-quality grades · Cross-referenced part numbers. Use the filters below to narrow by brand, category or keyword.</p>
+          <p className="text-[hsl(220_60%_12%)]/75 mt-5 max-w-2xl text-[15px] leading-relaxed">Explore catalog parts by brand, category or keyword. Confirm the part reference, fitment, price and availability with our team before ordering.</p>
         </div>
       </section>
 
@@ -111,9 +118,11 @@ export default function ProductsPage() {
               {products.map((p) => <ProductCard key={p.id} product={p} usdInr={usdInr} />)}
             </div>
             <nav className="flex justify-between items-center gap-3 mt-8" aria-label="Products pagination">
-              <Button variant="outline" disabled={page <= 1} onClick={() => { setPage(page - 1); window.scrollTo(0, 400); }}>Previous</Button>
+              {page <= 1 ? <Button variant="outline" disabled>Previous</Button> :
+                <Button variant="outline" asChild><a href={pageHref(page - 1)} onClick={e => { e.preventDefault(); setPage(page - 1); window.scrollTo(0, 400); }}>Previous</a></Button>}
               <span className="text-sm">Page {page} of {pages}</span>
-              <Button variant="outline" disabled={page >= pages} onClick={() => { setPage(page + 1); window.scrollTo(0, 400); }}>Next</Button>
+              {page >= pages ? <Button variant="outline" disabled>Next</Button> :
+                <Button variant="outline" asChild><a href={pageHref(page + 1)} onClick={e => { e.preventDefault(); setPage(page + 1); window.scrollTo(0, 400); }}>Next</a></Button>}
             </nav>
           </>
         )}

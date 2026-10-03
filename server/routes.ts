@@ -14,6 +14,8 @@ import { registerBulkRoutes } from "./bulk";
 import { registerV2Routes, TokenMap, TokenInfo, persistAdminSession, rehydrateSession, deleteAdminSession } from "./routes-v2";
 import { productsListHandler } from "./product-pagination";
 import type { AdminRole } from "@shared/schema";
+import { PUBLIC_ORIGIN } from "../shared/public-urls";
+import { canonicalSitemapEntries, checkPublicSitemap, registerPublicCatalog, publicRobots } from "./public-catalog";
 
 const ADMIN_USERNAME = "narmadamobility123";
 const ADMIN_PASSWORD = "Piyush@1969";
@@ -72,9 +74,7 @@ export function sitemapCanonicalBase(): string {
   // R27.31a — never derive from req.protocol/host or APP_URL: hit directly, Render
   // reports narmada-backend.onrender.com and Google rejects the sitemap. Always the
   // canonical live domain, with an explicit override kept only for future migrations.
-  const override = process.env.SITEMAP_CANONICAL_BASE;
-  if (override && override.startsWith("http")) return override.replace(/\/$/, "");
-  return "https://narmadamobility.com";
+  return PUBLIC_ORIGIN;
 }
 export function renderSitemapXml(urls: string[]): string {
   return `<?xml version="1.0" encoding="UTF-8"?>\n<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n${urls.join("\n")}\n</urlset>`;
@@ -84,71 +84,13 @@ export function renderSitemapXml(urls: string[]): string {
 export function buildRobotsTxt(): string {
   // R28 Session 4 — add `Disallow: /team/` per spec so bots stay out of the
   // team console. Existing /admin + /api/ disallows preserved verbatim.
-  return `User-agent: *\nAllow: /\nDisallow: /api/\nDisallow: /admin/\nDisallow: /admin\nDisallow: /team/\nSitemap: ${sitemapCanonicalBase()}/sitemap.xml\n`;
+  return publicRobots();
 }
 export const ROBOTS_TXT = buildRobotsTxt();
 
 // Module-scope so routes-v2.ts can also call this via the regenSitemap callback
 export function buildSitemapUrls(allProducts: Awaited<ReturnType<typeof storage.listProducts>>, baseUrl: string): string[] {
-  const urls: string[] = [];
-  const add = (loc: string, priority = "0.6", changefreq = "weekly") => {
-    urls.push(`  <url><loc>${baseUrl}${loc}</loc><changefreq>${changefreq}</changefreq><priority>${priority}</priority></url>`);
-  };
-  add("/", "1.0", "daily");
-  add("/products", "0.9", "daily");
-  add("/about", "0.7");
-  add("/contact", "0.7");
-  add("/work-with-us", "0.6");
-  add("/privacy", "0.4", "yearly");
-  add("/disclaimer", "0.4", "yearly");
-  add("/blog", "0.8", "daily");
-  add("/price-checker", "0.8", "weekly");
-  add("/track-consignment", "0.6", "monthly");
-  for (const b of BRAND_SLUGS) add(`/brand/${b}`, "0.9", "weekly");
-  for (const c of CATEGORY_SLUGS) add(`/category/${c}`, "0.8", "weekly");
-  for (const b of BRAND_SLUGS) {
-    for (const s of INDIAN_STATES) add(`/${b}-spare-parts-${toSlug(s)}`, "0.7");
-  }
-  for (const b of BRAND_SLUGS) {
-    for (const c of COUNTRIES) add(`/${b}-spare-parts-${toSlug(c)}`, "0.7");
-  }
-  // R28.12 — SPA URLs are now path-routed (Router hook switched from
-  // useHashLocation to a path/history hook). Sitemap emits clean /product/...
-  // URLs so Google indexes them and shared links resolve correctly. Was
-  // /#/product/... which always fell back to the homepage when Google or a
-  // WhatsApp preview crawler followed the link.
-  for (const p of allProducts) {
-    if (!p.active) continue;
-    const pn = (p as any).partNumber || (p as any).part_number;
-    if (pn) add(`/product/${encodeURIComponent(String(pn))}/${p.slug}`, "0.7", "weekly");
-    else add(`/product/${p.slug}`, "0.7", "weekly");
-  }
-  // R28 Session 4 — also emit the SSR /p/{slug} URLs so Google can crawl the
-  // full-HTML product pages (the hash routes above are for the SPA experience).
-  // These are the URLs the Session 4 SSR routes at /p/:slug serve.
-  for (const p of allProducts) {
-    if (!p.active) continue;
-    if (p.slug) add(`/p/${encodeURIComponent(String(p.slug))}`, "0.7", "weekly");
-  }
-  // R28.11 — chassis catalogue SPA pages (/chassis/{slug}). Was /c/{slug} which
-  // is an SSR route only reachable on the backend host; changed to /chassis/{slug}
-  // which is the SPA route registered in client/src/App.tsx and reachable via
-  // the GoDaddy .htaccess SPA fallback. Best-effort read; if the chassis_catalog
-  // table isn't populated the loop is a no-op.
-  try {
-    const rows = rawSqlite
-      .prepare(`SELECT slug FROM chassis_catalog WHERE is_active = 1 AND slug IS NOT NULL AND slug != ''`).all() as any[];
-    for (const r of rows) add(`/chassis/${encodeURIComponent(String(r.slug))}`, "0.7", "weekly");
-  } catch { /* chassis_catalog table may not exist in older DBs */ }
-  // R28 Session 4 — SSR category pages (/cat/{slug}) derived from distinct
-  // product categories. Complements the SPA /category/{slug} entries above.
-  const seenCats = new Set<string>();
-  for (const p of allProducts) {
-    if (!p.active) continue;
-    const c = (p as any).category;
-    if (c && !seenCats.has(c)) { seenCats.add(c); add(`/cat/${encodeURIComponent(String(c))}`, "0.6", "weekly"); }
-  }
-  return urls;
+  return canonicalSitemapEntries(allProducts, baseUrl);
 }
 
 // --- Session token map shared across routes.ts + routes-v2.ts ---
@@ -589,6 +531,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
   // (whose /sitemap.xml + /robots.txt never bind) and before the vite/static catch-all,
   // with no auth, so crawlers hitting narmadamobility.com/sitemap.xml (proxied to
   // Render) get fresh data. Same URL set the /admin "Sitemap & SEO" dashboard shows.
+  registerPublicCatalog(app, rawSqlite);
   app.get("/sitemap.xml", async (_req, res) => {
     try {
       const baseUrl = sitemapCanonicalBase();
@@ -597,7 +540,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
       const xml = renderSitemapXml(urls);
       console.log("[R27.31 sitemap] generated", urls.length, "URLs");
       res.set("Content-Type", "application/xml; charset=utf-8");
-      res.set("Cache-Control", "public, max-age=3600");
+      res.set("Cache-Control", "no-store");
       res.send(xml);
     } catch (err) {
       console.error("[R27.31 sitemap]", err);
@@ -611,25 +554,26 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
   });
 
   app.post("/api/admin/sitemap/regenerate", requireAdmin, async (req, res) => {
-    const baseUrl = req.body.baseUrl || "https://narmadamobility.com";
+    const baseUrl = sitemapCanonicalBase();
     const allProducts = await storage.listProducts({ activeOnly: true });
     const urls = buildSitemapUrls(allProducts, baseUrl);
     const xml = `<?xml version="1.0" encoding="UTF-8"?>\n<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n${urls.join("\n")}\n</urlset>`;
     fs.writeFileSync(path.join(PUBLIC_DIR, "sitemap.xml"), xml);
     await storage.logSitemapRun(urls.length);
-    res.json({ ok: true, urlCount: urls.length, sample: urls.slice(0, 6), xmlSize: xml.length });
+    res.json({ ok: true, urlCount: urls.length, generatedAt: Date.now(), public: await checkPublicSitemap(xml) });
   });
 
   app.get("/api/admin/sitemap/status", requireAdmin, async (_req, res) => {
     const last = await storage.getLatestSitemapRun();
-    res.json({ last });
+    const urls = buildSitemapUrls(await storage.listProducts({ activeOnly: true }), sitemapCanonicalBase());
+    res.json({ last, urlCount: urls.length, generatedAt: Date.now(), lastRegeneratedAt: last?.generatedAt ?? null,
+      public: await checkPublicSitemap(renderSitemapXml(urls)), publicUrl: PUBLIC_ORIGIN + "/sitemap.xml" });
   });
 
   // Download the last generated sitemap
-  app.get("/api/admin/sitemap/download", requireAdmin, (_req, res) => {
-    const p = path.join(PUBLIC_DIR, "sitemap.xml");
-    if (!fs.existsSync(p)) return res.status(404).json({ error: "Generate first" });
-    res.download(p, "sitemap.xml");
+  app.get("/api/admin/sitemap/download", requireAdmin, async (_req, res) => {
+    const urls = buildSitemapUrls(await storage.listProducts({ activeOnly: true }), sitemapCanonicalBase());
+    res.set("Content-Disposition", 'attachment; filename="sitemap.xml"').type("application/xml").send(renderSitemapXml(urls));
   });
 
   // -------- R28 Session 4: SEO SSR pages + sitemap-seo.xml + robots-seo.txt --------
@@ -661,7 +605,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
 
   // -------- Phase 3: CMS / Price Checker / Consignments / Sub-users / SEO helpers --------
   const regenSitemapFn = async () => {
-    const baseUrl = `https://${process.env.SITE_HOST || "narmadamobility.com"}`;
+    const baseUrl = sitemapCanonicalBase();
     const allProducts = await storage.listProducts({ activeOnly: true });
     const urls = buildSitemapUrls(allProducts, baseUrl);
     const xml = `<?xml version="1.0" encoding="UTF-8"?>\n<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n${urls.join("\n")}\n</urlset>`;

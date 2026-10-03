@@ -69,6 +69,39 @@ const jobs = () => db.prepare("SELECT * FROM blog_jobs ORDER BY id").all() as an
 const posts = () => db.prepare("SELECT * FROM posts ORDER BY id").all() as any[];
 
 describe("durable schedules, concurrency and budgets", () => {
+  it("reports gate/key presence separately from verified connectivity and gives setup action", () => {
+    const off = new AutoBlogger(db, provider, () => false).status(evening);
+    expect(off.diagnostics.nextAction).toContain("AUTO_BLOGGER_ENABLED=true");
+    expect(off.diagnostics.connectivity).toBe("not-verified");
+    expect(off.diagnostics.providerNotice).toContain("key presence only");
+    expect(off.diagnostics.lastSuccessfulJobAt).toBeNull();
+  });
+  it("does not reserve tokens for skipped improvements or modify legacy manually published articles", async () => {
+    db.prepare("INSERT INTO posts(id,slug,title,excerpt,content,published,created_at,updated_at) VALUES(7,'manual-article','Manually written legacy article','Legacy summary','Legacy untouched body',1,0,0)").run();
+    await engine.tick(evening); // first new
+    const before = engine.status(evening).today.usage;
+    await engine.tick(evening); // no eligible managed improvement
+    expect(jobs()[1].status).toBe("skipped");
+    expect(engine.status(evening).today.usage).toEqual(before);
+    expect((db.prepare("SELECT content FROM posts WHERE id=7").get() as any).content).toBe("Legacy untouched body");
+    expect(jobs()[1].calls).toBe(0);
+  });
+  it("protects morning and evening first attempts from optional manual draft work", async () => {
+    engine.setSettings({ ...engine.settings(), dailyCallBudget: 6, dailyTokenBudget: 120000 });
+    engine.enqueueDraft(slotTime(DAY, "08:00"));
+    await engine.tick(slotTime(DAY, "08:01"));
+    expect(jobs()[0].error_code).toBe("BUDGET_RESERVED_FOR_NEW_POSTS");
+    expect(provider.research).not.toHaveBeenCalled();
+    await engine.tick(evening); await engine.tick(evening); await engine.tick(evening);
+    expect(posts().filter(p => p.published)).toHaveLength(2);
+    expect(engine.status(evening).today.usage).toMatchObject({ calls: 6, tokens: 120000 });
+  });
+  it("never returns uppercase unrecognized exception text as a sanitized code", async () => {
+    provider.research = vi.fn(async () => { throw new Error("SECRET_PROVIDER_KEY"); });
+    await engine.tick(evening);
+    expect(jobs()[0].error_code).toBe("INTERNAL_JOB_ERROR");
+    expect(JSON.stringify(engine.status(evening))).not.toContain("SECRET_PROVIDER_KEY");
+  });
   it("uses IST boundaries, ordered configurable slots and two fixed new-post slots", () => {
     expect(indiaDay(Date.parse("2026-09-19T18:29:59Z"))).toBe("2026-09-19");
     expect(indiaDay(Date.parse("2026-09-19T18:30:00Z"))).toBe(DAY);
@@ -286,6 +319,21 @@ describe("revisions, public visibility, rendering and admin boundary", () => {
 });
 
 describe("production provider HTTP contracts (mocked transport only)", () => {
+  it("accepts whitespace around fenced JSON and distinguishes auth/model errors without provider bodies", async () => {
+    vi.stubEnv("CLAUDE_API_KEY", "fixture");
+    const http = vi.fn(async () => Response.json({ stop_reason: "end_turn", content: [{ type: "text", text: ` \n\`\`\`json\n${JSON.stringify(draft())}\n\`\`\`\n ` }], usage: {} }));
+    expect((await new LiveBlogProviders(http as any).generate({})).draft).toMatchObject({ title: draft().title });
+    for (const [status, code] of [[401, "PROVIDER_AUTH_FAILED"], [403, "PROVIDER_AUTH_FAILED"], [404, "PROVIDER_MODEL_UNAVAILABLE"], [429, "PROVIDER_RATE_LIMIT"]] as const) {
+      http.mockImplementation(async () => new Response("SECRET_PRIVATE_PROVIDER_RESPONSE", { status }));
+      await expect(new LiveBlogProviders(http as any).generate({})).rejects.toThrow(code);
+    }
+  });
+  it("deduplicates source URLs after redirects, so one page cannot masquerade as two references", async () => {
+    vi.stubEnv("TAVILY_API_KEY", "fixture");
+    const http = vi.fn(async () => Response.json({ results: [{ url: sources[0].url }, { url: sources[1].url }] }));
+    const live = new LiveBlogProviders(http as any, async () => sources[0]);
+    await expect(live.research("technical reference")).rejects.toThrow("EVIDENCE_INSUFFICIENT");
+  });
   it("reports missing real credentials rather than returning a mock article", async () => {
     vi.stubEnv("CLAUDE_API_KEY", ""); vi.stubEnv("ANTHROPIC_API_KEY", "");
     vi.stubEnv("TAVILY_API_KEY", ""); vi.stubEnv("PERPLEXITY_API_KEY", "");

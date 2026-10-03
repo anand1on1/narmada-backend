@@ -1,4 +1,5 @@
 // App-level utilities: currency conversion, slug helpers, SEO helpers.
+import { productPath } from "@shared/public-urls";
 
 export function toSlug(s: string): string {
   return s.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/(^-|-$)/g, "");
@@ -14,9 +15,7 @@ export function fromSlug(s: string): string {
 // The page still loads the product by slug (last segment); the server also falls
 // back to part-number lookup. Slug-only fallback when no part number exists.
 export function productHref(product: { slug: string; partNumber?: string | null }): string {
-  return product.partNumber
-    ? `/product/${encodeURIComponent(product.partNumber)}/${product.slug}`
-    : `/product/${product.slug}`;
+  return productPath(product);
 }
 
 export function formatUSD(inr: number, usdInr: number): string {

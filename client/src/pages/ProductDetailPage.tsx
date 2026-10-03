@@ -1,4 +1,5 @@
 import { apiUrl } from "@/lib/queryClient";
+import { publicMedia, PUBLIC_ORIGIN } from "@shared/public-urls";
 import { useRoute, Link } from "wouter";
 import { useQuery } from "@tanstack/react-query";
 import type { Product } from "@shared/schema";
@@ -56,7 +57,7 @@ export default function ProductDetailPage() {
   if (!product) return <NotFound />;
 
   const brandInfo = BRANDS[product.brand as keyof typeof BRANDS];
-  const images = parseJsonArray(product.imageUrls);
+  const images = parseJsonArray(product.imageUrls).map(publicMedia).filter(Boolean);
   const compatible = parseJsonArray(product.compatibleModels);
   const buyUrl = whatsappLink("7909083806", buildBuyMessage({
     name: product.name, partNumber: product.partNumber || undefined, slug: product.slug, brand: brandInfo?.name || product.brand,
@@ -82,6 +83,7 @@ export default function ProductDetailPage() {
   return (
     <>
       <SeoHead
+        canonicalPath={productHref(product)}
         title={product.metaTitle || `${product.name} — ${brandInfo?.name || product.brand} | Narmada Mobility`}
         description={product.metaDescription || product.shortDescription || product.description.slice(0, 160)}
         keywords={product.metaKeywords || undefined}
@@ -96,8 +98,9 @@ export default function ProductDetailPage() {
           brand: { "@type": "Brand", name: brandInfo?.name || product.brand },
           offers: {
             "@type": "Offer",
-            priceCurrency: "USD",
-            price: (product.priceInr / usdInr).toFixed(2),
+            priceCurrency: "INR",
+            price: product.priceInr.toFixed(2),
+            url: PUBLIC_ORIGIN + productHref(product),
             availability: (product.stockQty ?? 0) > 0 ? "https://schema.org/InStock" : "https://schema.org/PreOrder",
             seller: { "@type": "Organization", name: "Narmada Mobility" },
           },
