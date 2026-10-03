@@ -5,6 +5,7 @@ import { LiveBlogProviders, type BlogProviders } from "./auto-blogger-providers"
 import { cleanHtml, similarity, overlap, internalLinks, validateArticle } from "./auto-blogger-safety";
 import { productPath } from "../shared/public-urls";
 import { safeBlogCode, blogAction } from "../shared/blog-diagnostics";
+import { ArticleSchemaValidationError, schemaDiagnosticSummary, type SchemaDiagnostic } from "./blog-schema-diagnostics";
 
 // Deliberately isolated, additive tables. Never alters products/quotations/PO publication rules.
 export function migrateAutoBlogger(db: Database) {
@@ -42,6 +43,8 @@ export function migrateAutoBlogger(db: Database) {
       id INTEGER PRIMARY KEY CHECK(id=1), token TEXT, expires INTEGER NOT NULL DEFAULT 0);
     CREATE TABLE IF NOT EXISTS blog_usage (
       day TEXT PRIMARY KEY, calls INTEGER NOT NULL DEFAULT 0, tokens INTEGER NOT NULL DEFAULT 0);
+    CREATE TABLE IF NOT EXISTS blog_job_schema_diagnostics (
+      job_id INTEGER PRIMARY KEY, details TEXT NOT NULL, created_at INTEGER NOT NULL);
     CREATE INDEX IF NOT EXISTS blog_jobs_due ON blog_jobs(day,status,retry_at);
     CREATE INDEX IF NOT EXISTS blog_versions_post ON blog_versions(post_id,id);
     INSERT OR IGNORE INTO blog_worker_lock(id,expires) VALUES(1,0);
@@ -97,7 +100,8 @@ export class AutoBlogger {
   }
   status(now = Date.now(), requestedPage = 1) {
     const settings = this.settings(), providers = this.providers.status(), deploymentEnabled = this.enabled();
-    const today = indiaDay(now), jobs = this.db.prepare("SELECT * FROM blog_jobs ORDER BY id DESC LIMIT 80").all() as any[];
+    const today = indiaDay(now), jobs = this.db.prepare(`SELECT j.*,d.details AS schema_details FROM blog_jobs j
+      LEFT JOIN blog_job_schema_diagnostics d ON d.job_id=j.id ORDER BY j.id DESC LIMIT 80`).all() as any[];
     const tomorrow = indiaDay(now + 86400000);
     const slots = [["morning", settings.morning], ["improvement", settings.improvement], ["evening", settings.evening]];
     const next = [today, tomorrow].flatMap(day => slots.map(([slot, time]) => ({ slot, at: slotTime(day, time) })))
@@ -120,7 +124,15 @@ export class AutoBlogger {
       today: { day: today, published: (this.db.prepare("SELECT COUNT(*) n FROM blog_publications WHERE day=?").get(today) as any).n,
         usage: this.db.prepare("SELECT calls,tokens FROM blog_usage WHERE day=?").get(today) || { calls: 0, tokens: 0 } },
       // Logs contain only allowlisted diagnostic codes, never raw prompts, API bodies or credentials.
-      jobs: jobs.map(({ lease_token, ...j }) => ({ ...j, error_code: j.error_code ? safeCode(j.error_code) : null, nextAction: blogAction(j.error_code) })),
+      jobs: jobs.map(({ lease_token, schema_details, ...j }) => {
+        let schemaDiagnostics: SchemaDiagnostic[] = [];
+        try { schemaDiagnostics = schema_details ? JSON.parse(schema_details) : []; } catch { /* damaged optional diagnostic is not content */ }
+        return { ...j, error_code: j.error_code ? safeCode(j.error_code) : null, schemaDiagnostics,
+          nextAction: (j.error_code === "ARTICLE_SCHEMA_INVALID"
+            ? "Generated JSON failed a field/type/length rule. No rejected content was saved or published. Older jobs did not retain field diagnostics. New failures use bounded retries within the existing daily budget."
+            : blogAction(j.error_code)) + (j.error_code === "ARTICLE_SCHEMA_INVALID" && schemaDiagnostics.length
+            ? ` Fields: ${schemaDiagnosticSummary(schemaDiagnostics)}` : "") };
+      }),
       topics: this.db.prepare("SELECT * FROM blog_topics ORDER BY id DESC LIMIT 100").all(),
       clusters: this.db.prepare("SELECT * FROM blog_clusters").all(),
       articleTotal, articlePages, articlePage,
@@ -211,6 +223,7 @@ export class AutoBlogger {
       if (!job) { this.release(token); return null; }
       this.db.prepare(`UPDATE blog_jobs SET status='running',attempts=attempts+1,lease_token=?,lease_until=?,
         error_code=NULL WHERE id=?`).run(token, now + LEASE_MS, job.id);
+      this.db.prepare("DELETE FROM blog_job_schema_diagnostics WHERE job_id=?").run(job.id);
       return { ...job, lease_token: token, attempts: job.attempts + 1 };
     }).immediate();
   }
@@ -384,8 +397,19 @@ export class AutoBlogger {
       }).immediate();
     } catch (error) {
       const code = safeCode(error);
+      if (error instanceof ArticleSchemaValidationError) {
+        // The generated article itself is deliberately NOT persisted on failure.
+        // Fence diagnostics too: an expired worker cannot replace a newer attempt's result.
+        const owned = this.db.prepare("SELECT id FROM blog_jobs WHERE id=? AND lease_token=?").get(job.id, job.lease_token);
+        if (owned) {
+          this.db.prepare(`INSERT INTO blog_job_schema_diagnostics(job_id,details,created_at) VALUES(?,?,?)
+            ON CONFLICT(job_id) DO UPDATE SET details=excluded.details,created_at=excluded.created_at`)
+            .run(job.id, JSON.stringify(error.diagnostics), clock());
+          console.warn("[auto-blogger] schema_validation", JSON.stringify({ jobId: job.id, attempt: job.attempts, issues: error.diagnostics }));
+        }
+      }
       const skipped = code === "NO_SUPPORTED_CHANGE";
-      const retryable = /^(PROVIDER_(?:NETWORK|RATE|REQUEST|RESPONSE|EMPTY)|SOURCE_|EVIDENCE_|LEASE_EXPIRED|GENERATION_(?:JSON_INVALID|TRUNCATED))/.test(code);
+      const retryable = /^(PROVIDER_(?:NETWORK|RATE|REQUEST|RESPONSE|EMPTY)|SOURCE_|EVIDENCE_|LEASE_EXPIRED|ARTICLE_SCHEMA_INVALID$|GENERATION_(?:JSON_INVALID|TRUNCATED))/.test(code);
       const status = skipped ? "skipped" : retryable && job.attempts < this.settings().maxAttempts ? "retry" : "failed";
       this.db.prepare(`UPDATE blog_jobs SET status=?,error_code=?,retry_at=?,finished_at=?
         WHERE id=? AND lease_token=?`).run(status, code, clock() + 5 * 60000 * job.attempts, clock(), job.id, job.lease_token);

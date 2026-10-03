@@ -24,10 +24,16 @@ Use Narmada Mobility, not Narmada Motors. Organization author only. Never invent
 450–1000 words; three or more useful h2 headings; concise paragraphs/checklist; no h1/images/script/style.
 Finish with a modest invitation to request a quote at /contact; confirm fitment and availability with the team.
 Return only JSON matching {title,excerpt,content,metaTitle,metaDescription,claims,productSlugs,improvementSummary,followUpTopics}.
+Return the article object itself, with no wrapper and NO extra keys at any level.
+title, excerpt, content, metaTitle, metaDescription and improvementSummary must be strings, never null.
+claims, productSlugs and followUpTopics must be arrays, never null; use [] when an optional list is empty.
 title 20–120 chars, excerpt 50–200, metaTitle 15–65, metaDescription 60–165.
-claims: at least two {claim,sourceUrl,evidenceQuote}; claim must occur verbatim in article,
-evidenceQuote must be 30+ characters verbatim from supplied source. Cite at least two sources in article.
-productSlugs: array of supplied slugs only. improvementSummary: empty for new article; for update describe a
+content must be a single HTML string, 1500–35000 characters, in addition to the word/heading rules above.
+claims: 2–15 objects with exactly {claim,sourceUrl,evidenceQuote}, all strings.
+claim must be 15–700 characters and occur verbatim in article; sourceUrl must be a supplied absolute source URL.
+evidenceQuote must be 30–1200 characters verbatim from supplied source. Cite at least two sources in article.
+productSlugs: 0–5 supplied slug strings matching ^[a-zA-Z0-9_-]+$, never URLs or objects.
+improvementSummary: 0–600 characters; empty string for new article; for update describe a
 substantive supported addition/correction. Do not just reword or change dates.
 The queued topic is an editorial seed, not a title to copy: discover the most useful specific question and
 natural search wording the actual research can answer within that theme. No invented volume/difficulty metrics.
