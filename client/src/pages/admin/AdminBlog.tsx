@@ -130,7 +130,7 @@ export default function AdminBlog() {
   const filtered = posts.filter((p) => filter === "all" || p.type === filter);
 
   return (
-    <AdminLayout title="Content / Blog">
+    <AdminLayout title="Content / Blog" responsiveSidebar>
       <div className="mb-5 p-5 border border-amber-300 rounded-xl bg-card text-sm" data-testid="legacy-blog-automation-status">
         <h2 className="font-semibold text-base">This is the manual blog editor — not the scheduled Auto Blogger.</h2>
         <p className="mt-2">“Generate with AI” runs only when you click it. A manually published post does not prove the daily engine is running.</p>
