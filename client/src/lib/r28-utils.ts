@@ -2,6 +2,7 @@
 // Kept as a small standalone module to avoid touching the existing helpers.
 
 import { toast } from "@/hooks/use-toast";
+import { productPath } from "@shared/public-urls";
 
 /** Public site host used to build shareable SEO links (matches Session 4 SSR routes). */
 export const PUBLIC_SITE_HOST = "https://narmadamobility.com";
@@ -34,9 +35,9 @@ export async function copyToClipboardWithToast(
   }
 }
 
-/** SEO product share URL — proxied to the backend SSR page by the .htaccess mod_proxy block. */
-export function productSeoUrl(slug: string): string {
-  return `${PUBLIC_SITE_HOST}/p/${encodeURIComponent(slug)}`;
+/** Canonical product share URL; read-only GoDaddy PHP bridge delivers full HTML. */
+export function productSeoUrl(slug: string, partNumber?: string | null): string {
+  return PUBLIC_SITE_HOST + productPath({ slug, partNumber });
 }
 
 /** SEO chassis share URL. */

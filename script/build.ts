@@ -39,7 +39,7 @@ async function buildAll() {
   // Release identity, not credentials. Detect uploading an older GoDaddy ZIP.
   const commit = execFileSync("git", ["rev-parse", "HEAD"], { encoding: "utf8" }).trim();
   const dirty = !!execFileSync("git", ["status", "--porcelain"], { encoding: "utf8" }).trim();
-  await writeFile("dist/public/version.json", JSON.stringify({ release: "R28.18", commit, dirty, builtAt: new Date().toISOString() }, null, 2) + "\n");
+  await writeFile("dist/public/version.json", JSON.stringify({ release: "R28.19", commit, dirty, builtAt: new Date().toISOString() }, null, 2) + "\n");
 
   // Vite's publicDir copy skips dotfiles, so .htaccess (SPA rewrite + cache headers
   // for the GoDaddy frontend) is copied explicitly into dist/public.

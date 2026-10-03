@@ -19,6 +19,8 @@
 //   * Mobile-first CSS, no external stylesheet.
 // =========================================================================
 
+import { productPath, publicMedia } from "../shared/public-urls";
+
 export interface SeoConfig {
   baseUrl: string;            // e.g. https://narmadamobility.com
   siteName?: string;          // "Narmada Mobility"
@@ -266,13 +268,13 @@ export function renderProductPage(
   const site = cfg.siteName || "Narmada Mobility";
   const wa = cfg.whatsappNumber || "917909083806";
   const spaBase = cfg.spaBase || cfg.baseUrl;
-  const images = parseImageUrls(product.imageUrls);
+  const images = parseImageUrls(product.imageUrls).map(publicMedia).filter(Boolean);
   const primaryImage = images[0];
   const primaryImageAbs = primaryImage ? absUrl(cfg.baseUrl, primaryImage) : "";
-  const canonical = `${cfg.baseUrl.replace(/\/$/, "")}/p/${encodeURIComponent(product.slug)}`;
-  const spaAlt    = `${spaBase.replace(/\/$/, "")}/product/${encodeURIComponent(product.partNumber || product.slug)}/${encodeURIComponent(product.slug)}`;
+  const canonical = `${cfg.baseUrl.replace(/\/$/, "")}${productPath(product)}`;
+  const spaAlt = canonical;
   const title    = buildTitle(product, site);
-  const desc     = shortDesc(product);
+  const desc     = product.metaDescription || shortDesc(product);
   const keywords = buildKeywords(product);
   const showDisclaimer = (product.imageSource === "placeholder" || product.imageSource === "generated");
   const inStock = (product.stockQty ?? 0) > 0;
@@ -309,8 +311,7 @@ export function renderProductPage(
     itemListElement: [
       { "@type": "ListItem", position: 1, name: "Home", item: cfg.baseUrl },
       { "@type": "ListItem", position: 2, name: "Products", item: `${cfg.baseUrl}/products` },
-      { "@type": "ListItem", position: 3, name: product.category || "Category", item: `${cfg.baseUrl}/cat/${encodeURIComponent(product.category || "other")}` },
-      { "@type": "ListItem", position: 4, name: product.name, item: canonical },
+      { "@type": "ListItem", position: 3, name: product.name, item: canonical },
     ],
   };
 
@@ -318,7 +319,6 @@ export function renderProductPage(
     title, description: desc, keywords, canonical,
     ogImage: primaryImageAbs, ogType: "product",
     jsonLd: [productJsonLd, breadcrumbJsonLd],
-    spaAlternate: spaAlt,
   });
 
   const imgBlock = primaryImageAbs
@@ -341,9 +341,9 @@ export function renderProductPage(
     ? `<section aria-labelledby="related-h"><h2 id="related-h">Related products</h2>
        <div class="related-grid">
          ${relatedProducts.map((r) => {
-           const rImgs = parseImageUrls(r.imageUrls);
+           const rImgs = parseImageUrls(r.imageUrls).map(publicMedia).filter(Boolean);
            const rImg  = rImgs[0] ? absUrl(cfg.baseUrl, rImgs[0]) : "";
-           const rHref = `${cfg.baseUrl.replace(/\/$/, "")}/p/${encodeURIComponent(r.slug)}`;
+           const rHref = `${cfg.baseUrl.replace(/\/$/, "")}${productPath(r)}`;
            return `<a class="related-item" href="${attr(rHref)}">
              ${rImg ? `<img src="${attr(rImg)}" alt="${attr(r.name)}" width="240" height="180" loading="lazy">` : ""}
              <div class="name">${esc(r.name)}</div>
@@ -361,7 +361,7 @@ ${renderHeader(cfg)}
   <nav class="breadcrumb" aria-label="Breadcrumb">
     <a href="${attr(cfg.baseUrl)}/">Home</a> &raquo;
     <a href="${attr(cfg.baseUrl)}/products">Products</a> &raquo;
-    <a href="${attr(cfg.baseUrl)}/cat/${attr(product.category || "other")}">${esc(product.category || "Category")}</a> &raquo;
+    <span>${esc(product.category || "Category")}</span> &raquo;
     <span aria-current="page">${esc(product.name)}</span>
   </nav>
 
@@ -378,7 +378,7 @@ ${renderHeader(cfg)}
 
       <div class="cta-row">
         <a class="btn btn-wa" href="${attr(waHref)}" rel="nofollow noopener" target="_blank">WhatsApp us to order</a>
-        <a class="btn btn-primary" href="${attr(spaAlt)}">View on the app</a>
+        <a class="btn btn-primary" href="${attr(cfg.baseUrl)}/contact">Request a quote</a>
       </div>
 
       <h2>About this part</h2>
@@ -582,7 +582,8 @@ export function renderNotFoundPage(cfg: SeoConfig, kind: "product" | "chassis" |
     description: "The page you're looking for is not available.",
     canonical,
     jsonLd: [],
-  }).replace('name="robots" content="index,follow,max-image-preview:large"', 'name="robots" content="noindex,follow"');
+  }).replace('name="robots" content="index,follow,max-image-preview:large"', 'name="robots" content="noindex,follow"')
+    .replace(/<link rel="canonical"[^>]*>/, "");
   const body = `<body>
 ${renderHeader(cfg)}
 <main class="container" role="main">

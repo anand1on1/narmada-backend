@@ -176,12 +176,11 @@ describe("R27.31 dynamic sitemap + robots", () => {
     expect(xml.trimEnd().endsWith("</urlset>")).toBe(true);
     expect(xml).toContain("<loc>https://narmadamobility.com/</loc>");
     expect(xml).toContain("<loc>https://narmadamobility.com/products</loc>");
-    // Static (product-independent) URL count is stable: 10 fixed pages + 5 brands +
-    // 15 categories + 5 brands × (37 states + 60 countries) = 515.
-    expect(urls.length).toBe(515);
+    // R28.19: core pages only; gated/alias and mass geo pages no longer promoted.
+    expect(urls.length).toBe(8);
   });
 
-  it("(2) product URLs are part-number-first, hash-routed, and skip inactive rows", () => {
+  it("(2) product URLs are canonical part-number-first, not hash-routed, and skip inactive rows", () => {
     const base = buildSitemapUrls([], "https://narmadamobility.com").length;
     const products = [
       anyProduct({ active: true, slug: "brake-pad", partNumber: "BP 100/A" }),
@@ -189,14 +188,12 @@ describe("R27.31 dynamic sitemap + robots", () => {
       anyProduct({ active: false, slug: "hidden-part", partNumber: "ZZ9" }),
     ];
     const urls = buildSitemapUrls(products, "https://narmadamobility.com");
-    // R28.4: 2 URLs per active product now (SPA hash-route + SSR /p/{slug} for Google),
-    // so 2 active products → base + 4. Inactive still skipped.
-    expect(urls.length).toBe(base + 4);
-    expect(urls.some((u) => u.includes("/#/product/BP%20100%2FA/brake-pad"))).toBe(true);
-    expect(urls.some((u) => u.includes("/#/product/oil-filter"))).toBe(true);
-    // R28.4: also asserts the new SSR /p/{slug} URLs are in the sitemap.
-    expect(urls.some((u) => u.includes("/p/brake-pad"))).toBe(true);
-    expect(urls.some((u) => u.includes("/p/oil-filter"))).toBe(true);
+    expect(urls.length).toBe(base + 2);
+    // Encoded slashes are rejected before PHP by many Apache shared hosts.
+    expect(urls.some((u) => u.includes("/product/brake-pad"))).toBe(true);
+    expect(urls.some((u) => u.includes("%2F"))).toBe(false);
+    expect(urls.some((u) => u.includes("/product/oil-filter"))).toBe(true);
+    expect(urls.some((u) => u.includes("/p/") || u.includes("/#/"))).toBe(false);
     expect(urls.some((u) => u.includes("hidden-part"))).toBe(false);
   });
 

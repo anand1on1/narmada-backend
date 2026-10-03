@@ -4,11 +4,12 @@ import { spawnSync } from "node:child_process";
 const php = readFileSync("client/public/blog-bridge.php", "utf8");
 const ht = readFileSync("client/public/.htaccess", "utf8");
 describe("GoDaddy bridge deployment contract", () => {
-  it("rewrites only blog and sitemap ahead of stale static paths, never proxies product/write routes", () => {
+  it("rewrites blog and scoped read-only catalog before stale static paths, never proxies write APIs", () => {
     expect(ht.indexOf("RewriteRule ^blog")).toBeLessThan(ht.indexOf("RewriteCond %{REQUEST_FILENAME}"));
     expect(ht).toContain("RewriteRule ^sitemap-blog\\.xml$ blog-bridge.php");
     expect(ht).not.toMatch(/^\s*ProxyPass/m);
-    expect(ht).not.toMatch(/RewriteRule.*(?:product|api)/);
+    expect(ht).not.toMatch(/RewriteRule.*api/);
+    expect(ht.indexOf("seo-bridge.php")).toBeLessThan(ht.indexOf("RewriteCond %{REQUEST_FILENAME}"));
   });
   it("uses a fixed HTTPS upstream with TLS validation, redirects off, read-only method whitelist and limits", () => {
     expect(php).toContain("'https://narmada-backend.onrender.com' . $upstreamPath");

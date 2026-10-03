@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { AdminLayout } from "./AdminLayout";
 import { adminFetch, useAdminAuth } from "@/lib/admin-auth";
 import { Plus, Edit3, Trash2, Eye, EyeOff, FileText, Star, Sparkles } from "lucide-react";
+import { blogAction } from "@shared/blog-diagnostics";
 
 interface Post {
   id: number;
@@ -34,6 +35,17 @@ export default function AdminBlog() {
   const [saving, setSaving] = useState(false);
   const [uploading, setUploading] = useState(false);
   const [generating, setGenerating] = useState(false);
+  const [automation, setAutomation] = useState<{ available: boolean; reason: string | null; settings: { mode: string } } | null>(null);
+  useEffect(() => {
+    if (!token) return;
+    let cancelled = false;
+    adminFetch(token, "/api/admin/auto-blogger").then(async r => {
+      if (!r.ok) return;
+      const value = await r.json();
+      if (!cancelled && typeof value.available === "boolean") setAutomation(value);
+    }).catch(() => {});
+    return () => { cancelled = true; };
+  }, [token]);
 
   async function generateWithAi() {
     if (!token) return;
@@ -118,8 +130,15 @@ export default function AdminBlog() {
   const filtered = posts.filter((p) => filter === "all" || p.type === filter);
 
   return (
-    <AdminLayout title="Content / Blog">
-      <div className="mb-5 p-4 border rounded-xl bg-card text-sm">Scheduled, evidence-led publishing now lives in <a href="/admin/auto-blogger" className="font-semibold text-indigo-600 underline">Auto Blogger</a>. Managed articles must be edited there to retain validation and revision history.</div>
+    <AdminLayout title="Content / Blog" responsiveSidebar>
+      <div className="mb-5 p-5 border border-amber-300 rounded-xl bg-card text-sm" data-testid="legacy-blog-automation-status">
+        <h2 className="font-semibold text-base">This is the manual blog editor — not the scheduled Auto Blogger.</h2>
+        <p className="mt-2">“Generate with AI” runs only when you click it. A manually published post does not prove the daily engine is running.</p>
+        <p className="mt-2 font-semibold">{!automation ? "Automation readiness: unknown — open diagnostics." : !automation.available ? "Automation unavailable — no scheduled generation." : automation.settings.mode === "pause" ? "Automation paused." : `Automation mode: ${automation.settings.mode}. Key presence does not verify provider connectivity.`}</p>
+        {automation?.reason && <p className="mt-2">{blogAction(automation.reason)}</p>}
+        <a href="/admin/auto-blogger" className="mt-3 inline-block font-semibold text-indigo-600 underline" data-testid="open-auto-blogger">Open Auto Blogger setup, schedule and job diagnostics</a>
+        <p className="mt-2 text-muted-foreground">Existing manual articles remain here unchanged. Only managed Auto Blogger articles are eligible for scheduled improvements.</p>
+      </div>
       <div className="flex gap-2 mb-6 flex-wrap items-center">
         {(["all", "blog", "spotlight"] as const).map((f) => (
           <button

@@ -40,8 +40,8 @@ Do not propose paraphrases of this article or each other. Keep within commercial
 If evidence cannot support useful
 content, return {"skip":true}. Preserve the topic and don't claim search volume or keyword difficulty.`;
 
-const present = (s: string | undefined) => !!s && s !== "skip";
-const key = () => process.env.CLAUDE_API_KEY || process.env.ANTHROPIC_API_KEY;
+const present = (s: string | undefined) => !!s?.trim() && !/^(skip|changeme|your[_ -].*|placeholder)$/i.test(s.trim());
+const key = () => present(process.env.CLAUDE_API_KEY) ? process.env.CLAUDE_API_KEY!.trim() : process.env.ANTHROPIC_API_KEY?.trim();
 // All provider requests are fixed API URLs: administrators cannot configure arbitrary network targets.
 export class LiveBlogProviders implements BlogProviders {
   constructor(private fetcher: typeof fetch = fetch, private evidence = readEvidence) {}
@@ -55,7 +55,9 @@ export class LiveBlogProviders implements BlogProviders {
       response = await this.fetcher(url, { method: "POST", headers: { "Content-Type": "application/json", ...headers },
         body: JSON.stringify(body), signal: AbortSignal.timeout(60000), redirect: "error" });
     } catch { throw new Error("PROVIDER_NETWORK_ERROR"); }
-    if (!response.ok) throw new Error(response.status === 429 ? "PROVIDER_RATE_LIMIT" : "PROVIDER_REQUEST_FAILED");
+    if (!response.ok) throw new Error(response.status === 429 ? "PROVIDER_RATE_LIMIT" :
+      [401, 403].includes(response.status) ? "PROVIDER_AUTH_FAILED" :
+      response.status === 404 ? "PROVIDER_MODEL_UNAVAILABLE" : "PROVIDER_REQUEST_FAILED");
     const reader = response.body?.getReader();
     if (!reader) throw new Error("PROVIDER_EMPTY_RESPONSE");
     let size = 0; const chunks: Uint8Array[] = [];
@@ -94,14 +96,15 @@ export class LiveBlogProviders implements BlogProviders {
     }).slice(0, 4);
     const sources: BlogSource[] = [];
     // Bounded: at most four pages, retain at most two 6k evidence excerpts.
+    let failures = 0;
     for (const url of safeUrls) {
       try {
         const s = await this.evidence(url);
-        sources.push({ ...s, text: s.text.slice(0, 6000) });
+        if (!sources.some(existing => existing.url === s.url)) sources.push({ ...s, text: s.text.slice(0, 6000) });
         if (sources.length === 2) break;
-      } catch { /* unreachable or unsafe source is not evidence */ }
+      } catch { failures++; /* unreachable or unsafe source is not evidence */ }
     }
-    if (sources.length < 2) throw new Error("EVIDENCE_INSUFFICIENT");
+    if (sources.length < 2) throw new Error(failures && sources.length === 0 ? "EVIDENCE_SOURCES_UNREACHABLE" : "EVIDENCE_INSUFFICIENT");
     return sources;
   }
   private async claude(system: string, data: unknown, maxTokens: number) {
@@ -117,12 +120,12 @@ export class LiveBlogProviders implements BlogProviders {
     if (r.stop_reason !== "end_turn") throw new Error("GENERATION_TRUNCATED");
     try {
       const text = r.content.filter((c: any) => c.type === "text").map((c: any) => c.text).join("");
-      return { data: JSON.parse(text.replace(/^```(?:json)?\s*|\s*```$/g, "")),
+      return { data: JSON.parse(text.trim().replace(/^```(?:json)?\s*|\s*```$/g, "")),
         tokens: Number(r.usage?.input_tokens || 0) + Number(r.usage?.output_tokens || 0) };
     } catch { throw new Error("GENERATION_JSON_INVALID"); }
   }
   async generate(context: unknown) {
-    const r = await this.claude(BLOG_POLICY, context, 4500);
+    const r = await this.claude(BLOG_POLICY, context, 6000);
     if (r.data.skip) throw new Error("NO_SUPPORTED_CHANGE");
     return { draft: r.data, tokens: r.tokens };
   }

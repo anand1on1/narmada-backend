@@ -1,9 +1,11 @@
 import { Card, CardContent } from "@/components/ui/card";
 import { AlertCircle } from "lucide-react";
+import { SeoHead } from "@/components/SeoHead";
 
 export default function NotFound() {
   return (
     <div className="min-h-screen w-full flex items-center justify-center bg-gray-50">
+      <SeoHead title="Page not found — Narmada Mobility" description="This page is not available. Browse the catalog or contact the team." noindex />
       <Card className="w-full max-w-md mx-4">
         <CardContent className="pt-6">
           <div className="flex mb-4 gap-2">
@@ -12,7 +14,7 @@ export default function NotFound() {
           </div>
 
           <p className="mt-4 text-sm text-gray-600">
-            Did you forget to add the page to the router?
+            This page is not available. <a className="underline" href="/products">Browse products</a> or <a className="underline" href="/contact">contact our team</a>.
           </p>
         </CardContent>
       </Card>

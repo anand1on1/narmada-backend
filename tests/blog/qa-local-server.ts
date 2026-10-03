@@ -7,15 +7,29 @@ import { join, resolve } from "node:path";
 import { AutoBlogger } from "../../server/auto-blogger";
 import { registerAutoBloggerRoutes } from "../../server/auto-blogger-routes";
 import { BLOG_EDITOR } from "../../shared/auto-blogger";
+import { registerPublicCatalog, catalogSitemap, publicRobots } from "../../server/public-catalog";
 
 const db = new Database(join(mkdtempSync(join(tmpdir(), "narmada-vitest-browser-")), "fixture.db"));
 db.exec(`CREATE TABLE products(id INTEGER PRIMARY KEY,slug TEXT,name TEXT,brand TEXT,category TEXT,part_number TEXT,active INTEGER);
 CREATE TABLE posts(id INTEGER PRIMARY KEY,slug TEXT UNIQUE,title TEXT,excerpt TEXT,content TEXT,meta_title TEXT,meta_description TEXT,author_name TEXT,published INTEGER DEFAULT 0,published_at INTEGER,created_at INTEGER,updated_at INTEGER);
 INSERT INTO products VALUES(1,'fixture-filter','Filter — QA catalog fixture','Tata','filter','QA-FILTER-1',1);`);
+db.exec(`ALTER TABLE products ADD COLUMN model TEXT DEFAULT '';
+ALTER TABLE products ADD COLUMN oem_number TEXT;
+ALTER TABLE products ADD COLUMN description TEXT DEFAULT 'Local QA catalog fixture. Confirm vehicle details and fitment before requesting a quote.';
+ALTER TABLE products ADD COLUMN short_description TEXT;
+ALTER TABLE products ADD COLUMN price_inr REAL DEFAULT 1250;
+ALTER TABLE products ADD COLUMN stock_qty INTEGER DEFAULT 2;
+ALTER TABLE products ADD COLUMN image_urls TEXT DEFAULT '[]';
+ALTER TABLE products ADD COLUMN compatible_models TEXT DEFAULT '[]';
+ALTER TABLE products ADD COLUMN meta_title TEXT;
+ALTER TABLE products ADD COLUMN meta_description TEXT;`);
+for (let id = 2; id <= 28; id++) db.prepare("INSERT INTO products(id,slug,name,brand,category,part_number,active) VALUES(?,?,?,'Tata','filter',?,1)")
+  .run(id, `fixture-part-${id}`, `Filter assembly — QA ${id}`, `QA-${id}`);
+let gate = false;
 const providers = { status: () => ({ ready: true, generation: true, research: true }),
   research: async () => { throw new Error("QA_NO_PAID_GENERATIONS"); }, generate: async () => { throw new Error("QA_NO_PAID_GENERATIONS"); },
   review: async () => ({ supported: true, tokens: 0 }) };
-const engine = new AutoBlogger(db, providers, () => true);
+const engine = new AutoBlogger(db, providers, () => gate);
 const now = Date.now();
 const title = "A clearer parts enquiry starts with the right information";
 const content = `<h2>Start with the vehicle record</h2><p>A maintenance record helps identify the components used on a commercial vehicle. Keep the available vehicle details together rather than relying on a photograph alone. A short enquiry that separates confirmed identifiers from open questions gives the receiving team a clearer starting point.</p>
@@ -54,7 +68,27 @@ db.prepare("INSERT INTO blog_jobs(day,slot,kind,status,due_at,attempts,error_cod
 const app = express(); app.use(express.json());
 app.get("/config.js", (_req, res) => res.type("js").send("window.__API_BASE__='';"));
 app.get("/api/admin/me", (_req, res) => res.json({ username: "QA Admin", role: "admin", displayName: "QA Admin" }));
-app.post("/qa/availability", (req, res) => { providers.status = () => ({ ready: !!req.body.ready, research: !!req.body.ready, generation: !!req.body.ready }); res.json({ ok: true }); });
+app.post("/qa/availability", (req, res) => { if (req.body.enabled !== undefined) gate = !!req.body.enabled; providers.status = () => ({ ready: !!req.body.ready, research: !!req.body.ready, generation: !!req.body.ready }); res.json({ ok: true }); });
+let drift = "drift";
+app.post("/qa/sitemap", (req, res) => { drift = req.body.status; res.json({ ok: true }); });
+const sitemapStatus = () => ({ urlCount: 36, generatedAt: Date.now(), public: { status: drift, count: drift === "unknown" ? null : drift === "match" ? 36 : 516, checkedAt: Date.now(), ...(drift === "unknown" ? { error: "PUBLIC_SITEMAP_UNREACHABLE" } : {}) } });
+app.get("/api/admin/sitemap/status", (_req, res) => res.json(sitemapStatus()));
+app.post("/api/admin/sitemap/regenerate", (_req, res) => res.json({ ok: true, ...sitemapStatus() }));
+app.get("/api/admin/sitemap/download", (_req, res) => res.type("application/xml").send(catalogSitemap(db)));
+app.get("/sitemap.xml", (_req, res) => res.type("application/xml").send(catalogSitemap(db)));
+app.get("/robots.txt", (_req, res) => res.type("text/plain").send(publicRobots()));
+app.get("/api/admin/posts", (_req, res) => res.json([]));
+const productCols = `id,slug,name,brand,category,part_number AS partNumber,description,price_inr AS priceInr,stock_qty AS stockQty,image_urls AS imageUrls,compatible_models AS compatibleModels,active`;
+app.get("/api/products", (req, res) => {
+  const page = Math.max(1, Number(req.query.page) || 1);
+  res.json({ products: db.prepare(`SELECT ${productCols} FROM products WHERE active=1 ORDER BY id DESC LIMIT 24 OFFSET ?`).all((page - 1) * 24), total: 28, pages: 2, page });
+});
+app.get("/api/products/:key", (req, res) => {
+  const p = db.prepare(`SELECT ${productCols} FROM products WHERE slug=? OR part_number=?`).get(req.params.key, req.params.key);
+  p ? res.json(p) : res.status(404).json({ error: "Not found" });
+});
+app.get("/api/settings/fx", (_req, res) => res.json({ usdInr: 83.5 }));
+registerPublicCatalog(app, db);
 registerAutoBloggerRoutes(app, db, (req, res, next) => req.headers["x-admin-token"] === "qa-local-only" ? next() : res.status(401).json({ error: "Unauthorized" }), engine);
 app.use("/api", (_req, res) => res.json({ items: [], products: [], count: 0, total: 0 }));
 app.get("/qa/spa", (_req, res) => res.sendFile(resolve("dist/public/index.html")));

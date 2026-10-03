@@ -4,6 +4,8 @@ import { z } from "zod";
 import { AutoBlogger } from "./auto-blogger";
 import { cleanHtml, escapeHtml as esc } from "./auto-blogger-safety";
 import { BLOG_ORIGIN, BLOG_EDITOR } from "../shared/auto-blogger";
+import { productPath } from "../shared/public-urls";
+import { safeBlogCode } from "../shared/blog-diagnostics";
 
 const iso = (n: number) => new Date(n).toISOString();
 const date = (n: number) => new Date(n).toLocaleDateString("en-IN", { day: "numeric", month: "long", year: "numeric", timeZone: "Asia/Kolkata" });
@@ -17,7 +19,7 @@ export function publicArticle(db: Database, slug: string): any {
     metaTitle: p.meta_title, metaDescription: p.meta_description, category: p.category || "Insights",
     authorName: BLOG_EDITOR, publishedAt: p.published_at || p.created_at, updatedAt: p.updated_at,
     sources, aiAssisted: sources.length >= 2,
-    products: db.prepare(`SELECT p.slug,p.name FROM products p JOIN blog_article_products ap ON ap.product_id=p.id
+    products: db.prepare(`SELECT p.slug,p.name,p.part_number AS partNumber FROM products p JOIN blog_article_products ap ON ap.product_id=p.id
       WHERE ap.post_id=? AND p.active=1 LIMIT 5`).all(p.id),
     related: db.prepare(`SELECT p.slug,p.title FROM posts p JOIN blog_articles a ON a.post_id=p.id
       WHERE p.published=1 AND p.id!=? AND a.cluster_id=? ORDER BY p.published_at DESC LIMIT 3`).all(p.id, p.cluster_id || 0),
@@ -95,12 +97,13 @@ ${p.aiAssisted ? '<p class="meta">AI-assisted editorial content, checked automat
 <article class="reading">${p.content}
 ${p.sources.length ? `<section class="sources"><h2>Sources & further reading</h2><ul>${p.sources.map((s: any) =>
         `<li><a href="${esc(s.url)}" rel="noopener noreferrer">${esc(s.title)}</a> · Accessed ${date(s.accessedAt)}</li>`).join("")}</ul></section>` : ""}
-${p.products.length ? `<section><h2>Explore the catalog</h2><ul>${p.products.map((r: any) => `<li><a href="/product/${esc(r.slug)}">${esc(r.name)}</a></li>`).join("")}</ul><p>Catalog references do not confirm fitment or current availability.</p></section>` : ""}
+${p.products.length ? `<section><h2>Explore the catalog</h2><ul>${p.products.map((r: any) => `<li><a href="${esc(productPath(r))}">${esc(r.name)}</a></li>`).join("")}</ul><p>Catalog references do not confirm fitment or current availability.</p></section>` : ""}
 <section class="cta"><h2>Make your next enquiry more useful.</h2><p>Share your vehicle details, part number and requirements. Our team can help confirm fitment and availability before quoting.</p>
 <a class="button" href="/contact">Request a quote</a><a href="https://wa.me/917909083806?text=Hello%20Narmada%20Mobility%2C%20I%20have%20a%20parts%20enquiry.">WhatsApp the team</a></section>
 ${p.related.length ? `<section><h2>Continue reading</h2><ul>${p.related.map((r: any) => `<li><a href="/blog/${esc(r.slug)}">${esc(r.title)}</a></li>`).join("")}</ul></section>` : ""}</article>`, schema) };
   }
   const list = publicList(db, query);
+  if (list.page > Math.max(1, list.pages)) return { status: 404, html: shell("Page not found", "This insights page is not available.", "/blog", "<h1>Page not found</h1><a href='/blog'>All insights</a>", undefined, true) };
   const pageHref = (page: number) => `/blog?${new URLSearchParams({ page: String(page), ...(list.q ? { q: list.q } : {}), ...(list.category ? { category: list.category } : {}) })}`;
   return { status: 200, html: shell("Parts knowledge. Better decisions.", "Practical commercial vehicle parts guides from the Narmada Mobility Editorial Desk.",
     list.page > 1 ? `/blog?page=${list.page}` : "/blog",
@@ -119,7 +122,7 @@ ${list.items.length ? `<div class="grid">${(list.items as any[]).map(p => `<arti
 
 export function registerAutoBloggerRoutes(app: Express, db: Database, requireAdmin: RequestHandler, engine = new AutoBlogger(db)) {
   const base = "/api/admin/auto-blogger";
-  const err = (res: any, e: any) => res.status(400).json({ error: /^[A-Z_]+$/.test(e?.message || "") ? e.message : "INVALID_REQUEST" });
+  const err = (res: any, e: any) => res.status(400).json({ error: safeBlogCode(e) });
   app.get(base, requireAdmin, (req, res) => res.json(engine.status(Date.now(), Number(req.query.page) || 1)));
   app.patch(`${base}/settings`, requireAdmin, (req, res) => {
     try { res.json(engine.setSettings(req.body)); } catch (e) { err(res, e); }
@@ -168,6 +171,9 @@ export function registerAutoBloggerRoutes(app: Express, db: Database, requireAdm
   // Wake on intervals, never exact wall-minute equality; SQL leases also cover manual/parallel instances.
   // Deployment gate is checked inside tick. Registering/migrating alone never publishes.
   if (process.env.NODE_ENV !== "test") {
+    const status = engine.status();
+    console.log("[auto-blogger] startup", JSON.stringify({ deploymentEnabled: status.deploymentEnabled, mode: status.settings.mode,
+      providers: status.providers, reason: status.reason, diagnostics: status.diagnostics }));
     const wake = () => { void engine.tick().catch(() => console.error("[auto-blogger] SCHEDULER_ERROR")); };
     const first = setTimeout(wake, 15000); first.unref();
     const timer = setInterval(wake, 60000); timer.unref();

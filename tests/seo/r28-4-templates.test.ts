@@ -51,11 +51,11 @@ function baseProduct(overrides: Partial<SeoProduct> = {}): SeoProduct {
 }
 
 describe("R28.4 seo-templates: renderProductPage", () => {
-  it("emits doctype, viewport, and canonical /p/{slug}", () => {
+  it("emits doctype, viewport, and canonical /product/{partNumber}/{slug}", () => {
     const html = renderProductPage(baseProduct(), [], CFG);
     expect(html.startsWith("<!DOCTYPE html>")).toBe(true);
     expect(html).toContain('<meta name="viewport"');
-    expect(html).toContain('rel="canonical" href="https://narmadamobility.com/p/tata-clutch-plate-clp-9001"');
+    expect(html).toContain('rel="canonical" href="https://narmadamobility.com/product/CLP-9001/tata-clutch-plate-clp-9001"');
   });
 
   it("emits OG, Twitter, and Product + Breadcrumb JSON-LD", () => {
@@ -73,9 +73,10 @@ describe("R28.4 seo-templates: renderProductPage", () => {
     expect(html).toContain('"sku":"CLP-9001"');
   });
 
-  it("includes SPA alternate hash-route link back to the app", () => {
+  it("does not advertise a duplicate SPA alternate or hash route", () => {
     const html = renderProductPage(baseProduct(), [], CFG);
-    expect(html).toContain('rel="alternate" href="https://narmadamobility.com/#/product/CLP-9001/tata-clutch-plate-clp-9001"');
+    expect(html).not.toContain('rel="alternate"');
+    expect(html).not.toContain("/#/");
   });
 
   it("renders the mobile-first inline critical CSS", () => {
@@ -109,14 +110,14 @@ describe("R28.4 seo-templates: renderProductPage", () => {
     }
   });
 
-  it("renders related products (4 max) with links to /p/{slug}", () => {
+  it("renders related products (4 max) with canonical product links", () => {
     const related = [
       baseProduct({ id: 1, slug: "brake-shoe-1", name: "Brake Shoe 1", partNumber: "BS-1" }),
       baseProduct({ id: 2, slug: "brake-shoe-2", name: "Brake Shoe 2", partNumber: "BS-2" }),
     ];
     const html = renderProductPage(baseProduct(), related, CFG);
-    expect(html).toContain('href="https://narmadamobility.com/p/brake-shoe-1"');
-    expect(html).toContain('href="https://narmadamobility.com/p/brake-shoe-2"');
+    expect(html).toContain('href="https://narmadamobility.com/product/BS-1/brake-shoe-1"');
+    expect(html).toContain('href="https://narmadamobility.com/product/BS-2/brake-shoe-2"');
   });
 
   it("has a WhatsApp CTA linking to wa.me with the shared number", () => {
