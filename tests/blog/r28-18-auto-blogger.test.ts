@@ -69,6 +69,48 @@ const jobs = () => db.prepare("SELECT * FROM blog_jobs ORDER BY id").all() as an
 const posts = () => db.prepare("SELECT * FROM posts ORDER BY id").all() as any[];
 
 describe("durable schedules, concurrency and budgets", () => {
+  it("retains only sanitized schema diagnostics, retries within existing limits, and clears them after recovery", async () => {
+    const good = provider.generate;
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    provider.generate = vi.fn(async () => ({ draft: { ...draft(), metaTitle: "PRIVATE_PROVIDER_VALUE".repeat(5),
+      PRIVATE_EXTRA_FIELD: "private@example.com secret-token" }, tokens: 2000 }));
+    const morning = slotTime(DAY, "09:01");
+    await engine.tick(morning);
+    expect(posts()).toHaveLength(0);
+    expect(provider.review).not.toHaveBeenCalled();
+    expect(jobs()[0]).toMatchObject({ error_code: "ARTICLE_SCHEMA_INVALID", status: "retry", attempts: 1 });
+    const status = engine.status(morning);
+    expect(status.jobs[0].schemaDiagnostics).toEqual(expect.arrayContaining([
+      expect.objectContaining({ field: "metaTitle", rule: "too_big", maximum: 65, actualLength: 110 }),
+      expect.objectContaining({ field: "$", rule: "unrecognized_keys", extraFieldCount: 1 }),
+    ]));
+    expect(status.jobs[0].nextAction).toContain("metaTitle: too_big");
+    expect(JSON.stringify(status.jobs)).not.toMatch(/PRIVATE_|private@example|secret-token/);
+    expect(JSON.stringify(warn.mock.calls)).toContain("[auto-blogger] schema_validation");
+    expect(JSON.stringify(warn.mock.calls)).not.toMatch(/PRIVATE_|private@example|secret-token/);
+    provider.generate = good;
+    await engine.tick(morning + 6 * 60000);
+    expect(posts().filter(p => p.published)).toHaveLength(1);
+    expect(jobs()[0]).toMatchObject({ status: "succeeded", attempts: 2, error_code: null });
+    expect(engine.status(morning).jobs[0].schemaDiagnostics).toEqual([]);
+    warn.mockRestore();
+  });
+  it("keeps repeated schema failures bounded and changing morning time does not recreate a failed slot", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    provider.generate = vi.fn(async () => ({ draft: { ...draft(), excerpt: null }, tokens: 2000 }));
+    const morning = slotTime(DAY, "09:01");
+    await engine.tick(morning);
+    await engine.tick(morning + 6 * 60000);
+    await engine.tick(morning + 17 * 60000);
+    expect(jobs()[0]).toMatchObject({ status: "failed", error_code: "ARTICLE_SCHEMA_INVALID", attempts: 3 });
+    expect(provider.generate).toHaveBeenCalledTimes(3);
+    expect(posts()).toHaveLength(0);
+    engine.setSettings({ ...engine.settings(), morning: "12:48" });
+    await engine.tick(slotTime(DAY, "12:49"));
+    expect(jobs()).toHaveLength(1);
+    expect(provider.generate).toHaveBeenCalledTimes(3);
+    warn.mockRestore();
+  });
   it("reports gate/key presence separately from verified connectivity and gives setup action", () => {
     const off = new AutoBlogger(db, provider, () => false).status(evening);
     expect(off.diagnostics.nextAction).toContain("AUTO_BLOGGER_ENABLED=true");

@@ -5,6 +5,7 @@ import { isIP } from "node:net";
 import type { Database } from "better-sqlite3";
 import { articleDraftSchema, type ArticleDraft, type BlogSource } from "../shared/auto-blogger";
 import { productPath } from "../shared/public-urls";
+import { ArticleSchemaValidationError } from "./blog-schema-diagnostics";
 
 export const authoritativeDomains = [
   "tatamotors.com", "tatacommercialvehicles.com", "ashokleyland.com", "eichertrucksandbuses.com",
@@ -125,7 +126,7 @@ export function internalLinks(db: Database): string[] {
 }
 export function validateArticle(db: Database, input: unknown, sources: BlogSource[], existingId?: number): ArticleDraft {
   const parsed = articleDraftSchema.safeParse(input);
-  if (!parsed.success) throw new Error("ARTICLE_SCHEMA_INVALID");
+  if (!parsed.success) throw new ArticleSchemaValidationError(input, parsed.error.issues);
   const d = parsed.data;
   const clean = cleanHtml(d.content), plain = textOnly(clean);
   const all = `${d.title} ${d.excerpt} ${plain} ${d.metaTitle} ${d.metaDescription}`;
