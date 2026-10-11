@@ -7,6 +7,7 @@ import type { Database } from "better-sqlite3";
 import { articleDraftSchema, type ArticleDraft, type BlogSource } from "../shared/auto-blogger";
 import { productPath } from "../shared/public-urls";
 import { ArticleSchemaValidationError } from "./blog-schema-diagnostics";
+import { commercialDiagnostics, CommercialPolicyValidationError } from "./blog-commercial-policy";
 
 export const authoritativeDomains = [
   "tatamotors.com", "tatacommercialvehicles.com", "ashokleyland.com", "eichertrucksandbuses.com",
@@ -155,17 +156,27 @@ export function internalLinks(db: Database): string[] {
     ...(db.prepare("SELECT slug FROM posts WHERE published=1 LIMIT 10000").all() as any[])
       .filter(r => /^[a-zA-Z0-9_-]+$/.test(r.slug)).map(r => `/blog/${r.slug}`)];
 }
+function boundedPlainPresentation(value: unknown, minimum: number, maximum: number): unknown {
+  if (typeof value !== "string" || value.length <= maximum || /[<>]|&(?:#\w+|\w+);/.test(value)) return value;
+  // Keep a complete-word prefix only. HTML/entities, unbroken overlong values,
+  // wrong types and too-short values must still fail their original schema rule.
+  const boundary = value.slice(0, maximum + 1).search(/\s+\S*$/);
+  if (boundary < minimum) return value;
+  const clipped = value.slice(0, boundary).trimEnd();
+  return clipped.length >= minimum ? clipped : value;
+}
 export function validateArticle(db: Database, input: unknown, sources: BlogSource[], existingId?: number): ArticleDraft {
   // Repair presentation only. No claim or quotation is padded, rewritten or
   // fabricated. Optional queue suggestions must never poison a valid article.
   let normalized = input;
   if (input && typeof input === "object" && !Array.isArray(input)) {
     const value = input as Record<string, unknown>;
-    let excerpt = value.excerpt;
-    if (typeof excerpt === "string" && excerpt.length > 200 && !/[<>]|&(?:#\w+|\w+);/.test(excerpt)) {
-      const prefix = excerpt.slice(0, 200);
-      excerpt = prefix.slice(0, Math.max(50, prefix.lastIndexOf(" "))).trimEnd();
-    }
+    const presentation = {
+      title: boundedPlainPresentation(value.title, 20, 120),
+      excerpt: boundedPlainPresentation(value.excerpt, 50, 200),
+      metaTitle: boundedPlainPresentation(value.metaTitle, 15, 65),
+      metaDescription: boundedPlainPresentation(value.metaDescription, 60, 165),
+    };
     const followSchema = articleDraftSchema.shape.followUpTopics.removeDefault().element;
     const follows = Array.isArray(value.followUpTopics) ? value.followUpTopics.slice(0, 3).flatMap(f => {
       const valid = followSchema.safeParse(f);
@@ -174,15 +185,16 @@ export function validateArticle(db: Database, input: unknown, sources: BlogSourc
       return source?.text.includes(valid.data.evidenceQuote) &&
         /^[a-zA-Z0-9 ,:?!&()/'–—-]+$/.test(valid.data.title) && !/\d{7,}/.test(valid.data.title) ? [valid.data] : [];
     }) : [];
-    normalized = { ...value, excerpt, followUpTopics: follows };
+    normalized = { ...value, ...presentation, followUpTopics: follows };
   }
   const parsed = articleDraftSchema.safeParse(normalized);
   if (!parsed.success) throw new ArticleSchemaValidationError(input, parsed.error.issues);
   const d = parsed.data;
   const clean = cleanHtml(d.content), plain = textOnly(clean);
   const all = `${d.title} ${d.excerpt} ${plain} ${d.metaTitle} ${d.metaDescription}`;
-  if (/\b(exclusive|authori[sz]ed (?:dealer|supplier|distributor|partner)|best supplier|guaranteed fit|in stock|ready stock|genuine OEM|OEM genuine|lowest price|our branch|our warehouse|Narmada Motors)\b/i.test(all))
-    throw new Error("UNSUPPORTED_COMMERCIAL_CLAIM");
+  const commercial = commercialDiagnostics({ title: d.title, excerpt: d.excerpt, content: plain,
+    metaTitle: d.metaTitle, metaDescription: d.metaDescription });
+  if (commercial.length) throw new CommercialPolicyValidationError(commercial);
   if (/\S+@\S+\.\S+|(?:\+?\d[\s().-]*){10,}|\b(customer|vendor)\s*(name|address|phone|price)|\b(margin|bank account|IFSC|payment details)\b/i.test(all))
     throw new Error("PRIVACY_CHECK_FAILED");
   if (plain.split(/\s+/).length < 450 || plain.split(/\s+/).length > 1400 || (clean.match(/<h2>/g) || []).length < 3)
