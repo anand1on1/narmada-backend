@@ -8,8 +8,7 @@ NO_SUPPORTED_CHANGE PROVIDER_EMPTY_RESPONSE PROVIDER_NETWORK_ERROR PROVIDER_RESP
 RESEARCH_NOT_CONFIGURED PROVIDER_RATE_LIMIT PROVIDER_REQUEST_FAILED PROVIDER_AUTH_FAILED PROVIDER_MODEL_UNAVAILABLE
 ARTICLE_CHANGED_DURING_JOB ARTICLE_NOT_FOUND DAILY_PROVIDER_BUDGET DRAFT_DAILY_CAP DUPLICATE_SLUG EDITORIAL_REVIEW_FAILED
 LEASE_EXPIRED LEGACY_TITLE_UNSAFE NEW_PUBLICATION_DAILY_CAP PAUSED_DURING_JOB PROVIDERS_UNAVAILABLE PUBLIC_CATALOG_INSUFFICIENT
-REVISION_NOT_FOUND TOPIC_QUEUE_EMPTY MISSED_DAY ATTEMPTS_EXHAUSTED BUDGET_RESERVED_FOR_NEW_POSTS
-PROVIDER_TIMEOUT BUDGET_RESERVED_FOR_OTHER_NEW_SLOT JOB_RECOVERY_NOT_ELIGIBLE`;
+REVISION_NOT_FOUND TOPIC_QUEUE_EMPTY MISSED_DAY ATTEMPTS_EXHAUSTED BUDGET_RESERVED_FOR_NEW_POSTS`;
 const known = new Set(codes.split(/\s+/));
 export function safeBlogCode(error: unknown) {
   const code = error instanceof Error ? error.message : String(error || "");
@@ -24,7 +23,6 @@ export function blogAction(code: string | null) {
     PROVIDER_MODEL_UNAVAILABLE: "Check that the Anthropic account can use claude-sonnet-4-5.",
     PROVIDER_RATE_LIMIT: "Provider rate or credit limit reached. Check account limits; the slot uses bounded retries.",
     PROVIDER_NETWORK_ERROR: "Provider could not be reached. Check Render outbound connectivity; bounded retries apply.",
-    PROVIDER_TIMEOUT: "The provider request or response body exceeded its timeout. Bounded retries apply; no partial output is published.",
     EVIDENCE_SOURCES_UNREACHABLE: "Authoritative sources were blocked, redirected outside the allowlist or not readable HTML/text. No article was published; retry or use a different grounded topic.",
     EVIDENCE_INSUFFICIENT: "Research did not yield two distinct, readable authoritative references. No filler will be published.",
     CONTEXT_BUDGET_EXCEEDED: "Evidence/article exceeded the safe provider context limit. Shorten the article/evidence; do not remove factual checks.",
@@ -32,11 +30,9 @@ export function blogAction(code: string | null) {
     GENERATION_TRUNCATED: "Provider output was incomplete. The bounded retry may recover; do not publish partial content.",
     DAILY_PROVIDER_BUDGET: "Daily reservation budget is exhausted. Review calls/tokens and wait for the next IST day or explicitly adjust the limits.",
     BUDGET_RESERVED_FOR_NEW_POSTS: "Budget is protected for the remaining new-post slots. Optional draft/improvement work was deferred.",
-    BUDGET_RESERVED_FOR_OTHER_NEW_SLOT: "This new-post retry cannot use the first-attempt budget protected for the other new-post slot. Daily caps are unchanged.",
     NO_SUPPORTED_CHANGE: "No eligible older article or no substantive supported improvement. Nothing changed.",
     EDITORIAL_REVIEW_FAILED: "Factual/privacy review rejected this article. Keep it unpublished and review its evidence.",
-    TOPIC_QUEUE_EMPTY: "No eligible unused topic is ready. Failed topics recover after bounded cooldown; safety-blocked or repeatedly failing topics stay blocked. Check catalog coverage and topic status; do not replay old jobs.",
-    JOB_RECOVERY_NOT_ELIGIBLE: "Recovery requires today's failed new-post job, an allowlisted recoverable error, remaining attempts and no previous explicit recovery. Historical or exhausted jobs and safety rejections cannot be reopened.",
+    TOPIC_QUEUE_EMPTY: "Use Plan topics after confirming active, supported catalog categories.",
     PUBLIC_CATALOG_INSUFFICIENT: "No eligible public catalog facts were available for a grounded topic.",
   };
   return code ? actions[code] || "The safety check stopped publication. Review this diagnostic and the stored article/evidence; do not bypass validation." : "";

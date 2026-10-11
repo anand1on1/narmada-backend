@@ -5,7 +5,7 @@ import { AutoBlogger } from "./auto-blogger";
 import { cleanHtml, escapeHtml as esc } from "./auto-blogger-safety";
 import { BLOG_ORIGIN, BLOG_EDITOR } from "../shared/auto-blogger";
 import { productPath } from "../shared/public-urls";
-import { safeBlogCode } from "../shared/blog-diagnostics";
+import { safeBlogCode } from "./auto-blogger-diagnostics";
 
 const iso = (n: number) => new Date(n).toISOString();
 const date = (n: number) => new Date(n).toLocaleDateString("en-IN", { day: "numeric", month: "long", year: "numeric", timeZone: "Asia/Kolkata" });

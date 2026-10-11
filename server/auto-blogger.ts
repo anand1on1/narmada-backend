@@ -4,7 +4,7 @@ import { bloggerSettingsSchema, BLOG_EDITOR, type BloggerSettings, type CatalogF
 import { LiveBlogProviders, type BlogProviders } from "./auto-blogger-providers";
 import { cleanHtml, similarity, hasSubstantiveChange, internalLinks, validateArticle } from "./auto-blogger-safety";
 import { productPath } from "../shared/public-urls";
-import { safeBlogCode, blogAction } from "../shared/blog-diagnostics";
+import { safeBlogCode, blogAction } from "./auto-blogger-diagnostics";
 import { ArticleSchemaValidationError, schemaDiagnosticSummary, type SchemaDiagnostic } from "./blog-schema-diagnostics";
 
 // Deliberately isolated, additive tables. Never alters products/quotations/PO publication rules.
