@@ -5,7 +5,7 @@ import { AutoBlogger } from "./auto-blogger";
 import { cleanHtml, escapeHtml as esc } from "./auto-blogger-safety";
 import { BLOG_ORIGIN, BLOG_EDITOR } from "../shared/auto-blogger";
 import { productPath } from "../shared/public-urls";
-import { safeBlogCode } from "../shared/blog-diagnostics";
+import { safeBlogCode } from "./auto-blogger-diagnostics";
 
 const iso = (n: number) => new Date(n).toISOString();
 const date = (n: number) => new Date(n).toLocaleDateString("en-IN", { day: "numeric", month: "long", year: "numeric", timeZone: "Asia/Kolkata" });
@@ -131,11 +131,23 @@ export function registerAutoBloggerRoutes(app: Express, db: Database, requireAdm
     try { res.json({ added: engine.plan() }); } catch (e) { err(res, e); }
   });
   app.post(`${base}/draft`, requireAdmin, (_req, res) => {
-    try { res.status(202).json({ jobId: engine.enqueueDraft() }); void engine.tick().catch(() => {}); } catch (e) { err(res, e); }
+    try {
+      const jobId = Number(engine.enqueueDraft());
+      res.status(202).json({ jobId }); void engine.tick(Date.now(), jobId).catch(() => {});
+    } catch (e) { err(res, e); }
   });
-  app.post(`${base}/wake`, requireAdmin, (_req, res) => {
-    if (!engine.status().available || engine.settings().mode === "pause") return res.status(409).json({ error: "AUTOMATION_UNAVAILABLE_OR_PAUSED" });
-    void engine.tick().catch(() => {}); res.status(202).json({ ok: true });
+  app.post(`${base}/jobs/:id/recover`, requireAdmin, (req, res) => {
+    try {
+      const id = z.coerce.number().int().positive().parse(req.params.id);
+      res.json(engine.recoverJob(id));
+    } catch (e) { err(res, e); }
+  });
+  app.post(`${base}/wake`, requireAdmin, (req, res) => {
+    const input = z.object({ jobId: z.number().int().positive().optional() }).strict().safeParse(req.body || {});
+    if (!input.success) return res.status(400).json({ error: "JOB_RECOVERY_NOT_ELIGIBLE" });
+    if (!engine.status().available || (engine.settings().mode === "pause" && input.data.jobId === undefined))
+      return res.status(409).json({ error: "AUTOMATION_UNAVAILABLE_OR_PAUSED" });
+    void engine.tick(Date.now(), input.data.jobId).catch(() => {}); res.status(202).json({ ok: true });
   });
   app.get(`${base}/articles/:id`, requireAdmin, (req, res) => {
     try { res.json(engine.article(Number(req.params.id))); } catch (e) { err(res, e); }

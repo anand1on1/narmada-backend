@@ -2,9 +2,9 @@ import type { Database } from "better-sqlite3";
 import { randomUUID, createHash } from "node:crypto";
 import { bloggerSettingsSchema, BLOG_EDITOR, type BloggerSettings, type CatalogFact, type BlogSource, type ArticleDraft } from "../shared/auto-blogger";
 import { LiveBlogProviders, type BlogProviders } from "./auto-blogger-providers";
-import { cleanHtml, similarity, overlap, internalLinks, validateArticle } from "./auto-blogger-safety";
+import { cleanHtml, similarity, hasSubstantiveChange, internalLinks, validateArticle } from "./auto-blogger-safety";
 import { productPath } from "../shared/public-urls";
-import { safeBlogCode, blogAction } from "../shared/blog-diagnostics";
+import { safeBlogCode, blogAction } from "./auto-blogger-diagnostics";
 import { ArticleSchemaValidationError, schemaDiagnosticSummary, type SchemaDiagnostic } from "./blog-schema-diagnostics";
 
 // Deliberately isolated, additive tables. Never alters products/quotations/PO publication rules.
@@ -45,6 +45,16 @@ export function migrateAutoBlogger(db: Database) {
       day TEXT PRIMARY KEY, calls INTEGER NOT NULL DEFAULT 0, tokens INTEGER NOT NULL DEFAULT 0);
     CREATE TABLE IF NOT EXISTS blog_job_schema_diagnostics (
       job_id INTEGER PRIMARY KEY, details TEXT NOT NULL, created_at INTEGER NOT NULL);
+    CREATE TABLE IF NOT EXISTS blog_topic_recovery (
+      topic_id INTEGER PRIMARY KEY, failures INTEGER NOT NULL DEFAULT 0,
+      last_job_id INTEGER, next_eligible_at INTEGER NOT NULL DEFAULT 0);
+    CREATE TABLE IF NOT EXISTS blog_attempt_budget (
+      lease_token TEXT PRIMARY KEY, job_id INTEGER NOT NULL, day TEXT NOT NULL,
+      calls_started INTEGER NOT NULL DEFAULT 0, tokens_started INTEGER NOT NULL DEFAULT 0,
+      settled INTEGER NOT NULL DEFAULT 0);
+    CREATE TABLE IF NOT EXISTS blog_job_recoveries (
+      job_id INTEGER PRIMARY KEY, previous_error TEXT NOT NULL,
+      attempts_at_recovery INTEGER NOT NULL, recovered_at INTEGER NOT NULL);
     CREATE INDEX IF NOT EXISTS blog_jobs_due ON blog_jobs(day,status,retry_at);
     CREATE INDEX IF NOT EXISTS blog_versions_post ON blog_versions(post_id,id);
     INSERT OR IGNORE INTO blog_worker_lock(id,expires) VALUES(1,0);
@@ -56,6 +66,9 @@ export function migrateAutoBlogger(db: Database) {
 export function indiaDay(now = Date.now()) { return new Date(now + 330 * 60000).toISOString().slice(0, 10); }
 export function slotTime(day: string, hhmm: string) { return Date.parse(`${day}T${hhmm}:00+05:30`); }
 export const TOKEN_RESERVATION = 60000; // Worst-case character-bound input + capped output for all three calls.
+// Charge sent calls conservatively (including ambiguous transport failures).
+// Only stages provably never started are refunded, including after a restart.
+const STAGE_TOKENS = { research: 2000, generate: 34000, review: 24000 };
 const LEASE_MS = 5 * 60000;
 const safeCode = safeBlogCode;
 const brands = ["Tata", "Ashok Leyland", "Eicher", "Mahindra", "BharatBenz", "AMW", "MAN", "Volvo",
@@ -133,7 +146,8 @@ export class AutoBlogger {
             : blogAction(j.error_code)) + (j.error_code === "ARTICLE_SCHEMA_INVALID" && schemaDiagnostics.length
             ? ` Fields: ${schemaDiagnosticSummary(schemaDiagnostics)}` : "") };
       }),
-      topics: this.db.prepare("SELECT * FROM blog_topics ORDER BY id DESC LIMIT 100").all(),
+      topics: this.db.prepare(`SELECT t.*,COALESCE(r.failures,0) AS recoveryFailures,r.next_eligible_at AS nextEligibleAt
+        FROM blog_topics t LEFT JOIN blog_topic_recovery r ON r.topic_id=t.id ORDER BY t.id DESC LIMIT 100`).all(),
       clusters: this.db.prepare("SELECT * FROM blog_clusters").all(),
       articleTotal, articlePages, articlePage,
       articles: this.db.prepare(`SELECT p.id,p.slug,p.title,p.published,p.published_at,p.updated_at,a.category
@@ -141,8 +155,9 @@ export class AutoBlogger {
   }
   plan(now = Date.now()) {
     return this.db.transaction(() => {
+      const recovered = this.recoverTopics(now);
       const queued = (this.db.prepare("SELECT COUNT(*) n FROM blog_topics WHERE status='queued'").get() as any).n;
-      if (queued >= 12) return 0;
+      if (queued >= 12) return recovered;
       const facts = catalogFeed(this.db);
       if (!facts.length) throw new Error("PUBLIC_CATALOG_INSUFFICIENT");
       const prior = (this.db.prepare("SELECT title FROM blog_topics UNION ALL SELECT title FROM posts").all() as any[]).map(r => r.title);
@@ -155,6 +170,15 @@ export class AutoBlogger {
         { cluster: 3, label: "procurement", title: (f: CatalogFact) => `Receiving ${f.category} components: documenting condition and checking the order` },
         { cluster: 5, label: "geography", title: (f: CatalogFact) => `Cross-border ${f.category} parts enquiries: separating technical details from export paperwork` },
         { cluster: 4, label: "application", title: (f: CatalogFact) => `How a fleet service history supports clearer ${f.category} replacement enquiries` },
+        // Distinct next-batch seeds when earlier themes are exhausted/quarantined.
+        // Still catalog-grounded questions, never claims or city-name permutations;
+        // research and article deduplication must establish publishable substance.
+        { cluster: 2, label: "identification", title: (f: CatalogFact) => `Building a ${f.category} component identification record when markings are incomplete` },
+        { cluster: 3, label: "documentation", title: (f: CatalogFact) => `Photographing ${f.category} component labels: what to include in a technical enquiry` },
+        { cluster: 3, label: "clarification", title: (f: CatalogFact) => `Recording unresolved ${f.category} specification questions before approving an order` },
+        { cluster: 3, label: "traceability", title: (f: CatalogFact) => `Keeping ${f.category} packaging labels linked to purchasing documents` },
+        { cluster: 4, label: "records", title: (f: CatalogFact) => `Reviewing conflicting ${f.category} references in workshop records` },
+        { cluster: 2, label: "verification", title: (f: CatalogFact) => `Asking for documentary support when a ${f.category} replacement is proposed` },
       ];
       let added = 0;
       // Round-robin intents AND brands/categories; no multiplication over city names.
@@ -162,7 +186,8 @@ export class AutoBlogger {
       const ordered = [...facts].sort((a, b) => a.brand.localeCompare(b.brand) || a.category.localeCompare(b.category));
       const unique = Array.from(new Map(ordered.map(f => [`${f.brand}:${f.category}`, f])).values());
       for (let k = 0; k < unique.length * intents.length && queued + added < 12; k++) {
-        const i = intents[(k + count) % intents.length], f = unique[(Math.floor(k / intents.length) + k + count) % unique.length];
+        const f = unique[(k + count) % unique.length];
+        const i = intents[(Math.floor(k / unique.length) + k % unique.length + count) % intents.length];
         const title = i.title(f);
         if (prior.some(t => similarity(title, t) > 0.8)) continue;
         const fingerprint = createHash("sha256").update(title.toLowerCase()).digest("hex");
@@ -171,7 +196,55 @@ export class AutoBlogger {
           VALUES(?,?,?,?,?,?,?)`).run(fingerprint, title, i.cluster, i.label, f.category, JSON.stringify(productIds), now);
         if (r.changes) { added++; prior.push(title); }
       }
-      return added;
+      return added + recovered;
+    }).immediate();
+  }
+  private recoverTopics(now: number) {
+    // Historical jobs are audit records, never re-run or reset. Recover only their
+    // unused topics; a live/retrying job or a saved draft always keeps ownership.
+    const abandoned = this.db.prepare(`SELECT t.id,j.id AS job_id,j.error_code,
+        COALESCE(j.finished_at,j.created_at,t.created_at) AS failed_at
+      FROM blog_topics t LEFT JOIN blog_jobs j ON j.id=(SELECT MAX(id) FROM blog_jobs WHERE topic_id=t.id)
+      WHERE t.status='assigned'
+        AND NOT EXISTS(SELECT 1 FROM blog_articles a WHERE a.topic_id=t.id)
+        AND NOT EXISTS(SELECT 1 FROM blog_jobs live WHERE live.topic_id=t.id
+          AND live.status IN ('queued','retry','running'))
+      ORDER BY t.id LIMIT 100`).all() as any[];
+    for (const t of abandoned) {
+      const prior = this.db.prepare("SELECT * FROM blog_topic_recovery WHERE topic_id=?").get(t.id) as any;
+      const failures = (prior?.failures || 0) + (prior?.last_job_id === t.job_id ? 0 : 1);
+      const unsafe = /PRIVACY|UNSAFE|UNGROUNDED|CLAIM_NOT|UNSUPPORTED_COMMERCIAL|EDITORIAL_REVIEW/.test(t.error_code || "");
+      const eligible = t.failed_at + Math.min(7, 2 ** Math.max(0, failures - 1)) * 86400000;
+      this.db.prepare(`INSERT INTO blog_topic_recovery VALUES(?,?,?,?)
+        ON CONFLICT(topic_id) DO UPDATE SET failures=excluded.failures,last_job_id=excluded.last_job_id,next_eligible_at=excluded.next_eligible_at`)
+        .run(t.id, failures, t.job_id || null, eligible);
+      this.db.prepare("UPDATE blog_topics SET status=? WHERE id=?").run(unsafe || failures >= 3 ? "blocked" : "cooldown", t.id);
+    }
+    // At most four re-entries per planning pass; never create extra publication jobs.
+    const queued = (this.db.prepare("SELECT COUNT(*) n FROM blog_topics WHERE status='queued'").get() as any).n;
+    return this.db.prepare(`UPDATE blog_topics SET status='queued' WHERE id IN (
+      SELECT t.id FROM blog_topics t JOIN blog_topic_recovery r ON r.topic_id=t.id
+      WHERE t.status='cooldown' AND r.failures<3 AND r.next_eligible_at<=?
+      ORDER BY r.failures,r.next_eligible_at,t.id LIMIT ?)`).run(now, Math.min(4, Math.max(0, 12 - queued))).changes;
+  }
+  private settleBudget(token: string) {
+    this.db.transaction(() => {
+      const b = this.db.prepare("SELECT * FROM blog_attempt_budget WHERE lease_token=? AND settled=0").get(token) as any;
+      if (!b) return;
+      const calls = 3 - b.calls_started, tokens = TOKEN_RESERVATION - b.tokens_started;
+      this.db.prepare("UPDATE blog_usage SET calls=calls-?,tokens=tokens-? WHERE day=?").run(calls, tokens, b.day);
+      this.db.prepare("UPDATE blog_jobs SET calls=calls-?,token_reserved=token_reserved-? WHERE id=?").run(calls, tokens, b.job_id);
+      this.db.prepare("UPDATE blog_attempt_budget SET settled=1 WHERE lease_token=?").run(token);
+    }).immediate();
+  }
+  private startStage(job: any, stage: keyof typeof STAGE_TOKENS, now: number) {
+    this.db.transaction(() => {
+      this.ensureLease(job, now);
+      if (!this.enabled() || (this.settings().mode === "pause" && !job.allowPaused)) throw new Error("PAUSED_DURING_JOB");
+      const r = this.db.prepare(`UPDATE blog_attempt_budget SET calls_started=calls_started+1,tokens_started=tokens_started+?
+        WHERE lease_token=? AND settled=0 AND calls_started<3 AND tokens_started+?<=?`)
+        .run(STAGE_TOKENS[stage], job.lease_token, STAGE_TOKENS[stage], TOKEN_RESERVATION);
+      if (!r.changes) throw new Error("DAILY_PROVIDER_BUDGET");
     }).immediate();
   }
   enqueueDue(now = Date.now()) {
@@ -196,6 +269,27 @@ export class AutoBlogger {
         .run(day, `draft-${n + 1}`, now, now).lastInsertRowid;
     }).immediate();
   }
+  recoverJob(id: number, now = Date.now()) {
+    return this.db.transaction(() => {
+      const job = this.db.prepare("SELECT * FROM blog_jobs WHERE id=?").get(id) as any;
+      // One explicit recovery, only today's failed new slot, with attempts left.
+      // Never reset attempt/cost counters, re-open old days or override a safety rejection.
+      if (!job || job.day !== indiaDay(now) || job.kind !== "new" || job.status !== "failed" ||
+          job.attempts >= this.settings().maxAttempts ||
+          !/^(TOPIC_QUEUE_EMPTY|PUBLIC_CATALOG_INSUFFICIENT|DAILY_PROVIDER_BUDGET|BUDGET_RESERVED_FOR_(NEW_POSTS|OTHER_NEW_SLOT)|PROVIDER_(NETWORK_ERROR|TIMEOUT|RATE_LIMIT|REQUEST_FAILED)|EVIDENCE_(INSUFFICIENT|SOURCES_UNREACHABLE)|ARTICLE_SCHEMA_INVALID)$/.test(job.error_code || "") ||
+          this.db.prepare("SELECT 1 FROM blog_job_recoveries WHERE job_id=?").get(id))
+        throw new Error("JOB_RECOVERY_NOT_ELIGIBLE");
+      if (job.topic_id && (
+        this.db.prepare("SELECT 1 FROM blog_topics WHERE id=? AND status='blocked'").get(job.topic_id) ||
+        this.db.prepare("SELECT 1 FROM blog_articles WHERE topic_id=?").get(job.topic_id) ||
+        this.db.prepare("SELECT 1 FROM blog_jobs WHERE topic_id=? AND id!=? AND status IN ('queued','retry','running')")
+          .get(job.topic_id, id))) throw new Error("JOB_RECOVERY_NOT_ELIGIBLE");
+      this.db.prepare("INSERT INTO blog_job_recoveries VALUES(?,?,?,?)").run(id, job.error_code, job.attempts, now);
+      this.db.prepare("UPDATE blog_jobs SET status='retry',retry_at=MAX(retry_at,?) WHERE id=?").run(now, id);
+      return { jobId: id, attemptsRemaining: this.settings().maxAttempts - job.attempts,
+        nextEligibleAt: Math.max(now, job.retry_at), mode: this.settings().mode };
+    }).immediate();
+  }
   private reserve(day: string, calls: number, tokens: number, protectNew = false) {
     const s = this.settings();
     this.db.prepare("INSERT OR IGNORE INTO blog_usage(day) VALUES(?)").run(day);
@@ -210,7 +304,7 @@ export class AutoBlogger {
       WHERE day=? AND calls+?<=? AND tokens+?<=?`).run(calls, tokens, day, calls, s.dailyCallBudget, tokens, s.dailyTokenBudget);
     if (!result.changes) throw new Error("DAILY_PROVIDER_BUDGET");
   }
-  private claim(now: number): any {
+  private claim(now: number, requestedJobId?: number): any {
     return this.db.transaction(() => {
       const token = randomUUID();
       if (!this.db.prepare("UPDATE blog_worker_lock SET token=?,expires=? WHERE id=1 AND expires<?").run(token, now + LEASE_MS, now).changes) return null;
@@ -218,12 +312,12 @@ export class AutoBlogger {
       this.db.prepare(`UPDATE blog_jobs SET status='failed',error_code='ATTEMPTS_EXHAUSTED',finished_at=?
         WHERE day=? AND attempts>=? AND status IN ('running','retry') AND COALESCE(lease_until,0)<?`).run(now, day, s.maxAttempts, now);
       const job = this.db.prepare(`SELECT * FROM blog_jobs WHERE day=? AND attempts<? AND due_at<=? AND retry_at<=?
+        AND (? IS NULL OR id=?)
         AND (status IN ('queued','retry') OR (status='running' AND lease_until<?))
-        ORDER BY due_at,id LIMIT 1`).get(day, s.maxAttempts, now, now, now) as any;
+        ORDER BY due_at,id LIMIT 1`).get(day, s.maxAttempts, now, now, requestedJobId ?? null, requestedJobId ?? null, now) as any;
       if (!job) { this.release(token); return null; }
       this.db.prepare(`UPDATE blog_jobs SET status='running',attempts=attempts+1,lease_token=?,lease_until=?,
         error_code=NULL WHERE id=?`).run(token, now + LEASE_MS, job.id);
-      this.db.prepare("DELETE FROM blog_job_schema_diagnostics WHERE job_id=?").run(job.id);
       return { ...job, lease_token: token, attempts: job.attempts + 1 };
     }).immediate();
   }
@@ -251,7 +345,11 @@ export class AutoBlogger {
     }
     if (!job.topic_id) this.plan(now);
     const topic = (job.topic_id ? this.db.prepare("SELECT * FROM blog_topics WHERE id=?").get(job.topic_id) :
-      this.db.prepare("SELECT * FROM blog_topics WHERE status='queued' ORDER BY id LIMIT 1").get()) as any;
+      this.db.prepare(`SELECT t.* FROM blog_topics t LEFT JOIN blog_topic_recovery r ON r.topic_id=t.id
+        WHERE t.status='queued'
+        ORDER BY (t.category=COALESCE((SELECT prev.category FROM blog_jobs j JOIN blog_topics prev ON prev.id=j.topic_id
+          WHERE j.topic_id IS NOT NULL ORDER BY j.id DESC LIMIT 1),'')),
+          COALESCE(r.failures,0),t.id LIMIT 1`).get()) as any;
     if (!topic) throw new Error("TOPIC_QUEUE_EMPTY");
     this.db.prepare("UPDATE blog_topics SET status='assigned' WHERE id=?").run(topic.id);
     this.db.prepare("UPDATE blog_jobs SET topic_id=? WHERE id=?").run(topic.id, job.id);
@@ -295,7 +393,7 @@ export class AutoBlogger {
   }
   private persist(draft: ArticleDraft, sources: BlogSource[], topic: any, existing: any, job: any, now: number) {
     const snapshot = { ...draft, sources };
-    const publish = job.kind !== "draft" && this.settings().mode === "auto";
+    const publish = !job.forceDraft && job.kind !== "draft" && this.settings().mode === "auto";
     if (existing && !publish) {
       this.db.prepare(`INSERT OR IGNORE INTO blog_articles(post_id,topic_id,cluster_id,category,snapshot,updated_at) VALUES(?,?,?,?,?,?)`)
         .run(existing.id, topic.id || null, topic.cluster_id, topic.category, JSON.stringify({
@@ -338,10 +436,18 @@ export class AutoBlogger {
     if (topic.id) this.db.prepare("UPDATE blog_topics SET status='completed' WHERE id=?").run(topic.id);
     return id;
   }
-  async tick(now = Date.now()) {
-    if (!this.enabled() || !this.providers.status().ready || this.settings().mode === "pause") return;
-    this.enqueueDue(now);
-    const job = this.claim(now); if (!job) return;
+  async tick(now = Date.now(), requestedJobId?: number) {
+    const initialMode = this.settings().mode;
+    if (!this.enabled() || !this.providers.status().ready || (initialMode === "pause" && requestedJobId === undefined)) return;
+    // Explicit admin verification never catches up unrelated scheduled slots.
+    if (requestedJobId === undefined) this.enqueueDue(now);
+    const staleBudgets = this.db.prepare(`SELECT b.lease_token FROM blog_attempt_budget b JOIN blog_jobs j ON j.id=b.job_id
+      WHERE b.settled=0 AND (j.lease_token!=b.lease_token OR COALESCE(j.lease_until,0)<=?
+        OR j.status NOT IN ('running'))`).all(now) as any[];
+    for (const b of staleBudgets) this.settleBudget(b.lease_token);
+    const job = this.claim(now, requestedJobId); if (!job) return;
+    job.allowPaused = requestedJobId !== undefined && initialMode === "pause";
+    job.forceDraft = initialMode !== "auto";
     // Test clock may be injected; real processing elapsed time still expires the lease.
     const start = Date.now(), clock = () => now + (Date.now() - start);
     try {
@@ -354,13 +460,19 @@ export class AutoBlogger {
         const protectedSlots = Math.max(0, 2 - started);
         if (settings.mode === "auto" && (job.kind !== "new" || job.attempts > 1) &&
           (usage.calls + 3 + protectedSlots * 3 > settings.dailyCallBudget ||
-           usage.tokens + TOKEN_RESERVATION * (1 + protectedSlots) > settings.dailyTokenBudget)) throw new Error("BUDGET_RESERVED_FOR_NEW_POSTS");
+           usage.tokens + TOKEN_RESERVATION * (1 + protectedSlots) > settings.dailyTokenBudget))
+          throw new Error(job.kind === "new" ? "BUDGET_RESERVED_FOR_OTHER_NEW_SLOT" : "BUDGET_RESERVED_FOR_NEW_POSTS");
         this.reserve(job.day, 3, TOKEN_RESERVATION);
         this.db.prepare("UPDATE blog_jobs SET calls=calls+3,token_reserved=token_reserved+? WHERE id=?").run(TOKEN_RESERVATION, job.id);
+        this.db.prepare("INSERT INTO blog_attempt_budget(lease_token,job_id,day) VALUES(?,?,?)").run(job.lease_token, job.id, job.day);
       }).immediate();
-      const sources = await this.providers.research(topic.title);
       const ids = JSON.parse(topic.product_ids);
       const facts = catalogFeed(this.db).filter(f => ids.includes(f.id)).slice(0, 3);
+      // Search for technical evidence, not the long templated editorial headline.
+      const researchQuery = topic.intent === "research-discovery" || topic.intent === "geography" ? topic.title :
+        `${facts[0]?.brand || ""} ${topic.category} parts ${job.attempts > 1 ? "service maintenance reference" : "identification documentation"} manufacturer`;
+      this.startStage(job, "research", clock());
+      const sources = await this.providers.research(researchQuery);
       const links = internalLinks(this.db);
       const cluster = this.db.prepare("SELECT name,pillar_post_id FROM blog_clusters WHERE id=?").get(topic.cluster_id) as any;
       const pillar = cluster?.pillar_post_id && this.db.prepare("SELECT slug FROM posts WHERE id=? AND published=1").get(cluster.pillar_post_id) as any;
@@ -369,6 +481,9 @@ export class AutoBlogger {
       // Existing managed content already passed privacy checks. Unmanaged legacy prose
       // is not sent to AI: research the safe title afresh rather than risk old free-text PII.
       const managed = existing && this.db.prepare("SELECT post_id FROM blog_articles WHERE post_id=?").get(existing.id);
+      const diagnosticRow = this.db.prepare("SELECT details FROM blog_job_schema_diagnostics WHERE job_id=?").get(job.id) as any;
+      const schemaFeedback: SchemaDiagnostic[] = diagnosticRow ? JSON.parse(diagnosticRow.details) : [];
+      this.startStage(job, "generate", clock());
       const generated = await this.providers.generate({
         topic: topic.title, category: topic.category, catalog: facts,
         cluster: cluster?.name, editorialRole: pillar ? "supporting article" : "evidence-led overview/pillar",
@@ -377,23 +492,29 @@ export class AutoBlogger {
           ...(pillar ? [`/blog/${pillar.slug}`] : []),
           ...supporting.map(p => `/blog/${p.slug}`).filter(l => links.includes(l))],
         sources, previousArticle: managed ? cleanHtml(existing.content).slice(0, 6500) : undefined,
+        ...(schemaFeedback.length ? { schemaFeedback,
+          repairInstruction: "The prior attempt failed these schema rules. Correct these fields using the supplied evidence. Never invent or extend quotations. Omit optional follow-up questions if invalid. Return a complete valid article." } : {}),
       });
+      this.db.prepare("UPDATE blog_jobs SET token_used=token_used+? WHERE id=? AND lease_token=?").run(generated.tokens, job.id, job.lease_token);
       const draft = validateArticle(this.db, generated.draft, sources, existing?.id);
-      if (existing && (!draft.improvementSummary || overlap(draft.content, existing.content) > 0.94))
+      if (existing && (!draft.improvementSummary || !hasSubstantiveChange(draft.content, existing.content)))
         throw new Error("NO_SUPPORTED_CHANGE");
+      this.startStage(job, "review", clock());
       const review = await this.providers.review(draft, sources);
+      this.db.prepare("UPDATE blog_jobs SET token_used=token_used+? WHERE id=? AND lease_token=?").run(review.tokens, job.id, job.lease_token);
       if (!review.supported) throw new Error("EDITORIAL_REVIEW_FAILED");
       this.db.transaction(() => {
         this.ensureLease(job, clock());
-        if (!this.enabled() || this.settings().mode === "pause") throw new Error("PAUSED_DURING_JOB");
+        if (!this.enabled() || (this.settings().mode === "pause" && !job.allowPaused)) throw new Error("PAUSED_DURING_JOB");
         // An editor may have unpublished or changed the article while a provider was running.
         if (existing) {
           const current = this.db.prepare("SELECT published,updated_at FROM posts WHERE id=?").get(existing.id) as any;
           if (!current?.published || current.updated_at !== existing.updated_at) throw new Error("ARTICLE_CHANGED_DURING_JOB");
         }
         const postId = this.persist(draft, sources, topic, existing, job, clock());
-        this.db.prepare("UPDATE blog_jobs SET status='succeeded',post_id=?,finished_at=?,token_used=? WHERE id=? AND lease_token=?")
-          .run(postId, clock(), generated.tokens + review.tokens, job.id, job.lease_token);
+        this.db.prepare("UPDATE blog_jobs SET status='succeeded',post_id=?,finished_at=? WHERE id=? AND lease_token=?")
+          .run(postId, clock(), job.id, job.lease_token);
+        this.db.prepare("DELETE FROM blog_job_schema_diagnostics WHERE job_id=?").run(job.id);
       }).immediate();
     } catch (error) {
       const code = safeCode(error);
@@ -409,11 +530,17 @@ export class AutoBlogger {
         }
       }
       const skipped = code === "NO_SUPPORTED_CHANGE";
-      const retryable = /^(PROVIDER_(?:NETWORK|RATE|REQUEST|RESPONSE|EMPTY)|SOURCE_|EVIDENCE_|LEASE_EXPIRED|ARTICLE_SCHEMA_INVALID$|GENERATION_(?:JSON_INVALID|TRUNCATED))/.test(code);
+      const retryable = /^(PROVIDER_(?:NETWORK|TIMEOUT|RATE|REQUEST|RESPONSE|EMPTY)|SOURCE_|EVIDENCE_|LEASE_EXPIRED|ARTICLE_SCHEMA_INVALID$|GENERATION_(?:JSON_INVALID|TRUNCATED))/.test(code);
       const status = skipped ? "skipped" : retryable && job.attempts < this.settings().maxAttempts ? "retry" : "failed";
       this.db.prepare(`UPDATE blog_jobs SET status=?,error_code=?,retry_at=?,finished_at=?
         WHERE id=? AND lease_token=?`).run(status, code, clock() + 5 * 60000 * job.attempts, clock(), job.id, job.lease_token);
-    } finally { this.release(job.lease_token); }
+    } finally {
+      this.settleBudget(job.lease_token);
+      this.release(job.lease_token);
+      const result = this.db.prepare(`SELECT id,day,kind,status,attempts,error_code,calls,token_reserved,post_id
+        FROM blog_jobs WHERE id=? AND lease_token=?`).get(job.id, job.lease_token);
+      if (result) console.info("[auto-blogger] job_result", JSON.stringify(result));
+    }
   }
   article(id: number) {
     const row = this.db.prepare(`SELECT p.*,a.snapshot,a.category FROM posts p JOIN blog_articles a ON a.post_id=p.id WHERE p.id=?`).get(id) as any;

@@ -2,6 +2,7 @@ import sanitizeHtml from "sanitize-html";
 import { lookup } from "node:dns/promises";
 import { request } from "node:https";
 import { isIP } from "node:net";
+import { createGunzip, createBrotliDecompress, createInflate } from "node:zlib";
 import type { Database } from "better-sqlite3";
 import { articleDraftSchema, type ArticleDraft, type BlogSource } from "../shared/auto-blogger";
 import { productPath } from "../shared/public-urls";
@@ -66,7 +67,8 @@ export async function readEvidence(input: string): Promise<BlogSource> {
   if (!addresses.length || addresses.some(a => !publicAddress(a.address))) throw new Error("SOURCE_ADDRESS_REJECTED");
   const result = await new Promise<{ html?: string; redirect?: string }>((resolve, reject) => {
     const req = request(url, {
-      method: "GET", headers: { "User-Agent": "NarmadaMobilityEditorial/1.0", Accept: "text/html,text/plain" },
+      method: "GET", headers: { "User-Agent": "NarmadaMobilityEditorial/1.0", Accept: "text/html,text/plain",
+        "Accept-Encoding": "gzip, deflate, br" },
       lookup: ((_host: any, opts: any, cb: any) => opts?.all
         ? cb(null, [{ address: addresses[0].address, family: 4 }])
         : cb(null, addresses[0].address, 4)) as any,
@@ -77,14 +79,27 @@ export async function readEvidence(input: string): Promise<BlogSource> {
       if (res.statusCode !== 200 || !/text\/(html|plain)/i.test(String(res.headers["content-type"]))) {
         res.resume(); reject(new Error("SOURCE_UNREACHABLE")); return;
       }
-      const chunks: Buffer[] = []; let size = 0;
-      res.on("data", c => { size += c.length; if (size > 750000) req.destroy(new Error("SOURCE_TOO_LARGE")); else chunks.push(c); });
-      res.on("end", () => resolve({ html: Buffer.concat(chunks).toString("utf8") }));
+      const encoding = String(res.headers["content-encoding"] || "identity").toLowerCase();
+      const decoder = encoding === "gzip" ? createGunzip() : encoding === "br" ? createBrotliDecompress() :
+        encoding === "deflate" ? createInflate() : null;
+      if (!decoder && encoding !== "identity") { res.resume(); reject(new Error("SOURCE_UNREACHABLE")); return; }
+      const chunks: Buffer[] = []; let size = 0, wireSize = 0;
+      const body = decoder ? res.pipe(decoder) : res;
+      const tooLarge = () => {
+        decoder?.destroy(); req.destroy(new Error("SOURCE_TOO_LARGE"));
+        reject(new Error("SOURCE_TOO_LARGE"));
+      };
+      if (decoder) res.on("data", c => { wireSize += c.length; if (wireSize > 750000) tooLarge(); });
+      body.on("data", c => { size += c.length; if (size > 750000) tooLarge(); else chunks.push(c); });
+      body.on("end", () => resolve({ html: Buffer.concat(chunks).toString("utf8") }));
+      body.on("error", () => { req.destroy(); reject(new Error("SOURCE_UNREACHABLE")); });
       res.on("error", () => reject(new Error("SOURCE_UNREACHABLE")));
+      res.on("aborted", () => { decoder?.destroy(); reject(new Error("SOURCE_UNREACHABLE")); });
     });
     const timer = setTimeout(() => req.destroy(new Error("SOURCE_TIMEOUT")), Math.max(1, deadline - Date.now()));
     req.on("close", () => clearTimeout(timer));
-    req.on("error", () => reject(new Error("SOURCE_UNREACHABLE")));
+    req.on("error", error => reject(new Error(
+      ["SOURCE_TIMEOUT", "SOURCE_TOO_LARGE"].includes(error.message) ? error.message : "SOURCE_UNREACHABLE")));
     req.end();
   });
   if (result.redirect) {
@@ -95,7 +110,14 @@ export async function readEvidence(input: string): Promise<BlogSource> {
   html = result.html || "";
   break;
   }
-  const text = textOnly(html).slice(0, 14000);
+  // Prefer actual article/main text over navigation/cookie walls. Never treat a
+  // blocked/challenge page or search-result snippet as substantive evidence.
+  const main = html.match(/<(article|main)\b[^>]*>([\s\S]*?)<\/\1>/i)?.[2];
+  const useful = (main && textOnly(main).length >= 250 ? main : html)
+    .replace(/<(nav|header|footer|aside)\b[^>]*>[\s\S]*?<\/\1>/gi, " ");
+  const text = textOnly(useful).slice(0, 14000);
+  if (/\b(verify you are human|checking your browser|enable javascript and cookies to continue|access denied|just a moment)\b/i.test(text.slice(0, 500)))
+    throw new Error("SOURCE_UNREACHABLE");
   if (text.length < 250) throw new Error("EVIDENCE_INSUFFICIENT");
   // Redact phone/email text from public research pages before generation.
   const safe = text.replace(/\S+@\S+\.\S+/g, "[redacted]").replace(/(?:\+?\d[\s().-]*){9,}/g, "[redacted]");
@@ -117,6 +139,15 @@ export function overlap(a: string, b: string): number {
   const x = shingles(a), y = shingles(b);
   return Array.from(x).filter(t => y.has(t)).length / Math.max(1, Math.min(x.size, y.size));
 }
+export function hasSubstantiveChange(next: string, previous: string): boolean {
+  const proposed = shingles(next), prior = shingles(previous);
+  const novel = Array.from(proposed).filter(s => !prior.has(s)).length;
+  // Measure the proposed article, not the smaller text. Otherwise retaining the
+  // old article and adding a useful new section always scores 100% overlap.
+  // Formatting/date-only changes cannot meet both thresholds; review must still
+  // confirm factual support and the editorial usefulness of the added content.
+  return novel >= 60 && novel / Math.max(1, proposed.size) >= 0.10;
+}
 export function internalLinks(db: Database): string[] {
   return ["/products", "/contact", "/blog",
     ...(db.prepare("SELECT slug,part_number FROM products WHERE active=1 AND slug GLOB '[a-zA-Z0-9]*' LIMIT 10000").all() as any[])
@@ -125,7 +156,27 @@ export function internalLinks(db: Database): string[] {
       .filter(r => /^[a-zA-Z0-9_-]+$/.test(r.slug)).map(r => `/blog/${r.slug}`)];
 }
 export function validateArticle(db: Database, input: unknown, sources: BlogSource[], existingId?: number): ArticleDraft {
-  const parsed = articleDraftSchema.safeParse(input);
+  // Repair presentation only. No claim or quotation is padded, rewritten or
+  // fabricated. Optional queue suggestions must never poison a valid article.
+  let normalized = input;
+  if (input && typeof input === "object" && !Array.isArray(input)) {
+    const value = input as Record<string, unknown>;
+    let excerpt = value.excerpt;
+    if (typeof excerpt === "string" && excerpt.length > 200 && !/[<>]|&(?:#\w+|\w+);/.test(excerpt)) {
+      const prefix = excerpt.slice(0, 200);
+      excerpt = prefix.slice(0, Math.max(50, prefix.lastIndexOf(" "))).trimEnd();
+    }
+    const followSchema = articleDraftSchema.shape.followUpTopics.removeDefault().element;
+    const follows = Array.isArray(value.followUpTopics) ? value.followUpTopics.slice(0, 3).flatMap(f => {
+      const valid = followSchema.safeParse(f);
+      if (!valid.success) return [];
+      const source = sources.find(s => s.url === valid.data.sourceUrl);
+      return source?.text.includes(valid.data.evidenceQuote) &&
+        /^[a-zA-Z0-9 ,:?!&()/'–—-]+$/.test(valid.data.title) && !/\d{7,}/.test(valid.data.title) ? [valid.data] : [];
+    }) : [];
+    normalized = { ...value, excerpt, followUpTopics: follows };
+  }
+  const parsed = articleDraftSchema.safeParse(normalized);
   if (!parsed.success) throw new ArticleSchemaValidationError(input, parsed.error.issues);
   const d = parsed.data;
   const clean = cleanHtml(d.content), plain = textOnly(clean);
@@ -149,7 +200,7 @@ export function validateArticle(db: Database, input: unknown, sources: BlogSourc
       hrefs.length > 12 || sources.length < 2) throw new Error("LINK_EVIDENCE_INSUFFICIENT");
   for (const claim of d.claims) {
     const source = sources.find(s => s.url === claim.sourceUrl);
-    if (!source || !source.text.toLowerCase().includes(claim.evidenceQuote.toLowerCase()) ||
+    if (!source || !source.text.includes(claim.evidenceQuote) ||
         !plain.toLowerCase().includes(textOnly(claim.claim).toLowerCase())) throw new Error("CLAIM_NOT_GROUNDED");
   }
   for (const topic of d.followUpTopics) {

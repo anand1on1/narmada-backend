@@ -26,6 +26,7 @@ Finish with a modest invitation to request a quote at /contact; confirm fitment 
 Return only JSON matching {title,excerpt,content,metaTitle,metaDescription,claims,productSlugs,improvementSummary,followUpTopics}.
 Return the article object itself, with no wrapper and NO extra keys at any level.
 title, excerpt, content, metaTitle, metaDescription and improvementSummary must be strings, never null.
+excerpt must be plain text, not HTML or encoded entities.
 claims, productSlugs and followUpTopics must be arrays, never null; use [] when an optional list is empty.
 title 20–120 chars, excerpt 50–200, metaTitle 15–65, metaDescription 60–165.
 content must be a single HTML string, 1500–35000 characters, in addition to the word/heading rules above.
@@ -48,6 +49,10 @@ content, return {"skip":true}. Preserve the topic and don't claim search volume 
 
 const present = (s: string | undefined) => !!s?.trim() && !/^(skip|changeme|your[_ -].*|placeholder)$/i.test(s.trim());
 const key = () => present(process.env.CLAUDE_API_KEY) ? process.env.CLAUDE_API_KEY!.trim() : process.env.ANTHROPIC_API_KEY?.trim();
+function transportCode(error: unknown, signal: AbortSignal) {
+  return signal.aborted || (error instanceof Error && ["TimeoutError", "AbortError"].includes(error.name))
+    ? "PROVIDER_TIMEOUT" : "PROVIDER_NETWORK_ERROR";
+}
 // All provider requests are fixed API URLs: administrators cannot configure arbitrary network targets.
 export class LiveBlogProviders implements BlogProviders {
   constructor(private fetcher: typeof fetch = fetch, private evidence = readEvidence) {}
@@ -57,13 +62,17 @@ export class LiveBlogProviders implements BlogProviders {
   }
   private async json(url: string, headers: Record<string, string>, body: unknown): Promise<any> {
     let response: Response;
+    const signal = AbortSignal.timeout(60000);
     try {
       response = await this.fetcher(url, { method: "POST", headers: { "Content-Type": "application/json", ...headers },
-        body: JSON.stringify(body), signal: AbortSignal.timeout(60000), redirect: "error" });
-    } catch { throw new Error("PROVIDER_NETWORK_ERROR"); }
-    if (!response.ok) throw new Error(response.status === 429 ? "PROVIDER_RATE_LIMIT" :
-      [401, 403].includes(response.status) ? "PROVIDER_AUTH_FAILED" :
-      response.status === 404 ? "PROVIDER_MODEL_UNAVAILABLE" : "PROVIDER_REQUEST_FAILED");
+        body: JSON.stringify(body), signal, redirect: "error" });
+    } catch (error) { throw new Error(transportCode(error, signal)); }
+    if (!response.ok) {
+      await response.body?.cancel().catch(() => {});
+      throw new Error(response.status === 429 ? "PROVIDER_RATE_LIMIT" :
+        [401, 403].includes(response.status) ? "PROVIDER_AUTH_FAILED" :
+        response.status === 404 ? "PROVIDER_MODEL_UNAVAILABLE" : "PROVIDER_REQUEST_FAILED");
+    }
     const reader = response.body?.getReader();
     if (!reader) throw new Error("PROVIDER_EMPTY_RESPONSE");
     let size = 0; const chunks: Uint8Array[] = [];
@@ -74,8 +83,12 @@ export class LiveBlogProviders implements BlogProviders {
         if (size > 250000) { await reader.cancel(); throw new Error("PROVIDER_RESPONSE_TOO_LARGE"); }
         chunks.push(part.value);
       }
-      return JSON.parse(Buffer.concat(chunks).toString("utf8"));
-    } catch { throw new Error("PROVIDER_RESPONSE_INVALID"); }
+    } catch (error) {
+      if (error instanceof Error && error.message === "PROVIDER_RESPONSE_TOO_LARGE") throw error;
+      throw new Error(transportCode(error, signal));
+    } finally { reader.releaseLock(); }
+    try { return JSON.parse(Buffer.concat(chunks).toString("utf8")); }
+    catch { throw new Error("PROVIDER_RESPONSE_INVALID"); }
   }
   async research(query: string): Promise<BlogSource[]> {
     if (!this.status().research) throw new Error("RESEARCH_NOT_CONFIGURED");
@@ -92,23 +105,31 @@ export class LiveBlogProviders implements BlogProviders {
         Authorization: `Bearer ${process.env.PERPLEXITY_API_KEY}`,
       }, {
         model: "sonar", max_tokens: 500, search_domain_filter: authoritativeDomains.slice(0, 20),
-        messages: [{ role: "system", content: "Find authoritative manufacturer or government technical references only. No marketing claims. Return citations for research, do not write an article." },
+        messages: [{ role: "system", content: "Find authoritative manufacturer or government technical references only. Prefer directly readable public HTML/text reference pages, not PDFs, homepages or script-only portals. No marketing claims. Return citations for research, do not write an article." },
           { role: "user", content: query.slice(0, 300) }],
       });
       urls = Array.isArray(r.citations) ? r.citations : [];
     }
     const safeUrls = Array.from(new Set(urls)).filter(url => {
       try { assertPublicSource(url); return true; } catch { return false; }
-    }).slice(0, 4);
+    }).map(url => { const u = new URL(url); u.hash = ""; return u.href; });
+    const candidates = Array.from(new Set(safeUrls)).slice(0, 6);
     const sources: BlogSource[] = [];
-    // Bounded: at most four pages, retain at most two 6k evidence excerpts.
+    // One paid search, at most six authoritative pages in pairs, no unbounded
+    // paid fallback. A bad first pair must not hide good later references.
     let failures = 0;
-    for (const url of safeUrls) {
-      try {
-        const s = await this.evidence(url);
-        if (!sources.some(existing => existing.url === s.url)) sources.push({ ...s, text: s.text.slice(0, 6000) });
-        if (sources.length === 2) break;
-      } catch { failures++; /* unreachable or unsafe source is not evidence */ }
+    for (let i = 0; i < candidates.length && sources.length < 2; i += 2) {
+      const results = await Promise.allSettled(candidates.slice(i, i + 2).map(url => this.evidence(url)));
+      for (const result of results) {
+        if (result.status === "rejected") { failures++; continue; }
+        const s = result.value;
+        try { assertPublicSource(s.url); } catch { failures++; continue; }
+        const canonical = new URL(s.url); canonical.hash = "";
+        if (typeof s.text !== "string" || s.text.trim().length < 250) { failures++; continue; }
+        if (sources.length < 2 && !sources.some(existing => existing.url === canonical.href ||
+            existing.text === s.text.slice(0, 6000)))
+          sources.push({ ...s, url: canonical.href, text: s.text.slice(0, 6000) });
+      }
     }
     if (sources.length < 2) throw new Error(failures && sources.length === 0 ? "EVIDENCE_SOURCES_UNREACHABLE" : "EVIDENCE_INSUFFICIENT");
     return sources;
@@ -116,7 +137,9 @@ export class LiveBlogProviders implements BlogProviders {
   private async claude(system: string, data: unknown, maxTokens: number) {
     if (!this.status().generation) throw new Error("GENERATION_NOT_CONFIGURED");
     const payload = JSON.stringify(data);
-    if (Buffer.byteLength(payload, "utf8") > 23000) throw new Error("CONTEXT_BUDGET_EXCEEDED");
+    if (Buffer.byteLength(payload, "utf8") > 23000 ||
+        Buffer.byteLength(payload + system, "utf8") + maxTokens + 100 > (maxTokens === 300 ? 24000 : 34000))
+      throw new Error("CONTEXT_BUDGET_EXCEEDED");
     const r = await this.json("https://api.anthropic.com/v1/messages", {
       "x-api-key": key()!, "anthropic-version": "2023-06-01",
     }, {
