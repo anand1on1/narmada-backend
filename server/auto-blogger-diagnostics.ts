@@ -4,6 +4,7 @@ import { safeBlogCode as sharedCode, blogAction as sharedAction } from "../share
 // GoDaddy frontend already renders each job's server-provided nextAction.
 const actions: Record<string, string> = {
   PROVIDER_TIMEOUT: "The provider request or response body exceeded its timeout. Bounded retries apply; no partial output is published.",
+  UNSUPPORTED_COMMERCIAL_CLAIM: "A conservative commercial phrase rule blocked the article. This alone does not establish an unsupported assertion: negated/advisory phrasing can also match. New jobs record safe field/rule IDs and allow at most one diagnostic-guided correction within existing attempts/budgets; repeated failures remain unpublished.",
   BUDGET_RESERVED_FOR_OTHER_NEW_SLOT: "This new-post retry cannot use the first-attempt budget protected for the other new-post slot. Daily caps are unchanged.",
   JOB_RECOVERY_NOT_ELIGIBLE: "Recovery requires today's failed new-post job, an allowlisted recoverable error, remaining attempts and no previous explicit recovery. Historical or exhausted jobs and safety rejections cannot be reopened.",
   TOPIC_QUEUE_EMPTY: "No eligible unused topic is ready. Failed topics recover after bounded cooldown; safety-blocked or repeatedly failing topics stay blocked. Check catalog coverage and topic status; do not replay old jobs.",
