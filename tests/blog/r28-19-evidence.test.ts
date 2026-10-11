@@ -64,6 +64,6 @@ describe("R28.19 authoritative evidence transport", () => {
     replies = [{ status: 200, body: "<p>Too short</p>" }];
     await expect(readEvidence("https://www.tatamotors.com/file")).rejects.toThrow("EVIDENCE_INSUFFICIENT");
     replies = [{ status: 200, body: "x".repeat(750001) }];
-    await expect(readEvidence("https://www.tatamotors.com/file")).rejects.toThrow("SOURCE_UNREACHABLE");
+    await expect(readEvidence("https://www.tatamotors.com/file")).rejects.toThrow("SOURCE_TOO_LARGE");
   });
 });
