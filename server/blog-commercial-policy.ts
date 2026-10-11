@@ -30,4 +30,4 @@ These phrases are rejected even in negated advice or attributed source quotation
 Use neutral questions such as "confirm availability" or "ask for manufacturer documentation".
 Remove unsupported assertions about Narmada, NEVER disguise them with synonyms.
 Keep evidenceQuote verbatim in claims metadata; do not alter a source quotation to evade a rule.
-If supplied evidence cannot support two valid claims and useful compliant prose, return {"skip":true}.`;
+If supplied evidence cannot support two valid claims and useful compliant prose, use the operation-specific abstention contract.`;

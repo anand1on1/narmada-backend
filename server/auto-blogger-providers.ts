@@ -1,6 +1,7 @@
 import type { ArticleDraft, BlogSource } from "../shared/auto-blogger";
 import { authoritativeDomains, assertPublicSource, readEvidence } from "./auto-blogger-safety";
 import { COMMERCIAL_WRITING_RULES } from "./blog-commercial-policy";
+import { checkGenerationDecision, generationContract, type GenerationOperation } from "./blog-generation-decision";
 
 export interface BlogProviders {
   status(): { ready: boolean; generation: boolean; research: boolean };
@@ -25,7 +26,7 @@ Use only supplied actual internal links; one or two related products where relev
 Use Narmada Mobility, not Narmada Motors. Organization author only. Never invent photographs or human experience.
 450–1000 words; three or more useful h2 headings; concise paragraphs/checklist; no h1/images/script/style.
 Finish with a modest invitation to request a quote at /contact; confirm fitment and availability with the team.
-Return only JSON matching {title,excerpt,content,metaTitle,metaDescription,claims,productSlugs,improvementSummary,followUpTopics}.
+For article output, return only JSON matching {title,excerpt,content,metaTitle,metaDescription,claims,productSlugs,improvementSummary,followUpTopics}.
 Return the article object itself, with no wrapper and NO extra keys at any level.
 title, excerpt, content, metaTitle, metaDescription and improvementSummary must be strings, never null.
 title, excerpt, metaTitle and metaDescription must be plain text, not HTML or encoded entities.
@@ -36,8 +37,8 @@ claims: 2–15 objects with exactly {claim,sourceUrl,evidenceQuote}, all strings
 claim must be 15–700 characters and occur verbatim in article; sourceUrl must be a supplied absolute source URL.
 evidenceQuote must be 30–1200 characters verbatim from supplied source. Cite at least two sources in article.
 productSlugs: 0–5 supplied slug strings matching ^[a-zA-Z0-9_-]+$, never URLs or objects.
-improvementSummary: 0–600 characters; empty string for new article; for update describe a
-substantive supported addition/correction. Do not just reword or change dates.
+improvementSummary: 0–600 characters; follow the operation-specific instructions below.
+For updates, do not just reword or change dates.
 The queued topic is an editorial seed, not a title to copy: discover the most useful specific question and
 natural search wording the actual research can answer within that theme. No invented volume/difficulty metrics.
 Respect editorialRole: a pillar is a useful evergreen overview of the evidenced theme; supporting articles
@@ -46,8 +47,8 @@ followUpTopics: up to 3 genuinely DISTINCT further questions revealed by these s
 {title,sourceUrl,evidenceQuote}; 30–140 char question/title, 30–500 char verbatim supporting source excerpt.
 These replenish the topic queue from real research, not fixed city/brand template multiplication.
 Do not propose paraphrases of this article or each other. Keep within commercial parts and supported catalog context.
-If evidence cannot support useful
-content, return {"skip":true}. Preserve the topic and don't claim search volume or keyword difficulty.`;
+If evidence cannot support useful content, follow the operation-specific abstention contract.
+Do not claim search volume or keyword difficulty.`;
 
 const present = (s: string | undefined) => !!s?.trim() && !/^(skip|changeme|your[_ -].*|placeholder)$/i.test(s.trim());
 const key = () => present(process.env.CLAUDE_API_KEY) ? process.env.CLAUDE_API_KEY!.trim() : process.env.ANTHROPIC_API_KEY?.trim();
@@ -173,8 +174,10 @@ export class LiveBlogProviders implements BlogProviders {
     } catch { throw new Error("GENERATION_JSON_INVALID"); }
   }
   async generate(context: unknown) {
-    const r = await this.claude(BLOG_POLICY, context, 6000);
-    if (r.data.skip) throw new Error("NO_SUPPORTED_CHANGE");
+    const operation: GenerationOperation = context && typeof context === "object" &&
+      (context as { operation?: unknown }).operation === "improve" ? "improve" : "new";
+    const r = await this.claude(`${BLOG_POLICY}\n${generationContract(operation)}`, context, 6000);
+    checkGenerationDecision(r.data, operation, r.tokens);
     return { draft: r.data, tokens: r.tokens };
   }
   async review(draft: ArticleDraft, sources: BlogSource[]) {

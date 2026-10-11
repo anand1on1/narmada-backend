@@ -7,6 +7,7 @@ import { productPath } from "../shared/public-urls";
 import { safeBlogCode, blogAction } from "./auto-blogger-diagnostics";
 import { ArticleSchemaValidationError, schemaDiagnosticSummary, type SchemaDiagnostic } from "./blog-schema-diagnostics";
 import { CommercialPolicyValidationError, type CommercialDiagnostic } from "./blog-commercial-policy";
+import { GenerationDecisionError } from "./blog-generation-decision";
 
 // Deliberately isolated, additive tables. Never alters products/quotations/PO publication rules.
 export function migrateAutoBlogger(db: Database) {
@@ -154,12 +155,14 @@ export class AutoBlogger {
         return { ...j, error_code: j.error_code ? safeCode(j.error_code) : null, schemaDiagnostics, commercialDiagnostics, providerDiagnostics,
           nextAction: (j.error_code === "ARTICLE_SCHEMA_INVALID"
             ? "Generated JSON failed a field/type/length rule. No rejected content was saved or published. Older jobs did not retain field diagnostics. New failures use bounded retries within the existing daily budget."
+            : j.error_code === "NO_SUPPORTED_CHANGE" && j.kind !== "improve"
+            ? "Legacy new-article generation skip: the original skip value and reason were not retained. No historical job was rerun."
             : blogAction(j.error_code)) + (j.error_code === "ARTICLE_SCHEMA_INVALID" && schemaDiagnostics.length
             ? ` Fields: ${schemaDiagnosticSummary(schemaDiagnostics)}` : "") +
             (j.error_code === "UNSUPPORTED_COMMERCIAL_CLAIM" && commercialDiagnostics.length
               ? ` Rules: ${commercialDiagnostics.map(d => `${d.field}/${d.rule}`).join(", ")}.` : "") +
-            (j.error_code?.startsWith("PROVIDER_") && providerDiagnostics
-              ? ` Stage: ${providerDiagnostics.stage}${providerDiagnostics.phase ? `; phase: ${providerDiagnostics.phase}` : ""}${providerDiagnostics.timeoutMs ? `; deadline: ${providerDiagnostics.timeoutMs}ms` : ""}.` : "") };
+            ((j.error_code?.startsWith("PROVIDER_") || ["GENERATION_ABSTAINED", "GENERATION_DECISION_INVALID"].includes(j.error_code)) && providerDiagnostics
+              ? ` Stage: ${providerDiagnostics.stage}${providerDiagnostics.phase ? `; phase: ${providerDiagnostics.phase}` : ""}${providerDiagnostics.timeoutMs ? `; deadline: ${providerDiagnostics.timeoutMs}ms` : ""}${providerDiagnostics.operation ? `; operation: ${providerDiagnostics.operation}` : ""}${providerDiagnostics.reasonCode ? `; model reason: ${providerDiagnostics.reasonCode}` : ""}${providerDiagnostics.rule ? `; rule: ${providerDiagnostics.rule}` : ""}.` : "") };
       }),
       topics: this.db.prepare(`SELECT t.*,COALESCE(r.failures,0) AS recoveryFailures,r.next_eligible_at AS nextEligibleAt
         FROM blog_topics t LEFT JOIN blog_topic_recovery r ON r.topic_id=t.id ORDER BY t.id DESC LIMIT 100`).all(),
@@ -505,6 +508,7 @@ export class AutoBlogger {
       providerStage = "generate";
       this.startStage(job, providerStage, clock());
       const generated = await this.providers.generate({
+        operation: job.kind === "improve" ? "improve" : "new",
         topic: topic.title, category: topic.category, catalog: facts,
         cluster: cluster?.name, editorialRole: pillar ? "supporting article" : "evidence-led overview/pillar",
         pillarLink: pillar ? `/blog/${pillar.slug}` : undefined,
@@ -545,6 +549,16 @@ export class AutoBlogger {
       const code = safeCode(error);
       const owned = this.db.prepare("SELECT id FROM blog_jobs WHERE id=? AND lease_token=?").get(job.id, job.lease_token);
       let commercialRepair = false;
+      if (owned && error instanceof GenerationDecisionError) {
+        this.db.prepare(`INSERT INTO blog_job_provider_diagnostics VALUES(?,?,?)
+          ON CONFLICT(job_id) DO UPDATE SET details=excluded.details,created_at=excluded.created_at`)
+          .run(job.id, JSON.stringify(error.diagnostics), clock());
+        // Generation completed and reported usage even when it returned no draft.
+        this.db.prepare("UPDATE blog_jobs SET token_used=token_used+? WHERE id=? AND lease_token=?")
+          .run(error.tokens, job.id, job.lease_token);
+        console.warn("[auto-blogger] generation_decision", JSON.stringify({
+          jobId: job.id, attempt: job.attempts, code, ...error.diagnostics }));
+      }
       if (owned && error instanceof CommercialPolicyValidationError) {
         const prior = this.db.prepare("SELECT repair_offered FROM blog_job_commercial_diagnostics WHERE job_id=?").get(job.id) as any;
         commercialRepair = !prior?.repair_offered && job.attempts < this.settings().maxAttempts;
@@ -571,7 +585,7 @@ export class AutoBlogger {
           console.warn("[auto-blogger] schema_validation", JSON.stringify({ jobId: job.id, attempt: job.attempts, issues: error.diagnostics }));
         }
       }
-      const skipped = code === "NO_SUPPORTED_CHANGE";
+      const skipped = code === "NO_SUPPORTED_CHANGE" || code === "GENERATION_ABSTAINED";
       const retryable = commercialRepair || /^(PROVIDER_(?:NETWORK|TIMEOUT|RATE|REQUEST|RESPONSE|EMPTY)|SOURCE_|EVIDENCE_|LEASE_EXPIRED|ARTICLE_SCHEMA_INVALID$|GENERATION_(?:JSON_INVALID|TRUNCATED))/.test(code);
       const status = skipped ? "skipped" : retryable && job.attempts < this.settings().maxAttempts ? "retry" : "failed";
       this.db.prepare(`UPDATE blog_jobs SET status=?,error_code=?,retry_at=?,finished_at=?
