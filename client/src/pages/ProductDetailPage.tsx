@@ -197,13 +197,13 @@ export default function ProductDetailPage() {
                 <a href="tel:+917909083806"><Phone className="h-4 w-4 mr-2" /> Call to Order</a>
               </Button>
             </div>
-            <p className="mt-4 text-xs text-[hsl(220_60%_12%)]/75 font-medium">Cash on Delivery available. Our team confirms availability and freight before dispatch.</p>
+            <p className="mt-4 text-xs text-[hsl(220_60%_12%)]/75 font-medium">{product.catalogPriced ? "Our team confirms availability, payment options and freight before dispatch." : "Cash on Delivery available. Our team confirms availability and freight before dispatch."}</p>
           </div>
 
           <div className="mt-6 grid grid-cols-3 gap-3 text-center">
-            <Card className="p-3 border-card-border"><Truck className="h-5 w-5 mx-auto mb-1 text-[hsl(212_95%_50%)]" /><div className="text-xs font-medium">Global Shipping</div></Card>
-            <Card className="p-3 border-card-border"><ShieldCheck className="h-5 w-5 mx-auto mb-1 text-[hsl(212_95%_50%)]" /><div className="text-xs font-medium">OEM Verified</div></Card>
-            <Card className="p-3 border-card-border"><Package className="h-5 w-5 mx-auto mb-1 text-[hsl(212_95%_50%)]" /><div className="text-xs font-medium">Safe Packaging</div></Card>
+            <Card className="p-3 border-card-border"><Truck className="h-5 w-5 mx-auto mb-1 text-[hsl(212_95%_50%)]" /><div className="text-xs font-medium">{product.catalogPriced ? "Enquire shipping" : "Global Shipping"}</div></Card>
+            <Card className="p-3 border-card-border"><ShieldCheck className="h-5 w-5 mx-auto mb-1 text-[hsl(212_95%_50%)]" /><div className="text-xs font-medium">{product.catalogPriced ? "Confirm fitment" : "OEM Verified"}</div></Card>
+            <Card className="p-3 border-card-border"><Package className="h-5 w-5 mx-auto mb-1 text-[hsl(212_95%_50%)]" /><div className="text-xs font-medium">{product.catalogPriced ? "Confirm packing" : "Safe Packaging"}</div></Card>
           </div>
         </div>
       </section>

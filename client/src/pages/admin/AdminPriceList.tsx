@@ -99,6 +99,7 @@ export default function AdminPriceList() {
   }
 
   async function onFile(file: File) {
+    setWorkbook(null);
     if(file.size>8*1024*1024) {setProgress("Split files into pieces under 8 MB.");return;}
     try {
       const XLSX=await import("xlsx");
@@ -109,11 +110,11 @@ export default function AdminPriceList() {
   }
 
   return (
-    <AdminLayout title="Price Lists">
+    <AdminLayout title="Price Lists" responsiveSidebar>
       <CatalogSyncPanel token={token || null} />
       {progress && <p role="status" className="mb-4 text-sm">{progress}</p>}
       <div className="flex items-center gap-3 mb-6 flex-wrap">
-        <button onClick={() => setOpen({ brand: "", versionLabel: "", effectiveDate: "", notes: "", csv: "" })}
+        <button onClick={() => {setWorkbook(null);setOpen({ brand: "", versionLabel: "", effectiveDate: "", notes: "", csv: "" });}}
           className="px-4 py-2 bg-accent text-accent-foreground rounded-lg font-semibold text-sm inline-flex items-center gap-2"
           data-testid="button-upload-list">
           <Upload className="w-4 h-4" /> Upload Price List
