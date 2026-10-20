@@ -107,7 +107,8 @@ export async function publishQuotationLineAsProduct(
     // ---- Case 1: line has partNumber and product with that SKU already exists ----
     const rawPartNumber = String(item.partNumber || "").trim();
     if (rawPartNumber) {
-      const existing = await (storage as any).getProductByPartNumber(rawPartNumber);
+      const brand = String(item.brand || "").trim().toLowerCase() || inferBrand(productName, rawPartNumber);
+      const existing = await (storage as any).getProductByPartNumber(rawPartNumber, brand);
       if (existing) {
         // Leave completely untouched per spec.
         return { identifier: rawPartNumber, productId: existing.id, action: "skipped_existing" };

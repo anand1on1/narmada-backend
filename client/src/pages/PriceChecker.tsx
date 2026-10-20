@@ -157,7 +157,6 @@ export default function PriceChecker() {
                       <div className="text-sm text-foreground mb-3">{it.description || "—"}</div>
                       <div className="flex flex-wrap gap-x-5 gap-y-1.5 text-xs">
                         {it.mrp && <span className="inline-flex items-center gap-1.5"><Tag className="w-3.5 h-3.5 text-muted-foreground" /> <span className="text-muted-foreground">MRP:</span> <span className="font-bold">₹{it.mrp.toLocaleString("en-IN")}</span></span>}
-                        {it.dealerPrice && <span className="inline-flex items-center gap-1.5"><Tag className="w-3.5 h-3.5 text-emerald-600" /> <span className="text-muted-foreground">Dealer:</span> <span className="font-bold text-emerald-700">₹{it.dealerPrice.toLocaleString("en-IN")}</span></span>}
                         {it.hsnCode && <span className="inline-flex items-center gap-1.5"><Hash className="w-3.5 h-3.5 text-muted-foreground" /> <span className="text-muted-foreground">HSN:</span> <span className="font-mono font-semibold">{it.hsnCode}</span></span>}
                         {it.gstPercent !== null && it.gstPercent !== undefined && <span className="inline-flex items-center gap-1.5"><Package className="w-3.5 h-3.5 text-muted-foreground" /> <span className="text-muted-foreground">GST:</span> <span className="font-semibold">{it.gstPercent}%</span></span>}
                         {it.uom && <span className="text-muted-foreground">Unit: <span className="font-semibold text-foreground">{it.uom}</span></span>}

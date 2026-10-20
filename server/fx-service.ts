@@ -59,6 +59,9 @@ export async function refreshFxRate(): Promise<number> {
   if (live && live > 0) {
     usdInr = live;
     lastSource = "er-api";
+    // Price-list publication never accepts a hardcoded FX fallback. Keep the
+    // last genuinely observed provider rate, with its real observation time.
+    await storage.setSetting("catalog_verified_fx", JSON.stringify({ rate: live, at: Date.now() }));
   } else {
     // Provider down — prefer the last good DB/setting value over the constant.
     const cached = await readCachedUsdInr();

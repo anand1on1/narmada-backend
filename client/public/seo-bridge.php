@@ -19,7 +19,7 @@ if (strlen($uri) > 1500) seo_fail(414, 'Address too long');
 if (substr($uri, 0, 2) === '//') seo_fail(404, 'Page not found');
 $path = parse_url($uri, PHP_URL_PATH);
 if (!is_string($path) || preg_match('/[\x00-\x1f\\\\]/', rawurldecode($path)) || strpos(rawurldecode($path), '..') !== false) seo_fail(404, 'Page not found');
-$xml = in_array($path, ['/sitemap.xml', '/sitemap-seo.xml', '/sitemap-seo-index.xml'], true);
+$xml = in_array($path, ['/sitemap.xml', '/sitemap-seo.xml', '/sitemap-seo-index.xml'], true) || preg_match('~^/sitemap-catalog-(?:static|0|[1-9][0-9]{0,8})\.xml$~D', $path);
 $robots = $path === '/robots.txt';
 $catalog = preg_match('~^/(?:products/?|product/[^/?#]+(?:/[^/?#]+)?/?|p/[^/?#]+/?)$~D', $path);
 if (!$xml && !$robots && !$catalog) seo_fail(404, 'Page not found');
@@ -59,6 +59,15 @@ $status = (int) curl_getinfo($curl, CURLINFO_HTTP_CODE);
 $type = (string) curl_getinfo($curl, CURLINFO_CONTENT_TYPE);
 curl_close($curl);
 if ($ok === false) seo_fail(503, 'Catalog temporarily unavailable');
+// A missing bounded sitemap segment is a real 404, not an upstream outage.
+// Do not relay an arbitrary error body as XML.
+if ($xml && $status === 404) {
+    http_response_code(404);
+    header('Content-Type: application/xml; charset=utf-8');
+    header('X-Robots-Tag: noindex');
+    if ($method !== 'HEAD') echo '<?xml version="1.0" encoding="UTF-8"?><urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9"></urlset>';
+    exit;
+}
 // Relay only backend-generated redirects to our own public canonical routes; never follow them.
 if ($status === 301 && preg_match('~^https://narmadamobility\.com/(?:product/[^?#\s]+|sitemap\.xml)$~D', $location)
     && strpos($location, '\\') === false && !preg_match('/%0[ad]/i', $location)) {

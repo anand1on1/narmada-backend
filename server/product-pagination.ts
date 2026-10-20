@@ -31,6 +31,7 @@ export function productsListHandler(storage: DatabaseStorage): RequestHandler {
       featured: featured === "1" || featured === "true",
       activeOnly: true,
     };
-    res.json(paging ? await storage.pageProducts(filters, paging) : await storage.listProducts(filters));
+    const result = await storage.pageProducts(filters, paging || {page:1,limit:100,offset:0});
+    res.json(paging ? result : result.products);
   };
 }
