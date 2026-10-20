@@ -59,6 +59,15 @@ $status = (int) curl_getinfo($curl, CURLINFO_HTTP_CODE);
 $type = (string) curl_getinfo($curl, CURLINFO_CONTENT_TYPE);
 curl_close($curl);
 if ($ok === false) seo_fail(503, 'Catalog temporarily unavailable');
+// A missing bounded sitemap segment is a real 404, not an upstream outage.
+// Do not relay an arbitrary error body as XML.
+if ($xml && $status === 404) {
+    http_response_code(404);
+    header('Content-Type: application/xml; charset=utf-8');
+    header('X-Robots-Tag: noindex');
+    if ($method !== 'HEAD') echo '<?xml version="1.0" encoding="UTF-8"?><urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9"></urlset>';
+    exit;
+}
 // Relay only backend-generated redirects to our own public canonical routes; never follow them.
 if ($status === 301 && preg_match('~^https://narmadamobility\.com/(?:product/[^?#\s]+|sitemap\.xml)$~D', $location)
     && strpos($location, '\\') === false && !preg_match('/%0[ad]/i', $location)) {
