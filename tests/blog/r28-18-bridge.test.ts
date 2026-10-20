@@ -26,7 +26,7 @@ describe("GoDaddy bridge deployment contract", () => {
     const robots = readFileSync("client/public/robots.txt", "utf8");
     expect(robots).toContain("Sitemap: https://narmadamobility.com/sitemap.xml");
     expect(robots).toContain("Sitemap: https://narmadamobility.com/sitemap-blog.xml");
-    expect(readFileSync("script/build.ts", "utf8")).toContain('writeFile("dist/public/version.json"');
+    expect(readFileSync("script/build.ts", "utf8")).toContain('writeFile(resolve(out,"public/version.json")');
   });
 });
 

@@ -156,7 +156,7 @@ async function createMissingProduct(args: {
   imageUrl: string;
 }): Promise<{ id: number; created: boolean }> {
   const { partNumber, description, publishedPrice, quantity, imageUrl } = args;
-  const existing = await (storage as any).getProductByPartNumber(partNumber);
+  const existing = await (storage as any).getProductByPartNumber(partNumber, inferBrand(description, partNumber));
   const imageUrlsJson = JSON.stringify([imageUrl]);
   const inferredBrand = inferBrand(description, partNumber);
   if (existing) {
@@ -302,7 +302,7 @@ export async function autoPublishFromPO(
       details.push({ part_number: partNumber, status: "skipped_price" });
       continue;
     }
-    const existing = await storage.getProductByPartNumber(partNumber);
+    const existing = await storage.getProductByPartNumber(partNumber, inferBrand(String(it.description || partNumber), partNumber));
     if (existing) {
       skipped += 1;
       details.push({ part_number: partNumber, status: "skipped_existing", product_id: existing.id });

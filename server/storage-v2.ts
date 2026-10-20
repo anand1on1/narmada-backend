@@ -62,10 +62,11 @@ export async function getAvailableBrands(): Promise<{ brand: string; count: numb
   const rows: any[] = sqlite.prepare(`
     SELECT
       pl.brand AS brand,
-      COUNT(DISTINCT pi.id) AS count,
+      COUNT(DISTINCT lower(trim(pi.part_number))) AS count,
       MAX(pl.uploaded_at) AS last_updated
     FROM price_lists pl
-    LEFT JOIN price_items pi ON pi.brand = pl.brand
+    JOIN price_items pi ON pi.price_list_id = pl.id
+    WHERE NOT EXISTS(SELECT 1 FROM catalog_uploads u WHERE u.list_id=pl.id AND u.status!='complete')
     GROUP BY pl.brand
     ORDER BY last_updated DESC
   `).all();
@@ -82,6 +83,8 @@ export async function createPriceList(p: InsertPriceList): Promise<PriceList> {
   return db.insert(priceLists).values(data).returning().get();
 }
 export async function deletePriceList(id: number) {
+  if(sqlite.prepare("SELECT 1 FROM catalog_prices WHERE source_list_id=? LIMIT 1").get(id) ||
+     sqlite.prepare("SELECT 1 FROM catalog_jobs WHERE list_id=? LIMIT 1").get(id)) throw Error("Price list retained for catalog provenance and audit");
   db.delete(priceItems).where(eq(priceItems.priceListId, id)).run();
   db.delete(priceLists).where(eq(priceLists.id, id)).run();
 }
@@ -112,6 +115,7 @@ export async function searchPriceItems(partNumber: string, brand?: string): Prom
     FROM price_items pi
     LEFT JOIN price_lists pl ON pl.id = pi.price_list_id
     WHERE pi.part_number_clean LIKE ?
+      AND NOT EXISTS(SELECT 1 FROM catalog_uploads u WHERE u.list_id=pl.id AND u.status!='complete')
   `;
   const params: any[] = [clean + "%"];
   if (brand) { sqlStr += " AND pi.brand = ?"; params.push(brand); }
@@ -148,6 +152,7 @@ export function lookupPartNumberMrp(partNumber: string): { mrp: number; brand: s
     FROM price_items pi
     LEFT JOIN price_lists pl ON pl.id = pi.price_list_id
     WHERE pi.part_number_clean = ?
+      AND NOT EXISTS(SELECT 1 FROM catalog_uploads u WHERE u.list_id=pl.id AND u.status!='complete')
     ORDER BY pl.uploaded_at DESC
     LIMIT 1
   `).get(clean) as any;

@@ -18,7 +18,7 @@ const STOCK_IMAGES = [stockTurbo, stockBrake, stockInjector, stockFlatlay];
 export function ProductCard({ product, usdInr }: { product: Product; usdInr: number }) {
   const brandInfo = BRANDS[product.brand as keyof typeof BRANDS];
   const images = parseJsonArray(product.imageUrls).map(publicMedia).filter(Boolean);
-  const cover = images[0] || STOCK_IMAGES[product.id % STOCK_IMAGES.length];
+  const cover = images[0] || (product.catalogPriced ? "" : STOCK_IMAGES[product.id % STOCK_IMAGES.length]);
   // R28: products created by auto-publish may have imageSource='generated'|'placeholder'|'reused'.
   const imageSource = (product as any).imageSource ?? (product as any).image_source ?? null;
   const showRepresentationDisclaimer = isRepresentationalImage(imageSource);
@@ -86,7 +86,8 @@ export function ProductCard({ product, usdInr }: { product: Product; usdInr: num
         <div className="mt-3 flex items-end justify-between gap-2 pt-3 border-t border-[hsl(220_45%_20%)]/8">
           <div>
             <div className="font-mono text-[9px] uppercase tracking-[0.2em] text-[hsl(220_60%_12%)]/40">Price</div>
-            <div className="text-xl font-display font-black text-[hsl(220_60%_12%)]" data-testid={`text-price-${product.id}`}>{formatUSD(product.priceInr, usdInr)}</div>
+            <div className="text-xl font-display font-black text-[hsl(220_60%_12%)]" data-testid={`text-price-${product.id}`}>{product.catalogPriced ? `US$${product.priceUsd!.toFixed(2)}` : formatUSD(product.priceInr, usdInr)}</div>
+            {product.catalogPriced && <div className="text-xs">GST included · <Link href={productHref(product)}>Contact us for a discount</Link></div>}
           </div>
           <div className="flex items-center gap-1.5">
             {product.slug && (

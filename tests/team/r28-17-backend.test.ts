@@ -135,7 +135,7 @@ describe("R28.17 public SQL pagination", () => {
   });
   it("preserves legacy public array callers", async () => {
     const legacy = await (await fetch(`${origin}/api/products`)).json();
-    expect(Array.isArray(legacy)).toBe(true); expect(legacy.length).toBe(125);
+    expect(Array.isArray(legacy)).toBe(true); expect(legacy.length).toBe(100); // bounded legacy response; full catalog uses page/limit
   });
 });
 

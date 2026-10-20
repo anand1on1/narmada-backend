@@ -6,6 +6,7 @@ import { createHash } from "node:crypto";
 import { PUBLIC_ORIGIN, productPath } from "../shared/public-urls";
 import { escapeHtml as esc } from "./auto-blogger-safety";
 import { renderProductPage, renderNotFoundPage, CRITICAL_CSS } from "./seo-templates";
+import { indexedCatalogQuery, publicCatalogPrices } from "./price-catalog";
 
 const config = { baseUrl: PUBLIC_ORIGIN };
 export const CORE_PATHS = ["/", "/products", "/about", "/contact", "/work-with-us", "/privacy", "/disclaimer", "/blog"];
@@ -51,7 +52,7 @@ export function registerPublicCatalog(app: Express, db: Database) {
     if (req.path !== canonical) return res.redirect(301, PUBLIC_ORIGIN + canonical);
     const related = db.prepare(`SELECT ${columns} FROM products WHERE active=1 AND category=? AND id!=? ORDER BY id DESC LIMIT 4`).all(row.category, row.id) as any[];
     try { row.imageSource = (db.prepare("SELECT image_source FROM auto_publish_log WHERE product_id=? ORDER BY id DESC LIMIT 1").get(row.id) as any)?.image_source; } catch { /* optional old install */ }
-    return res.type("html").send(appHtml(renderProductPage(row, related, config)));
+    return res.type("html").send(appHtml(renderProductPage(publicCatalogPrices(db,[row])[0], publicCatalogPrices(db,related), config)));
   };
   app.get(["/product/:a/:b", "/product/:a", "/p/:a"], product);
   app.use(/^\/(?:product|p)(?:\/|$)/, (_req, res) => notFound(res));
@@ -59,19 +60,40 @@ export function registerPublicCatalog(app: Express, db: Database) {
     const pageText = String(req.query.page || "1");
     if (!/^[1-9]\d{0,5}$/.test(pageText)) return notFound(res);
     const page = Number(pageText), limit = 24;
-    const total = (db.prepare("SELECT COUNT(*) n FROM products WHERE active=1").get() as any).n;
+    const clauses=["active=1"],values:string[]=[],params=new URLSearchParams();
+    for(const field of ["brand","category"] as const) {
+      const value=req.query[field];
+      if(typeof value==="string" && value.length<=120) {
+        const aliases=[["engine","engine-parts"],["brake","brake-system"],["filter","filters"],["body","body-parts"]];
+        const names=field==="category" ? aliases.find(a=>a.includes(value)) || [value] : [value];
+        clauses.push(`${field} IN (${names.map(()=>"?").join(",")})`);values.push(...names);params.set(field,value);
+      }
+    }
+    const q=typeof req.query.q==="string" ? req.query.q.trim().slice(0,120):"";
+    if(q) {
+      let indexed:string|null=null;
+      try {indexed=indexedCatalogQuery(db,q);} catch(e) {if(!/no such table/.test(String(e))) throw e;}
+      if(indexed) {clauses.push("id IN (SELECT rowid FROM catalog_search WHERE catalog_search MATCH ?)");values.push(indexed);}
+      else {clauses.push("(part_number LIKE ? OR name LIKE ? OR description LIKE ? OR model LIKE ? OR oem_number LIKE ?)");values.push(...Array(5).fill("%"+q+"%"));}
+      params.set("q",q);
+    }
+    const where=clauses.join(" AND ");
+    const total = (db.prepare(`SELECT COUNT(*) n FROM products WHERE ${where}`).get(...values) as any).n;
     if (page > Math.max(1, Math.ceil(total / limit))) return notFound(res);
-    const rows = db.prepare(`SELECT ${columns} FROM products WHERE active=1 ORDER BY id DESC LIMIT ? OFFSET ?`).all(limit, (page - 1) * limit) as any[];
-    const path = `/products${page > 1 ? `?page=${page}` : ""}`;
+    const rows = publicCatalogPrices(db,db.prepare(`SELECT ${columns} FROM products WHERE ${where} ORDER BY id DESC LIMIT ? OFFSET ?`).all(...values,limit, (page - 1) * limit) as any[]);
+    const href=(p:number)=>{const qs=new URLSearchParams(params);if(p>1) qs.set("page",String(p));return `/products${qs.size ? "?"+qs.toString():""}`;};
+    const path=href(page);
     const html = `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Commercial vehicle parts${page > 1 ? ` — Page ${page}` : ""} | Narmada Mobility</title>
+<title>${esc([params.get("brand"),params.get("category")].filter(Boolean).join(" "))} Commercial vehicle parts${page > 1 ? ` — Page ${page}` : ""} | Narmada Mobility</title>
 <meta name="description" content="Browse the Narmada Mobility parts catalog. Confirm fitment, price and availability before ordering.">
-<meta name="robots" content="${Object.keys(req.query).some(k => k !== "page") ? "noindex,follow" : "index,follow"}">
+<meta name="robots" content="${q ? "noindex,follow" : "index,follow"}">
 <link rel="canonical" href="${PUBLIC_ORIGIN}${esc(path)}"><style>${CRITICAL_CSS}</style></head><body>
 <header class="site"><a class="brand" href="${PUBLIC_ORIGIN}/">Narmada Mobility</a><nav><a href="/blog">Insights</a><a href="/contact">Contact</a></nav></header>
 <main class="container"><h1>Commercial vehicle parts</h1><p>${total} catalog products. Confirm fitment and availability with our team.</p>
-<div class="related-grid">${rows.map(p => `<article class="card"><h2><a href="${esc(productPath(p))}">${esc(p.name)}</a></h2><p>${esc(p.partNumber)} · ${esc(p.brand)}</p></article>`).join("")}</div>
-<nav aria-label="Catalog pagination">${page > 1 ? `<a href="/products${page > 2 ? `?page=${page - 1}` : ""}">Previous</a> · ` : ""}Page ${page} of ${Math.max(1, Math.ceil(total / limit))}${page * limit < total ? ` · <a href="/products?page=${page + 1}">Next</a>` : ""}</nav></main></body></html>`;
+<nav aria-label="Catalog categories">${(db.prepare("SELECT DISTINCT category FROM products WHERE active=1 ORDER BY category LIMIT 100").all() as any[]).map(c=>`<a href="/products?category=${encodeURIComponent(c.category)}">${esc(c.category)}</a>`).join(" · ")}</nav>
+<form action="/products" method="get"><label>Part name, number, OEM or model <input name="q" value="${esc(q)}"></label><button>Search</button></form>
+<div class="related-grid">${rows.map((p:any) => `<article class="card"><h2><a href="${esc(productPath(p))}">${esc(p.name)}</a></h2><p>${esc(p.partNumber)} · ${esc(p.brand)}</p><p>${p.catalogPriced ? `US$${p.priceUsd.toFixed(2)} · GST included` : `INR ${Number(p.priceInr).toFixed(2)}`}</p>${p.catalogPriced ? `<a href="${esc(productPath(p))}">Contact us for a discount</a>`:""}</article>`).join("")}</div>
+<nav aria-label="Catalog pagination">${page > 1 ? `<a href="${esc(href(page-1))}">Previous</a> · ` : ""}Page ${page} of ${Math.max(1, Math.ceil(total / limit))}${page * limit < total ? ` · <a href="${esc(href(page+1))}">Next</a>` : ""}</nav></main></body></html>`;
     res.set("Cache-Control", "no-store").type("html").send(appHtml(html));
   });
   // Obsolete SEO feed now redirects to the single canonical feed.
@@ -98,7 +120,7 @@ export async function checkPublicSitemap(expected: string, fetcher: typeof fetch
       chunks.push(p.value);
     }
     const xml = Buffer.concat(chunks).toString("utf8");
-    if (!/^\s*<\?xml/.test(xml) || !/<urlset[\s>]/.test(xml) || !/<\/urlset>\s*$/.test(xml) || /<!DOCTYPE|<!ENTITY/i.test(xml)) throw new Error("PUBLIC_SITEMAP_INVALID");
+    if (!/^\s*<\?xml/.test(xml) || !/<(?:urlset|sitemapindex)[\s>]/.test(xml) || !/<\/(?:urlset|sitemapindex)>\s*$/.test(xml) || /<!DOCTYPE|<!ENTITY/i.test(xml)) throw new Error("PUBLIC_SITEMAP_INVALID");
     const locs = (s: string) => Array.from(s.matchAll(/<loc>([^<]+)<\/loc>/g)).map(m => m[1]).sort();
     const actual = locs(xml), wanted = locs(expected);
     value = { status: JSON.stringify(actual) === JSON.stringify(wanted) ? "match" : "drift", count: actual.length, checkedAt: Date.now() };

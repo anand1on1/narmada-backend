@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { AdminLayout } from "./AdminLayout";
 import { adminFetch, useAdminAuth } from "@/lib/admin-auth";
 import { Upload, Download, Trash2, ListChecks, FileSpreadsheet } from "lucide-react";
+import { CatalogSyncPanel } from "./CatalogSyncPanel";
 
 interface PriceList {
   id: number;
@@ -32,6 +33,8 @@ export default function AdminPriceList() {
     brand: string; versionLabel: string; effectiveDate: string; notes: string; csv: string;
   }>(null);
   const [uploading, setUploading] = useState(false);
+  const [workbook, setWorkbook] = useState<any>(null);
+  const [progress, setProgress] = useState("");
 
   async function load() {
     if (!token) return;
@@ -43,22 +46,39 @@ export default function AdminPriceList() {
   async function upload() {
     if (!token || !open) return;
     if (!open.brand) { alert("Pick a brand"); return; }
-    if (!open.csv.trim()) { alert("Paste or upload CSV content"); return; }
+    if (!open.csv.trim() && !workbook) { alert("Paste CSV or choose an Excel file"); return; }
     setUploading(true);
     try {
-      const r = await adminFetch(token, "/api/admin/price-lists", {
-        method: "POST",
-        body: JSON.stringify(open),
-      });
-      const data = await r.json();
-      if (!r.ok) {
-        alert(data.error || "Upload failed");
-      } else {
-        alert(`Uploaded ${data.inserted} items. Errors: ${data.errors?.length || 0}`);
-        setOpen(null);
-        await load();
+      const XLSX=await import("xlsx");
+      const sheet=workbook || XLSX.read(open.csv,{type:"string",raw:true}).Sheets.Sheet1;
+      const range=XLSX.utils.decode_range(sheet["!ref"] || "A1");
+      if(range.e.r>50000) throw Error("Split files into at most 50,000 rows each; imports are partial updates, never deletions.");
+      const header=(XLSX.utils.sheet_to_json<string[]>(sheet,{header:1,range:{s:range.s,e:{r:range.s.r,c:range.e.c}},raw:false})[0] || []).map(v=>String(v).trim().toLowerCase().replace(/\s+/g,"_"));
+      const partCol=header.findIndex(h=>["part_number","partnumber","part_no"].includes(h));
+      if(partCol<0 || !header.includes("mrp")) throw Error("Required columns: part_number and mrp");
+      const hashBytes=new Uint8Array(await crypto.subtle.digest("SHA-256",new TextEncoder().encode(JSON.stringify([open.brand,open.versionLabel,open.effectiveDate,sheet]))));
+      const requestKey="excel-"+Array.from(hashBytes,b=>b.toString(16).padStart(2,"0")).join("");
+      const send=async(path:string,body:any) => {
+        const r=await adminFetch(token!,path,{method:"POST",body:JSON.stringify(body)});
+        const data=await r.json();if(!r.ok) throw Error(data.error || "Upload failed");return data;
+      };
+      const u=await send("/api/admin/catalog-sync/uploads",{...open,csv:undefined,requestKey});
+      for(let start=range.s.r+1,seq=0;start<=range.e.r;start+=500,seq++) {
+        const values=XLSX.utils.sheet_to_json<string[]>(sheet,{header:1,range:{s:{r:start,c:range.s.c},e:{r:Math.min(start+499,range.e.r),c:range.e.c}},raw:false,defval:"",blankrows:true});
+        const rows=values.map((v,index)=>{
+          const cell=sheet[XLSX.utils.encode_cell({r:start+index,c:range.s.c+partCol})];
+          const unsafe=cell?.t==="n" && (!Number.isSafeInteger(cell.v) || cell.v>=1e15);
+          const get=(name:string)=>v[header.indexOf(name)] || "";
+          return {partNumber:unsafe ? "" : String(v[partCol] || ""),description:get("description"),mrp:get("mrp"),hsnCode:get("hsn_code"),uom:get("uom"),sourceCurrency:get("currency") || "INR"};
+        });
+        await send(`/api/admin/catalog-sync/uploads/${u.id}/chunks`,{seq,rows});
+        setProgress(`Uploaded ${Math.min(start+499,range.e.r).toLocaleString()} / ${range.e.r.toLocaleString()} rows`);
       }
-    } finally { setUploading(false); }
+      const done=await send(`/api/admin/catalog-sync/uploads/${u.id}/finish`,{});
+      setProgress(`${done.rows.toLocaleString()} rows received. ${done.job ? `Publication job ${done.job.id}: ${done.job.state}.` : "Future sync is disabled; run a dry run and publication job when ready."}`);
+      setOpen(null);setWorkbook(null);await load();
+    } catch(e) {setProgress(`Upload stopped: ${(e as Error).message}. Select the same file and metadata to retry safely.`);}
+    finally { setUploading(false); }
   }
 
   async function del(id: number) {
@@ -78,14 +98,20 @@ export default function AdminPriceList() {
     URL.revokeObjectURL(url);
   }
 
-  function onFile(file: File) {
-    const reader = new FileReader();
-    reader.onload = () => setOpen((o) => o ? { ...o, csv: String(reader.result || "") } : o);
-    reader.readAsText(file);
+  async function onFile(file: File) {
+    if(file.size>8*1024*1024) {setProgress("Split files into pieces under 8 MB.");return;}
+    try {
+      const XLSX=await import("xlsx");
+      const book=XLSX.read(await file.arrayBuffer(),{type:"array",raw:true});
+      setWorkbook(book.Sheets[book.SheetNames[0]]);
+      setOpen(o=>o?{...o,csv:""}:o);setProgress(`Selected ${file.name}. First worksheet; MRP in INR, GST included.`);
+    } catch {setProgress("Unable to read file.");}
   }
 
   return (
     <AdminLayout title="Price Lists">
+      <CatalogSyncPanel token={token || null} />
+      {progress && <p role="status" className="mb-4 text-sm">{progress}</p>}
       <div className="flex items-center gap-3 mb-6 flex-wrap">
         <button onClick={() => setOpen({ brand: "", versionLabel: "", effectiveDate: "", notes: "", csv: "" })}
           className="px-4 py-2 bg-accent text-accent-foreground rounded-lg font-semibold text-sm inline-flex items-center gap-2"
@@ -166,17 +192,17 @@ export default function AdminPriceList() {
                 <input value={open.notes} onChange={(e) => setOpen({ ...open, notes: e.target.value })}
                   className="w-full border rounded-lg px-3 py-2 bg-background" data-testid="input-notes" />
               </Field>
-              <Field label="CSV File (or paste below)">
-                <input type="file" accept=".csv,text/csv" onChange={(e) => e.target.files?.[0] && onFile(e.target.files[0])}
+              <Field label="Excel or CSV file (or paste CSV below)">
+                <input type="file" accept=".xlsx,.xls,.csv,text/csv" onChange={(e) => e.target.files?.[0] && void onFile(e.target.files[0])}
                   className="block w-full text-sm" data-testid="input-csv-file" />
                 <textarea
-                  value={open.csv} onChange={(e) => setOpen({ ...open, csv: e.target.value })}
+                  value={open.csv} onChange={(e) => {setWorkbook(null);setOpen({ ...open, csv: e.target.value });}}
                   rows={10}
                   placeholder="part_number,description,mrp,dealer_price,hsn_code,gst_percent,uom"
                   className="w-full mt-2 border rounded-lg px-3 py-2 bg-background font-mono text-xs"
                   data-testid="input-csv-text"
                 />
-                <p className="text-xs text-muted-foreground mt-1">Columns: part_number (required), description, mrp, dealer_price, hsn_code, gst_percent, uom</p>
+                <p className="text-xs text-muted-foreground mt-1">Required: part_number, mrp. Optional: description, hsn_code, uom, currency (INR only). MRP is GST-inclusive. Private dealer prices are not imported. First worksheet, up to 50,000 rows and 8 MB per file; larger lists can be split safely. Store long part numbers as text to preserve precision and leading zeros.</p>
               </Field>
             </div>
             <div className="sticky bottom-0 bg-card border-t px-6 py-4 flex justify-end gap-3">

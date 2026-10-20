@@ -32,7 +32,11 @@ export const insertProductSchema = createInsertSchema(products).omit({
 });
 
 export type InsertProduct = z.infer<typeof insertProductSchema>;
-export type Product = typeof products.$inferSelect;
+export type Product = typeof products.$inferSelect & {
+  priceUsd?: number;
+  catalogFxAt?: number;
+  catalogPriced?: boolean;
+};
 
 // Contact submissions
 export const contactSubmissions = sqliteTable("contact_submissions", {

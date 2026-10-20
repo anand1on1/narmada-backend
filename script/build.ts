@@ -2,6 +2,7 @@ import { build as esbuild } from "esbuild";
 import { build as viteBuild } from "vite";
 import { rm, readFile, cp, access, writeFile } from "node:fs/promises";
 import { execFileSync } from "node:child_process";
+import { resolve } from "node:path";
 
 // server deps to bundle to reduce openat(2) syscalls
 // which helps cold start times
@@ -32,20 +33,21 @@ const allowlist = [
 ];
 
 async function buildAll() {
-  await rm("dist", { recursive: true, force: true });
+  const out=resolve(process.env.BUILD_OUT_DIR || "dist");
+  if(!process.env.BUILD_OUT_DIR) await rm("dist", { recursive: true, force: true });
 
   console.log("building client...");
-  await viteBuild();
+  await viteBuild({build:{outDir:resolve(out,"public"),emptyOutDir:!process.env.BUILD_OUT_DIR}});
   // Release identity, not credentials. Detect uploading an older GoDaddy ZIP.
   const commit = execFileSync("git", ["rev-parse", "HEAD"], { encoding: "utf8" }).trim();
   const dirty = !!execFileSync("git", ["status", "--porcelain"], { encoding: "utf8" }).trim();
-  await writeFile("dist/public/version.json", JSON.stringify({ release: "R28.19", commit, dirty, builtAt: new Date().toISOString() }, null, 2) + "\n");
+  await writeFile(resolve(out,"public/version.json"), JSON.stringify({ release: "price-list-catalog-v1", commit, dirty, builtAt: new Date().toISOString() }, null, 2) + "\n");
 
   // Vite's publicDir copy skips dotfiles, so .htaccess (SPA rewrite + cache headers
   // for the GoDaddy frontend) is copied explicitly into dist/public.
   try {
     await access("client/public/.htaccess");
-    await cp("client/public/.htaccess", "dist/public/.htaccess");
+    await cp("client/public/.htaccess", resolve(out,"public/.htaccess"));
     console.log("copied client/public/.htaccess -> dist/public/.htaccess");
   } catch {
     console.log("no client/public/.htaccess to copy");
@@ -64,7 +66,7 @@ async function buildAll() {
     platform: "node",
     bundle: true,
     format: "cjs",
-    outfile: "dist/index.cjs",
+    outfile: resolve(out,"index.cjs"),
     define: {
       "process.env.NODE_ENV": '"production"',
     },
@@ -74,7 +76,7 @@ async function buildAll() {
   });
 
   console.log("copying server assets...");
-  await cp("server/assets", "dist/assets", { recursive: true });
+  await cp("server/assets", resolve(out,"assets"), { recursive: true });
 }
 
 buildAll().catch((err) => {

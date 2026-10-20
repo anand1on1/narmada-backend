@@ -84,7 +84,7 @@ export default function ProductDetailPage() {
     <>
       <SeoHead
         canonicalPath={productHref(product)}
-        title={product.metaTitle || `${product.name} — ${brandInfo?.name || product.brand} | Narmada Mobility`}
+        title={product.metaTitle || `${product.name}${product.partNumber ? ` (${product.partNumber})`:""} — ${brandInfo?.name || product.brand} | Narmada Mobility`}
         description={product.metaDescription || product.shortDescription || product.description.slice(0, 160)}
         keywords={product.metaKeywords || undefined}
         jsonLd={{
@@ -98,10 +98,11 @@ export default function ProductDetailPage() {
           brand: { "@type": "Brand", name: brandInfo?.name || product.brand },
           offers: {
             "@type": "Offer",
-            priceCurrency: "INR",
-            price: product.priceInr.toFixed(2),
+            priceCurrency: product.catalogPriced ? "USD" : "INR",
+            price: (product.catalogPriced ? product.priceUsd! : product.priceInr).toFixed(2),
             url: PUBLIC_ORIGIN + productHref(product),
-            availability: (product.stockQty ?? 0) > 0 ? "https://schema.org/InStock" : "https://schema.org/PreOrder",
+            availability: product.catalogPriced ? undefined : (product.stockQty ?? 0) > 0 ? "https://schema.org/InStock" : "https://schema.org/PreOrder",
+            ...(product.catalogPriced ? {priceSpecification: {"@type":"UnitPriceSpecification",price:product.priceUsd!.toFixed(2),priceCurrency:"USD",valueAddedTaxIncluded:true}} : {}),
             seller: { "@type": "Organization", name: "Narmada Mobility" },
           },
         }}
@@ -142,7 +143,7 @@ export default function ProductDetailPage() {
               : product.brand && <Badge variant="outline" data-testid="badge-brand">{product.brand}</Badge>}
             {product.model && <Badge variant="outline">{product.model}</Badge>}
             <Badge variant="outline">{product.category}</Badge>
-            {(product.stockQty ?? 0) > 0 ? (
+            {product.catalogPriced ? <Badge variant="outline">Confirm availability</Badge> : (product.stockQty ?? 0) > 0 ? (
               <Badge className="bg-green-600/15 text-green-700 hover:bg-green-600/15">In stock · {product.stockQty} units</Badge>
             ) : (
               <Badge variant="outline">Made to order</Badge>
@@ -166,8 +167,9 @@ export default function ProductDetailPage() {
 
           <div className="mt-6 p-5 rounded-xl bg-secondary/40 border border-card-border">
             <div className="text-xs uppercase tracking-wider text-[hsl(220_60%_12%)]/75 font-medium">Price</div>
-            <div className="text-4xl font-display font-black text-foreground" data-testid="product-price">{formatPrice(product.priceInr)}</div>
-            <div className="text-sm text-muted-foreground mt-0.5">{getCurrency() === "USD" ? "Converted at live USD/INR rate" : "Inclusive of GST · freight calculated at checkout"}</div>
+            <div className="text-4xl font-display font-black text-foreground" data-testid="product-price">{product.catalogPriced ? `US$${product.priceUsd!.toFixed(2)}` : formatPrice(product.priceInr)}</div>
+            <div className="text-sm text-muted-foreground mt-0.5">{product.catalogPriced ? `GST included · price-list MRP converted from INR · FX verified ${new Date(product.catalogFxAt!).toISOString().slice(0,10)}. Confirm freight and availability.` : getCurrency() === "USD" ? "Converted at live USD/INR rate" : "Inclusive of GST · freight calculated at checkout"}</div>
+            {product.catalogPriced && <a className="inline-block mt-3 underline font-semibold" href={buyUrl} target="_blank" rel="noopener noreferrer" data-testid="request-discount">Contact us for a discount</a>}
 
             {/* Qty stepper */}
             <div className="mt-5 flex items-center gap-3">

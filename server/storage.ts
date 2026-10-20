@@ -10,6 +10,7 @@ import type {
 import { drizzle } from "drizzle-orm/better-sqlite3";
 import Database from "better-sqlite3";
 import { eq, desc, and, like, or, sql } from "drizzle-orm";
+import { CATALOG_BRANDS, initPriceCatalog, linkedProduct, publicCatalogPrices, partKey, indexedCatalogQuery } from "./price-catalog";
 
 // SQLite path is configurable so Render can mount a persistent disk and point DATA_DIR at it.
 // Locally / on shared hosting it defaults to ./data.db (project root).
@@ -622,15 +623,17 @@ export class DatabaseStorage implements IStorage {
     }
     if (filters.featured) conditions.push(eq(products.featured, true));
     if (filters.q) {
-      const q = `%${filters.q.toLowerCase()}%`;
-      conditions.push(or(like(products.name, q), like(products.description, q), like(products.model, q), like(products.partNumber, q), like(products.oemNumber, q))!);
+      const indexed=indexedCatalogQuery(sqlite,filters.q);
+      const q = `%${filters.q.toLowerCase().slice(0,120)}%`;
+      conditions.push(indexed ? sql`${products.id} IN (SELECT rowid FROM catalog_search WHERE catalog_search MATCH ${indexed})`
+        : or(like(products.name,q),like(products.description,q),like(products.model,q),like(products.partNumber,q),like(products.oemNumber,q))!);
     }
     const where = and(...conditions);
     // COUNT and LIMIT run in SQLite; never materialize the full catalog.
     const total = db.select({ count: sql<number>`count(*)` }).from(products).where(where).get()!.count;
     const rows = db.select().from(products).where(where)
       .orderBy(desc(products.createdAt), desc(products.id)).limit(paging.limit).offset(paging.offset).all();
-    return { products: rows, total, page: paging.page, limit: paging.limit, pages: Math.ceil(total / paging.limit) };
+    return { products: publicCatalogPrices(sqlite, rows), total, page: paging.page, limit: paging.limit, pages: Math.ceil(total / paging.limit) };
   }
   async listProducts(filters: { brand?: string; category?: string; q?: string; featured?: boolean; activeOnly?: boolean } = {}): Promise<Product[]> {
     const conditions = [];
@@ -646,17 +649,47 @@ export class DatabaseStorage implements IStorage {
     if (where) return db.select().from(products).where(where).orderBy(desc(products.createdAt)).all();
     return db.select().from(products).orderBy(desc(products.createdAt)).all();
   }
-  async getProduct(id: number) { return db.select().from(products).where(eq(products.id, id)).get(); }
-  async getProductBySlug(slug: string) { return db.select().from(products).where(eq(products.slug, slug)).get(); }
+  async getProduct(id: number) { const p=db.select().from(products).where(eq(products.id,id)).get(); return p ? publicCatalogPrices(sqlite,[p])[0] : undefined; }
+  async getProductBySlug(slug: string) { const p=db.select().from(products).where(eq(products.slug,slug)).get(); return p ? publicCatalogPrices(sqlite,[p])[0] : undefined; }
   // R27.6 #5 — resolve a product by its part number (for part-number-first URLs).
-  async getProductByPartNumber(partNumber: string) { return db.select().from(products).where(eq(products.partNumber, partNumber)).get(); }
+  async getProductByPartNumber(partNumber: string, brand?: string) {
+    if (brand) {
+      const linked=linkedProduct(sqlite,brand,partNumber);
+      if(linked) return this.getProduct(linked.id);
+      if(CATALOG_BRANDS.includes(brand)) {
+        const match=sqlite.prepare("SELECT id FROM products WHERE lower(trim(brand))=? AND lower(trim(part_number))=? ORDER BY id LIMIT 1").get(brand,partKey(partNumber)) as any;
+        return match ? this.getProduct(match.id) : undefined;
+      }
+      // Preserve legacy non-linked exact lookup, but never take another brand's linked product.
+      const p=db.select().from(products).where(eq(products.partNumber,partNumber)).get();
+      if(p && linkedProduct(sqlite,p.brand,partNumber) && p.brand!==brand) return undefined;
+      return p;
+    }
+    const p=db.select().from(products).where(eq(products.partNumber,partNumber)).get();
+    return p ? publicCatalogPrices(sqlite,[p])[0] : undefined;
+  }
   async createProduct(p: InsertProduct) {
+    // Final synchronous recheck closes the await/image-completion race with
+    // an import transaction. Private PO/quotation values remain untouched.
+    if(p.partNumber) {
+      const linked=linkedProduct(sqlite,p.brand,p.partNumber);
+      if(linked) return (await this.getProduct(linked.id))!;
+      if(!CATALOG_BRANDS.includes(p.brand) && sqlite.prepare("SELECT 1 FROM catalog_prices WHERE part_key=? LIMIT 1").get(partKey(p.partNumber)))
+        throw Error("A catalog-owned part needs a validated brand before automatic publication");
+    }
     return db.insert(products).values({ ...p, createdAt: Date.now() }).returning().get();
   }
   async updateProduct(id: number, p: Partial<InsertProduct>) {
+    const owned=sqlite.prepare("SELECT * FROM catalog_prices WHERE product_id=?").get(id) as any;
+    if(owned) {
+      const current=await this.getProduct(id);
+      if((p.priceInr!==undefined && p.priceInr!==current?.priceInr) || (p.brand!==undefined && p.brand!==current?.brand) || (p.partNumber!==undefined && p.partNumber!==current?.partNumber))
+        throw Error("This product's price and identity are managed by its price list");
+    }
     return db.update(products).set(p).where(eq(products.id, id)).returning().get();
   }
   async deleteProduct(id: number) {
+    if(sqlite.prepare("SELECT 1 FROM catalog_prices WHERE product_id=?").get(id)) throw Error("Hide the product or reverse its publication job; catalog identities cannot be deleted");
     db.delete(products).where(eq(products.id, id)).run();
   }
 
@@ -691,4 +724,5 @@ export class DatabaseStorage implements IStorage {
   }
 }
 
+initPriceCatalog(sqlite);
 export const storage = new DatabaseStorage();

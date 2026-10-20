@@ -19,7 +19,7 @@ if (strlen($uri) > 1500) seo_fail(414, 'Address too long');
 if (substr($uri, 0, 2) === '//') seo_fail(404, 'Page not found');
 $path = parse_url($uri, PHP_URL_PATH);
 if (!is_string($path) || preg_match('/[\x00-\x1f\\\\]/', rawurldecode($path)) || strpos(rawurldecode($path), '..') !== false) seo_fail(404, 'Page not found');
-$xml = in_array($path, ['/sitemap.xml', '/sitemap-seo.xml', '/sitemap-seo-index.xml'], true);
+$xml = in_array($path, ['/sitemap.xml', '/sitemap-seo.xml', '/sitemap-seo-index.xml'], true) || preg_match('~^/sitemap-catalog-(?:static|0|[1-9][0-9]{0,8})\.xml$~D', $path);
 $robots = $path === '/robots.txt';
 $catalog = preg_match('~^/(?:products/?|product/[^/?#]+(?:/[^/?#]+)?/?|p/[^/?#]+/?)$~D', $path);
 if (!$xml && !$robots && !$catalog) seo_fail(404, 'Page not found');

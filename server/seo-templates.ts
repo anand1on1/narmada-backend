@@ -40,6 +40,9 @@ export interface SeoProduct {
   description: string;
   shortDescription?: string | null;
   priceInr: number;                 // sell price (never purchase_price)
+  priceUsd?: number;
+  catalogPriced?: boolean;
+  catalogFxAt?: number;
   stockQty?: number | null;
   imageUrls?: string[] | string;    // JSON array or already-parsed
   compatibleModels?: string[] | string;
@@ -279,7 +282,7 @@ export function renderProductPage(
   const showDisclaimer = (product.imageSource === "placeholder" || product.imageSource === "generated");
   const inStock = (product.stockQty ?? 0) > 0;
   const availability = inStock ? "https://schema.org/InStock" : "https://schema.org/PreOrder";
-  const priceStr = product.priceInr.toFixed(2);
+  const priceStr = (product.catalogPriced ? product.priceUsd! : product.priceInr).toFixed(2);
 
   const waMessage = encodeURIComponent(
     `Hi, I'm interested in ${product.name}${product.partNumber ? ` (Part No: ${product.partNumber})` : ""}. Please share availability & delivery details.`,
@@ -296,9 +299,10 @@ export function renderProductPage(
     image: images.length ? images.map((u) => absUrl(cfg.baseUrl, u)) : undefined,
     offers: {
       "@type": "Offer",
-      priceCurrency: "INR",
+      priceCurrency: product.catalogPriced ? "USD" : "INR",
       price: priceStr,
-      availability,
+      availability: product.catalogPriced ? undefined : availability,
+      ...(product.catalogPriced ? {priceSpecification: {"@type":"UnitPriceSpecification",price:priceStr,priceCurrency:"USD",valueAddedTaxIncluded:true}} : {}),
       url: canonical,
     },
   };
@@ -348,7 +352,7 @@ export function renderProductPage(
              ${rImg ? `<img src="${attr(rImg)}" alt="${attr(r.name)}" width="240" height="180" loading="lazy">` : ""}
              <div class="name">${esc(r.name)}</div>
              ${r.partNumber ? `<div style="font-size:.85rem;color:#555">P/N: ${esc(r.partNumber)}</div>` : ""}
-             <div class="price">&#8377;${esc(fmtInr(r.priceInr))}</div>
+             <div class="price">${r.catalogPriced ? `US$${r.priceUsd!.toFixed(2)}` : `&#8377;${esc(fmtInr(r.priceInr))}`}</div>
            </a>`;
          }).join("\n")}
        </div>
@@ -373,8 +377,9 @@ ${renderHeader(cfg)}
     <div class="info">
       <h1>${esc(product.name)}</h1>
       ${product.partNumber ? `<p style="color:#555;margin:.15rem 0">Part No: <strong>${esc(product.partNumber)}</strong></p>` : ""}
-      <p class="price">&#8377;${esc(fmtInr(product.priceInr))} <span style="font-size:.85rem;color:#555;font-weight:400">(incl. GST as applicable)</span></p>
-      <p>${inStock ? `<span class="stock-in">In stock</span>` : `<span class="stock-out">Made to order &middot; contact for lead time</span>`}</p>
+      <p class="price">${product.catalogPriced ? `US$${priceStr}` : `&#8377;${esc(fmtInr(product.priceInr))}`} <span style="font-size:.85rem;color:#555;font-weight:400">(GST included)</span></p>
+      ${product.catalogPriced ? `<p>Price-list MRP converted from INR. FX verified ${esc(new Date(product.catalogFxAt!).toISOString().slice(0,10))}. Confirm availability and freight.</p><p><a href="${waHref}">Contact us for a discount</a></p>` : ""}
+      <p>${product.catalogPriced ? "Contact us to confirm availability" : inStock ? `<span class="stock-in">In stock</span>` : `<span class="stock-out">Made to order &middot; contact for lead time</span>`}</p>
 
       <div class="cta-row">
         <a class="btn btn-wa" href="${attr(waHref)}" rel="nofollow noopener" target="_blank">WhatsApp us to order</a>

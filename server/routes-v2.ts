@@ -5,6 +5,7 @@ import { randomBytes, createHash, scryptSync, timingSafeEqual } from "node:crypt
 import path from "node:path";
 import fs from "node:fs";
 import Papa from "papaparse";
+import { registerPriceCatalog } from "./price-catalog-routes";
 import multer from "multer";
 import { storage, db } from "./storage";
 import * as v2 from "./storage-v2";
@@ -585,6 +586,7 @@ export function registerV2Routes(app: Express, ctx: V2Context) {
 
   // ============== BLOG / POSTS ==============
   registerAutoBloggerRoutes(app, rawSqlite, requireAdminRole);
+  registerPriceCatalog(app, rawSqlite, requireAdminRole);
   // Managed posts use the versioned, validated editor, not the legacy bypass.
   const managedPost = (id: number) => !!rawSqlite.prepare("SELECT post_id FROM blog_articles WHERE post_id=?").get(id);
   // Public — only published posts
@@ -677,7 +679,7 @@ export function registerV2Routes(app: Express, ctx: V2Context) {
     const brand = req.query.brand as string | undefined;
     if (!partNumber) return res.status(400).json({ error: "part_number required" });
     const results = await v2.searchPriceItems(partNumber, brand);
-    res.json({ results, count: results.length });
+    res.json({ results: results.map(({ dealerPrice, ...publicItem }) => publicItem), count: results.length });
   });
 
   // Bug 3: Part number / product name autocomplete for quote line items

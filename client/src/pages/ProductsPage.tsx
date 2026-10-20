@@ -43,7 +43,10 @@ export default function ProductsPage() {
   const { data: fx } = useQuery<{ usdInr: number }>({ queryKey: ["/api/settings/fx"] });
   const usdInr = fx?.usdInr || 83.5;
   const pageHref = (n: number) => {
-    const next = new URLSearchParams(params);
+    const next = new URLSearchParams();
+    if(brand!=="all") next.set("brand",brand);
+    if(category!=="all") next.set("category",category);
+    if(q) next.set("q",q);
     n > 1 ? next.set("page", String(n)) : next.delete("page");
     return `/products${next.size ? `?${next}` : ""}`;
   };
@@ -51,10 +54,10 @@ export default function ProductsPage() {
   return (
     <>
       <SeoHead
-        title={`Commercial vehicle parts${page > 1 ? ` — Page ${page}` : ""} | Narmada Mobility`}
+        title={`${[brand!=="all"?brand:"",category!=="all"?category:""].filter(Boolean).join(" ")} Commercial vehicle parts${page > 1 ? ` — Page ${page}` : ""} | Narmada Mobility`}
         description="Browse the Narmada Mobility parts catalog. Confirm fitment, price and availability before ordering."
-        noindex={!!q || brand !== "all" || category !== "all"}
-        canonicalPath={`/products${page > 1 ? `?page=${page}` : ""}`}
+        noindex={!!q}
+        canonicalPath={pageHref(page)}
         keywords="truck spare parts catalog, commercial vehicle parts india, heavy duty spare parts exporter"
       />
       <section className="surface-obsidian relative overflow-hidden border-b border-[hsl(220_45%_20%)]/8">

@@ -13,6 +13,7 @@ import { sendContactEmail, sendQuoteRequestEmail as salesSendQuoteRequestEmail }
 import { registerBulkRoutes } from "./bulk";
 import { registerV2Routes, TokenMap, TokenInfo, persistAdminSession, rehydrateSession, deleteAdminSession } from "./routes-v2";
 import { productsListHandler } from "./product-pagination";
+import { splitSitemapIndex, splitSitemapPage, sitemapProductCount } from "./catalog-sitemap";
 import type { AdminRole } from "@shared/schema";
 import { PUBLIC_ORIGIN } from "../shared/public-urls";
 import { canonicalSitemapEntries, checkPublicSitemap, registerPublicCatalog, publicRobots } from "./public-catalog";
@@ -532,13 +533,14 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
   // with no auth, so crawlers hitting narmadamobility.com/sitemap.xml (proxied to
   // Render) get fresh data. Same URL set the /admin "Sitemap & SEO" dashboard shows.
   registerPublicCatalog(app, rawSqlite);
+  app.get("/sitemap-catalog-:segment.xml", (req,res)=>{
+    const xml=splitSitemapPage(rawSqlite,String(req.params.segment));
+    if(!xml) return res.status(404).set("X-Robots-Tag","noindex").end();
+    res.type("application/xml").set("Cache-Control","no-store").send(xml);
+  });
   app.get("/sitemap.xml", async (_req, res) => {
     try {
-      const baseUrl = sitemapCanonicalBase();
-      const allProducts = await storage.listProducts({ activeOnly: true });
-      const urls = buildSitemapUrls(allProducts, baseUrl);
-      const xml = renderSitemapXml(urls);
-      console.log("[R27.31 sitemap] generated", urls.length, "URLs");
+      const xml = splitSitemapIndex(rawSqlite);
       res.set("Content-Type", "application/xml; charset=utf-8");
       res.set("Cache-Control", "no-store");
       res.send(xml);
@@ -554,26 +556,22 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
   });
 
   app.post("/api/admin/sitemap/regenerate", requireAdmin, async (req, res) => {
-    const baseUrl = sitemapCanonicalBase();
-    const allProducts = await storage.listProducts({ activeOnly: true });
-    const urls = buildSitemapUrls(allProducts, baseUrl);
-    const xml = `<?xml version="1.0" encoding="UTF-8"?>\n<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n${urls.join("\n")}\n</urlset>`;
+    const xml = splitSitemapIndex(rawSqlite);
+    const count = sitemapProductCount(rawSqlite);
     fs.writeFileSync(path.join(PUBLIC_DIR, "sitemap.xml"), xml);
-    await storage.logSitemapRun(urls.length);
-    res.json({ ok: true, urlCount: urls.length, generatedAt: Date.now(), public: await checkPublicSitemap(xml) });
+    await storage.logSitemapRun(count);
+    res.json({ ok: true, urlCount: count, generatedAt: Date.now(), public: await checkPublicSitemap(xml) });
   });
 
   app.get("/api/admin/sitemap/status", requireAdmin, async (_req, res) => {
     const last = await storage.getLatestSitemapRun();
-    const urls = buildSitemapUrls(await storage.listProducts({ activeOnly: true }), sitemapCanonicalBase());
-    res.json({ last, urlCount: urls.length, generatedAt: Date.now(), lastRegeneratedAt: last?.generatedAt ?? null,
-      public: await checkPublicSitemap(renderSitemapXml(urls)), publicUrl: PUBLIC_ORIGIN + "/sitemap.xml" });
+    res.json({ last, urlCount: sitemapProductCount(rawSqlite), generatedAt: Date.now(), lastRegeneratedAt: last?.generatedAt ?? null,
+      public: await checkPublicSitemap(splitSitemapIndex(rawSqlite)), publicUrl: PUBLIC_ORIGIN + "/sitemap.xml" });
   });
 
   // Download the last generated sitemap
   app.get("/api/admin/sitemap/download", requireAdmin, async (_req, res) => {
-    const urls = buildSitemapUrls(await storage.listProducts({ activeOnly: true }), sitemapCanonicalBase());
-    res.set("Content-Disposition", 'attachment; filename="sitemap.xml"').type("application/xml").send(renderSitemapXml(urls));
+    res.set("Content-Disposition", 'attachment; filename="sitemap.xml"').type("application/xml").send(splitSitemapIndex(rawSqlite));
   });
 
   // -------- R28 Session 4: SEO SSR pages + sitemap-seo.xml + robots-seo.txt --------
@@ -605,13 +603,10 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
 
   // -------- Phase 3: CMS / Price Checker / Consignments / Sub-users / SEO helpers --------
   const regenSitemapFn = async () => {
-    const baseUrl = sitemapCanonicalBase();
-    const allProducts = await storage.listProducts({ activeOnly: true });
-    const urls = buildSitemapUrls(allProducts, baseUrl);
-    const xml = `<?xml version="1.0" encoding="UTF-8"?>\n<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n${urls.join("\n")}\n</urlset>`;
+    const xml = splitSitemapIndex(rawSqlite), count=sitemapProductCount(rawSqlite);
     fs.writeFileSync(path.join(PUBLIC_DIR, "sitemap.xml"), xml);
-    await storage.logSitemapRun(urls.length);
-    return { urlCount: urls.length };
+    await storage.logSitemapRun(count);
+    return { urlCount: count };
   };
 
   registerV2Routes(app, {
