@@ -20,6 +20,11 @@ claimed as fully exercised in the browser.
 - Expect stable IDs/URLs, no duplicates or deletion, and exact progress/counts.
 - Test invalid prices, significant zeros/punctuation, duplicate rows, collisions,
   two brands, future dates, native Excel formatting, retries and concurrency.
+- Import dealer-price/GST metadata privately; omit it on a subsequent upload and
+  verify latest same-brand/same-part values survive. Explicit zero remains zero;
+  new identities stay NULL. Malformed metadata rejects the chunk atomically.
+- Verify authorized private checker access and no dealer-cost field/value in
+  public checker/product API, initial HTML or structured data.
 
 ## Quotations
 - Create/save/edit INR and USD quotations; switch currency and re-save.

@@ -46,7 +46,7 @@ export function registerPriceCatalog(app: Express, db: Database, admin: RequestH
     const requestKey=req.body.requestKey || "csv-"+createHash("sha256").update(JSON.stringify([req.body.brand,req.body.versionLabel,req.body.effectiveDate,req.body.csv])).digest("hex");
     const upload=startUpload(db,{...req.body,requestKey}) as any;
     for(let i=0;i<parsed.data.length;i+=500) uploadChunk(db,upload.id,i/500,parsed.data.slice(i,i+500).map(r=>({
-      partNumber:r.part_number || r.partnumber || r.part_no, description:r.description,mrp:r.mrp,hsnCode:r.hsn_code,uom:r.uom,
+      partNumber:r.part_number || r.partnumber || r.part_no, description:r.description,mrp:r.mrp,dealerPrice:r.dealer_price,gstPercent:r.gst_percent,hsnCode:r.hsn_code,uom:r.uom,
     })));
     return {...finishUpload(db,upload.id),ok:true,inserted:parsed.data.length,errors:[]};
   }));

@@ -16,6 +16,31 @@ export function positivePrice(value: unknown): number | null {
   const n = Number(text.replace(/,/g, ""));
   return Number.isFinite(n) && n > 0 && n <= 1e10 ? n : null;
 }
+// Missing/blank private metadata means "retain the most recent valid value".
+// Explicit zero is meaningful (including zero-rated GST), never a missing value.
+function privateNumber(value: unknown, field: "dealer_price" | "gst_percent"): number | undefined {
+  if(value==null || (typeof value==="string" && !value.trim())) return undefined;
+  if(typeof value!=="number" && typeof value!=="string") throw Error(`Invalid ${field}`);
+  let text=String(value).trim();
+  if(field==="gst_percent") text=text.replace(/%$/,"").trim();
+  else text=text.replace(/^(?:₹\s*|INR\s+|Rs\.?\s+)/i,"");
+  if(!/^(?:\d+|\d{1,3}(?:,\d{3})+|\d{1,2}(?:,\d{2})*,\d{3})(?:\.\d{1,4})?$/.test(text)) throw Error(`Invalid ${field}`);
+  const n=Number(text.replace(/,/g,""));
+  if(!Number.isFinite(n) || n<0 || n>(field==="gst_percent"?100:1e10)) throw Error(`Invalid ${field}`);
+  return n;
+}
+function previousPrivateNumber(db: Database, brand: string, part: string, listId: number, field: "dealer_price" | "gst_percent"): number | null {
+  if(!part) return null;
+  // field is an internal fixed enum, never request-provided SQL.
+  const row=db.prepare(`SELECT pi.${field} value FROM price_items pi JOIN price_lists pl ON pl.id=pi.price_list_id
+    WHERE pi.brand=? AND lower(trim(pi.part_number))=? AND pi.mrp>0
+      AND typeof(pi.${field}) IN ('integer','real') AND pi.${field}>=0 AND pi.${field}<=?
+      AND (pl.effective_date IS NULL OR pl.effective_date<=?)
+      AND (pi.price_list_id=? OR NOT EXISTS(SELECT 1 FROM catalog_uploads u WHERE u.list_id=pi.price_list_id AND u.status!='complete'))
+    ORDER BY (pi.price_list_id=?) DESC,pl.uploaded_at DESC,pi.id DESC LIMIT 1`)
+    .get(brand,partKey(part),field==="gst_percent"?100:1e10,Date.now(),listId,listId) as any;
+  return row ? row.value : null;
+}
 export type CatalogFx = { rate: number; at: number };
 export function catalogFx(db: Database): CatalogFx | null {
   const r = db.prepare("SELECT value FROM settings WHERE key='catalog_verified_fx'").get() as any;
@@ -97,14 +122,19 @@ export function uploadChunk(db: Database, id: number, seq: number, rows: any[]) 
     if (u.status !== "uploading" || u.next_chunk !== seq) throw Error("Upload closed or chunk out of sequence");
     if (u.rows + rows.length > 500000) throw Error("Upload exceeds 500000 rows");
     const insert = db.prepare(`INSERT INTO price_items(brand,price_list_id,part_number,part_number_clean,description,mrp,dealer_price,hsn_code,gst_percent,uom)
-      VALUES(?,?,?,?,?,?,NULL,?,NULL,?)`);
+      VALUES(?,?,?,?,?,?,?,?,?,?)`);
     for (const row of rows) {
       // Retain invalid rows for explicit job rejection; never repair their prices.
       let part = typeof row.partNumber === "string" ? row.partNumber.trim() : "";
       if (part.length > 120 || /[\x00-\x1f\x7f]/.test(part)) part = "";
+      const dealer=privateNumber(row.dealerPrice ?? row.dealer_price,"dealer_price");
+      const gst=privateNumber(row.gstPercent ?? row.gst_percent,"gst_percent");
       insert.run(u.brand, u.list_id, part, partKey(part).replace(/[^a-z0-9]/g,""),
         String(row.description || "").slice(0,1000), row.sourceCurrency && row.sourceCurrency!=="INR" ? null : positivePrice(row.mrp),
-        String(row.hsnCode || "").slice(0,30), String(row.uom || "").slice(0,20));
+        dealer===undefined ? previousPrivateNumber(db,u.brand,part,u.list_id,"dealer_price") : dealer,
+        String(row.hsnCode || "").slice(0,30),
+        gst===undefined ? previousPrivateNumber(db,u.brand,part,u.list_id,"gst_percent") : gst,
+        String(row.uom || "").slice(0,20));
     }
     db.prepare("INSERT INTO catalog_chunks VALUES(?,?,?)").run(id,seq,hash);
     db.prepare("UPDATE catalog_uploads SET rows=rows+?,next_chunk=next_chunk+1 WHERE id=?").run(rows.length,id);

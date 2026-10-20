@@ -51,9 +51,22 @@ resumes jobs already requested. Future-upload synchronization defaults off.
 - Native Excel/CSV: first worksheet, at most 50,000 rows and 8 MB per file;
   split larger files safely. Browser reads one bounded workbook; requests carry
   at most 500 rows. Existing database backfill does not load all rows into memory.
-- Required columns: `part_number`, `mrp`. Optional: `description`, `hsn_code`,
-  `uom`, `currency` (INR only). Store long identifiers as text; unsafe numeric
+- Required columns: `part_number`, `mrp`. Optional: `description`, `dealer_price`,
+  `gst_percent`, `hsn_code`, `uom`, `currency` (INR only). Store long identifiers as text; unsafe numeric
   identifiers are rejected rather than silently losing precision.
+- Valid dealer-price and GST-percent metadata is retained privately. Blank or
+  omitted fields carry forward the most recent valid value for the same validated
+  brand and exact normalized part only; new identities remain NULL. Explicit zero
+  is retained, including zero-rated GST. Incomplete unrelated uploads are not a
+  carry-forward source. Historical rows are never zeroed or rewritten.
+- Private numeric fields must be finite, non-negative numbers; GST percent must be
+  at most 100. Standard INR/grouped dealer values and a trailing GST `%` are accepted.
+  Malformed private metadata rejects the entire chunk atomically. Correct the file
+  and re-upload; an unfinished upload remains excluded from checker results.
+- Authorized admins can inspect retained costs through
+  `/api/admin/price-lists/search?part_number=...&brand=...`; unauthenticated checker
+  output continues to omit dealer costs. GST metadata retention does not add GST
+  again to the approved public MRP.
 - Brand is selected explicitly from the existing supported-brand list.
   Identity ignores ASCII case and outer whitespace only. Leading zeros,
   punctuation and internal whitespace remain significant.

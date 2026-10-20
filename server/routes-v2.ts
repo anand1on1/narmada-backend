@@ -682,6 +682,15 @@ export function registerV2Routes(app: Express, ctx: V2Context) {
     res.json({ results: results.map(({ dealerPrice, ...publicItem }) => publicItem), count: results.length });
   });
 
+  // Private checker projection: costs are retained for authorized staff, never
+  // restored to the unauthenticated checker endpoint above.
+  app.get("/api/admin/price-lists/search", requireAdminRole, async (req,res)=>{
+    const partNumber=(req.query.part_number || req.query.q) as string;
+    if(!partNumber) return res.status(400).json({error:"part_number required"});
+    const results=await v2.searchPriceItems(partNumber,req.query.brand as string | undefined);
+    res.json({results,count:results.length});
+  });
+
   // Bug 3: Part number / product name autocomplete for quote line items
   // Requires admin/team auth (x-admin-token). Returns suggestions from price_list + past quote items.
   app.get("/api/admin/part-suggestions", requireAuth, async (req, res) => {

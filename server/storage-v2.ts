@@ -119,7 +119,7 @@ export async function searchPriceItems(partNumber: string, brand?: string): Prom
   `;
   const params: any[] = [clean + "%"];
   if (brand) { sqlStr += " AND pi.brand = ?"; params.push(brand); }
-  sqlStr += " ORDER BY pl.uploaded_at DESC LIMIT 50";
+  sqlStr += " ORDER BY pl.uploaded_at DESC, pi.id DESC LIMIT 50";
   const rows = sqlite.prepare(sqlStr).all(...params) as any[];
   return rows.map((r) => ({
     id: r.id,
@@ -153,7 +153,7 @@ export function lookupPartNumberMrp(partNumber: string): { mrp: number; brand: s
     LEFT JOIN price_lists pl ON pl.id = pi.price_list_id
     WHERE pi.part_number_clean = ?
       AND NOT EXISTS(SELECT 1 FROM catalog_uploads u WHERE u.list_id=pl.id AND u.status!='complete')
-    ORDER BY pl.uploaded_at DESC
+    ORDER BY pl.uploaded_at DESC, pi.id DESC
     LIMIT 1
   `).get(clean) as any;
   if (!row || row.mrp == null) return null;

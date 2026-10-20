@@ -69,7 +69,7 @@ export default function AdminPriceList() {
           const cell=sheet[XLSX.utils.encode_cell({r:start+index,c:range.s.c+partCol})];
           const unsafe=cell?.t==="n" && (!Number.isSafeInteger(cell.v) || cell.v>=1e15);
           const get=(name:string)=>v[header.indexOf(name)] || "";
-          return {partNumber:unsafe ? "" : String(v[partCol] || ""),description:get("description"),mrp:get("mrp"),hsnCode:get("hsn_code"),uom:get("uom"),sourceCurrency:get("currency") || "INR"};
+          return {partNumber:unsafe ? "" : String(v[partCol] || ""),description:get("description"),mrp:get("mrp"),dealerPrice:get("dealer_price"),gstPercent:get("gst_percent"),hsnCode:get("hsn_code"),uom:get("uom"),sourceCurrency:get("currency") || "INR"};
         });
         await send(`/api/admin/catalog-sync/uploads/${u.id}/chunks`,{seq,rows});
         setProgress(`Uploaded ${Math.min(start+499,range.e.r).toLocaleString()} / ${range.e.r.toLocaleString()} rows`);
@@ -203,7 +203,7 @@ export default function AdminPriceList() {
                   className="w-full mt-2 border rounded-lg px-3 py-2 bg-background font-mono text-xs"
                   data-testid="input-csv-text"
                 />
-                <p className="text-xs text-muted-foreground mt-1">Required: part_number, mrp. Optional: description, hsn_code, uom, currency (INR only). MRP is GST-inclusive. Private dealer prices are not imported. First worksheet, up to 50,000 rows and 8 MB per file; larger lists can be split safely. Store long part numbers as text to preserve precision and leading zeros.</p>
+                <p className="text-xs text-muted-foreground mt-1">Required: part_number, mrp. Optional: description, dealer_price, gst_percent, hsn_code, uom, currency (INR only). MRP is GST-inclusive. Dealer prices remain private; blank dealer/GST metadata retains the latest valid same-brand, same-part value. Explicit zero is retained; malformed metadata stops the chunk. First worksheet, up to 50,000 rows and 8 MB per file. Store long part numbers as text to preserve precision and leading zeros.</p>
               </Field>
             </div>
             <div className="sticky bottom-0 bg-card border-t px-6 py-4 flex justify-end gap-3">
