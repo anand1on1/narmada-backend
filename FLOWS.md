@@ -1,6 +1,14 @@
 # Price-list publication — pending QA inventory
 
-Discovery only. No source edits or browser signoff. These are planned checks.
+QA inventory. Completed checks and exclusions are recorded in the release handoff;
+this list is not blanket browser signoff for every existing private workflow.
+
+Offline browser checks completed: native Excel upload/retry with one update, one
+new product and one invalid-price rejection; stable product URL and USD price;
+catalog search/pagination; desktop/mobile screens; initial HTML and JSON-LD through
+the real PHP bridge using a local-only transport stub; missing product 404.
+Existing private PO/quotation workflows are covered by regression tests, not
+claimed as fully exercised in the browser.
 
 ## Price Checker
 - Choose Tata, search a known part, open an enquiry.

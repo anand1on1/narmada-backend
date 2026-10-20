@@ -66,7 +66,7 @@ export function ProductCard({ product, usdInr }: { product: Product; usdInr: num
 
           {product.partNumber && (
             <div className="absolute bottom-3 left-3 font-mono text-[10px] text-[hsl(220_60%_12%)]/82 uppercase tracking-wider">
-              <span className="text-[hsl(220_60%_12%)]/40">OEM</span> {product.partNumber}
+              <span className="text-[hsl(220_60%_12%)]/40">{product.catalogPriced ? "Part" : "OEM"}</span> {product.partNumber}
             </div>
           )}
         </a>
