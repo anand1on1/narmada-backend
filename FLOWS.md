@@ -15,6 +15,16 @@ claimed as fully exercised in the browser.
 - Verify public-safe price details, empty/invalid search and no supplier/private data.
 
 ## Admin upload
+- November 3 narrow feedback fix: verify protected deletion returns HTTP 409 with
+  retained-for-audit guidance and leaves source rows, ownership and audit unchanged.
+- Verify an unprotected list can still be deleted and the list refreshes.
+- In the open upload dialog, verify file-size, worksheet-row, missing-header and
+  HTTP 400 private-metadata errors remain visible at desktop and 375px.
+- Verify parsing/upload disables submission, input changes and closing; opening a
+  fresh dialog clears stale state, and replacing a rejected file cannot submit
+  previously pasted CSV. Retry the same native Excel file without duplicate rows.
+- Keep the 8 MiB/50,000-row limits and first-worksheet rule. A replacement upload
+  never requires deleting the older list. Actual November 3 file failure unknown.
 - Download the template; upload a small brand file.
 - Repeat it, update one price, add a part, omit an existing part.
 - Expect stable IDs/URLs, no duplicates or deletion, and exact progress/counts.
@@ -60,3 +70,22 @@ claimed as fully exercised in the browser.
 - Stable final changes: full suite, typecheck/build, browser QA and offline fixtures.
 - Reviewable exact-head PR and GoDaddy ZIP with marker/checksum.
 - No merge/deploy/production activation without explicit authority.
+
+## November 3 feedback-fix verification
+- Full existing suite: 42 files passed, 609 tests passed and one opt-in 400k
+  benchmark skipped, with a single worker and isolated temporary databases.
+- Targeted catalog suites: 25 passed; one opt-in 400k benchmark skipped.
+  The new tests compare all source/catalog/job/audit rows before and after both
+  retained-list conflict branches, plus verify permitted deletion still works.
+- TypeScript no-emit and whitespace checks passed.
+- Actual frontend offline browser QA passed ten check groups at 1280px and 375px:
+  protected/permitted deletion, in-dialog file/header/row/API errors, parsing and
+  upload locks, native Excel first-sheet/text-ID/private-zero fields, stable retry
+  key, cleared fresh-dialog state, and CSV template download. No page errors.
+- Browser requests were intercepted with fixtures. Real route/database validation
+  is tested separately in isolated SQLite; no production actions were performed.
+- This narrow change does not claim a new browser review of all unrelated app
+  workflows, and does not identify the user's unseen replacement-file failure.
+- Reusable browser runner: import `tests/catalog/price-list-feedback.browser.mjs`
+  and call `runPriceListFeedbackQa(browser, { baseURL, outputDir })` with an
+  already-installed Playwright browser and local frontend dev/preview server.
