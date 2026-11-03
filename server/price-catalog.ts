@@ -53,6 +53,13 @@ export function initPriceCatalog(db: Database) {
       list_id INTEGER NOT NULL UNIQUE, status TEXT NOT NULL DEFAULT 'uploading', next_chunk INTEGER NOT NULL DEFAULT 0,
       rows INTEGER NOT NULL DEFAULT 0, created_at INTEGER NOT NULL);
     CREATE TABLE IF NOT EXISTS catalog_chunks(upload_id INTEGER, seq INTEGER, digest TEXT NOT NULL, PRIMARY KEY(upload_id,seq));
+    CREATE TABLE IF NOT EXISTS catalog_csv_imports(
+      upload_id INTEGER PRIMARY KEY,encoding TEXT NOT NULL,expected_bytes INTEGER NOT NULL,
+      metadata TEXT NOT NULL,requested_by TEXT NOT NULL,state TEXT NOT NULL DEFAULT 'pending',
+      received_bytes INTEGER NOT NULL DEFAULT 0,parsed_rows INTEGER NOT NULL DEFAULT 0,
+      sha256 TEXT,error TEXT,lease_token TEXT,lease_until INTEGER NOT NULL DEFAULT 0,
+      attempted_at INTEGER,created_at INTEGER NOT NULL,updated_at INTEGER NOT NULL);
+    CREATE UNIQUE INDEX IF NOT EXISTS catalog_csv_single_stream ON catalog_csv_imports((1)) WHERE state='streaming';
     CREATE TABLE IF NOT EXISTS catalog_jobs(
       id INTEGER PRIMARY KEY, request_key TEXT NOT NULL UNIQUE, list_id INTEGER, mode TEXT NOT NULL,
       state TEXT NOT NULL DEFAULT 'queued', cursor INTEGER NOT NULL DEFAULT 0, max_id INTEGER NOT NULL,
@@ -111,12 +118,15 @@ export function startUpload(db: Database, body: any) {
     return db.prepare("SELECT * FROM catalog_uploads WHERE id=?").get(id);
   }).immediate();
 }
-export function uploadChunk(db: Database, id: number, seq: number, rows: any[]) {
+export function uploadChunk(db: Database, id: number, seq: number, rows: any[], internal?: {csvLease: string}) {
   if (!Number.isInteger(seq) || seq < 0 || !Array.isArray(rows) || !rows.length || rows.length > 500) throw Error("Send 1–500 rows per chunk");
   const hash = digest(JSON.stringify(rows));
   return db.transaction(() => {
     const u = db.prepare("SELECT * FROM catalog_uploads WHERE id=?").get(id) as any;
     if (!u) throw Error("Upload not found");
+    const csv = db.prepare("SELECT state,lease_token,lease_until FROM catalog_csv_imports WHERE upload_id=?").get(id) as any;
+    if (csv && (csv.state!=="streaming" || !internal?.csvLease || csv.lease_token!==internal.csvLease || csv.lease_until<Date.now()))
+      throw Error("Use the protected CSV stream endpoint for this import");
     const prior = db.prepare("SELECT digest FROM catalog_chunks WHERE upload_id=? AND seq=?").get(id, seq) as any;
     if (prior) { if (prior.digest !== hash) throw Error("Chunk retry differs"); return u; }
     if (u.status !== "uploading" || u.next_chunk !== seq) throw Error("Upload closed or chunk out of sequence");
@@ -171,6 +181,8 @@ export function finishUpload(db: Database, id: number) {
   return db.transaction(() => {
     const u = db.prepare("SELECT * FROM catalog_uploads WHERE id=?").get(id) as any;
     if (!u || !u.rows) throw Error("Empty or missing upload");
+    const csv = db.prepare("SELECT state FROM catalog_csv_imports WHERE upload_id=?").get(id) as any;
+    if (csv && !["validated","complete"].includes(csv.state)) throw Error("CSV stream has not passed complete-file validation");
     db.prepare("UPDATE catalog_uploads SET status='complete' WHERE id=?").run(id);
     db.prepare("UPDATE price_lists SET item_count=? WHERE id=?").run(u.rows,u.list_id);
     const enabled = (db.prepare("SELECT value FROM settings WHERE key='catalog_auto_sync'").get() as any)?.value === "true";

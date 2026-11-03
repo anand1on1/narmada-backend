@@ -3,8 +3,10 @@ import type { Database } from "better-sqlite3";
 import Papa from "papaparse";
 import { createHash } from "node:crypto";
 import { catalogFx, createJob, finishUpload, rollbackBatch, runCatalogBatch, startUpload, uploadChunk } from "./price-catalog";
+import { registerLargeCsvImports } from "./price-csv-import";
 
 export function registerPriceCatalog(app: Express, db: Database, admin: RequestHandler) {
+  registerLargeCsvImports(app,db,admin);
   const safe = (fn: (req: any) => any): RequestHandler => (req,res) => {
     try { res.json(fn(req)); } catch(e) { res.status(400).json({error:(e as Error).message}); }
   };
