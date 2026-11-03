@@ -3,6 +3,7 @@ import { AdminLayout } from "./AdminLayout";
 import { adminFetch, useAdminAuth } from "@/lib/admin-auth";
 import { Upload, Download, Trash2, ListChecks, FileSpreadsheet } from "lucide-react";
 import { CatalogSyncPanel } from "./CatalogSyncPanel";
+import { CSV_MAX_BYTES, CSV_IMPORT_BASE, csvJson, csvProgress, csvComplete, streamCsvFile, readCsvCheckpoint, writeCsvCheckpoint, type CsvImportStatus, type CsvCheckpoint } from "@/lib/price-csv-upload";
 
 interface PriceList {
   id: number;
@@ -40,6 +41,50 @@ export default function AdminPriceList() {
   const [uploadError, setUploadError] = useState("");
   const [deleteError, setDeleteError] = useState("");
   const [deletingId, setDeletingId] = useState<number | null>(null);
+  const [csvFile, setCsvFile] = useState<File | null>(null);
+  const [csvSession, setCsvSession] = useState<CsvImportStatus | null>(null);
+  const [savedCsv, setSavedCsv] = useState<CsvCheckpoint | null>(readCsvCheckpoint);
+  const [csvSyncReview, setCsvSyncReview] = useState<boolean | null>(null);
+  const [csvApproved, setCsvApproved] = useState(false);
+  const csvRequestKey = useRef<string | null>(null);
+  const fileInput = useRef<HTMLInputElement | null>(null);
+  useEffect(()=>{
+    setCsvApproved(false);setCsvSyncReview(null);
+    if(!csvSession) csvRequestKey.current=null;
+  },[open?.brand,open?.versionLabel,open?.effectiveDate,open?.notes,csvFile]); // eslint-disable-line
+  function checkpoint(value: CsvCheckpoint | null) { setSavedCsv(value);writeCsvCheckpoint(value); }
+  function resetCsvFile() {
+    if(busy.current) return;
+    setCsvFile(null);setCsvSession(null);setCsvApproved(false);setCsvSyncReview(null);
+    csvRequestKey.current=null;checkpoint(null);setUploadError("");
+    if(fileInput.current) fileInput.current.value="";
+    setProgress("Choose a new or corrected file. Any earlier incomplete import remains staged and is not deleted.");
+  }
+  function freshUpload() {
+    if(busy.current) return;
+    setWorkbook(null);setCsvFile(null);setCsvSession(null);csvRequestKey.current=null;
+    setCsvApproved(false);setCsvSyncReview(null);setProgress("");setUploadError("");
+    setOpen({brand:"",versionLabel:"",effectiveDate:"",notes:"",csv:""});
+  }
+  async function csvDone(data: CsvImportStatus) {
+    setProgress(csvComplete(data));checkpoint(null);setCsvSession(null);setCsvFile(null);
+    setWorkbook(null);setUploadError("");setOpen(null);
+    try { await load(); } catch { setProgress(csvComplete(data)+" Refresh the list to see its latest count."); }
+  }
+  async function resumeCsv() {
+    if(!token || !savedCsv || busy.current) return;
+    freshUpload();busy.current=true;setParsing(true);
+    try {
+      const data=await csvJson(token,`${CSV_IMPORT_BASE}/${savedCsv.id}`) as CsvImportStatus;
+      if(data.state==="complete") { await csvDone(data);return; }
+      if(data.encoding!=="utf-8") throw Error("This import uses a different encoding. Resume it with its original operator workflow; the dashboard uses strict UTF-8.");
+      setCsvSession(data);
+      setOpen({brand:data.brand,versionLabel:data.version_label || "",effectiveDate:data.effective_date ? new Date(data.effective_date).toISOString().slice(0,10) : "",notes:"",csv:""});
+      setProgress(`${csvProgress(data)} Choose the exact original CSV (${savedCsv.fileName}). Original metadata and notes are retained.`);
+      if(data.error) setUploadError(data.error);
+    } catch(e) { setUploadError((e as Error).message); }
+    finally {busy.current=false;setParsing(false);}
+  }
 
   async function load() {
     if (!token) return;
@@ -52,10 +97,35 @@ export default function AdminPriceList() {
     if (!token || !open || busy.current) return;
     setUploadError("");setProgress("");
     if (!open.brand) { setUploadError("Pick a brand."); return; }
-    if (!open.csv.trim() && !workbook) { setUploadError("Paste CSV or choose an Excel file."); return; }
+    if (!open.csv.trim() && !workbook && !csvFile) { setUploadError("Paste CSV or choose an Excel or CSV file."); return; }
     busy.current = true;
     setUploading(true);
+    let csvId=csvSession?.upload_id;
     try {
+      if(csvFile) {
+        const settings=await csvJson(token,"/api/admin/catalog-sync");
+        if(!csvApproved || csvSyncReview!==!!settings.enabled) {
+          setCsvSyncReview(!!settings.enabled);setCsvApproved(false);
+          setProgress("Review the publication notice below and confirm before starting this CSV import.");
+          return;
+        }
+        if(csvId) {
+          const current=await csvJson(token,`${CSV_IMPORT_BASE}/${csvId}`) as CsvImportStatus;
+          if(current.state==="complete") { await csvDone(current);return; }
+          if(csvFile.size!==current.expected_bytes) throw Error("Choose the exact original CSV. A corrected or different file needs a new import.");
+        } else {
+          csvRequestKey.current ||= crypto.randomUUID();
+          const created=await csvJson(token,CSV_IMPORT_BASE,{method:"POST",body:JSON.stringify({
+            brand:open.brand,versionLabel:open.versionLabel,effectiveDate:open.effectiveDate,notes:open.notes,
+            requestKey:csvRequestKey.current,encoding:"utf-8",bytes:csvFile.size,
+          })}) as CsvImportStatus;
+          csvId=created.upload_id;setCsvSession(created);
+          checkpoint({id:csvId,fileName:csvFile.name,bytes:csvFile.size});
+        }
+        setProgress(`Starting CSV import #${csvId}. Keep this tab open; rows remain staged until the entire file passes validation.`);
+        const done=await streamCsvFile(token,csvId!,csvFile,data=>setProgress(csvProgress(data)));
+        await csvDone(done);return;
+      }
       const XLSX=await import("xlsx");
       const sheet=workbook || XLSX.read(open.csv,{type:"string",raw:true}).Sheets.Sheet1;
       const range=XLSX.utils.decode_range(sheet["!ref"] || "A1");
@@ -85,8 +155,16 @@ export default function AdminPriceList() {
       setProgress(`${done.rows.toLocaleString()} rows received. ${done.job ? `Publication job ${done.job.id}: ${done.job.state}.` : "Future sync is disabled; run a dry run and publication job when ready."}`);
       setOpen(null);setWorkbook(null);await load();
     } catch(e) {
-      setProgress("");
-      setUploadError(`Upload stopped: ${(e as Error).message} Review the file and error before retrying. For an interrupted upload, use the same file and metadata to retry safely.`);
+      if(csvId) {
+        try {
+          const current=await csvJson(token,`${CSV_IMPORT_BASE}/${csvId}`) as CsvImportStatus;
+          if(current.state==="complete") {await csvDone(current);return;}
+          setProgress(csvProgress(current));
+        } catch {setProgress(`CSV import #${csvId} has not been confirmed complete. Its saved status can be checked by resuming it.`);}
+      } else setProgress("");
+      setUploadError(`Upload stopped: ${(e as Error).message} ${csvFile ?
+        "Interrupted transfer? Retry the exact file after five seconds. Invalid data or encoding? Choose New or corrected file. No silent repairs." :
+        "Review the file and error before retrying. For an interrupted upload, use the same file and metadata to retry safely."}`);
     }
     finally { busy.current = false; setUploading(false); }
   }
@@ -118,8 +196,18 @@ export default function AdminPriceList() {
 
   async function onFile(file: File) {
     if (busy.current) return;
-    setWorkbook(null);setOpen(o=>o?{...o,csv:""}:o);setUploadError("");setProgress("");
-    if(file.size>8*1024*1024) {setUploadError("Split files into pieces under 8 MB.");return;}
+    setWorkbook(null);setCsvFile(null);setOpen(o=>o?{...o,csv:""}:o);setUploadError("");setProgress("");
+    const isCsv=/\.csv$/i.test(file.name) || file.type==="text/csv";
+    if(csvSession && (!isCsv || file.size!==csvSession.expected_bytes)) {
+      setUploadError("Resume requires the exact original CSV and byte size. Use 'New or corrected file' to start a separate import.");return;
+    }
+    if(isCsv) {
+      if(!file.size || file.size>CSV_MAX_BYTES) {setUploadError("CSV files must be nonempty and at most 64 MiB. The server checks the 500,000-row limit.");return;}
+      setCsvFile(file);
+      setProgress(`Selected ${file.name} (${(file.size/1024/1024).toFixed(1)} MiB). CSV will stream directly; strict UTF-8, up to 500,000 rows. Click Upload to review publication settings.`);
+      return;
+    }
+    if(file.size>8*1024*1024) {setUploadError("Excel files must be at most 8 MiB and 50,000 rows in the first worksheet. Use a valid UTF-8 CSV for larger files.");return;}
     busy.current = true;setParsing(true);setProgress(`Reading ${file.name}…`);
     try {
       const XLSX=await import("xlsx");
@@ -137,11 +225,12 @@ export default function AdminPriceList() {
       {deleteError && <p role="alert" className="mb-4 text-sm text-red-700">{deleteError}</p>}
       <p className="mb-4 text-sm text-muted-foreground">To update prices, upload a replacement for the same brand. You do not need to delete the old list; lists used by the catalog are retained for audit. Products absent from a partial upload are not deleted.</p>
       <div className="flex items-center gap-3 mb-6 flex-wrap">
-        <button disabled={parsing || uploading} onClick={() => {if(busy.current) return;setWorkbook(null);setProgress("");setUploadError("");setOpen({ brand: "", versionLabel: "", effectiveDate: "", notes: "", csv: "" });}}
+        <button disabled={parsing || uploading} onClick={freshUpload}
           className="px-4 py-2 bg-accent text-accent-foreground rounded-lg font-semibold text-sm inline-flex items-center gap-2 disabled:opacity-50"
           data-testid="button-upload-list">
           <Upload className="w-4 h-4" /> Upload Price List
         </button>
+        {savedCsv && <button onClick={resumeCsv} disabled={parsing || uploading} className="px-4 py-2 border rounded-lg text-sm font-semibold disabled:opacity-50" data-testid="button-resume-csv">Resume CSV import #{savedCsv.id}</button>}
         <button onClick={downloadTemplate}
           className="px-4 py-2 border rounded-lg font-semibold text-sm inline-flex items-center gap-2"
           data-testid="button-download-template">
@@ -197,7 +286,7 @@ export default function AdminPriceList() {
               <p className="text-sm text-muted-foreground">Upload a replacement for the same brand without deleting the old list. Existing catalog provenance and audit history are retained.</p>
               <div className="grid sm:grid-cols-2 gap-4">
                 <Field label="Brand *">
-                  <select value={open.brand} onChange={(e) => setOpen({ ...open, brand: e.target.value })}
+                  <select disabled={!!csvSession} value={open.brand} onChange={(e) => setOpen({ ...open, brand: e.target.value })}
                     className="w-full border rounded-lg px-3 py-2 bg-background"
                     data-testid="select-brand">
                     <option value="">— Select brand —</option>
@@ -205,40 +294,46 @@ export default function AdminPriceList() {
                   </select>
                 </Field>
                 <Field label="Version Label (e.g. 2026-Q1)">
-                  <input value={open.versionLabel} onChange={(e) => setOpen({ ...open, versionLabel: e.target.value })}
+                  <input disabled={!!csvSession} value={open.versionLabel} onChange={(e) => setOpen({ ...open, versionLabel: e.target.value })}
                     className="w-full border rounded-lg px-3 py-2 bg-background" data-testid="input-version" />
                 </Field>
               </div>
               <Field label="Effective Date (YYYY-MM-DD)">
-                <input value={open.effectiveDate} onChange={(e) => setOpen({ ...open, effectiveDate: e.target.value })}
+                <input disabled={!!csvSession} value={open.effectiveDate} onChange={(e) => setOpen({ ...open, effectiveDate: e.target.value })}
                   placeholder="2026-01-01" className="w-full border rounded-lg px-3 py-2 bg-background" data-testid="input-effective" />
               </Field>
               <Field label="Notes (internal)">
-                <input value={open.notes} onChange={(e) => setOpen({ ...open, notes: e.target.value })}
+                <input disabled={!!csvSession} value={open.notes} onChange={(e) => setOpen({ ...open, notes: e.target.value })}
                   className="w-full border rounded-lg px-3 py-2 bg-background" data-testid="input-notes" />
               </Field>
               <Field label="Excel or CSV file (or paste CSV below)">
-                <input type="file" accept=".xlsx,.xls,.csv,text/csv" onChange={(e) => e.target.files?.[0] && void onFile(e.target.files[0])}
+                <input ref={fileInput} type="file" accept=".xlsx,.xls,.csv,text/csv" onChange={(e) => e.target.files?.[0] && void onFile(e.target.files[0])}
                   className="block w-full text-sm" data-testid="input-csv-file" />
                 <textarea
-                  value={open.csv} onChange={(e) => {setWorkbook(null);setUploadError("");setProgress("");setOpen({ ...open, csv: e.target.value });}}
+                  disabled={!!csvSession || !!csvFile} value={open.csv} onChange={(e) => {setWorkbook(null);setUploadError("");setProgress("");setOpen({ ...open, csv: e.target.value });}}
                   rows={10}
                   placeholder="part_number,description,mrp,dealer_price,hsn_code,gst_percent,uom"
                   className="w-full mt-2 border rounded-lg px-3 py-2 bg-background font-mono text-xs"
                   data-testid="input-csv-text"
                 />
-                <p className="text-xs text-muted-foreground mt-1">Required: part_number, mrp. Optional: description, dealer_price, gst_percent, hsn_code, uom, currency (INR only). MRP is GST-inclusive. Dealer prices remain private; blank dealer/GST metadata retains the latest valid same-brand, same-part value. Explicit zero is retained; malformed metadata stops the chunk. First worksheet, up to 50,000 rows and 8 MB per file. Store long part numbers as text to preserve precision and leading zeros.</p>
+                <p className="text-xs text-muted-foreground mt-1">Selected CSV: up to 64 MiB and 500,000 rows, streamed directly with strict UTF-8 decoding. Excel: first worksheet, up to 8 MiB and 50,000 rows; pasted CSV remains limited to 50,000 rows. Required: part_number, mrp. Optional: description, dealer_price, gst_percent, hsn_code, uom, currency (INR only). MRP is GST-inclusive. Dealer prices remain private; blank dealer/GST metadata retains the latest valid same-brand, same-part value. Explicit zero is retained; malformed metadata stops the chunk. Store long part numbers as text to preserve precision and leading zeros.</p>
+                {csvSession && <p className="text-xs mt-2">Import #{csvSession.upload_id}: original metadata is locked. Resume only the exact original file.</p>}
               </Field>
             </fieldset>
             <div className="sticky bottom-0 bg-card border-t px-6 py-4">
+              {csvFile && csvSyncReview!==null && <label className="mb-3 flex items-start gap-2 text-sm" data-testid="csv-publication-notice">
+                <input type="checkbox" checked={csvApproved} disabled={uploading} onChange={e=>setCsvApproved(e.target.checked)} className="mt-1 shrink-0" data-testid="checkbox-csv-confirm" />
+                <span>Future-upload sync is currently {csvSyncReview ? "ENABLED" : "DISABLED"}. I approve this file and metadata. If enabled at completion, publication may update public prices. Sync settings stay unchanged; absent products are not deleted.</span>
+              </label>}
               {uploadError && <p role="alert" className="mb-3 text-sm text-red-700 break-words">{uploadError}</p>}
               {progress && <p role="status" aria-live="polite" className="mb-3 text-sm break-words">{progress}</p>}
-              <div className="flex justify-end gap-3">
+              <div className="flex flex-wrap justify-end gap-3">
+              {(csvFile || csvSession) && <button type="button" disabled={uploading || parsing} className="w-full text-left text-sm underline sm:w-auto sm:mr-auto disabled:opacity-50" data-testid="button-new-csv" onClick={resetCsvFile}>New or corrected file</button>}
               <button onClick={() => setOpen(null)} disabled={parsing || uploading} className="px-4 py-2 border rounded-lg text-sm font-semibold disabled:opacity-50">Cancel</button>
-              <button onClick={upload} disabled={parsing || uploading}
+              <button onClick={upload} disabled={parsing || uploading || (csvFile!==null && csvSyncReview!==null && !csvApproved)}
                 className="px-4 py-2 bg-accent text-accent-foreground rounded-lg font-semibold text-sm disabled:opacity-50"
                 data-testid="button-upload-list-save">
-                {parsing ? "Reading file…" : uploading ? "Uploading…" : "Upload Price List"}
+                {parsing ? "Reading file…" : uploading ? "Uploading…" : csvFile && csvSyncReview!==null ? csvSession ? "Retry CSV import" : "Start CSV import" : "Upload Price List"}
               </button>
               </div>
             </div>

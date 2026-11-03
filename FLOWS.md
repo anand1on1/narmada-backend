@@ -15,6 +15,16 @@ claimed as fully exercised in the browser.
 - Verify public-safe price details, empty/invalid search and no supplier/private data.
 
 ## Admin upload
+- November 3 dashboard CSV integration: selected native CSV over 8 MiB uses raw
+  File streaming, not worksheet parsing; 64 MiB/500k limits are clearly separate
+  from Excel's unchanged 8 MiB/50k first-sheet limits.
+- Review current publication setting and explicitly acknowledge before creating
+  a CSV session. HTTP 200 without terminal completion is not success; reconcile
+  authenticated status, display encoding/API errors in the open dialog, and
+  distinguish import completion from queued/waiting-FX/live publication.
+- Retry the same file without a new session, resume saved ID after refresh, reject
+  mismatched size, and use a new session for a corrected file. Keep source bytes
+  unchanged and never silently repair the user's known damaged UTF-8 CSV.
 - November 3 narrow feedback fix: verify protected deletion returns HTTP 409 with
   retained-for-audit guidance and leaves source rows, ownership and audit unchanged.
 - Verify an unprotected list can still be deleted and the list refreshes.
@@ -89,3 +99,16 @@ claimed as fully exercised in the browser.
 - Reusable browser runner: import `tests/catalog/price-list-feedback.browser.mjs`
   and call `runPriceListFeedbackQa(browser, { baseURL, outputDir })` with an
   already-installed Playwright browser and local frontend dev/preview server.
+
+## Dashboard streaming CSV verification
+- Eight new browser check groups passed with a native 9,600,028-byte CSV:
+  unchanged source SHA-256/body, no worksheet materialization, explicit current
+  sync approval, HTTP/auth/NDJSON failure handling, missing terminal event,
+  authenticated completion reconciliation, saved-ID refresh resume, wrong-size
+  rejection, separate corrected-file session, and 64 MiB cap.
+- Ten existing Excel/delete/template browser groups passed, including first-sheet
+  row/file bounds, native XLSX/metadata/idempotency, parser locks and errors.
+- Desktop 1280px and mobile 375px errors/actions were checked with no page errors
+  or horizontal overflow. APIs were intercepted; no real source import occurred.
+- The user's source CSV remains unchanged and has known invalid UTF-8 description
+  bytes. Connecting the large-file path does not repair that source data.
