@@ -81,14 +81,16 @@ export async function runPriceListFeedbackQa(browser, { baseURL, outputDir }) {
     await page.getByTestId("select-brand").selectOption("tata");
     await save.click(); await alertText("Paste CSV or choose");
     await paste.fill("part_number,mrp\nSTALE,835");
-    await uploadFile("too-big.csv", Buffer.alloc(8 * 1024 * 1024 + 1, 32));
-    await alertText("under 8 MB"); assert.equal(await paste.inputValue(), "");
+    await uploadFile("too-big.xlsx", Buffer.alloc(8 * 1024 * 1024 + 1, 32));
+    await alertText("at most 8 MiB"); assert.equal(await paste.inputValue(), "");
     assert.equal(uploads.size, 0);
     checks.push("Oversized file error visible; stale pasted CSV cleared; no API upload");
     await paste.fill("description,mrp\nMissing part,835"); await save.click();
     await alertText("Required columns: part_number and mrp");
-    const longCsv = Buffer.from("part_number,mrp\n" + "ROW,835\n".repeat(50001));
-    await uploadFile("too-many.csv", longCsv); await save.click();
+    const limitBook=XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(limitBook,{"A1":{t:"s",v:"part_number"},"B1":{t:"s",v:"mrp"},
+      "A50002":{t:"s",v:"LIMIT"},"B50002":{t:"n",v:835},"!ref":"A1:B50002"},"Limit");
+    await uploadFile("too-many.xlsx",XLSX.write(limitBook,{type:"buffer",bookType:"xlsx"}));await save.click();
     await alertText("at most 50,000 rows"); assert.equal(uploads.size, 0);
     checks.push("Missing headers and 50,001 data rows rejected before API call");
     const workbook = XLSX.utils.book_new();
