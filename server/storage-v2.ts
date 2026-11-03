@@ -92,7 +92,8 @@ export class PriceListRetentionError extends Error {
 }
 export async function deletePriceList(id: number) {
   if(sqlite.prepare("SELECT 1 FROM catalog_prices WHERE source_list_id=? LIMIT 1").get(id) ||
-     sqlite.prepare("SELECT 1 FROM catalog_jobs WHERE list_id=? LIMIT 1").get(id)) throw new PriceListRetentionError();
+     sqlite.prepare("SELECT 1 FROM catalog_jobs WHERE list_id=? LIMIT 1").get(id) ||
+     sqlite.prepare("SELECT 1 FROM catalog_csv_imports c JOIN catalog_uploads u ON u.id=c.upload_id WHERE u.list_id=? LIMIT 1").get(id)) throw new PriceListRetentionError();
   db.delete(priceItems).where(eq(priceItems.priceListId, id)).run();
   db.delete(priceLists).where(eq(priceLists.id, id)).run();
 }
