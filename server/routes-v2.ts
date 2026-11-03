@@ -768,8 +768,15 @@ export function registerV2Routes(app: Express, ctx: V2Context) {
   });
 
   app.delete("/api/admin/price-lists/:id", requireAdminRole, async (req, res) => {
-    await v2.deletePriceList(parseInt(req.params.id as string, 10));
-    res.json({ ok: true });
+    try {
+      await v2.deletePriceList(parseInt(req.params.id as string, 10));
+      res.json({ ok: true });
+    } catch (e) {
+      if (e instanceof v2.PriceListRetentionError) {
+        return res.status(e.status).json({ error: e.message, code: e.code });
+      }
+      throw e;
+    }
   });
 
   // ============== CONSIGNMENTS ==============

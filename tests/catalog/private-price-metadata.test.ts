@@ -5,7 +5,7 @@ import { randomUUID } from "node:crypto";
 import { register } from "tsx/cjs/api";
 import { rawSqlite as db,storage } from "../../server/storage";
 import { registerV2Routes } from "../../server/routes-v2";
-import { lookupPartNumberMrp,searchPriceItems } from "../../server/storage-v2";
+import { lookupPartNumberMrp,searchPriceItems,createPriceList,bulkInsertPriceItems } from "../../server/storage-v2";
 import { registerPublicCatalog } from "../../server/public-catalog";
 import { createJob,runCatalogBatch } from "../../server/price-catalog";
 let server:Server,base:string;
@@ -44,6 +44,31 @@ function publish(listId:number) {
   expect(runCatalogBatch(db,j.id)).toMatchObject({rejected:0});return j;
 }
 describe("private price-list metadata through actual upload/checker routes",()=>{
+  it.each(["job", "ownership"])("returns actionable 409 without changing retained %s data",async protection=>{
+    const u=await upload([row({dealerPrice:600,gstPercent:18})]);
+    // A list-scoped dry run protects history even without ownership; a global
+    // publish owns the list without a list-scoped job. Exercise both OR branches.
+    const j=createJob(db,{requestKey:randomUUID(),mode:protection==="job"?"dry-run":"publish",...(protection==="job"?{listId:u.list_id}:{})}) as any;
+    runCatalogBatch(db,j.id);
+    const snapshot=()=>["price_lists","price_items","catalog_prices","catalog_jobs","catalog_audit","catalog_uploads","catalog_chunks","products"]
+      .map(t=>db.prepare(`SELECT * FROM ${t} ORDER BY rowid`).all());
+    const before=snapshot();
+    const r=await fetch(`${base}/api/admin/price-lists/${u.list_id}`,{method:"DELETE",headers:{"x-admin-token":"private-fixture"}});
+    expect(r.status).toBe(409);
+    expect(await r.json()).toEqual({code:"PRICE_LIST_RETAINED",error:expect.stringContaining("Upload a replacement price list for the same brand")});
+    expect(snapshot()).toEqual(before);
+  });
+  it("still deletes an unreferenced list and its items without changing another list",async()=>{
+    const retained=await upload([row({dealerPrice:600,gstPercent:18})]);
+    const list=await createPriceList({brand:"volvo"});
+    await bulkInsertPriceItems("volvo",list.id,[{partNumber:"DELETE-FIXTURE",mrp:835}]);
+    const r=await fetch(`${base}/api/admin/price-lists/${list.id}`,{method:"DELETE",headers:{"x-admin-token":"private-fixture"}});
+    expect(r.status).toBe(200);expect(await r.json()).toEqual({ok:true});
+    expect(db.prepare("SELECT * FROM price_lists WHERE id=?").get(list.id)).toBeUndefined();
+    expect(db.prepare("SELECT * FROM price_items WHERE price_list_id=?").all(list.id)).toHaveLength(0);
+    expect(db.prepare("SELECT * FROM price_lists WHERE id=?").get(retained.list_id)).toBeTruthy();
+    expect(await latest()).toMatchObject({dealerPrice:600,gstPercent:18,mrp:835});
+  });
   it("imports provided CSV dealer/GST updates and latest-row lookup including timestamp ties",async()=>{
     const a=await post("/api/admin/price-lists",{brand:"tata",csv:'part_number,mrp,dealer_price,gst_percent,description\n001-A,835,"₹1,200.00",18%,Actual description'});
     expect(a.status).toBe(200);

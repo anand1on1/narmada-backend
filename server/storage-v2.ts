@@ -82,9 +82,17 @@ export async function createPriceList(p: InsertPriceList): Promise<PriceList> {
   const data: any = { ...p, uploadedAt: Date.now(), itemCount: 0 };
   return db.insert(priceLists).values(data).returning().get();
 }
+export class PriceListRetentionError extends Error {
+  readonly status = 409;
+  readonly code = "PRICE_LIST_RETAINED";
+  constructor() {
+    super("This price list is retained for catalog provenance and audit and cannot be deleted. Upload a replacement price list for the same brand; you do not need to delete the old list.");
+    this.name = "PriceListRetentionError";
+  }
+}
 export async function deletePriceList(id: number) {
   if(sqlite.prepare("SELECT 1 FROM catalog_prices WHERE source_list_id=? LIMIT 1").get(id) ||
-     sqlite.prepare("SELECT 1 FROM catalog_jobs WHERE list_id=? LIMIT 1").get(id)) throw Error("Price list retained for catalog provenance and audit");
+     sqlite.prepare("SELECT 1 FROM catalog_jobs WHERE list_id=? LIMIT 1").get(id)) throw new PriceListRetentionError();
   db.delete(priceItems).where(eq(priceItems.priceListId, id)).run();
   db.delete(priceLists).where(eq(priceLists.id, id)).run();
 }
