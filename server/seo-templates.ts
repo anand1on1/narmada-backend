@@ -164,6 +164,7 @@ export const CRITICAL_CSS = `
   .breadcrumb a{color:#555}
   .card{border:1px solid #e5e5e5;border-radius:8px;padding:12px;margin-bottom:12px;background:#fff}
   .product{display:grid;grid-template-columns:1fr;gap:16px}
+  .product>*{min-width:0}
   .price{font-size:1.5rem;font-weight:700;color:#0a58ca;margin:.25rem 0}
   .stock-in{color:#0a7c2f;font-weight:600}
   .stock-out{color:#a30000;font-weight:600}

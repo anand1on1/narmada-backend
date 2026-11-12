@@ -30,6 +30,7 @@ describe("Shared price and part-reference disclaimer", () => {
     expect(html).toContain("000771"); expect(html).toContain("REF771");
     expect(html).toContain('price">'); expect(html).toContain('"price":"125.00"');
     expect(html).toContain("OEM reference number");
+    expect(html).toContain(".product>*{min-width:0}");
   });
   it("both existing page components reuse the notice, preserving search/cart controls", () => {
     const catalog = readFileSync("client/src/pages/ProductsPage.tsx", "utf8");
