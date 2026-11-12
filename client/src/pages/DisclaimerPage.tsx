@@ -21,7 +21,7 @@ export default function DisclaimerPage() {
 
             <section>
               <h2 className="font-display text-2xl font-bold text-foreground mb-3">2. Trademark & Brand Use</h2>
-              <p>All brand names, logos and trademarks — including but not limited to <strong className="text-foreground">Tata, Tata Motors, BharatBenz, Mercedes-Benz, Ashok Leyland, Eicher, VECV, Volvo, Volvo Construction Equipment</strong> — are the property of their respective owners. Their use on this website is purely descriptive, to identify the make and model of the vehicle for which a given spare part is intended.</p>
+              <p>All brand names, logos and trademarks — including but not limited to <strong className="text-foreground">Tata, Tata Motors, BharatBenz, Mercedes-Benz, Ashok Leyland, Volvo, Volvo Construction Equipment</strong> — are the property of their respective owners. Their use on this website is purely descriptive, to identify the make and model of the vehicle for which a given spare part is intended.</p>
               <p>Narmada Mobility is <strong className="text-foreground">not</strong> an authorised dealer, distributor or agent of these vehicle OEMs unless explicitly stated. We supply genuine OEM parts where available and OEM-equivalent / aftermarket parts elsewhere; this is always clearly labelled on the product page.</p>
             </section>
 

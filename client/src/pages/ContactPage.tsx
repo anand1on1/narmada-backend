@@ -31,7 +31,7 @@ export default function ContactPage() {
     <>
       <SeoHead
         title="Contact Narmada Mobility — Truck & Equipment Spare Parts Enquiry"
-        description="Get a quote on Tata, BharatBenz, Ashok Leyland, Eicher or Volvo spare parts. WhatsApp, call or email — we respond within an hour during business hours."
+        description="Get a quote on Tata, BharatBenz, Ashok Leyland or Volvo spare parts. WhatsApp, call or email — we respond within an hour during business hours."
         keywords="contact narmada mobility, spare parts enquiry, truck parts quote, narmadamobility patna"
       />
       <section className="bg-[hsl(210_30%_96%)] text-[hsl(220_60%_12%)] py-14">

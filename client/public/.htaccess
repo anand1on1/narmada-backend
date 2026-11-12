@@ -10,7 +10,9 @@ DirectoryIndex index.html
   RewriteCond %{HTTP_HOST} ^narmadamobility\.com$ [NC]
   RewriteCond %{HTTPS} !=on
   RewriteRule ^ https://narmadamobility.com%{REQUEST_URI} [R=301,L,NE]
-  RewriteRule ^(?:product(?:/.*)?|p(?:/.*)?|products/?)$ seo-bridge.php [END,QSA]
+  RewriteRule ^(?:product(?:/.*)?|p(?:/.*)?|products/?|get-quote/?)$ seo-bridge.php [END,QSA]
+  # Excluded public brand paths/assets must not be served by stale static files.
+  RewriteRule ^(?:brand/(?:eicher|vecv)(?:/.*)?|(?:eicher|vecv)-.*|.*(?:eicher|vecv).*\.(?:svg|png|jpg|webp))$ - [R=404,L,NC]
   RewriteRule ^(?:sitemap(?:-seo|-seo-index)?\.xml|robots\.txt)$ seo-bridge.php [END,QSA]
   RewriteRule ^sitemap-catalog-(?:static|0|[1-9][0-9]{0,8})\.xml$ seo-bridge.php [END,QSA]
 

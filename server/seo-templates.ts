@@ -20,6 +20,7 @@
 // =========================================================================
 
 import { productPath, publicMedia } from "../shared/public-urls";
+import { renderReferenceNotice } from "../shared/reference-notice";
 
 export interface SeoConfig {
   baseUrl: string;            // e.g. https://narmadamobility.com
@@ -163,6 +164,7 @@ export const CRITICAL_CSS = `
   .breadcrumb a{color:#555}
   .card{border:1px solid #e5e5e5;border-radius:8px;padding:12px;margin-bottom:12px;background:#fff}
   .product{display:grid;grid-template-columns:1fr;gap:16px}
+  .product>*{min-width:0}
   .price{font-size:1.5rem;font-weight:700;color:#0a58ca;margin:.25rem 0}
   .stock-in{color:#0a7c2f;font-weight:600}
   .stock-out{color:#a30000;font-weight:600}
@@ -334,7 +336,7 @@ export function renderProductPage(
   addRow("Brand", product.brand?.toUpperCase());
   addRow("Category", product.category);
   addRow("Part Number", product.partNumber || undefined);
-  addRow("OEM Number", product.oemNumber || undefined);
+  addRow("OEM reference number", product.oemNumber || undefined);
   addRow("Model", product.model || undefined);
   const compat = typeof product.compatibleModels === "string"
     ? (() => { try { return JSON.parse(product.compatibleModels as string) as string[]; } catch { return []; } })()
@@ -378,6 +380,7 @@ ${renderHeader(cfg)}
       <h1>${esc(product.name)}</h1>
       ${product.partNumber ? `<p style="color:#555;margin:.15rem 0">Part No: <strong>${esc(product.partNumber)}</strong></p>` : ""}
       <p class="price">${product.catalogPriced ? `US$${priceStr}` : `&#8377;${esc(fmtInr(product.priceInr))}`} <span style="font-size:.85rem;color:#555;font-weight:400">(GST included)</span></p>
+      ${renderReferenceNotice()}
       ${product.catalogPriced ? `<p>Price-list MRP converted from INR. FX verified ${esc(new Date(product.catalogFxAt!).toISOString().slice(0,10))}. Confirm availability and freight.</p><p><a href="${waHref}">Contact us for a discount</a></p>` : ""}
       <p>${product.catalogPriced ? "Contact us to confirm availability" : inStock ? `<span class="stock-in">In stock</span>` : `<span class="stock-out">Made to order &middot; contact for lead time</span>`}</p>
 

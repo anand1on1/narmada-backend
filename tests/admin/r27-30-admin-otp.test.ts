@@ -177,7 +177,7 @@ describe("R27.31 dynamic sitemap + robots", () => {
     expect(xml).toContain("<loc>https://narmadamobility.com/</loc>");
     expect(xml).toContain("<loc>https://narmadamobility.com/products</loc>");
     // R28.19: core pages only; gated/alias and mass geo pages no longer promoted.
-    expect(urls.length).toBe(8);
+    expect(urls.length).toBe(9); // Public quotation guide is a crawlable core page.
   });
 
   it("(2) product URLs are canonical part-number-first, not hash-routed, and skip inactive rows", () => {

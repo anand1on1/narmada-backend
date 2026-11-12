@@ -1,5 +1,5 @@
 export type BrandKey =
-  | "tata" | "bharatbenz" | "ashok-leyland" | "eicher" | "mahindra"
+  | "tata" | "bharatbenz" | "ashok-leyland" | "mahindra"
   | "volvo" | "scania" | "man" | "mercedes-benz" | "isuzu"
   | "iveco" | "daf" | "renault"
   | "jcb" | "caterpillar" | "komatsu" | "hitachi" | "hyundai-ce"
@@ -237,68 +237,6 @@ export const BRANDS: Record<BrandKey, BrandInfo> = {
     seoBlurbs: [
       "Ashok Leyland spare parts for Captain 2518, Captain 3118, Boss 1212, Boss 1415, Boss 1615, Ecomet 1012, AVTR 2820, AVTR 3520 and the Viking, Cheetah and Janbus chassis families are available ex-stock at Narmada Mobility. We stock Ashok Leyland H-series engine spares, Ashok Leyland Neptune piston-liner kits, Ashok Leyland clutch assemblies, Ashok Leyland fuel injection pumps and Ashok Leyland gearbox spares for the AL-9S, AL-6S and ZF Ecomid families.",
       "We are one of India's preferred Ashok Leyland spare parts exporters — supplying Ashok Leyland Sri Lanka, Ashok Leyland Bangladesh, Ashok Leyland Nepal, Ashok Leyland UAE, Ashok Leyland Saudi Arabia and Ashok Leyland Africa markets with original Ashok Leyland genuine parts plus OEM-equivalent components from the same Tier-1 vendor base."
-    ],
-  },
-  eicher: {
-    key: "eicher",
-    name: "Eicher Trucks & Buses",
-    slug: "eicher",
-    tagline: "VECV Pro series spares — light, medium and heavy duty",
-    description:
-      "Spare parts for Eicher Pro series — Pro 2049, 2059, 2075, 2095, 3015, 6019T, 6028, 8028XC, 8028XM and Eicher Skyline buses.",
-    longDescription:
-      "Eicher (VE Commercial Vehicles, a Volvo-Eicher joint venture) is the leader in Indian medium duty trucks and a fast-growing heavy-duty challenger. Narmada Mobility supplies Eicher OE and OEM-equivalent spare parts for the entire Pro 2000/3000/6000/8000 series including Volvo-derived heavy duty platforms — engine spares, fuel injection, Wabco brake parts, gearbox, cabin and electrical components. " + exportRegions,
-    highlights: [
-      "Pro 2000/3000/6000/8000 series complete coverage",
-      "Volvo-derived heavy duty engine spares",
-      "Eicher Skyline bus parts",
-      "BS6 SCR & DEF system components",
-    ],
-    models: [
-      "Eicher Pro 2049", "Eicher Pro 2059", "Eicher Pro 2075", "Eicher Pro 2095",
-      "Eicher Pro 2110XPT", "Eicher Pro 3012", "Eicher Pro 3014", "Eicher Pro 3015",
-      "Eicher Pro 3018", "Eicher Pro 6019T", "Eicher Pro 6028", "Eicher Pro 6035T",
-      "Eicher Pro 8028XC", "Eicher Pro 8028XM", "Eicher Pro 8035T",
-      "Eicher Pro 6048", "Eicher Pro 5016", "Eicher Pro 5025",
-      "Eicher Skyline Pro 6016", "Eicher Skyline Pro 3008",
-      "Eicher Terra 25", "Eicher Terra 35",
-    ],
-    categories: ["Engine Parts", "Fuel Injection", "Clutch", "Brake System", "Gearbox", "Cabin", "Electrical", "Filters", "BS6 SCR/DEF"],
-    color: "#16a34a",
-    heroAccent: "from-green-800 to-green-600",
-    founded: "1948",
-    origin: "Pithampur, India",
-    category: "truck",
-    logoFile: "eicher.svg",
-    keywordTargets: [
-      "eicher spare parts", "eicher pro 3015 parts", "eicher pro 6028 parts",
-      "vecv spare parts", "eicher skyline parts", "eicher truck parts exporter",
-      "eicher pro 2049 parts", "eicher pro 8028 parts", "eicher bs6 def",
-      "eicher terra parts", "eicher diesel injector",
-    ],
-    faq: [
-      { q: "Do you supply Eicher VEDX engine spares for Pro 6000/8000 series?", a: "Yes. We stock the complete VEDX engine spare parts range — pistons, liners, valves, turbocharger, EGR, SCR — for Pro 6019T, 6028, 6048, 8028XC and 8028XM heavy duty trucks." },
-      { q: "Are Eicher Skyline bus parts available?", a: "Yes. Full inventory for Skyline Pro 6016 and 3008 buses — engine, gearbox, axle, cabin, A/C and electrical parts." },
-      { q: "Do you ship Eicher parts to Nepal and Bangladesh?", a: "Yes. We have a robust land-border export pipeline through Raxaul (Nepal) and Petrapole (Bangladesh) for Eicher dealers and fleet operators." },
-    ],
-  
-    whyMatters: "Eicher (VE Commercial Vehicles — a Volvo Group / Eicher Motors JV) leads India's light- and medium-duty truck segment with the Pro 2049, Pro 2055, Pro 2059 and Pro 6028 series. Eicher Skyline buses and Pro tippers are equally common across South Asia and East Africa, and Eicher spare parts move fast at our warehouse.",
-    industries: ["Light & medium-duty logistics", "School & staff bus operations", "Urban tipper duty", "Cold-chain & refrigerated transport", "Last-mile delivery"],
-    commonIssues: [
-      { issue: "Pro 1049 / 1055 fuel injector misfire", fix: "Bosch CRDI injector with new copper washer kit — calibrated to VE-Power engine specs." },
-      { issue: "Eicher Pro 6019 / 6025 turbocharger wastegate stuck", fix: "Genuine Eicher Holset HX35 turbo with new gasket and oil-feed pipe." },
-      { issue: "Skyline Pro bus body mounting bracket cracks", fix: "Eicher genuine cabin / body bracket kit with corrosion-protected bolts." },
-      { issue: "Pro 3015 clutch slip with heavy load", fix: "Eicher genuine 330mm push-type clutch kit + dual-mass flywheel inspection." }
-    ],
-    specs: [
-      { label: "Engine families", value: "VEDX5 (5L) / VEDX8 (8L) Volvo-tech, E483, E494" },
-      { label: "GVW range", value: "4.9T (Pro 2049) — 31T (Pro 8035X)" },
-      { label: "Bus platforms", value: "Skyline Pro, Starline, Skyline Pro E (electric)" },
-      { label: "Emission norms", value: "BS-VI OBD-II ready, Euro-IV/V matched" }
-    ],
-    seoBlurbs: [
-      "Eicher spare parts for Pro 1049, Pro 1055, Pro 2049, Pro 2055, Pro 3015, Pro 6019, Pro 6028 and Pro 8035X are in ready stock at Narmada Mobility's Patna warehouse. Our Eicher catalog covers Eicher engine spares (VEDX5, VEDX8, E483, E494), Eicher Skyline Pro bus body panels, Eicher gearbox parts, Eicher cabin parts and Eicher Pro fuel system components.",
-      "For Eicher Skyline Pro and Starline bus operators in India, Nepal, Bangladesh, Sri Lanka, Kenya and Uganda, we supply Eicher bus genuine spare parts with VECV invoice and warranty traceability — from Eicher bus electricals to Eicher bus radiator and Eicher bus suspension assemblies."
     ],
   },
   mahindra: {

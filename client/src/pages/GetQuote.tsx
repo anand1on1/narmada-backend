@@ -1,791 +1,205 @@
-// R28.3 — Get-Quotation 5-step wizard (public). Full Step-3 redesign per user
-// feedback ("shitiest ui" screenshot review). Layout for Step 3 is now:
-//
-//   ┌──────────────────────────────────────────────────────────────────────┐
-//   │ Wizard stepper (5 pills)                                             │
-//   │ Step title "Add parts to your quote"                                 │
-//   ├────────────────────────┬─────────────────────────────────────────────┤
-//   │ LEFT 30% sticky cart   │ RIGHT 70% FindPartsEmbed (4 tabs)           │
-//   │  header + qty +/-      │  Registration | Chassis | Model | Part #    │
-//   │  empty state           │  results grid + Add-to-quote per card        │
-//   │  trash icon per row    │  collapsible "Don't see your part?" below   │
-//   ├────────────────────────┴─────────────────────────────────────────────┤
-//   │  [Back]                                                    [Continue]│
-//   └──────────────────────────────────────────────────────────────────────┘
-//
-// Mobile: single column. The cart becomes a bottom Sheet drawer; a floating
-// "🛒 View cart (N)" button on the bottom-right opens it. Continue is inside
-// the drawer footer AND below the finder.
-//
-// Steps 1, 2, 4, 5 are visually upgraded (card shadows, spacing, larger type,
-// bigger stepper pills, gradient background) but their flow logic is unchanged.
-import { useMemo, useState } from "react";
-import { Link } from "wouter";
-import { apiRequest } from "@/lib/queryClient";
+import { useState } from "react";
+import { apiUrl } from "@/lib/queryClient";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { Badge } from "@/components/ui/badge";
-import { Sheet, SheetContent, SheetHeader, SheetTitle } from "@/components/ui/sheet";
-import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
-import { toast } from "@/hooks/use-toast";
-import { COUNTRIES, CURRENCIES, DIAL_CODES, findCountry } from "@/data/countries";
-import { formatINR } from "@/lib/r28-utils";
-import { Plus, Minus, Trash2, MessageCircle, Loader2, ShoppingCart, ChevronDown, ChevronRight, ArrowRight, Check, ImageOff, ArrowLeft } from "lucide-react";
-import { FindPartsEmbed, AddablePart } from "@/components/FindPartsEmbed";
+import { SeoHead } from "@/components/SeoHead";
+import { COUNTRIES, findCountry } from "@/data/countries";
+import { Upload, ListPlus, Loader2, Trash2 } from "lucide-react";
+import { QuoteGuide, DestinationPicker } from "@/components/QuoteGuide";
 
-const WHATSAPP = "917909083806";
-
-interface Contact {
-  company_name: string;
-  contact_name: string;
-  email: string;
-  country: string;     // ISO code
-  currency: string;    // ISO 4217
-  country_code: string; // dial code (+91)
-  mobile: string;
+type Contact = { company_name: string; contact_name: string; email: string; mobile: string; country: string; currency: string; country_code: string };
+type Item = { part_number: string; description: string; qty: string; needs_review?: boolean };
+const initial: Contact = { company_name: "", contact_name: "", email: "", mobile: "", country: "IN", currency: "INR", country_code: "+91" };
+const blank = (): Item => ({ part_number: "", description: "", qty: "" });
+async function request(path: string, body?: unknown, token?: string, multipart = false) {
+  const response = await fetch(apiUrl(path), { method: body === undefined ? "GET" : "POST",
+    headers: { ...(multipart || body === undefined ? {} : { "Content-Type": "application/json" }), ...(token ? { "x-quote-token": token } : {}) },
+    body: body === undefined ? undefined : multipart ? body as FormData : JSON.stringify(body) });
+  const contentType = response.headers.get("content-type") || "";
+  if (!/\bapplication\/(?:[\w.+-]+\+)?json\b/i.test(contentType)) {
+    if (response.status === 404 || (response.ok && /text\/html/i.test(contentType))) {
+      throw Error("This quotation feature is not available on the current server version. Please contact sales so the matching backend can be deployed. Re-uploading the file will not fix this; your draft is retained.");
+    }
+    throw Error("The quotation service is temporarily unavailable. Your draft is retained. Please try later or contact sales.");
+  }
+  let result: any;
+  try { result = await response.json(); } catch { throw Error("The service returned an unreadable response. Retry without changing your draft."); }
+  if (!response.ok) throw Error(result.error || "The request failed. Please try again.");
+  return result;
 }
-export interface WizardCartItem {
-  part_id?: number;
-  part_number: string;
-  oem_number?: string | null;
-  description: string;
-  image_url?: string | null;
-  image_source?: string | null;
-  chassis_slug?: string | null;
-  chassis_display_name?: string | null;
-  sell_price?: number | null;
-  qty: number;
-}
-
-const EMPTY_CONTACT: Contact = {
-  company_name: "",
-  contact_name: "",
-  email: "",
-  country: "IN",
-  currency: "INR",
-  country_code: "+91",
-  mobile: "",
-};
-
 export default function GetQuote() {
-  const [step, setStep] = useState<1 | 2 | 3 | 4 | 5>(1);
-  const [contact, setContact] = useState<Contact>(EMPTY_CONTACT);
-  const [otpToken, setOtpToken] = useState<string>("");
-  const [cart, setCart] = useState<WizardCartItem[]>([]);
-  const [timeframe, setTimeframe] = useState<"immediate" | "one_week" | "one_month" | "three_months" | "later">("immediate");
+  const [step, setStep] = useState(1);
+  const [contact, setContact] = useState<Contact>(initial);
+  const [sentTo, setSentTo] = useState("");
+  const [code, setCode] = useState("");
+  const [token, setToken] = useState("");
+  const [mode, setMode] = useState<"upload" | "manual" | null>(null);
+  const [items, setItems] = useState<Item[]>([]);
+  const [consent, setConsent] = useState(false);
+  const [file, setFile] = useState<File | null>(null);
   const [delivery, setDelivery] = useState("");
   const [notes, setNotes] = useState("");
-  const [reference, setReference] = useState("");
-
-  const resetWizard = () => {
-    setStep(1);
-    setContact(EMPTY_CONTACT);
-    setOtpToken("");
-    setCart([]);
-    setTimeframe("immediate");
-    setDelivery("");
-    setNotes("");
-    setReference("");
+  const [timeframe, setTimeframe] = useState("immediate");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const [notice, setNotice] = useState("");
+  const [result, setResult] = useState<any>(null);
+  const [key] = useState(() => crypto.randomUUID());
+  const validContact = contact.company_name.trim() && contact.contact_name.trim() && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(contact.email) && /^\d{6,15}$/.test(contact.mobile);
+  const validItems = items.length > 0 && items.length <= 500 && items.every(i => (i.part_number.trim() || i.description.trim()) && /^\d+$/.test(i.qty) && Number(i.qty) >= 1 && Number(i.qty) <= 9999);
+  const changeContact = (name: keyof Contact, value: string) => {
+    if (name === "email") { setToken(""); setSentTo(""); setCode(""); }
+    setContact(c => ({ ...c, [name]: value })); setError(""); setNotice("");
   };
-
-  return (
-    <div className="min-h-screen bg-gradient-to-b from-slate-50 to-white">
-      <div className="max-w-6xl mx-auto py-8 md:py-12 px-4 sm:px-6">
-        <div className="text-center mb-8">
-          <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-indigo-100 text-indigo-700 text-xs font-mono uppercase mb-3">
-            <span className="h-1.5 w-1.5 rounded-full bg-indigo-600 animate-pulse" /> Formal Quotation
-          </div>
-          <h1 className="text-2xl md:text-3xl font-bold text-slate-900">Request a formal quotation</h1>
-          <p className="text-slate-600 mt-2 text-base">Verified email · secure form · sales team responds within 24 hours.</p>
-        </div>
-
-        <StepIndicator current={step} />
-
-        {step === 1 && <Step1Contact contact={contact} onContact={setContact} onNext={() => setStep(2)} />}
-        {step === 2 && (
-          <Step2Otp
-            email={contact.email}
-            onBack={() => setStep(1)}
-            onVerified={(tok) => { setOtpToken(tok); setStep(3); }}
-          />
-        )}
-        {step === 3 && (
-          <Step3Parts
-            cart={cart}
-            onCart={setCart}
-            onBack={() => setStep(2)}
-            onNext={() => setStep(4)}
-          />
-        )}
-        {step === 4 && (
-          <Step4Details
-            cart={cart}
-            contact={contact}
-            timeframe={timeframe}
-            delivery={delivery}
-            notes={notes}
-            otpToken={otpToken}
-            onTimeframe={setTimeframe}
-            onDelivery={setDelivery}
-            onNotes={setNotes}
-            onBack={() => setStep(3)}
-            onSuccess={(ref) => { setReference(ref); setStep(5); }}
-          />
-        )}
-        {step === 5 && (
-          <Step5Success
-            reference={reference}
-            contact={contact}
-            onReset={resetWizard}
-          />
-        )}
-      </div>
-    </div>
-  );
-}
-
-/* ─────────────────────────────────────────────────────────── Stepper (bigger) */
-function StepIndicator({ current }: { current: 1 | 2 | 3 | 4 | 5 }) {
-  const labels = ["Contact", "Verify", "Parts", "Details", "Done"];
-  return (
-    <ol className="flex items-center justify-center gap-1 sm:gap-2 mb-8 flex-wrap" aria-label="Wizard progress">
-      {labels.map((label, i) => {
-        const idx = i + 1;
-        const active = current === idx;
-        const done = current > idx;
-        return (
-          <li key={label} className="flex items-center gap-1 sm:gap-2">
-            <span
-              className={`inline-flex items-center justify-center h-8 min-w-[2rem] px-4 rounded-full text-xs font-bold gap-1.5 transition-colors ${
-                done ? "bg-emerald-500 text-white"
-                : active ? "bg-indigo-600 text-white shadow-md shadow-indigo-600/30"
-                : "bg-slate-200 text-slate-500"
-              }`}
-              data-testid={`step-dot-${idx}`}
-            >
-              {done ? <Check className="h-3.5 w-3.5" /> : <span>{idx}</span>}
-              <span className="uppercase tracking-wider text-[11px] hidden sm:inline">{label}</span>
-            </span>
-            {idx < labels.length && <span className="text-slate-300 hidden sm:inline">·</span>}
-          </li>
-        );
-      })}
-    </ol>
-  );
-}
-
-/* ─────────────────────────────────────────────────────────────────── Step 1 */
-function Step1Contact({ contact, onContact, onNext }: { contact: Contact; onContact: (c: Contact) => void; onNext: () => void }) {
-  const [sending, setSending] = useState(false);
-
-  const onCountryChange = (code: string) => {
-    const c = findCountry(code);
-    if (!c) return onContact({ ...contact, country: code });
-    onContact({ ...contact, country: code, currency: c.currency, country_code: c.dial });
-  };
-
-  const emailValid = /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(contact.email);
-  const mobileValid = /^\d{6,15}$/.test(contact.mobile);
-  const canProceed = contact.company_name.trim() && contact.contact_name.trim() && emailValid && mobileValid && contact.country_code;
-
-  const submit = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!canProceed || sending) return;
-    setSending(true);
-    try {
-      const r = await apiRequest("POST", "/api/quote/otp/send", { email: contact.email.trim().toLowerCase() });
-      const data = await r.json();
-      if (!data.ok) throw new Error(data.error || "Failed to send OTP");
-      toast({ title: "OTP sent", description: `Check ${contact.email} for the 6-digit code.` });
-      onNext();
-    } catch (e: any) {
-      toast({ title: "Could not send OTP", description: e?.message || String(e), variant: "destructive" });
-    } finally { setSending(false); }
-  };
-
-  return (
-    <form onSubmit={submit} className="bg-card rounded-xl shadow-md border p-6 md:p-8 space-y-5 max-w-3xl mx-auto" data-testid="step-1">
-      <div>
-        <h2 className="text-xl md:text-2xl font-bold text-slate-900">Tell us who you are</h2>
-        <p className="text-sm text-slate-500 mt-1">We'll send a 6-digit code to your email to verify.</p>
-      </div>
-      <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-        <Field label="Company name">
-          <Input value={contact.company_name} onChange={(e) => onContact({ ...contact, company_name: e.target.value })} data-testid="input-company" required />
-        </Field>
-        <Field label="Contact name">
-          <Input value={contact.contact_name} onChange={(e) => onContact({ ...contact, contact_name: e.target.value })} data-testid="input-name" required />
-        </Field>
-        <Field label="Email" full>
-          <Input type="email" value={contact.email} onChange={(e) => onContact({ ...contact, email: e.target.value })} data-testid="input-email" required />
-          {!emailValid && contact.email.length > 0 && <p className="text-xs text-red-600 mt-1">Please enter a valid email.</p>}
-        </Field>
-        <Field label="Country">
-          <select value={contact.country} onChange={(e) => onCountryChange(e.target.value)} className="w-full h-10 rounded-md border border-slate-300 px-3 text-sm bg-white" data-testid="select-country">
-            {COUNTRIES.map((c) => <option key={c.code} value={c.code}>{c.name}</option>)}
-          </select>
-        </Field>
-        <Field label="Currency">
-          <select value={contact.currency} onChange={(e) => onContact({ ...contact, currency: e.target.value })} className="w-full h-10 rounded-md border border-slate-300 px-3 text-sm bg-white" data-testid="select-currency">
-            {CURRENCIES.map((c) => <option key={c} value={c}>{c}</option>)}
-          </select>
-        </Field>
-        <Field label="Country code">
-          <select value={contact.country_code} onChange={(e) => onContact({ ...contact, country_code: e.target.value })} className="w-full h-10 rounded-md border border-slate-300 px-3 text-sm bg-white" data-testid="select-dial">
-            {DIAL_CODES.map((d) => <option key={d.dial} value={d.dial}>{d.dial}</option>)}
-          </select>
-        </Field>
-        <Field label="Mobile">
-          <Input inputMode="tel" value={contact.mobile} onChange={(e) => onContact({ ...contact, mobile: e.target.value.replace(/\D/g, "") })} placeholder="6–15 digits" data-testid="input-mobile" required />
-          {!mobileValid && contact.mobile.length > 0 && <p className="text-xs text-red-600 mt-1">Mobile must be 6–15 digits.</p>}
-        </Field>
-      </div>
-      <div className="pt-2 flex justify-end">
-        <Button type="submit" size="lg" disabled={!canProceed || sending} data-testid="btn-send-otp">
-          {sending && <Loader2 className="w-4 h-4 mr-2 animate-spin" />}
-          Send verification code
-          <ArrowRight className="w-4 h-4 ml-2" />
-        </Button>
-      </div>
-    </form>
-  );
-}
-
-function Field({ label, full, children }: { label: string; full?: boolean; children: React.ReactNode }) {
-  return (
-    <div className={full ? "sm:col-span-2" : ""}>
-      <label className="block text-xs uppercase text-slate-500 mb-1.5 font-mono tracking-wider">{label}</label>
-      {children}
-    </div>
-  );
-}
-
-/* ─────────────────────────────────────────────────────────────────── Step 2 */
-function Step2Otp({ email, onBack, onVerified }: { email: string; onBack: () => void; onVerified: (tok: string) => void }) {
-  const [digits, setDigits] = useState<string[]>(Array(6).fill(""));
-  const [verifying, setVerifying] = useState(false);
-  const [resending, setResending] = useState(false);
-  const code = digits.join("");
-
-  const setDigit = (i: number, v: string) => {
-    const d = v.replace(/\D/g, "").slice(-1);
-    const next = [...digits]; next[i] = d; setDigits(next);
-    if (d) {
-      const nextEl = document.getElementById(`otp-${i + 1}`);
-      if (nextEl) (nextEl as HTMLInputElement).focus();
+  const run = async (task: () => Promise<void>) => {
+    if (busy) return;
+    setBusy(true); setError(""); setNotice("");
+    try { await task(); } catch (e: any) {
+      setError(e.message || "Please try again.");
+      if (/verify.*email|expired.*token|invalid_or_expired_token|missing_token/i.test(e.message || "")) setToken("");
     }
+    finally { setBusy(false); }
   };
-  const onKeyDown = (i: number, e: React.KeyboardEvent<HTMLInputElement>) => {
-    if (e.key === "Backspace" && !digits[i] && i > 0) {
-      const prev = document.getElementById(`otp-${i - 1}`);
-      if (prev) (prev as HTMLInputElement).focus();
-    }
-  };
-
-  const verify = async (e?: React.FormEvent) => {
-    e?.preventDefault();
-    if (code.length !== 6 || verifying) return;
-    setVerifying(true);
-    try {
-      const r = await apiRequest("POST", "/api/quote/otp/verify", { email: email.trim().toLowerCase(), code });
-      const data = await r.json();
-      const tok = data.verification_token || data.token;
-      if (!data.ok || !tok) throw new Error(data.error || "Invalid code");
-      onVerified(tok);
-    } catch (e: any) {
-      toast({ title: "Verification failed", description: e?.message || String(e), variant: "destructive" });
-    } finally { setVerifying(false); }
-  };
-
-  const resend = async () => {
-    if (resending) return;
-    setResending(true);
-    try {
-      const r = await apiRequest("POST", "/api/quote/otp/send", { email: email.trim().toLowerCase() });
-      const data = await r.json();
-      if (!data.ok) throw new Error(data.error || "Failed");
-      toast({ title: "OTP re-sent", description: `Check ${email} again.` });
-    } catch (e: any) {
-      toast({ title: "Could not resend", description: e?.message || String(e), variant: "destructive" });
-    } finally { setResending(false); }
-  };
-
-  return (
-    <form onSubmit={verify} className="bg-card rounded-xl shadow-md border p-6 md:p-8 text-center space-y-6 max-w-xl mx-auto" data-testid="step-2">
-      <div>
-        <div className="text-xs uppercase text-slate-500 font-mono tracking-wider mb-2">Step 2 — Verify email</div>
-        <h2 className="text-xl md:text-2xl font-bold text-slate-900">We sent a 6-digit code to</h2>
-        <div className="text-base text-indigo-700 font-mono mt-1">{email}</div>
-      </div>
-      <div className="flex justify-center gap-2">
-        {digits.map((d, i) => (
-          <input
-            key={i}
-            id={`otp-${i}`}
-            value={d}
-            onChange={(e) => setDigit(i, e.target.value)}
-            onKeyDown={(e) => onKeyDown(i, e)}
-            inputMode="numeric"
-            className="w-11 h-14 sm:w-12 sm:h-14 text-center text-lg font-mono border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-500"
-            maxLength={1}
-            aria-label={`Digit ${i + 1}`}
-            data-testid={`otp-${i}`}
-          />
-        ))}
-      </div>
-      <div className="flex flex-col sm:flex-row items-center justify-center gap-3">
-        <Button type="submit" size="lg" disabled={code.length !== 6 || verifying} data-testid="btn-verify">
-          {verifying && <Loader2 className="w-4 h-4 mr-2 animate-spin" />} Verify
-        </Button>
-        <Button type="button" variant="outline" onClick={resend} disabled={resending} data-testid="btn-resend">Resend code</Button>
-        <Button type="button" variant="ghost" onClick={onBack} data-testid="btn-change-email">Change email</Button>
-      </div>
-    </form>
-  );
-}
-
-/* ─────────────────────────────────────────────────────────────────── Step 3 */
-function Step3Parts({ cart, onCart, onBack, onNext }: { cart: WizardCartItem[]; onCart: (c: WizardCartItem[]) => void; onBack: () => void; onNext: () => void }) {
-  const [mobileCartOpen, setMobileCartOpen] = useState(false);
-
-  const addedPartIds = useMemo(() => {
-    const s = new Set<number>();
-    cart.forEach((c) => { if (c.part_id != null) s.add(c.part_id); });
-    return s;
-  }, [cart]);
-
-  const handleAdd = (p: AddablePart) => {
-    // Match on part_number + chassis_slug so a single part_number can appear
-    // twice if it fits two different chassis models.
-    const key = (c: WizardCartItem) => `${c.part_number}::${c.chassis_slug || ""}`;
-    const incomingKey = `${p.part_number}::${p.fits_chassis?.slug || ""}`;
-    const existing = cart.find((c) => key(c) === incomingKey);
-    if (existing) {
-      onCart(cart.map((c) => c === existing ? { ...c, qty: c.qty + 1 } : c));
-    } else {
-      onCart([...cart, {
-        part_id: p.part_id,
-        part_number: p.part_number,
-        oem_number: p.oem_number || null,
-        description: p.description || "",
-        image_url: p.image_url || null,
-        image_source: p.image_source || null,
-        chassis_slug: p.fits_chassis?.slug || null,
-        chassis_display_name: p.fits_chassis?.display_name || null,
-        sell_price: p.sell_price ?? null,
-        qty: 1,
-      }]);
-    }
-    toast({ title: "Added to your quote", description: `${p.part_number}${p.description ? " — " + p.description : ""}` });
-  };
-
-  const addManual = (pn: string, desc: string) => {
-    onCart([...cart, {
-      part_number: pn,
-      description: desc,
-      image_source: "manual",
-      qty: 1,
-      sell_price: null,
-      chassis_slug: null,
-      chassis_display_name: null,
-    }]);
-  };
-  const setQty = (i: number, qty: number) => onCart(cart.map((c, idx) => idx === i ? { ...c, qty: Math.max(1, qty) } : c));
-  const remove = (i: number) => onCart(cart.filter((_, idx) => idx !== i));
-
-  const totalItems = cart.reduce((s, c) => s + c.qty, 0);
-
-  return (
-    <div data-testid="step-3">
-      <div className="mb-6 text-center">
-        <h2 className="text-2xl md:text-3xl font-bold text-slate-900">Add parts to your quote</h2>
-        <p className="text-slate-600 mt-2 text-base">Use any of the four tabs — Registration, Chassis Number, Model, or Part Number — to find parts, then add them to your quote.</p>
-      </div>
-
-      {/* ── 2-column layout: LEFT 30% cart, RIGHT 70% finder */}
-      <div className="grid grid-cols-1 md:grid-cols-[minmax(320px,26%)_minmax(0,74%)] gap-6">
-        {/* LEFT — sticky cart (hidden on mobile; a floating button + Sheet handles mobile) */}
-        <aside className="hidden md:block">
-          <div className="sticky top-24">
-            <CartCard cart={cart} onSetQty={setQty} onRemove={remove} />
+  const go = (next: number) => { setError(""); setNotice(""); setStep(next); window.scrollTo({ top: 0 }); };
+  const send = () => run(async () => {
+    const email = contact.email.trim().toLowerCase();
+    await request("/api/quote/otp/send", { email });
+    setSentTo(email); setCode(""); setNotice("Verification email sent. The code expires in 10 minutes.");
+  });
+  const verify = () => run(async () => {
+    const data = await request("/api/quote/otp/verify", { email: sentTo, code });
+    if (!data.verification_token) throw Error("Verification did not complete. Please request a new code.");
+    setToken(data.verification_token); setNotice("Email verified. Continue to choose how to add parts.");
+  });
+  const parse = () => run(async () => {
+    if (!file || !consent) throw Error("Choose a file and confirm document-processing consent.");
+    if (file.size > 4 * 1024 * 1024) throw Error("Maximum file size is 4 MiB. Split the file or enter parts manually.");
+    const body = new FormData(); body.append("consent", "true"); body.append("file", file);
+    const data = await request("/api/quote/indent/parse", body, token, true);
+    if (!Array.isArray(data.items) || !data.items.length || data.items.length > 500) throw Error("No complete item list was returned. Try manual entry.");
+    setItems(data.items.map((i: any) => ({ part_number: i.part_number || "", description: i.description || "",
+      qty: i.qty == null ? "" : String(i.qty), needs_review: i.needs_review })));
+    setNotice("Extracted items are a draft. Check every part number, name and quantity before continuing.");
+  });
+  const submit = () => run(async () => {
+    if (!validItems || !token) throw Error("Check your items and verify your email before submitting.");
+    const data = await request("/api/quote/submit", { ...contact, email: contact.email.trim().toLowerCase(),
+      request_key: key, delivery_location: delivery, notes, timeframe,
+      cart: items.map(i => ({ part_number: i.part_number.trim(), description: i.description.trim(), qty: Number(i.qty) })) }, token);
+    if (!data.reference) throw Error("No request reference was returned. Retry this unchanged request.");
+    setResult(data); go(4);
+  });
+  return <div className="bg-slate-50 text-slate-900 min-h-screen">
+    <SeoHead title="Get a spare parts quotation | Trucks, buses and equipment | Narmada Mobility"
+      description="Verify your email, upload an indent or enter parts manually, review quantities and request pricing for commercial vehicle and construction equipment parts." />
+    <article className="max-w-6xl mx-auto px-4 sm:px-6 py-10">
+      <header className="max-w-3xl mb-8">
+        <p className="text-sm font-semibold text-cyan-800 uppercase tracking-wider mb-3">Parts enquiry desk</p>
+        <h1 className="text-3xl font-bold tracking-tight">Get a spare parts quotation</h1>
+        <p className="mt-3 text-slate-600">For trucks, buses, tippers, dumpers, trailers and construction equipment.
+          Share the parts you need; pricing, fitment and delivery are confirmed in the quotation.</p>
+      </header>
+      <ol aria-label="Quotation progress" className="flex flex-wrap gap-3 text-sm mb-6">
+        {["Contact & verify", "Add parts", "Review & submit", "Reference"].map((label, i) =>
+          <li key={label} aria-current={step === i + 1 ? "step" : undefined} className={step === i + 1 ? "font-bold text-cyan-800" : "text-slate-600"}>{i + 1}. {label}</li>)}
+      </ol>
+      <section className="bg-white border border-slate-200 rounded-xl p-5 sm:p-8" aria-busy={busy}>
+        {error && <div role="alert" className="mb-5 rounded-md bg-red-50 text-red-800 p-4 break-words" data-testid="quote-error">
+          {error}<p className="mt-2 text-sm">Your draft is retained. If verification expired, return to Contact &amp; verify.</p></div>}
+        {notice && <p role="status" className="mb-5 bg-cyan-50 text-cyan-900 p-4 rounded-md">{notice}</p>}
+        {step === 1 && <div data-testid="quote-contact">
+          <h2 className="text-xl font-semibold mb-5">Your details and email verification</h2>
+          <fieldset disabled={busy} className="grid sm:grid-cols-2 gap-5">
+            {([["company_name", "Company"], ["contact_name", "Contact name"], ["mobile", "Mobile number"], ["email", "Email address"]] as const).map(([name, label]) =>
+              <label key={name} className="block text-sm font-medium">{label}<Input className="mt-2" value={contact[name]}
+                type={name === "email" ? "email" : "text"} inputMode={name === "mobile" ? "tel" : undefined}
+                maxLength={name === "contact_name" ? 100 : name === "mobile" ? 15 : 200}
+                onChange={e => changeContact(name, name === "mobile" ? e.target.value.replace(/\D/g, "") : e.target.value)}
+                data-testid={`quote-${name}`} /></label>)}
+            <label className="block text-sm font-medium">Country<select value={contact.country} className="mt-2 w-full border rounded-md p-3 bg-white"
+              onChange={e => { const c = findCountry(e.target.value); if (c) setContact(v => ({ ...v, country: c.code, currency: c.currency, country_code: c.dial })); }} data-testid="quote-country">
+              {COUNTRIES.map(c => <option key={c.code} value={c.code}>{c.name}</option>)}</select></label>
+            <label className="block text-sm font-medium">Phone country code<Input value={contact.country_code} maxLength={6} className="mt-2"
+              onChange={e => changeContact("country_code", e.target.value)} data-testid="quote-dial" /></label>
+          </fieldset>
+          <div className="mt-6 flex flex-wrap gap-3 items-end">
+            {!token && <Button onClick={send} disabled={busy || !validContact} data-testid="quote-send-otp">{sentTo ? "Resend code" : "Send email code"}</Button>}
+            {sentTo && !token && <><label className="text-sm font-medium">Six-digit email code<Input inputMode="numeric" autoComplete="one-time-code"
+              value={code} onChange={e => setCode(e.target.value.replace(/\D/g, "").slice(0, 6))} disabled={busy} className="mt-2 max-w-48" data-testid="quote-otp" /></label>
+              <Button onClick={verify} disabled={busy || code.length !== 6} data-testid="quote-verify">Verify email</Button></>}
+            {token && <><p className="text-emerald-800 font-medium">Email verified</p>
+              <Button variant="outline" disabled={busy} onClick={() => { setToken(""); setSentTo(""); setCode(""); }} data-testid="quote-reverify">Re-verify email</Button>
+              <Button onClick={() => go(2)} disabled={busy || !validContact} data-testid="quote-next">Continue</Button></>}
           </div>
-        </aside>
-
-        {/* RIGHT — Find Parts + manual-entry collapsible */}
-        <div className="space-y-6 min-w-0">
-          {/* R28.4 — finder wrapped in a matching card so the visual boundary
-              between cart and finder reads clearly at wide viewports. */}
-          <div className="bg-card border shadow-md rounded-xl p-5 md:p-6" data-testid="finder-card">
-            <FindPartsEmbed
-              initialTab="reg"
-              isEmbeddedWizard
-              onAddToCart={handleAdd}
-              addedPartIds={addedPartIds}
-            />
+          <p className="text-sm text-slate-600 mt-5">We use these details to respond to this enquiry. Verification remains valid for 30 minutes.
+            Changing your email requires a new code.</p>
+        </div>}
+        {step === 2 && <div data-testid="quote-parts">
+          <h2 className="text-xl font-semibold mb-5">How would you like to add parts?</h2>
+          <div className="grid sm:grid-cols-2 gap-4 mb-6">
+            <button disabled={busy} onClick={() => setMode("upload")} aria-pressed={mode === "upload"} data-testid="quote-upload-mode"
+              className={`text-left border rounded-lg p-5 ${mode === "upload" ? "border-cyan-700 bg-cyan-50" : "border-slate-300"}`}><Upload className="mb-3" /><strong>Upload Indent Copy</strong><span className="block text-sm mt-2">CSV, XLSX, PDF, JPG or PNG</span></button>
+            <button disabled={busy} onClick={() => { setMode("manual"); if (!items.length) setItems([blank()]); }} aria-pressed={mode === "manual"} data-testid="quote-manual-mode"
+              className={`text-left border rounded-lg p-5 ${mode === "manual" ? "border-cyan-700 bg-cyan-50" : "border-slate-300"}`}><ListPlus className="mb-3" /><strong>Enter Parts Manually</strong><span className="block text-sm mt-2">Part numbers, names and quantities</span></button>
           </div>
-          <ManualEntry onAdd={addManual} />
-        </div>
-      </div>
-
-      {/* ── Bottom action row (full width, below the 2-col grid) */}
-      <div className="mt-8 pt-6 border-t border-slate-200 flex flex-col-reverse sm:flex-row items-stretch sm:items-center justify-between gap-3">
-        <Button variant="outline" size="lg" onClick={onBack} data-testid="btn-back-2">
-          <ArrowLeft className="w-4 h-4 mr-2" /> Back
-        </Button>
-        <Button
-          size="lg"
-          onClick={onNext}
-          disabled={cart.length === 0}
-          className="min-w-[200px]"
-          data-testid="btn-next-4"
-        >
-          Continue <ArrowRight className="w-4 h-4 ml-2" />
-        </Button>
-      </div>
-
-      {/* ── Mobile: floating "View cart (N)" button + Sheet drawer */}
-      <button
-        type="button"
-        onClick={() => setMobileCartOpen(true)}
-        className="md:hidden fixed bottom-24 right-5 z-40 inline-flex items-center gap-2 rounded-full bg-indigo-600 text-white px-5 py-3 font-semibold text-sm shadow-lg shadow-indigo-600/40 hover:bg-indigo-700 transition-all"
-        data-testid="btn-mobile-cart"
-        aria-label={`View cart with ${totalItems} items`}
-      >
-        <ShoppingCart className="h-4 w-4" />
-        View cart ({totalItems})
-      </button>
-      <Sheet open={mobileCartOpen} onOpenChange={setMobileCartOpen}>
-        <SheetContent side="bottom" className="max-h-[85vh] overflow-hidden flex flex-col p-0">
-          <SheetHeader className="p-4 border-b">
-            <SheetTitle>Your Quote ({totalItems} item{totalItems === 1 ? "" : "s"})</SheetTitle>
-          </SheetHeader>
-          <div className="flex-1 overflow-y-auto p-4">
-            <CartCard cart={cart} onSetQty={setQty} onRemove={remove} embedded />
+          {mode === "upload" && <fieldset disabled={busy} className="space-y-4 mb-6">
+            <label className="block text-sm font-medium">Indent file<input type="file" accept=".csv,.xlsx,.pdf,.jpg,.jpeg,.png" className="block mt-2 max-w-full" data-testid="quote-file"
+              onChange={e => { setFile(e.target.files?.[0] || null); setError(""); }} /></label>
+            <p className="text-sm text-slate-600">Up to 4 MiB, 500 items, 5 PDF pages or 20 megapixels. XLSX uses the first worksheet.
+              CSV must be UTF-8. Suggested headers: part_number, description, quantity. Reading a new file replaces the current draft only after successful extraction.</p>
+            <label className="flex gap-3 text-sm"><input type="checkbox" checked={consent} onChange={e => setConsent(e.target.checked)} data-testid="quote-consent" />Uploaded documents may be processed by our document-reading service. Review all extracted items before submission.</label>
+            <p className="text-sm text-slate-600">PDFs and images are sent to Anthropic for extraction. CSV and XLSX are processed on our server.
+              Remove confidential or unnecessary information before uploading. You can enter parts manually instead.</p>
+            <Button onClick={parse} disabled={busy || !file || !consent} data-testid="quote-parse">Read indent</Button>
+          </fieldset>}
+          {!!items.length && <div className="space-y-4">
+            <p className="text-sm text-slate-600">Review every row. Leave an unknown part number blank and provide its name. Quantities must be whole numbers from 1 to 9999.</p>
+            {items.map((item, index) => <fieldset key={index} disabled={busy} className="grid sm:grid-cols-[1fr_2fr_100px_44px] gap-3 border-b pb-4" data-testid={`quote-row-${index}`}>
+              <label className="text-sm">Part number<Input value={item.part_number} maxLength={100} className="mt-1 font-mono" data-testid={`quote-part-${index}`}
+                onChange={e => setItems(v => v.map((r, i) => i === index ? { ...r, part_number: e.target.value } : r))} /></label>
+              <label className="text-sm">Part name / description<Input value={item.description} maxLength={500} className="mt-1" data-testid={`quote-name-${index}`}
+                onChange={e => setItems(v => v.map((r, i) => i === index ? { ...r, description: e.target.value } : r))} /></label>
+              <label className="text-sm">Quantity<Input inputMode="numeric" value={item.qty} maxLength={4} className="mt-1" data-testid={`quote-qty-${index}`}
+                onChange={e => setItems(v => v.map((r, i) => i === index ? { ...r, qty: e.target.value } : r))} /></label>
+              <Button variant="outline" className="sm:mt-6 min-h-11" aria-label={`Remove row ${index + 1}`} onClick={() => setItems(v => v.filter((_, i) => i !== index))}><Trash2 className="w-4 h-4" /></Button>
+              {item.needs_review && <p className="text-sm text-amber-800 sm:col-span-4">Source fields may be missing or uncertain. Please check this row.</p>}
+            </fieldset>)}
+          </div>}
+          {mode && <Button variant="outline" className="mt-5" disabled={busy || items.length >= 500} onClick={() => setItems(v => [...v, blank()])} data-testid="quote-add-row">Add a row</Button>}
+          <div className="flex justify-between gap-4 mt-8"><Button variant="outline" disabled={busy} onClick={() => go(1)}>Contact &amp; verify</Button>
+            <Button disabled={busy || !validItems} onClick={() => go(3)} data-testid="quote-review">Review enquiry</Button></div>
+        </div>}
+        {step === 3 && <div data-testid="quote-review-panel">
+          <h2 className="text-xl font-semibold mb-4">Review and submit</h2>
+          <p className="text-slate-600 break-words">{contact.company_name} · {contact.contact_name} · {contact.email}</p>
+          <ul className="divide-y my-5">{items.map((i, n) => <li key={n} className="py-3 break-words"><span className="font-mono">{i.part_number || "Part number not supplied"}</span> · {i.description} · Quantity {i.qty}</li>)}</ul>
+          <DestinationPicker value={delivery} onChange={setDelivery} disabled={busy} />
+          <label className="block text-sm font-medium mt-5">Required timeframe<select disabled={busy} value={timeframe} onChange={e => setTimeframe(e.target.value)} className="block w-full mt-2 p-3 border rounded-md bg-white">
+            <option value="immediate">Immediate enquiry</option><option value="one_week">Within one week</option><option value="one_month">Within one month</option><option value="later">Planning for later</option>
+          </select></label>
+          <label className="block text-sm font-medium mt-5">Notes, vehicle details or delivery instructions<textarea disabled={busy} value={notes} maxLength={2000}
+            onChange={e => setNotes(e.target.value)} className="block w-full mt-2 p-3 border rounded-md" rows={4} data-testid="quote-notes" /></label>
+          <p className="text-sm text-slate-600 my-5">Submission saves your enquiry and sends it to anand@narmadamotors.in and sales@narmadamobility.com.
+            This is a request for a quotation, not an order or a guarantee of stock, fitment, price or delivery.</p>
+          <div className="flex justify-between gap-4"><Button variant="outline" disabled={busy} onClick={() => go(2)}>Edit parts</Button>
+            <Button disabled={busy || !validItems} onClick={submit} data-testid="quote-submit">Submit enquiry</Button></div>
+        </div>}
+        {step === 4 && result && <div data-testid="quote-success">
+          <h2 className="text-xl font-semibold">Your enquiry is saved</h2>
+          <p className="font-mono text-lg my-4" data-testid="quote-reference">{result.reference}</p>
+          <p>{result.notification?.state === "sent" ? "Both sales email notifications were accepted by the email service. Inbox delivery is not guaranteed." :
+            "Email delivery is not yet confirmed for both recipients. Your saved enquiry reference remains valid."}</p>
+          {result.notification?.recipients?.map((r: any) => <p className="text-sm mt-3 break-words" key={r.recipient}>{r.recipient}: {r.state === "unknown" ? "delivery uncertain; contact sales before sending again" : r.state}</p>)}
+          <div className="flex flex-wrap gap-3 mt-6">
+            <Button variant="outline" disabled={busy} onClick={() => run(async () => setResult(await request(`/api/quote/${encodeURIComponent(result.reference)}/status`, undefined, token)))} data-testid="quote-status">Check email status</Button>
+            {result.notification?.retryable && <Button disabled={busy} onClick={() => run(async () => setResult(await request(`/api/quote/${encodeURIComponent(result.reference)}/notification-retry`, {}, token)))} data-testid="quote-retry-email">Retry unsent notifications</Button>}
+            <a href="/get-quote" className="underline p-3">Start another enquiry</a>
           </div>
-          <div className="border-t p-4 grid grid-cols-2 gap-3">
-            <Button variant="outline" onClick={() => setMobileCartOpen(false)} data-testid="btn-mobile-cart-close">Close</Button>
-            <Button
-              onClick={() => { setMobileCartOpen(false); onNext(); }}
-              disabled={cart.length === 0}
-              data-testid="btn-mobile-cart-continue"
-            >
-              Continue <ArrowRight className="w-4 h-4 ml-2" />
-            </Button>
-          </div>
-        </SheetContent>
-      </Sheet>
-    </div>
-  );
-}
-
-/* ─────────────────────────────────────────── Cart card (used desktop + mobile) */
-function CartCard({ cart, onSetQty, onRemove, embedded }: { cart: WizardCartItem[]; onSetQty: (i: number, q: number) => void; onRemove: (i: number) => void; embedded?: boolean }) {
-  const totalItems = cart.reduce((s, c) => s + c.qty, 0);
-  return (
-    <div
-      className={`bg-card rounded-xl border shadow-md p-5 md:p-6 ${embedded ? "" : "max-h-[calc(100vh-8rem)] overflow-y-auto"}`}
-      data-testid="cart-card"
-    >
-      <div className="flex items-center justify-between mb-4">
-        <div className="flex items-center gap-2">
-          <ShoppingCart className="h-5 w-5 text-indigo-600" />
-          <h3 className="font-bold text-slate-900 text-lg">Your Quote</h3>
-          <span
-            className="inline-flex items-center rounded-full bg-indigo-100 text-indigo-700 text-[10px] font-mono uppercase tracking-wider px-2 py-0.5"
-            data-testid="cart-count"
-          >
-            {totalItems} item{totalItems === 1 ? "" : "s"}
-          </span>
-        </div>
-      </div>
-
-      {cart.length === 0 ? (
-        <div className="py-8 text-center">
-          <div className="inline-flex items-center justify-center h-16 w-16 rounded-full bg-slate-100 text-slate-400 mb-3">
-            <ShoppingCart className="h-7 w-7" />
-          </div>
-          <div className="text-sm font-medium text-slate-700">Your quote is empty</div>
-          <div className="text-xs text-slate-500 mt-1 flex items-center justify-center gap-1">
-            Add parts using the finder <ArrowRight className="h-3 w-3" />
-          </div>
-        </div>
-      ) : (
-        <ul className="space-y-3">
-          {cart.map((c, i) => (
-            <CartLine key={`${c.part_number}-${c.chassis_slug || ""}-${i}`} item={c} idx={i} onSetQty={onSetQty} onRemove={onRemove} />
-          ))}
-        </ul>
-      )}
-
-      {cart.length > 0 && (
-        <div className="mt-4 pt-3 border-t text-xs text-slate-500 text-center">
-          Prices are shown on the formal quotation you'll receive by email.
-        </div>
-      )}
-    </div>
-  );
-}
-
-function CartLine({ item, idx, onSetQty, onRemove }: { item: WizardCartItem; idx: number; onSetQty: (i: number, q: number) => void; onRemove: (i: number) => void }) {
-  const [imgOk, setImgOk] = useState(!!item.image_url);
-  return (
-    <li className="flex gap-3 pb-3 border-b border-slate-100 last:border-b-0 last:pb-0" data-testid={`cart-line-${idx}`}>
-      <div className="h-16 w-16 rounded bg-slate-100 shrink-0 flex items-center justify-center overflow-hidden">
-        {item.image_url && imgOk ? (
-          <img src={item.image_url} alt={item.part_number} className="h-full w-full object-contain" onError={() => setImgOk(false)} />
-        ) : (
-          <ImageOff className="h-4 w-4 text-slate-400" />
-        )}
-      </div>
-      <div className="flex-1 min-w-0">
-        <div className="font-mono text-xs font-bold text-slate-900 truncate">{item.part_number}</div>
-        {item.oem_number && <div className="font-mono text-[10px] text-slate-500 truncate">OEM {item.oem_number}</div>}
-        {item.description && <div className="text-[11px] text-slate-600 line-clamp-2">{item.description}</div>}
-        {item.chassis_display_name && (
-          <div className="text-[10px] text-indigo-600 font-mono truncate mt-0.5">{item.chassis_display_name}</div>
-        )}
-        <div className="flex items-center justify-between mt-2 gap-2">
-          <div className="inline-flex items-center border rounded-md bg-white">
-            <button
-              type="button"
-              onClick={() => onSetQty(idx, item.qty - 1)}
-              className="px-2 py-1 text-slate-600 hover:bg-slate-100 disabled:opacity-40"
-              disabled={item.qty <= 1}
-              aria-label="Decrease quantity"
-              data-testid={`cart-minus-${idx}`}
-            >
-              <Minus className="w-3 h-3" />
-            </button>
-            <span className="px-2 text-xs font-mono w-8 text-center" data-testid={`cart-qty-${idx}`}>{item.qty}</span>
-            <button
-              type="button"
-              onClick={() => onSetQty(idx, item.qty + 1)}
-              className="px-2 py-1 text-slate-600 hover:bg-slate-100"
-              aria-label="Increase quantity"
-              data-testid={`cart-plus-${idx}`}
-            >
-              <Plus className="w-3 h-3" />
-            </button>
-          </div>
-          <button
-            type="button"
-            onClick={() => onRemove(idx)}
-            className="text-slate-400 hover:text-red-600 p-1"
-            aria-label={`Remove ${item.part_number}`}
-            data-testid={`cart-remove-${idx}`}
-          >
-            <Trash2 className="w-4 h-4" />
-          </button>
-        </div>
-      </div>
-    </li>
-  );
-}
-
-/* ────────────────────────────────── Manual entry collapsible (closed default) */
-function ManualEntry({ onAdd }: { onAdd: (pn: string, desc: string) => void }) {
-  const [open, setOpen] = useState(false);
-  const [pn, setPn] = useState("");
-  const [desc, setDesc] = useState("");
-  const submit = (e: React.FormEvent) => {
-    e.preventDefault();
-    const cleaned = pn.trim();
-    if (!cleaned) return;
-    onAdd(cleaned, desc.trim());
-    setPn(""); setDesc("");
-    toast({ title: "Added to your quote", description: cleaned });
-  };
-  return (
-    <Collapsible open={open} onOpenChange={setOpen}>
-      <CollapsibleTrigger asChild>
-        <button
-          type="button"
-          className="w-full inline-flex items-center justify-between gap-2 px-4 py-3 rounded-lg border border-dashed border-slate-300 bg-slate-50/50 text-sm font-medium text-slate-700 hover:bg-slate-100 hover:border-slate-400 transition-colors"
-          data-testid="manual-entry-trigger"
-        >
-          <span className="inline-flex items-center gap-2">
-            <Plus className="h-4 w-4 text-slate-500" />
-            Don't see your part? Add it manually
-          </span>
-          {open ? <ChevronDown className="h-4 w-4" /> : <ChevronRight className="h-4 w-4" />}
-        </button>
-      </CollapsibleTrigger>
-      <CollapsibleContent>
-        <form onSubmit={submit} className="mt-3 bg-card rounded-lg border shadow-sm p-4 space-y-3">
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-            <div>
-              <label className="block text-xs uppercase text-slate-500 mb-1 font-mono tracking-wider">Part number *</label>
-              <Input value={pn} onChange={(e) => setPn(e.target.value)} placeholder="e.g. 251434100121" className="font-mono" data-testid="input-manual-pn" required />
-            </div>
-            <div>
-              <label className="block text-xs uppercase text-slate-500 mb-1 font-mono tracking-wider">Description</label>
-              <Input value={desc} onChange={(e) => setDesc(e.target.value)} placeholder="Optional" data-testid="input-manual-desc" />
-            </div>
-          </div>
-          <div className="flex justify-end">
-            <Button type="submit" disabled={!pn.trim()} data-testid="btn-manual-add">
-              <Plus className="w-4 h-4 mr-2" /> Add to quote
-            </Button>
-          </div>
-        </form>
-      </CollapsibleContent>
-    </Collapsible>
-  );
-}
-
-/* ─────────────────────────────────────────────────────────────────── Step 4 */
-function Step4Details({ cart, contact, timeframe, delivery, notes, otpToken, onTimeframe, onDelivery, onNotes, onBack, onSuccess }: {
-  cart: WizardCartItem[];
-  contact: Contact;
-  timeframe: string;
-  delivery: string;
-  notes: string;
-  otpToken: string;
-  onTimeframe: (v: any) => void;
-  onDelivery: (v: string) => void;
-  onNotes: (v: string) => void;
-  onBack: () => void;
-  onSuccess: (ref: string) => void;
-}) {
-  const [submitting, setSubmitting] = useState(false);
-  const notesLeft = 2000 - notes.length;
-  const TIMEFRAMES: { id: string; label: string }[] = [
-    { id: "immediate", label: "Immediate (0–7 days)" },
-    { id: "one_week", label: "Within 1 week" },
-    { id: "one_month", label: "Within 1 month" },
-    { id: "three_months", label: "Within 3 months" },
-    { id: "later", label: "Later / planning" },
-  ];
-  const total = useMemo(() => cart.reduce((s, c) => s + (Number(c.sell_price) || 0) * c.qty, 0), [cart]);
-
-  const submit = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (submitting) return;
-    if (notes.length > 2000) return toast({ title: "Notes too long", description: "Max 2000 characters.", variant: "destructive" });
-    setSubmitting(true);
-    try {
-      const body = {
-        email: contact.email.trim().toLowerCase(),
-        company_name: contact.company_name,
-        contact_name: contact.contact_name,
-        country: contact.country,
-        currency: contact.currency,
-        country_code: contact.country_code,
-        mobile: contact.mobile,
-        timeframe,
-        delivery_location: delivery,
-        notes,
-        cart: cart.map((c) => ({
-          part_number: c.part_number,
-          description: c.description,
-          chassis_slug: c.chassis_slug || null,
-          qty: c.qty,
-        })),
-      };
-      const r = await apiRequest("POST", "/api/quote/submit", body, {
-        "x-quote-token": otpToken,
-      });
-      const data = await r.json();
-      if (!data.ok || !data.reference) throw new Error(data.error || "Submission failed");
-      onSuccess(data.reference);
-    } catch (e: any) {
-      toast({ title: "Submission failed", description: e?.message || String(e), variant: "destructive" });
-    } finally { setSubmitting(false); }
-  };
-
-  return (
-    <form onSubmit={submit} className="bg-card rounded-xl shadow-md border p-6 md:p-8 space-y-6 max-w-3xl mx-auto" data-testid="step-4">
-      <div>
-        <h2 className="text-xl md:text-2xl font-bold text-slate-900">Order details</h2>
-        <p className="text-sm text-slate-500 mt-1">Tell us when you need parts and where to deliver.</p>
-      </div>
-
-      <div>
-        <div className="text-xs uppercase text-slate-500 font-mono tracking-wider mb-2">Cart summary</div>
-        <div className="rounded-lg border divide-y bg-white">
-          {cart.map((c, i) => (
-            <div key={i} className="p-3 flex items-center justify-between text-sm">
-              <div className="min-w-0 flex-1">
-                <div className="font-mono text-xs font-semibold truncate">{c.part_number}</div>
-                <div className="text-xs text-slate-600 truncate">{c.description}</div>
-              </div>
-              <div className="text-xs text-slate-600 font-mono">× {c.qty}</div>
-            </div>
-          ))}
-        </div>
-        {total > 0 && <div className="text-xs text-slate-500 mt-1 text-right">Est. subtotal: <span className="font-semibold text-slate-800">{formatINR(total)}</span></div>}
-      </div>
-
-      <div>
-        <div className="text-xs uppercase text-slate-500 font-mono tracking-wider mb-2">When do you need it?</div>
-        <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
-          {TIMEFRAMES.map((t) => (
-            <label key={t.id} className={`flex items-center gap-2 border rounded-lg p-3 text-sm cursor-pointer transition-colors ${
-              timeframe === t.id ? "border-indigo-500 bg-indigo-50 text-indigo-900" : "border-slate-200 text-slate-700 hover:border-slate-300"
-            }`}>
-              <input type="radio" name="tf" checked={timeframe === t.id} onChange={() => onTimeframe(t.id)} data-testid={`tf-${t.id}`} />
-              <span>{t.label}</span>
-            </label>
-          ))}
-        </div>
-      </div>
-
-      <Field label="Delivery location">
-        <Input value={delivery} onChange={(e) => onDelivery(e.target.value)} placeholder="City, port, or full address" data-testid="input-delivery" />
-      </Field>
-
-      <div>
-        <label className="block text-xs uppercase text-slate-500 mb-1.5 font-mono tracking-wider">Notes (optional, max 2000 chars)</label>
-        <textarea
-          value={notes}
-          onChange={(e) => onNotes(e.target.value)}
-          rows={4}
-          maxLength={2000}
-          className="w-full rounded-md border border-slate-300 p-3 text-sm font-sans"
-          placeholder="Additional context, special packing, payment terms…"
-          data-testid="input-notes"
-        />
-        <div className={`text-[11px] mt-1 text-right ${notesLeft < 100 ? "text-amber-600" : "text-slate-400"}`}>{notesLeft} chars remaining</div>
-      </div>
-
-      <div className="flex flex-col-reverse sm:flex-row gap-3 justify-between pt-2 border-t">
-        <Button type="button" variant="outline" size="lg" onClick={onBack} data-testid="btn-back-3">
-          <ArrowLeft className="w-4 h-4 mr-2" /> Back
-        </Button>
-        <Button type="submit" size="lg" disabled={submitting} data-testid="btn-submit">
-          {submitting && <Loader2 className="w-4 h-4 mr-2 animate-spin" />} Submit request
-        </Button>
-      </div>
-    </form>
-  );
-}
-
-/* ─────────────────────────────────────────────────────────────────── Step 5 */
-function Step5Success({ reference, contact, onReset }: { reference: string; contact: Contact; onReset: () => void }) {
-  const waMsg = `Hi Narmada Mobility, tracking my quote reference ${reference}.`;
-  const waHref = `https://wa.me/${WHATSAPP}?text=${encodeURIComponent(waMsg)}`;
-  return (
-    <div className="bg-card rounded-xl shadow-md border p-6 md:p-8 text-center space-y-5 max-w-xl mx-auto" data-testid="step-5">
-      <div className="inline-flex items-center justify-center h-16 w-16 rounded-full bg-emerald-100 text-emerald-700 mx-auto">
-        <Check className="w-7 h-7" />
-      </div>
-      <div>
-        <div className="text-xl font-bold text-slate-900">Request received</div>
-        <div className="text-sm text-slate-600 mt-1">Our sales team will respond to <span className="font-mono">{contact.email}</span> within 24 hours.</div>
-      </div>
-      <div className="rounded-lg bg-slate-50 border p-4 inline-block">
-        <div className="text-xs uppercase text-slate-500 font-mono tracking-wider mb-1">Your reference</div>
-        <div className="text-2xl font-mono font-bold text-slate-900" data-testid="quote-reference">{reference}</div>
-      </div>
-      <div className="flex flex-col sm:flex-row gap-3 justify-center pt-2">
-        <Button variant="outline" onClick={onReset} data-testid="btn-new-quote">Start a new quote</Button>
-        <a href={waHref} target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-2 bg-[#25D366] hover:bg-[#1da851] text-white px-4 py-2 rounded-md text-sm font-semibold" data-testid="btn-wa-track">
-          <MessageCircle className="w-4 h-4" /> Track on WhatsApp
-        </a>
-      </div>
-      <div className="text-xs text-slate-500 pt-3">
-        Need to browse more parts? <Link href="/find-parts"><a className="text-indigo-600 hover:underline">Back to Find Parts</a></Link>
-      </div>
-    </div>
-  );
+          <p className="text-sm mt-5">Retries are limited to three attempts, at least one minute apart. An uncertain send is not repeated automatically.</p>
+        </div>}
+        {busy && <p role="status" className="mt-5 inline-flex items-center gap-2 text-sm"><Loader2 className="w-4 h-4 animate-spin" />Processing. Keep this page open.</p>}
+      </section>
+      {step === 1 && <QuoteGuide onDestination={v => { setDelivery(v); setNotice(`Delivery enquiry destination selected: ${v}`); document.querySelector("main")?.scrollIntoView(); }} />}
+    </article>
+  </div>;
 }

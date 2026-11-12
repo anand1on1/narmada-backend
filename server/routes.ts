@@ -13,6 +13,8 @@ import { sendContactEmail, sendQuoteRequestEmail as salesSendQuoteRequestEmail }
 import { registerBulkRoutes } from "./bulk";
 import { registerV2Routes, TokenMap, TokenInfo, persistAdminSession, rehydrateSession, deleteAdminSession } from "./routes-v2";
 import { productsListHandler } from "./product-pagination";
+import { publicVisibility } from "./public-visibility";
+import { publicRecord } from "../shared/public-visibility";
 import { splitSitemapIndex, splitSitemapPage, sitemapProductCount } from "./catalog-sitemap";
 import type { AdminRole } from "@shared/schema";
 import { PUBLIC_ORIGIN } from "../shared/public-urls";
@@ -39,7 +41,7 @@ const SALES_EMAIL = "sales@Narmadamobility.com";
 const WHATSAPP_NUMBER = "7909083806";
 
 // Brand + category lists (mirror client/src/data/brands.ts at minimum for sitemap)
-const BRAND_SLUGS = ["tata", "bharatbenz", "ashok-leyland", "eicher", "volvo"];
+const BRAND_SLUGS = ["tata", "bharatbenz", "ashok-leyland", "mahindra", "volvo"];
 const CATEGORY_SLUGS = [
   "engine-parts", "dozer-urea", "clutch", "brake-system", "suspension",
   "transmission", "differential", "electrical", "filters", "turbocharger",
@@ -157,6 +159,7 @@ const PUBLIC_DIR = path.resolve(process.cwd(), "public-runtime");
 if (!fs.existsSync(PUBLIC_DIR)) fs.mkdirSync(PUBLIC_DIR, { recursive: true });
 
 export async function registerRoutes(httpServer: Server, app: Express): Promise<Server> {
+  app.use(publicVisibility);
   // Serve uploaded images
   app.use("/uploads", express.static(UPLOADS_DIR, { fallthrough: false }));
 
@@ -374,7 +377,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
     if ((!p || !p.active) && (storage as any).getProductByPartNumber) {
       try { p = await (storage as any).getProductByPartNumber(req.params.slug); } catch { /* ignore */ }
     }
-    if (!p || !p.active) return res.status(404).json({ error: "Not found" });
+    if (!p || !p.active || !publicRecord(p)) return res.status(404).json({ error: "Not found" });
     res.json(p);
   });
 

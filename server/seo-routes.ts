@@ -18,6 +18,7 @@
 
 import type { Express, Request, Response, NextFunction } from "express";
 import crypto from "crypto";
+import { publicRecord, publicSql } from "../shared/public-visibility";
 import { rawSqlite } from "./storage";
 import {
   renderProductPage,
@@ -84,7 +85,7 @@ function loadProductBySlug(slug: string): SeoProduct | null {
            active, created_at AS createdAt
     FROM products WHERE slug = ? LIMIT 1
   `).get(slug) as any;
-  if (!row) return null;
+  if (!row || !publicRecord(row)) return null;
   if (!row.active) return null;
   // NEVER surface purchase_price — the products table doesn't have it anyway,
   // purchase price lives on chassis_parts + auto_publish_log. Explicit call-out.
@@ -135,7 +136,7 @@ function loadRelatedProducts(product: SeoProduct, limit = 4): SeoProduct[] {
       ORDER BY created_at DESC
       LIMIT ?
     `).all(product.category, product.id, limit) as any[];
-    return rows.map((r) => ({
+    return rows.filter(publicRecord).map((r) => ({
       ...r,
       priceInr: Number(r.priceInr),
     }));
@@ -149,7 +150,7 @@ function loadChassisBySlug(slug: string): SeoChassis | null {
              make, model, variant, cover_image_url AS coverImageUrl, description, is_active
       FROM chassis_catalog WHERE slug = ? LIMIT 1
     `).get(slug) as any;
-    if (!row || !row.is_active) return null;
+    if (!row || !row.is_active || !publicRecord(row)) return null;
     return {
       id: row.id, slug: row.slug, chassisCode: row.chassisCode,
       chassisDisplayName: row.chassisDisplayName, make: row.make, model: row.model,
@@ -171,7 +172,7 @@ function loadChassisParts(chassisId: number): SeoChassisPart[] {
       ORDER BY cp.category, cp.part_number
     `).all(chassisId) as any[];
     // NEVER surface purchase_price. Only sell_price is included above.
-    return rows.map((r) => ({
+    return rows.filter(publicRecord).map((r) => ({
       id: r.id,
       partNumber: r.partNumber,
       oemNumber: r.oemNumber,
@@ -195,7 +196,7 @@ function loadCategoryProducts(category: string, limit = 100): SeoProduct[] {
       ORDER BY created_at DESC
       LIMIT ?
     `).all(category, limit) as any[];
-    return rows.map((r) => ({ ...r, priceInr: Number(r.priceInr) }));
+    return rows.filter(publicRecord).map((r) => ({ ...r, priceInr: Number(r.priceInr) }));
   } catch { return []; }
 }
 
@@ -217,7 +218,7 @@ export function buildSitemapForSeo(): SitemapUrl[] {
 
   try {
     const products = rawSqlite.prepare(`
-      SELECT slug, created_at FROM products WHERE active = 1 ORDER BY created_at DESC
+      SELECT slug, created_at FROM products WHERE active = 1 AND ${publicSql(["brand","name","slug","model","description","compatible_models"])} ORDER BY created_at DESC
     `).all() as any[];
     for (const p of products) {
       if (!p.slug) continue;
@@ -232,7 +233,7 @@ export function buildSitemapForSeo(): SitemapUrl[] {
 
   try {
     const chassis = rawSqlite.prepare(`
-      SELECT slug, updated_at FROM chassis_catalog WHERE is_active = 1
+      SELECT slug, updated_at FROM chassis_catalog WHERE is_active = 1 AND ${publicSql(["slug","make","model","description","chassis_display_name"])}
     `).all() as any[];
     for (const c of chassis) {
       if (!c.slug) continue;
@@ -246,7 +247,7 @@ export function buildSitemapForSeo(): SitemapUrl[] {
   } catch { /* ignore */ }
 
   try {
-    const cats = rawSqlite.prepare(`SELECT DISTINCT category FROM products WHERE active = 1 AND category IS NOT NULL AND category != ''`).all() as any[];
+    const cats = rawSqlite.prepare(`SELECT DISTINCT category FROM products WHERE active = 1 AND category IS NOT NULL AND category != '' AND ${publicSql(["category","brand","name","slug","model","description","compatible_models"])}`).all() as any[];
     for (const c of cats) {
       urls.push({
         loc: `${base}/cat/${encodeURIComponent(c.category)}`,

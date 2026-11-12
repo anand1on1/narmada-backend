@@ -15,7 +15,10 @@ const WHATSAPP = "917909083806";
 
 export default function PriceChecker() {
   const [q, setQ] = useState("");
-  const [brand, setBrand] = useState("");
+  const [brand, setBrand] = useState(() => {
+    const value = new URLSearchParams(window.location.search).get("brand") || "";
+    return ["tata", "bharatbenz", "ashok-leyland", "mahindra", "volvo", "scania", "force", "swaraj-mazda"].includes(value) ? value : "";
+  });
   const [searched, setSearched] = useState<string | null>(null);
 
   const { data: brandsData } = useQuery<BrandStat[]>({
@@ -50,9 +53,9 @@ export default function PriceChecker() {
   return (
     <>
       <SeoHead
-        title="Spare Part Price Checker — Narmada Mobility | Tata, BharatBenz, Ashok Leyland, Eicher, Volvo"
-        description="Search any commercial vehicle spare part number to see MRP, dealer price, HSN code and GST rate. Live price lists from Tata, BharatBenz, Ashok Leyland, Eicher and Volvo."
-        keywords="spare part price checker, truck part number search, hsn code lookup, tata bharatbenz ashok leyland eicher volvo parts price, narmada mobility"
+        title="Spare Part Price Checker — Narmada Mobility | Tata, BharatBenz, Ashok Leyland, Volvo"
+        description="Search available commercial vehicle part price lists for MRP, HSN code and GST rate. Request a quotation for confirmed pricing and availability."
+        keywords="spare part price checker, truck part number search, hsn code lookup, tata bharatbenz ashok leyland volvo parts price, narmada mobility"
       />
 
       <section className="relative surface-obsidian text-foreground py-14 lg:py-20 overflow-hidden border-b border-border">
@@ -65,7 +68,8 @@ export default function PriceChecker() {
             Look up any <span className="text-gradient-cyan">part number</span> instantly.
           </h1>
           <p className="text-lg text-muted-foreground max-w-2xl mb-8">
-            Search across the latest brand price lists to see MRP, dealer price, HSN code and GST. WhatsApp enquiry available for confirmed availability.
+            Search available brand price lists for MRP in INR (GST included), HSN code and GST rate.
+            Ask for a discount and confirm pricing and availability with a quotation.
           </p>
 
           {/* Search bar */}

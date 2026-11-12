@@ -1,8 +1,14 @@
-# Backend-only large price-list CSV import
+# Large price-list CSV import
 
-This adds an authorized operator path beyond the existing website upload limits.
-It does not change the frontend, require a GoDaddy upload, or grant permission to
-import or publish production data. Review and approve backend deployment first.
+The backend supports authenticated streaming CSV import. With the matching
+dashboard frontend update installed, Upload Price List sends selected CSV files
+directly through this path: up to 64 MiB/500,000 records, strict UTF-8, publication
+confirmation, visible progress/errors, and saved-import resume. Excel remains
+limited to 8 MiB/50,000 first-sheet rows. Installing an update does not authorize
+an import or publication.
+
+The one-time operator helper below remains an alternative that does not require
+the dashboard update. Review deployment and production import permissions first.
 
 ## Before importing
 
@@ -128,4 +134,5 @@ in 500-row batches, without materializing a file or large database fixture.
 Browser QA runs the actual helper with a native picker and confirmation dialogs
 against intercepted offline API fixtures. No live request, real file import,
 production publication, full-size database performance benchmark, deployment or
-GoDaddy build was performed. The existing website uploader's limits are unchanged.
+GoDaddy build was performed during backend-only verification. The dashboard
+integration is verified separately; its Excel and pasted-CSV legacy limits remain.

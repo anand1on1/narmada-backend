@@ -36,7 +36,7 @@ export default function CategoryPage() {
   return (
     <>
       <SeoHead
-        title={`${cat.name} — Spare Parts for Tata, BharatBenz, Volvo, Eicher, Ashok Leyland | Narmada Mobility`}
+        title={`${cat.name} — Spare Parts for Tata, BharatBenz, Volvo, Ashok Leyland | Narmada Mobility`}
         description={`Buy genuine and OEM-equivalent ${cat.name.toLowerCase()} for Indian commercial vehicles. Worldwide export. Compare across all 5 major brands at Narmada Mobility.`}
         keywords={`${cat.name.toLowerCase()}, tata ${cat.name.toLowerCase()}, volvo ${cat.name.toLowerCase()}, bharat benz ${cat.name.toLowerCase()}, spare parts ${cat.slug}`}
       />

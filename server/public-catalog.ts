@@ -7,19 +7,22 @@ import { PUBLIC_ORIGIN, productPath } from "../shared/public-urls";
 import { escapeHtml as esc } from "./auto-blogger-safety";
 import { renderProductPage, renderNotFoundPage, CRITICAL_CSS } from "./seo-templates";
 import { indexedCatalogQuery, publicCatalogPrices } from "./price-catalog";
+import { publicRecord, publicSql } from "../shared/public-visibility";
+import { renderQuotePage } from "./quote-page";
+import { renderReferenceNotice } from "../shared/reference-notice";
 
 const config = { baseUrl: PUBLIC_ORIGIN };
-export const CORE_PATHS = ["/", "/products", "/about", "/contact", "/work-with-us", "/privacy", "/disclaimer", "/blog"];
+export const CORE_PATHS = ["/", "/products", "/about", "/contact", "/work-with-us", "/privacy", "/disclaimer", "/blog", "/get-quote"];
 export function canonicalSitemapEntries(products: any[], base = PUBLIC_ORIGIN): string[] {
   // Deliberately omit alias, gated category/chassis and mass geo landing pages.
-  const paths = new Set([...CORE_PATHS, ...products.filter(p => p.active && p.slug).map(productPath)]);
+  const paths = new Set([...CORE_PATHS, ...products.filter(p => p.active && p.slug && publicRecord(p)).map(productPath)]);
   return Array.from(paths).map(p => `  <url><loc>${esc(base + p)}</loc></url>`);
 }
 export const sitemapXml = (entries: string[]) =>
   `<?xml version="1.0" encoding="UTF-8"?>\n<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n${entries.join("\n")}\n</urlset>`;
 export const publicRobots = () => `User-agent: *\nAllow: /\nDisallow: /api/\nDisallow: /admin\nDisallow: /team/\nSitemap: ${PUBLIC_ORIGIN}/sitemap.xml\nSitemap: ${PUBLIC_ORIGIN}/sitemap-blog.xml\n`;
 export function catalogSitemap(db: Database) {
-  return sitemapXml(canonicalSitemapEntries(db.prepare("SELECT slug,part_number,active FROM products WHERE active=1 ORDER BY id").all()));
+  return sitemapXml(canonicalSitemapEntries(db.prepare(`SELECT slug,part_number,active FROM products WHERE active=1 AND ${publicSql(["brand","name","description","slug","model","compatible_models"])} ORDER BY id`).all()));
 }
 // Embed real content in the existing app entry, not a bot-only page. React replaces
 // this root on startup, retaining the current catalog/cart/design and admin workflows.
@@ -37,6 +40,11 @@ const columns = `id,slug,name,brand,model,category,part_number AS partNumber,oem
  description,short_description AS shortDescription,price_inr AS priceInr,stock_qty AS stockQty,
  image_urls AS imageUrls,compatible_models AS compatibleModels,meta_title AS metaTitle,meta_description AS metaDescription`;
 export function registerPublicCatalog(app: Express, db: Database) {
+  app.get("/get-quote", (_req, res) => {
+    // The interactive guide checks availability live; the SSR fallback never
+    // advertises a price list whose availability has not been checked.
+    res.set("Cache-Control", "no-store").type("html").send(appHtml(renderQuotePage()));
+  });
   const notFound = (res: any) => res.status(404).set("X-Robots-Tag", "noindex").type("html")
     .send(renderNotFoundPage(config, "product", "not-found"));
   const product: RequestHandler = (req, res) => {
@@ -47,10 +55,10 @@ export function registerPublicCatalog(app: Express, db: Database) {
     const row = db.prepare(`SELECT ${columns} FROM products WHERE active=1 AND ${
       b ? "((slug=? AND part_number=?) OR (slug=? AND part_number=?))" : "slug=?"
     } LIMIT 1`).get(...(b ? [b, a, a, b] : [a])) as any;
-    if (!row) return notFound(res);
+    if (!row || !publicRecord(row)) return notFound(res);
     const canonical = productPath(row);
     if (req.path !== canonical) return res.redirect(301, PUBLIC_ORIGIN + canonical);
-    const related = db.prepare(`SELECT ${columns} FROM products WHERE active=1 AND category=? AND id!=? ORDER BY id DESC LIMIT 4`).all(row.category, row.id) as any[];
+    const related = db.prepare(`SELECT ${columns} FROM products WHERE active=1 AND ${publicSql(["brand", "name", "slug", "description", "model", "compatible_models"])} AND category=? AND id!=? ORDER BY id DESC LIMIT 4`).all(row.category, row.id) as any[];
     try { row.imageSource = (db.prepare("SELECT image_source FROM auto_publish_log WHERE product_id=? ORDER BY id DESC LIMIT 1").get(row.id) as any)?.image_source; } catch { /* optional old install */ }
     return res.type("html").send(appHtml(renderProductPage(publicCatalogPrices(db,[row])[0], publicCatalogPrices(db,related), config)));
   };
@@ -60,7 +68,7 @@ export function registerPublicCatalog(app: Express, db: Database) {
     const pageText = String(req.query.page || "1");
     if (!/^[1-9]\d{0,5}$/.test(pageText)) return notFound(res);
     const page = Number(pageText), limit = 24;
-    const clauses=["active=1"],values:string[]=[],params=new URLSearchParams();
+    const clauses=["active=1", publicSql(["brand", "name", "slug", "description", "model", "compatible_models"])],values:string[]=[],params=new URLSearchParams();
     for(const field of ["brand","category"] as const) {
       const value=req.query[field];
       if(typeof value==="string" && value.length<=120) {
@@ -90,6 +98,7 @@ export function registerPublicCatalog(app: Express, db: Database) {
 <link rel="canonical" href="${PUBLIC_ORIGIN}${esc(path)}"><style>${CRITICAL_CSS}</style></head><body>
 <header class="site"><a class="brand" href="${PUBLIC_ORIGIN}/">Narmada Mobility</a><nav><a href="/blog">Insights</a><a href="/contact">Contact</a></nav></header>
 <main class="container"><h1>Commercial vehicle parts</h1><p>${total} catalog products. Confirm fitment and availability with our team.</p>
+${renderReferenceNotice()}
 <nav aria-label="Catalog categories">${(db.prepare("SELECT DISTINCT category FROM products WHERE active=1 ORDER BY category LIMIT 100").all() as any[]).map(c=>`<a href="/products?category=${encodeURIComponent(c.category)}">${esc(c.category)}</a>`).join(" · ")}</nav>
 <form action="/products" method="get"><label>Part name, number, OEM or model <input name="q" value="${esc(q)}"></label><button>Search</button></form>
 <div class="related-grid">${rows.map((p:any) => `<article class="card"><h2><a href="${esc(productPath(p))}">${esc(p.name)}</a></h2><p>${esc(p.partNumber)} · ${esc(p.brand)}</p><p>${p.catalogPriced ? `US$${p.priceUsd.toFixed(2)} · GST included` : `INR ${Number(p.priceInr).toFixed(2)}`}</p>${p.catalogPriced ? `<a href="${esc(productPath(p))}">Contact us for a discount</a>`:""}</article>`).join("")}</div>
