@@ -6,6 +6,8 @@ import { cleanHtml, escapeHtml as esc } from "./auto-blogger-safety";
 import { BLOG_ORIGIN, BLOG_EDITOR } from "../shared/auto-blogger";
 import { productPath } from "../shared/public-urls";
 import { safeBlogCode } from "./auto-blogger-diagnostics";
+import { publicRecord, publicSql } from "../shared/public-visibility";
+const visiblePost = publicSql(["p.slug", "p.title", "p.excerpt", "p.content", "p.meta_title", "p.meta_description"]);
 
 const iso = (n: number) => new Date(n).toISOString();
 const date = (n: number) => new Date(n).toLocaleDateString("en-IN", { day: "numeric", month: "long", year: "numeric", timeZone: "Asia/Kolkata" });
@@ -13,23 +15,23 @@ export function publicArticle(db: Database, slug: string): any {
   const p = db.prepare(`SELECT p.id,p.slug,p.title,p.excerpt,p.content,p.meta_title,p.meta_description,
     p.published_at,p.updated_at,p.created_at,a.category,a.cluster_id FROM posts p
     LEFT JOIN blog_articles a ON a.post_id=p.id WHERE p.slug=? AND p.published=1`).get(slug) as any;
-  if (!p) return null;
-  const sources = db.prepare("SELECT url,title,accessed_at AS accessedAt FROM blog_sources WHERE post_id=?").all(p.id);
+  if (!p || !publicRecord(p)) return null;
+  const sources = db.prepare("SELECT url,title,accessed_at AS accessedAt FROM blog_sources WHERE post_id=?").all(p.id).filter(publicRecord);
   return { id: p.id, slug: p.slug, title: p.title, excerpt: p.excerpt, content: cleanHtml(p.content),
     metaTitle: p.meta_title, metaDescription: p.meta_description, category: p.category || "Insights",
     authorName: BLOG_EDITOR, publishedAt: p.published_at || p.created_at, updatedAt: p.updated_at,
     sources, aiAssisted: sources.length >= 2,
     products: db.prepare(`SELECT p.slug,p.name,p.part_number AS partNumber FROM products p JOIN blog_article_products ap ON ap.product_id=p.id
-      WHERE ap.post_id=? AND p.active=1 LIMIT 5`).all(p.id),
+      WHERE ap.post_id=? AND p.active=1 AND ${publicSql(["p.brand","p.slug","p.name"])} LIMIT 5`).all(p.id),
     related: db.prepare(`SELECT p.slug,p.title FROM posts p JOIN blog_articles a ON a.post_id=p.id
-      WHERE p.published=1 AND p.id!=? AND a.cluster_id=? ORDER BY p.published_at DESC LIMIT 3`).all(p.id, p.cluster_id || 0),
+      WHERE p.published=1 AND ${visiblePost} AND p.id!=? AND a.cluster_id=? ORDER BY p.published_at DESC LIMIT 3`).all(p.id, p.cluster_id || 0),
   };
 }
 export function publicList(db: Database, query: any = {}) {
   const page = Math.max(1, Math.min(10000, Number.parseInt(String(query.page), 10) || 1));
   const q = String(query.q || "").slice(0, 100).trim(), category = String(query.category || "").slice(0, 60);
   const term = `%${q.replace(/[\\%_]/g, "\\$&")}%`;
-  const where = `p.published=1 AND (p.title LIKE ? ESCAPE '\\' OR p.excerpt LIKE ? ESCAPE '\\')
+  const where = `p.published=1 AND ${visiblePost} AND (p.title LIKE ? ESCAPE '\\' OR p.excerpt LIKE ? ESCAPE '\\')
     AND (?='' OR COALESCE(a.category,'Insights')=?)`;
   const args = [term, term, category, category];
   const total = (db.prepare(`SELECT COUNT(*) n FROM posts p LEFT JOIN blog_articles a ON a.post_id=p.id WHERE ${where}`).get(...args) as any).n;
@@ -37,11 +39,11 @@ export function publicList(db: Database, query: any = {}) {
     p.updated_at AS updatedAt,COALESCE(a.category,'Insights') AS category FROM posts p LEFT JOIN blog_articles a ON a.post_id=p.id
     WHERE ${where} ORDER BY p.published_at DESC,p.id DESC LIMIT 12 OFFSET ?`).all(...args, (page - 1) * 12);
   const categories = (db.prepare(`SELECT DISTINCT COALESCE(a.category,'Insights') category FROM posts p
-    LEFT JOIN blog_articles a ON a.post_id=p.id WHERE p.published=1 ORDER BY category`).all() as any[]).map(r => r.category);
+    LEFT JOIN blog_articles a ON a.post_id=p.id WHERE p.published=1 AND ${visiblePost} ORDER BY category`).all() as any[]).map(r => r.category);
   return { items, total, page, pages: Math.ceil(total / 12), categories, q, category };
 }
 export function blogSitemap(db: Database) {
-  const rows = db.prepare("SELECT slug,updated_at FROM posts WHERE published=1 ORDER BY id LIMIT 45000").all() as any[];
+  const rows = db.prepare(`SELECT slug,updated_at FROM posts p WHERE published=1 AND ${visiblePost} ORDER BY id LIMIT 45000`).all() as any[];
   return `<?xml version="1.0" encoding="UTF-8"?><urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
 <url><loc>${BLOG_ORIGIN}/blog</loc></url>${rows.map(p =>
     `<url><loc>${BLOG_ORIGIN}/blog/${esc(encodeURIComponent(p.slug))}</loc><lastmod>${iso(p.updated_at)}</lastmod></url>`).join("")}</urlset>`;

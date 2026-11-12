@@ -260,6 +260,9 @@ function getSalesTransport(env: SalesEmailEnv): nodemailer.Transporter | null {
     port: env.port,
     secure: env.secure,
     auth: { user: env.user, pass: env.pass },
+    connectionTimeout: 10000,
+    greetingTimeout: 10000,
+    socketTimeout: 20000,
   });
   return _salesTransport;
 }
@@ -900,14 +903,14 @@ export async function sendGenericSalesEmail(
       `<pre style="font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px;white-space:pre-wrap;color:#111827;">${escape(text)}</pre>`,
       env.siteUrl,
     );
-    const bodyPreview = trim500(text);
+    const bodyPreview = payload.eventType === "quote_otp" ? "[Verification code redacted]" : trim500(text);
     const logId = insertEmailLog({
       event_type: payload.eventType,
       entity_id: payload.entityId ?? null,
       recipient: to,
       cc: null,
       reply_to: env.replyTo,
-      subject,
+      subject: payload.eventType === "quote_otp" ? "Email verification code" : subject,
       body_preview: bodyPreview,
       status: "pending",
       error_message: null,

@@ -407,13 +407,16 @@ function SignInLink() {
 /* ─────────────────────────────────────────────────────────────────── footer */
 
 function Footer() {
+  const [location] = useLocation();
+  const quotation = location.replace(/\/$/, "") === "/get-quote";
   return (
     <footer className="bg-slate-100 text-slate-700 pt-20 pb-7 mt-24 border-t border-slate-200">
       <div className="max-w-7xl mx-auto px-4 sm:px-6 grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-10">
         <div>
           <Logo />
           <p className="mt-5 text-sm leading-relaxed text-slate-600 max-w-xs">
-            India's spare parts source for the world. Genuine and OEM-equivalent components for Tata, BharatBenz, Ashok Leyland, Eicher and Volvo commercial vehicles since 2002.
+            {quotation ? "Commercial vehicle and construction equipment parts enquiries. Share your part references, quantities and destination for a quotation." :
+              "India's spare parts source for the world. Genuine and OEM-equivalent components for Tata, BharatBenz, Ashok Leyland and Volvo commercial vehicles since 2002."}
           </p>
           <div className="mt-5 space-y-2.5 text-xs text-slate-600">
             <div className="flex items-start gap-2.5"><MapPin className="h-3.5 w-3.5 mt-0.5 shrink-0 text-indigo-500" /> J-157, J Sector, Kankarbagh, Patna-800020, Bihar, India</div>
@@ -460,7 +463,7 @@ function Footer() {
       </div>
       <div className="max-w-7xl mx-auto px-4 sm:px-6 mt-14 pt-6 border-t border-slate-200 flex flex-col md:flex-row justify-between gap-3 text-[11px] font-mono text-slate-400 uppercase tracking-wider">
         <span>© {new Date().getFullYear()} Narmada Mobility · A unit of Narmada Motors</span>
-        <span>GST · IEC Certified · Authorized OEM Source</span>
+        <span>{quotation ? "Parts enquiries · India and international destinations" : "GST · IEC Certified · Authorized OEM Source"}</span>
       </div>
     </footer>
   );

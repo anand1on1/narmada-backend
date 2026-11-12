@@ -5,9 +5,8 @@
 //   POST /api/quote/otp/verify  → exchange code for a short-lived verification token
 //   POST /api/quote/submit      → persist the final RFQ (requires header X-Quote-Token)
 //
-// Everything additive. Reads/writes only the two R28.6-migration tables
-// (quote_otp, quote_request). Uses the existing SMTP path (sendGenericSalesEmail
-// in server/email.ts) so it inherits EMAIL_NOTIFICATIONS_ENABLED gating.
+// Additive quote_otp/quote_request/quote_delivery persistence. Reuses the existing
+// SMTP configuration; verification fails truthfully when email is unavailable.
 //
 // Verbatim user directive covered here:
 //   "mail otp has to be verified to proceed"
@@ -26,7 +25,7 @@
 //       - /otp/send: 5/hour/IP + 3/hour/email (sliding window)
 //       - /otp/verify: caps at 5 wrong attempts on the most-recent row before
 //         it is invalidated
-//   * Email existence is NEVER leaked — /otp/send always returns ok:true.
+//   * SMTP failures use a generic service error, never mailbox-existence detail.
 //   * The reference number `NM-Q-YYYY-NNNNN` is generated from a monotonic
 //     per-year counter derived from MAX(id) inside a transaction so concurrent
 //     submits cannot collide.
@@ -35,6 +34,8 @@ import type { Express, Request, Response } from "express";
 import { createHash, createHmac, timingSafeEqual, randomInt } from "node:crypto";
 import { rawSqlite } from "./storage";
 import { sendGenericSalesEmail } from "./email";
+import { deliverQuote, quoteDeliveryStatus, QUOTE_RECIPIENTS } from "./quote-delivery";
+import { registerQuoteIndentRoute } from "./quote-indent";
 
 // -------------------- config helpers --------------------
 
@@ -47,10 +48,13 @@ const EMAIL_HOUR_LIMIT = 3;
 function otpSalt(): string {
   // Never fall back to an empty string in production — but in the vitest
   // harness (setup-env.ts strips secrets) we still want deterministic hashing.
-  return process.env.OTP_SALT || "narmada-r28.2-default-otp-salt-please-override";
+  return process.env.OTP_SALT || tokenSecret();
 }
 function tokenSecret(): string {
-  return process.env.QUOTE_TOKEN_SECRET || "narmada-r28.2-default-quote-token-secret-please-override";
+  const value = [process.env.QUOTE_TOKEN_SECRET, process.env.SESSION_SECRET, process.env.AUTH_SECRET]
+    .find(v => v && v.length >= 32 && !v.includes("default-quote-token") && v !== "dev-insecure-session-secret");
+  if (!value) throw Error("quote_verification_unavailable");
+  return value;
 }
 function ipSalt(): string {
   // Reuse the team-upload salt if set so the two audit trails share a hash
@@ -62,9 +66,7 @@ function hashIp(ip: string): string {
   return createHash("sha256").update(`${ip}|${ipSalt()}`).digest("hex").slice(0, 16);
 }
 function extractIp(req: Request): string {
-  const xff = (req.headers["x-forwarded-for"] as string | undefined) || "";
-  const first = xff.split(",")[0]?.trim();
-  return first || req.socket?.remoteAddress || req.ip || "0.0.0.0";
+  return req.ip || req.socket?.remoteAddress || "0.0.0.0";
 }
 
 // Basic RFC-ish email regex. Rejects the obvious junk but doesn't try to be
@@ -106,9 +108,12 @@ export function signVerificationToken(payload: VerificationTokenPayload): string
 /** Verify a token; returns the payload if valid + unexpired, else null. */
 export function verifyVerificationToken(token: string, now: number = Date.now()): VerificationTokenPayload | null {
   if (!token || typeof token !== "string" || !token.includes(".")) return null;
-  const [body, sig] = token.split(".");
+  const [body, sig, extra] = token.split(".");
+  if (extra !== undefined) return null;
   if (!body || !sig) return null;
-  const expected = createHmac("sha256", tokenSecret()).update(body).digest();
+  let secret: string;
+  try { secret = tokenSecret(); } catch { return null; }
+  const expected = createHmac("sha256", secret).update(body).digest();
   const actual = base64urlDecode(sig);
   if (expected.length !== actual.length) return null;
   if (!timingSafeEqual(expected, actual)) return null;
@@ -129,10 +134,21 @@ export function verifyVerificationToken(token: string, now: number = Date.now())
 
 const _ipHourBuckets = new Map<string, number[]>();
 const _emailHourBuckets = new Map<string, number[]>();
+const _submitBuckets = new Map<string, number[]>();
+function submissionAllowed(key: string, now = Date.now()) {
+  for (const [k, times] of Array.from(_submitBuckets)) if (!times.some(t => t > now - 3600000)) _submitBuckets.delete(k);
+  const times = (_submitBuckets.get(key) || []).filter(t => t > now - 3600000);
+  if (times.length >= 5 || (_submitBuckets.size >= 10000 && !_submitBuckets.has(key))) return false;
+  _submitBuckets.set(key, [...times, now]); return true;
+}
 
 /** True when the (ip, email) pair may send another OTP right now. */
 export function checkOtpRate(ipHash: string, emailLower: string, now: number = Date.now()): { ok: boolean; reason?: "per_ip_hour" | "per_email_hour" } {
   const cutoff = now - 60 * 60 * 1000;
+  for (const map of [_ipHourBuckets, _emailHourBuckets]) for (const [k, times] of Array.from(map))
+    if (!times.some(t => t >= cutoff)) map.delete(k);
+  if (_ipHourBuckets.size >= 10000 && !_ipHourBuckets.has(ipHash)) return { ok: false, reason: "per_ip_hour" };
+  if (_emailHourBuckets.size >= 10000 && !_emailHourBuckets.has(emailLower)) return { ok: false, reason: "per_email_hour" };
   const ipBucket = _ipHourBuckets.get(ipHash) || [];
   const prunedIp = ipBucket.filter((ts) => ts >= cutoff);
   if (prunedIp.length >= IP_HOUR_LIMIT) {
@@ -156,6 +172,7 @@ export function checkOtpRate(ipHash: string, emailLower: string, now: number = D
 export function __resetOtpRateLimiter(): void {
   _ipHourBuckets.clear();
   _emailHourBuckets.clear();
+  _submitBuckets.clear();
 }
 
 // -------------------- reference-number generator --------------------
@@ -215,6 +232,27 @@ function invalidateOtp(id: number): void {
 // -------------------- registration --------------------
 
 export function registerQuoteRfqRoutes(app: Express): void {
+  app.use("/api/quote", (_req, res, next) => {
+    try { tokenSecret(); next(); }
+    catch { res.status(503).json({ error: "Email verification is temporarily unavailable. Please contact sales." }); }
+  });
+  registerQuoteIndentRoute(app, verifyVerificationToken);
+  app.post("/api/quote/:reference/notification-retry", async (req, res) => {
+    const payload = verifyVerificationToken(String(req.headers["x-quote-token"] || ""));
+    if (!payload) return res.status(401).json({ error: "Verify your email again to retry notification." });
+    const row = rawSqlite.prepare("SELECT id FROM quote_request WHERE reference=? AND email=?")
+      .get(String(req.params.reference), payload.email) as any;
+    if (!row) return res.status(404).json({ error: "Request not found" });
+    return res.json({ ok: true, reference: req.params.reference, notification: await deliverQuote(row.id) });
+  });
+  app.get("/api/quote/:reference/status", (req, res) => {
+    const payload = verifyVerificationToken(String(req.headers["x-quote-token"] || ""));
+    if (!payload) return res.status(401).json({ error: "Verify your email again to check this request." });
+    const row = rawSqlite.prepare("SELECT id FROM quote_request WHERE reference=? AND email=?")
+      .get(String(req.params.reference), payload.email) as any;
+    if (!row) return res.status(404).json({ error: "Request not found" });
+    return res.json({ ok: true, reference: req.params.reference, notification: quoteDeliveryStatus(row.id) });
+  });
   // ---- POST /api/quote/otp/send ------------------------------------------
   app.post("/api/quote/otp/send", async (req, res) => {
     try {
@@ -235,9 +273,10 @@ export function registerQuoteRfqRoutes(app: Express): void {
       // 6-digit code, zero-padded. randomInt is crypto-strong.
       const code = String(randomInt(0, 1_000_000)).padStart(6, "0");
       const now = Date.now();
-      insertOtp(email, hashOtp(code, email), ipHash, now);
+      rawSqlite.prepare("UPDATE quote_otp SET expires_at=0 WHERE email=? AND verified=0").run(email);
+      const otpId = insertOtp(email, hashOtp(code, email), ipHash, now);
 
-      // Fire-and-forget — response must not block on SMTP.
+      // Bounded delivery result; no verification code is exposed in the response.
       const subject = `Your Narmada Mobility verification code: ${code}`;
       const text = [
         `Your Narmada Mobility verification code is: ${code}`,
@@ -254,15 +293,23 @@ export function registerQuoteRfqRoutes(app: Express): void {
         `<p style="margin:24px 0 0 0;color:#718096;font-size:13px;">This code expires in 10 minutes. If you did not request it, you can safely ignore this email.</p>`,
         `</div>`,
       ].join("");
-      void sendGenericSalesEmail({
+      let timeout: ReturnType<typeof setTimeout> | undefined;
+      let sent: { ok: boolean };
+      try { sent = await Promise.race([sendGenericSalesEmail({
         eventType: "quote_otp",
         subject,
         text,
         html,
         to: rawEmail,
-      }).catch((err) => console.error("[quote-rfq] otp email send failed:", err?.message || err));
+      }), new Promise<{ ok: false }>(resolve => { timeout = setTimeout(() => resolve({ ok: false }), 25000); })]); }
+      catch { sent = { ok: false }; }
+      finally { if (timeout) clearTimeout(timeout); }
+      if (!sent.ok) {
+        invalidateOtp(otpId);
+        return res.status(503).json({ error: "We could not send the verification email. Please try later or contact sales." });
+      }
 
-      // Never disclose whether the email exists / whether SMTP is configured.
+      // Provider acceptance is not a claim of inbox delivery.
       return res.json({ ok: true, ttl_seconds: OTP_TTL_SECONDS });
     } catch (e: any) {
       // Same envelope on any unexpected failure — the client shouldn't be
@@ -340,11 +387,11 @@ export function registerQuoteRfqRoutes(app: Express): void {
 
       if (!company_name || company_name.length > 200) return res.status(400).json({ error: "invalid_company_name" });
       if (!contact_name || contact_name.length > 100) return res.status(400).json({ error: "invalid_contact_name" });
-      if (!country) return res.status(400).json({ error: "invalid_country" });
+      if (!/^[A-Z]{2}$/.test(country)) return res.status(400).json({ error: "invalid_country" });
       if (!/^[A-Z]{3}$/.test(currency)) return res.status(400).json({ error: "invalid_currency" });
-      if (!country_code) return res.status(400).json({ error: "invalid_country_code" });
-      if (!/^\d{6,15}$/.test(mobile.replace(/\D/g, ""))) return res.status(400).json({ error: "invalid_mobile" });
-      if (!timeframe) return res.status(400).json({ error: "invalid_timeframe" });
+      if (!/^\+\d{1,4}$/.test(country_code)) return res.status(400).json({ error: "invalid_country_code" });
+      if (!/^\d{6,15}$/.test(mobile)) return res.status(400).json({ error: "invalid_mobile" });
+      if (!["immediate", "one_week", "one_month", "three_months", "later"].includes(timeframe)) return res.status(400).json({ error: "invalid_timeframe" });
       if (notes && notes.length > 2000) return res.status(400).json({ error: "notes_too_long" });
 
       const cart = Array.isArray(b.cart) ? b.cart : [];
@@ -359,12 +406,28 @@ export function registerQuoteRfqRoutes(app: Express): void {
         chassis_slug: string | null;
         qty: number;
       };
-      const normalizedCart: CartRow[] = cart.map((row: any, idx: number) => ({
-        part_number: String(row?.part_number || "").trim() || `unknown-${idx + 1}`,
+      const normalizedCart: CartRow[] = cart.map((row: any) => ({
+        part_number: String(row?.part_number || "").trim(),
         description: String(row?.description || "").trim(),
         chassis_slug: String(row?.chassis_slug || "").trim() || null,
-        qty: Math.max(1, Math.min(9999, parseInt(String(row?.qty || 1), 10) || 1)),
+        qty: Number(row?.qty),
       }));
+      const invalidRow = normalizedCart.findIndex(r => (!r.part_number && !r.description) ||
+        r.part_number.length > 100 || r.description.length > 500 || (r.chassis_slug?.length || 0) > 150 ||
+        !Number.isInteger(r.qty) || r.qty < 1 || r.qty > 9999);
+      if (invalidRow >= 0) return res.status(400).json({ error: `Check row ${invalidRow + 1}: enter a part number or name and a whole quantity from 1 to 9999.` });
+      if (delivery_location && delivery_location.length > 300) return res.status(400).json({ error: "Delivery location must be at most 300 characters." });
+      const bodyHash = createHash("sha256").update(JSON.stringify([email, company_name, contact_name, country, currency,
+        country_code, mobile, timeframe, delivery_location, notes, normalizedCart])).digest("hex");
+      const requestKey = b.request_key || createHash("sha256").update(token + bodyHash).digest("hex");
+      if (typeof requestKey !== "string" || !/^[a-zA-Z0-9_-]{16,100}$/.test(requestKey)) return res.status(400).json({ error: "Invalid request key" });
+      const prior = rawSqlite.prepare("SELECT id,reference,body_hash FROM quote_request WHERE email=? AND request_key=?").get(email, requestKey) as any;
+      if (prior) {
+        if (prior.body_hash !== bodyHash) return res.status(409).json({ error: "This request was already submitted with different details. Start a new enquiry." });
+        return res.json({ ok: true, reference: prior.reference, notification: quoteDeliveryStatus(prior.id) });
+      }
+      if (!submissionAllowed(`email:${email}`) || !submissionAllowed(`ip:${hashIp(extractIp(req))}`))
+        return res.status(429).json({ error: "Enquiry limit reached. Keep your draft and try again in an hour." });
 
       const ipHash = hashIp(extractIp(req));
       const ua = String(req.headers["user-agent"] || "").slice(0, 500);
@@ -387,82 +450,26 @@ export function registerQuoteRfqRoutes(app: Express): void {
           if (Number.isFinite(n) && n > 0) next = n + 1;
         }
         reference = generateReference(year, next);
-        rawSqlite.prepare(
+        const inserted = rawSqlite.prepare(
           `INSERT INTO quote_request
             (reference, company_name, contact_name, email, country, currency,
              country_code, mobile, cart_json, timeframe, delivery_location, notes,
-             status, ip_hash, user_agent, created_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'new', ?, ?, ?)`,
+             status, ip_hash, user_agent, created_at, request_key, body_hash)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'new', ?, ?, ?, ?, ?)`,
         ).run(
           reference, company_name, contact_name, email, country, currency,
           country_code, mobile, JSON.stringify(normalizedCart), timeframe,
-          delivery_location, notes, ipHash, ua, now,
+          delivery_location, notes, ipHash, ua, now, requestKey, bodyHash,
         );
+        for (const recipient of QUOTE_RECIPIENTS) rawSqlite.prepare(
+          "INSERT INTO quote_delivery(request_id,recipient,updated_at) VALUES(?,?,?)"
+        ).run(inserted.lastInsertRowid, recipient, now);
       });
       tx();
 
-      // Fire-and-forget notification to sales@ — never await.
-      void (async () => {
-        try {
-          const cartTable = normalizedCart.map((r: CartRow, i: number) =>
-            `${String(i + 1).padStart(2, "0")}. ${r.qty} \u00D7 ${r.part_number}${r.chassis_slug ? `  [${r.chassis_slug}]` : ""}${r.description ? `\n     ${r.description}` : ""}`,
-          ).join("\n");
-          const text = [
-            `New RFQ received via /get-quote wizard.`,
-            ``,
-            `Reference:  ${reference}`,
-            `Company:    ${company_name}`,
-            `Contact:    ${contact_name} <${email}>`,
-            `Country:    ${country}`,
-            `Currency:   ${currency}`,
-            `Phone:      ${country_code} ${mobile}`,
-            `Timeframe:  ${timeframe}`,
-            `Delivery:   ${delivery_location || "(not specified)"}`,
-            ``,
-            `Cart (${normalizedCart.length} item${normalizedCart.length === 1 ? "" : "s"}):`,
-            cartTable,
-            ``,
-            notes ? `Notes:\n${notes}` : `Notes: (none)`,
-          ].join("\n");
-          const htmlRows = normalizedCart.map((r: CartRow, i: number) => `
-            <tr>
-              <td style="padding:6px 8px;border-bottom:1px solid #e2e8f0;color:#718096;font-family:ui-monospace,monospace;font-size:11px;">${i + 1}</td>
-              <td style="padding:6px 8px;border-bottom:1px solid #e2e8f0;font-family:ui-monospace,monospace;font-size:12px;font-weight:600;">${escapeHtml(r.part_number)}</td>
-              <td style="padding:6px 8px;border-bottom:1px solid #e2e8f0;font-size:12px;">${escapeHtml(r.description)}</td>
-              <td style="padding:6px 8px;border-bottom:1px solid #e2e8f0;font-family:ui-monospace,monospace;font-size:11px;color:#718096;">${escapeHtml(r.chassis_slug || "—")}</td>
-              <td style="padding:6px 8px;border-bottom:1px solid #e2e8f0;text-align:right;font-weight:600;">${r.qty}</td>
-            </tr>`).join("");
-          const html = [
-            `<div style="font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;padding:24px;color:#0a2540;max-width:720px;">`,
-            `<h2 style="margin:0 0 4px 0;">New RFQ: ${escapeHtml(reference)}</h2>`,
-            `<p style="margin:0 0 20px 0;color:#4a5568;">From <strong>${escapeHtml(company_name)}</strong> — ${escapeHtml(contact_name)} &lt;${escapeHtml(email)}&gt;</p>`,
-            `<table style="border-collapse:collapse;width:100%;margin-bottom:20px;font-size:13px;">`,
-            `<tr><td style="padding:4px 8px;color:#718096;">Country</td><td style="padding:4px 8px;font-weight:500;">${escapeHtml(country)}</td>`,
-            `<td style="padding:4px 8px;color:#718096;">Currency</td><td style="padding:4px 8px;font-weight:500;">${escapeHtml(currency)}</td></tr>`,
-            `<tr><td style="padding:4px 8px;color:#718096;">Phone</td><td style="padding:4px 8px;font-weight:500;">${escapeHtml(country_code)} ${escapeHtml(mobile)}</td>`,
-            `<td style="padding:4px 8px;color:#718096;">Timeframe</td><td style="padding:4px 8px;font-weight:500;">${escapeHtml(timeframe)}</td></tr>`,
-            `<tr><td style="padding:4px 8px;color:#718096;">Delivery</td><td colspan="3" style="padding:4px 8px;">${escapeHtml(delivery_location || "(not specified)")}</td></tr>`,
-            `</table>`,
-            `<h3 style="margin:0 0 8px 0;font-size:14px;">Cart (${normalizedCart.length})</h3>`,
-            `<table style="border-collapse:collapse;width:100%;border:1px solid #e2e8f0;">`,
-            `<thead><tr style="background:#f7fafc;"><th style="padding:6px 8px;text-align:left;font-size:11px;color:#4a5568;">#</th><th style="padding:6px 8px;text-align:left;font-size:11px;color:#4a5568;">Part #</th><th style="padding:6px 8px;text-align:left;font-size:11px;color:#4a5568;">Description</th><th style="padding:6px 8px;text-align:left;font-size:11px;color:#4a5568;">Chassis</th><th style="padding:6px 8px;text-align:right;font-size:11px;color:#4a5568;">Qty</th></tr></thead>`,
-            `<tbody>${htmlRows}</tbody>`,
-            `</table>`,
-            notes ? `<div style="margin-top:20px;padding:12px;background:#fffbeb;border-left:3px solid #f59e0b;"><strong>Notes:</strong><br/>${escapeHtml(notes).replace(/\n/g, "<br/>")}</div>` : "",
-            `</div>`,
-          ].join("");
-          await sendGenericSalesEmail({
-            eventType: "quote_submit",
-            subject: `[RFQ ${reference}] ${company_name} - ${normalizedCart.length} item${normalizedCart.length === 1 ? "" : "s"}`,
-            text,
-            html,
-          });
-        } catch (err: any) {
-          console.error("[quote-rfq] submit notification email failed:", err?.message || err);
-        }
-      })();
-
-      return res.json({ ok: true, reference });
+      const saved = rawSqlite.prepare("SELECT id FROM quote_request WHERE reference=?").get(reference) as any;
+      try { return res.json({ ok: true, reference, notification: await deliverQuote(saved.id) }); }
+      catch { return res.json({ ok: true, reference, notification: { state: "pending", retryable: true } }); }
     } catch (e: any) {
       console.error("[quote-rfq] submit failed:", e?.message || e);
       return res.status(500).json({ error: "quote_submit_failed" });

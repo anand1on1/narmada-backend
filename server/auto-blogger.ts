@@ -77,7 +77,7 @@ export const TOKEN_RESERVATION = 60000; // Worst-case character-bound input + ca
 const STAGE_TOKENS = { research: 2000, generate: 34000, review: 24000 };
 const LEASE_MS = 5 * 60000;
 const safeCode = safeBlogCode;
-const brands = ["Tata", "Ashok Leyland", "Eicher", "Mahindra", "BharatBenz", "AMW", "MAN", "Volvo",
+const brands = ["Tata", "Ashok Leyland", "Mahindra", "BharatBenz", "AMW", "MAN", "Volvo",
   "Bharat Benz", "Cummins", "Bosch", "ZF", "Schaeffler", "SKF", "Denso", "Delphi", "Lucas TVS",
   "Wabco", "Knorr-Bremse", "Meritor", "Donaldson", "Fleetguard", "Timken", "Sachs", "MANN-FILTER", "Mahle", "Haldex", "Dana", "Hella"];
 const categories = ["engine", "brake", "clutch", "transmission", "gearbox", "suspension", "steering",
@@ -471,6 +471,7 @@ export class AutoBlogger {
     let providerStage: ProviderStage | undefined;
     try {
       const { topic, existing } = this.choose(job, now);
+      if (/eicher|vecv/i.test(JSON.stringify([topic, existing]))) throw new Error("PUBLIC_BRAND_EXCLUDED");
       // Skipped improvements spend nothing. Protect one attempt for each other
       // unattempted daily new-post slot, including the not-yet-due evening slot.
       this.db.transaction(() => {

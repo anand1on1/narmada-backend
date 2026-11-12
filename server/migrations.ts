@@ -3398,6 +3398,14 @@ export function runR28_6Migrations() {
   `);
   run("idx_qreq_email",   `CREATE INDEX IF NOT EXISTS idx_qreq_email   ON quote_request(email);`);
   run("idx_qreq_created", `CREATE INDEX IF NOT EXISTS idx_qreq_created ON quote_request(created_at);`);
+  run("quote request key", `ALTER TABLE quote_request ADD COLUMN request_key TEXT;`);
+  run("quote request digest", `ALTER TABLE quote_request ADD COLUMN body_hash TEXT;`);
+  run("quote request idempotency", `CREATE UNIQUE INDEX IF NOT EXISTS idx_qreq_key ON quote_request(email,request_key) WHERE request_key IS NOT NULL;`);
+  run("quote delivery audit", `CREATE TABLE IF NOT EXISTS quote_delivery (
+    request_id INTEGER NOT NULL, recipient TEXT NOT NULL,
+    state TEXT NOT NULL DEFAULT 'pending', attempts INTEGER NOT NULL DEFAULT 0,
+    updated_at INTEGER NOT NULL, PRIMARY KEY(request_id,recipient)
+  );`);
 
   console.log("[migrations] R28.6: complete");
 }

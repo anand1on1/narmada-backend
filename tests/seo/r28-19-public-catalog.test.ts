@@ -23,12 +23,12 @@ afterEach(async () => { await new Promise<void>(r => server.close(() => r())); d
 describe("R28.19 canonical public catalog", () => {
   it("includes exactly one live canonical URL per active product and reflects new rows without rebuild", async () => {
     let xml = await (await fetch(base + "/sitemap.xml")).text();
-    expect((xml.match(/<loc>/g) || []).length).toBe(9);
+    expect((xml.match(/<loc>/g) || []).length).toBe(10);
     expect(xml).toContain("/product/BP%20100-A/filter");
     expect(xml).not.toMatch(/\/p\/|hidden|spare-parts-|\/cat\//);
     db.exec("INSERT INTO products SELECT 3,'new','New','Tata','','Filters',NULL,NULL,'New item','',12,1,'[]','[]',NULL,NULL,1");
     xml = await (await fetch(base + "/sitemap.xml")).text();
-    expect((xml.match(/<loc>/g) || []).length).toBe(10);
+    expect((xml.match(/<loc>/g) || []).length).toBe(11);
     expect(xml).toContain("/product/new");
   });
   it("SSR includes actual product, one canonical, matching JSON-LD and absolute backend upload URL; HEAD is empty", async () => {

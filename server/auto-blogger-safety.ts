@@ -166,6 +166,7 @@ function boundedPlainPresentation(value: unknown, minimum: number, maximum: numb
   return clipped.length >= minimum ? clipped : value;
 }
 export function validateArticle(db: Database, input: unknown, sources: BlogSource[], existingId?: number): ArticleDraft {
+  if (/eicher|vecv/i.test(JSON.stringify(input))) throw new Error("PUBLIC_BRAND_EXCLUDED");
   // Repair presentation only. No claim or quotation is padded, rewritten or
   // fabricated. Optional queue suggestions must never poison a valid article.
   let normalized = input;

@@ -7,7 +7,7 @@ import { Handshake, TrendingUp, Truck, Globe, CheckCircle2 } from "lucide-react"
 import worldShipping from "@/assets/world-shipping.png";
 
 const PARTNERSHIP_TYPES = [
-  { icon: Handshake, title: "Distributor Partnership", body: "Become an exclusive country / state distributor for Tata, BharatBenz, Ashok Leyland, Eicher or Volvo aftermarket parts in your region." },
+  { icon: Handshake, title: "Distributor Partnership", body: "Become an exclusive country / state distributor for Tata, BharatBenz, Ashok Leyland or Volvo aftermarket parts in your region." },
   { icon: Truck, title: "Workshop & Dealer", body: "Volume pricing for spare-parts workshops, fleet garages, multi-brand service centres and authorised dealers." },
   { icon: Globe, title: "Export & Re-export", body: "DDP and EXW shipments for traders supplying Africa, GCC, CIS, ASEAN and Latin America." },
   { icon: TrendingUp, title: "OEM Sourcing", body: "Long-term supply contracts for fleet operators, OEMs and original equipment manufacturers." },
@@ -34,7 +34,7 @@ export default function WorkWithUsPage() {
     <>
       <SeoHead
         title="Work With Us — Distributor, Dealer & Workshop Partnerships | Narmada Mobility"
-        description="Become a Narmada Mobility partner — distributor, workshop, exporter or fleet supplier for Tata, BharatBenz, Volvo, Eicher and Ashok Leyland spare parts. Apply online."
+        description="Become a Narmada Mobility partner — distributor, workshop, exporter or fleet supplier for Tata, BharatBenz, Volvo and Ashok Leyland spare parts. Apply online."
         keywords="commercial vehicle parts distributor india, become spare parts dealer, narmada mobility partnership, volvo parts distributor, tata parts wholesaler"
       />
 

@@ -1,5 +1,20 @@
 # Price-list publication — pending QA inventory
 
+## November 12 quotation and public visibility change
+- Baseline inspected at local Vite `/get-quote`: existing contact form and five-step wizard.
+- Same-page email verification, resend/error/expiry and changed-email invalidation.
+- Two entry tiles; native CSV/XLSX and consent-gated PDF/JPG/PNG parsing; bounded
+  files/rows/pages, missing-provider/manual fallback, editable uncertain fields.
+- Shared editable part number/name/quantity review; back navigation retains draft;
+  destination selection, final submission, stable reference and honest email state.
+- Both fixed sales recipients, idempotent retries, no emails on status polling.
+- Public Eicher exclusions across menus, logos, products, parts search, checker,
+  blog detail/list, SEO HTML/JSON-LD, sitemaps and future blog jobs; internal records retained.
+- First-page content, photographs, directory search and brand-preselected checker
+  links; no fabricated downloadable price lists. No-JavaScript SEO rendering.
+- Retest public navigation/catalog and prior admin CSV/Excel upload groups.
+- Browser/mock email/provider checks only; live SMTP/OCR delivery remains unverified.
+
 QA inventory. Completed checks and exclusions are recorded in the release handoff;
 this list is not blanket browser signoff for every existing private workflow.
 

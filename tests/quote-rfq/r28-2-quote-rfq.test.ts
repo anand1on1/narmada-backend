@@ -17,7 +17,8 @@
 //   (9) Reference format matches NM-Q-YYYY-NNNNN.
 //   (10) Two consecutive submits get sequential reference numbers.
 
-import { describe, it, expect, beforeAll, beforeEach } from "vitest";
+import { describe, it, expect, beforeAll, beforeEach, vi } from "vitest";
+vi.mock("../../server/email", () => ({ sendGenericSalesEmail: vi.fn(async () => ({ ok: true })) }));
 import express from "express";
 import type { Express } from "express";
 import { rawSqlite } from "../../server/storage";

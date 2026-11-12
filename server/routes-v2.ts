@@ -1,6 +1,7 @@
 // Phase 3 routes — blogs, price lists, consignments, admin users (sub-users), SEO helpers.
 // Mounted from server/routes.ts via registerV2Routes().
 import type { Express, Request, Response, NextFunction } from "express";
+import { publicRecord, publicSql } from "../shared/public-visibility";
 import { randomBytes, createHash, scryptSync, timingSafeEqual } from "node:crypto";
 import path from "node:path";
 import fs from "node:fs";
@@ -671,14 +672,14 @@ export function registerV2Routes(app: Express, ctx: V2Context) {
   // Public — available brands
   app.get("/api/price-lists/brands", async (_req, res) => {
     const brands = await v2.getAvailableBrands();
-    res.json(brands);
+    res.json(brands.filter(publicRecord));
   });
   // Public — search by part number
   app.get("/api/price-lists/search", async (req, res) => {
     const partNumber = (req.query.part_number || req.query.q) as string;
     const brand = req.query.brand as string | undefined;
     if (!partNumber) return res.status(400).json({ error: "part_number required" });
-    const results = await v2.searchPriceItems(partNumber, brand);
+    const results = (await v2.searchPriceItems(partNumber, brand)).filter(publicRecord);
     res.json({ results: results.map(({ dealerPrice, ...publicItem }) => publicItem), count: results.length });
   });
 
@@ -2645,7 +2646,7 @@ export function registerV2Routes(app: Express, ctx: V2Context) {
         SELECT c.id, c.chassis_display_name, c.slug, c.cover_image_url,
           (SELECT COUNT(*) FROM chassis_parts p WHERE p.chassis_id = c.id AND p.is_active = 1) AS parts_count
         FROM chassis_catalog c
-        WHERE c.is_active = 1`;
+        WHERE c.is_active = 1 AND ${publicSql(["c.make","c.model","c.slug","c.description","c.chassis_display_name"])}`;
       const params: any[] = [];
       if (q) {
         sql += ` AND (c.chassis_display_name LIKE ? OR c.make LIKE ? OR c.model LIKE ? OR c.chassis_code LIKE ?)`;
@@ -2666,7 +2667,7 @@ export function registerV2Routes(app: Express, ctx: V2Context) {
       const slug = String(req.params.slug || "").trim();
       if (!slug) return res.status(400).json({ error: "slug required" });
       const row = rawSqlite.prepare(`SELECT * FROM chassis_catalog WHERE slug = ? AND is_active = 1`).get(slug) as any;
-      if (!row) return res.status(404).json({ error: "chassis_not_found" });
+      if (!row || !publicRecord(row)) return res.status(404).json({ error: "chassis_not_found" });
       const partsCount = (rawSqlite.prepare(
         `SELECT COUNT(*) AS c FROM chassis_parts WHERE chassis_id = ? AND is_active = 1`
       ).get(row.id) as any).c as number;
@@ -2682,13 +2683,13 @@ export function registerV2Routes(app: Express, ctx: V2Context) {
       const slug = String(req.params.slug || "").trim();
       if (!slug) return res.status(400).json({ error: "slug required" });
       const chassis = rawSqlite
-        .prepare(`SELECT id FROM chassis_catalog WHERE slug = ? AND is_active = 1`)
+        .prepare(`SELECT id FROM chassis_catalog WHERE slug = ? AND is_active = 1 AND ${publicSql(["make","model","slug","description","chassis_display_name"])}`)
         .get(slug) as any;
       if (!chassis) return res.status(404).json({ error: "chassis_not_found" });
       const limit = Math.min(Math.max(parseInt(String(req.query.limit || "200"), 10) || 200, 1), 1000);
       const offset = Math.max(parseInt(String(req.query.offset || "0"), 10) || 0, 0);
       const q = String(req.query.q || "").trim();
-      let sql = `SELECT * FROM chassis_parts WHERE chassis_id = ? AND is_active = 1`;
+      let sql = `SELECT * FROM chassis_parts WHERE chassis_id = ? AND is_active = 1 AND ${publicSql(["description","category","part_number","oem_number"])}`;
       const params: any[] = [chassis.id];
       if (q) {
         sql += ` AND (part_number LIKE ? OR oem_number LIKE ? OR description LIKE ?)`;
@@ -2700,8 +2701,8 @@ export function registerV2Routes(app: Express, ctx: V2Context) {
       const rows = rawSqlite.prepare(sql).all(...params) as any[];
       const total = (rawSqlite.prepare(
         q
-          ? `SELECT COUNT(*) AS c FROM chassis_parts WHERE chassis_id = ? AND is_active = 1 AND (part_number LIKE ? OR oem_number LIKE ? OR description LIKE ?)`
-          : `SELECT COUNT(*) AS c FROM chassis_parts WHERE chassis_id = ? AND is_active = 1`
+          ? `SELECT COUNT(*) AS c FROM chassis_parts WHERE chassis_id = ? AND is_active = 1 AND ${publicSql(["description","category","part_number","oem_number"])} AND (part_number LIKE ? OR oem_number LIKE ? OR description LIKE ?)`
+          : `SELECT COUNT(*) AS c FROM chassis_parts WHERE chassis_id = ? AND is_active = 1 AND ${publicSql(["description","category","part_number","oem_number"])}`
       ).get(...(q ? [chassis.id, `%${q}%`, `%${q}%`, `%${q}%`] : [chassis.id])) as any).c as number;
       res.setHeader("X-Total-Count", String(total));
       res.json(rows.map(chassisPartRowToApiPublic));
@@ -2891,7 +2892,7 @@ export function registerV2Routes(app: Express, ctx: V2Context) {
       const hasQ = q.length >= 2;
 
       // Build the WHERE conditionally so we can support chassis-only lookups.
-      const clauses: string[] = ["p.is_active = 1", "c.is_active = 1"];
+      const clauses: string[] = ["p.is_active = 1", "c.is_active = 1", publicSql(["c.make","c.model","c.slug","c.description","c.chassis_display_name","p.description","p.part_number","p.oem_number","p.category"])];
       const whereParams: any[] = [];
       if (hasQ) {
         clauses.push("(p.part_number LIKE ? OR p.oem_number LIKE ? OR p.description LIKE ?)");

@@ -607,12 +607,13 @@ export interface IStorage {
   getLatestSitemapRun(): Promise<{ urlCount: number; generatedAt: number } | undefined>;
 }
 
+import { publicSql } from "../shared/public-visibility";
 export class DatabaseStorage implements IStorage {
   async pageProducts(filters: { brand?: string; category?: string; q?: string; featured?: boolean }, paging: { page: number; limit: number; offset: number }) {
     if (!Number.isSafeInteger(paging.limit) || paging.limit < 1 || paging.limit > 100 || !Number.isSafeInteger(paging.offset) || paging.offset < 0) {
       throw new Error("Invalid product pagination");
     }
-    const conditions = [eq(products.active, true)];
+    const conditions = [eq(products.active, true), sql.raw(publicSql(["brand", "name", "slug", "description", "model", "compatible_models"]))];
     if (filters.brand) conditions.push(eq(products.brand, filters.brand));
     if (filters.category) {
       // Older PO publishers and the admin catalog use different category slugs.

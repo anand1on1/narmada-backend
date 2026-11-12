@@ -8,7 +8,7 @@ export default function AboutPage() {
     <>
       <SeoHead
         title="About Narmada Mobility — 20+ Years of Commercial Vehicle Spare Parts Excellence"
-        description="Narmada Mobility, a UrbanFleet Technologies venture, has supplied genuine Tata, BharatBenz, Ashok Leyland, Eicher and Volvo spare parts across India and 60+ countries for over two decades."
+        description="Narmada Mobility, a UrbanFleet Technologies venture, has supplied genuine Tata, BharatBenz, Ashok Leyland and Volvo spare parts across India and 60+ countries for over two decades."
         keywords="about narmada mobility, narmada motors, commercial vehicle spare parts exporter india, urbanfleet technologies"
       />
 
@@ -43,7 +43,7 @@ export default function AboutPage() {
                   What began as <strong className="text-foreground">Narmada Motors</strong> — a Tata Motors authorized service and parts outlet in Patna, Bihar — has grown over 20+ years into a global commercial-vehicle spare parts supply chain. We today serve customers in every Indian state and across Africa, the Middle East, CIS, South-East Asia and Latin America.
                 </p>
                 <p>
-                  <strong className="text-foreground">Narmada Mobility</strong> is the international export and e-commerce arm under UrbanFleet Technologies Pvt. Ltd. Through this platform we make it possible for any workshop, fleet manager or independent dealer — anywhere — to source authentic Tata, BharatBenz, Ashok Leyland, Eicher and Volvo parts with confidence.
+                  <strong className="text-foreground">Narmada Mobility</strong> is the international export and e-commerce arm under UrbanFleet Technologies Pvt. Ltd. Through this platform we make it possible for any workshop, fleet manager or independent dealer — anywhere — to source authentic Tata, BharatBenz, Ashok Leyland and Volvo parts with confidence.
                 </p>
                 <p>
                   Our roots in dealership operations mean we understand vehicles the way the people who run them do — from a Tata LPK 2518 tipper in a Bihar quarry, to a Volvo EC210 excavator on an East-African mine site.

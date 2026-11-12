@@ -28,9 +28,9 @@ export default function HomePage() {
   return (
     <>
       <SeoHead
-        title="Narmada Mobility — Global Spare Parts for Tata, BharatBenz, Ashok Leyland, Eicher & Volvo"
-        description="India's trusted commercial vehicle spare parts exporter. Genuine and OEM-equivalent parts for Tata Prima, BharatBenz 2523, Ashok Leyland Captain, Eicher Pro and Volvo trucks & excavators. Shipping to 60+ countries."
-        keywords="tata spare parts, bharatbenz spare parts, ashok leyland leyparts, eicher pro spare parts, volvo spare parts, truck parts exporter india, commercial vehicle parts wholesale, volvo ec210 parts, tata prima parts"
+        title="Narmada Mobility — Global Spare Parts for Tata, BharatBenz, Ashok Leyland & Volvo"
+        description="India's trusted commercial vehicle spare parts exporter. Genuine and OEM-equivalent parts for Tata Prima, BharatBenz 2523, Ashok Leyland Captain, Volvo trucks & excavators. Shipping to 60+ countries."
+        keywords="tata spare parts, bharatbenz spare parts, ashok leyland leyparts, volvo spare parts, truck parts exporter india, commercial vehicle parts wholesale, volvo ec210 parts, tata prima parts"
         jsonLd={{
           "@context": "https://schema.org", "@type": "Organization",
           name: "Narmada Mobility", url: "https://narmadamobility.com",
@@ -63,7 +63,7 @@ export default function HomePage() {
             </h1>
 
             <p className="mt-7 text-[17px] md:text-[18px] text-[hsl(220_60%_12%)]/80 max-w-2xl leading-relaxed">
-              Genuine OEM and matched-quality components for Tata, BharatBenz, Ashok Leyland, Eicher and Volvo commercial vehicles — dispatched from Patna to fleets in 60+ countries.
+              Genuine OEM and matched-quality components for Tata, BharatBenz, Ashok Leyland and Volvo commercial vehicles — dispatched from Patna to fleets in 60+ countries.
             </p>
 
             <div className="mt-9 flex flex-wrap gap-3">
@@ -96,7 +96,7 @@ export default function HomePage() {
         <div className="relative border-t border-[hsl(220_45%_20%)]/8 bg-[hsl(210_30%_96%)]/60 backdrop-blur">
           <div className="max-w-7xl mx-auto px-4 sm:px-6 py-5 flex flex-wrap items-center gap-x-8 gap-y-3">
             <span className="eyebrow text-[hsl(220_60%_12%)]/82">Authorized source for</span>
-            {["Tata", "BharatBenz", "Ashok Leyland", "Eicher", "Volvo", "Scania", "JCB", "Caterpillar", "Komatsu"].map((name) => (
+            {["Tata", "BharatBenz", "Ashok Leyland", "Volvo", "Scania", "JCB", "Caterpillar", "Komatsu"].map((name) => (
               <span key={name} className="font-bold text-[14px] text-[hsl(220_60%_12%)]/85 inline-flex items-center gap-2">
                 <span className="h-1.5 w-1.5 rounded-full bg-[hsl(150_65%_40%)]" />
                 {name}
@@ -222,7 +222,7 @@ export default function HomePage() {
               <div className="eyebrow text-[hsl(212_95%_55%)] mb-3">Global Reach · 05</div>
               <h2 className="font-display font-black text-[hsl(220_60%_12%)] text-4xl md:text-5xl tracking-tight leading-[1.05] mb-6">From Patna to<br/>60+ countries.</h2>
               <p className="text-[hsl(220_60%_12%)]/75 text-[15px] leading-relaxed mb-8 max-w-lg">
-                Our distribution network spans every Indian state and every major commercial vehicle market on earth. Tata Prima haulers in Mozambique. Ashok Leyland Captains in Dubai. BharatBenz mixers in Saudi Arabia. Eicher Pro buses in Sri Lanka. Volvo EC210 excavators in Russia — we deliver.
+                Our distribution network spans every Indian state and every major commercial vehicle market on earth. Tata Prima haulers in Mozambique. Ashok Leyland Captains in Dubai. BharatBenz mixers in Saudi Arabia. Volvo EC210 excavators in Russia — we deliver.
               </p>
               <div className="grid grid-cols-2 gap-x-4 gap-y-2.5 max-w-md mb-8">
                 {["UAE","Saudi Arabia","Russia","Mexico","Nigeria","Kenya","Sri Lanka","Australia","USA","Mozambique","Uganda","Tanzania"].map((c) => (
