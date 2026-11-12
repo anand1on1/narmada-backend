@@ -1,10 +1,12 @@
 # Price-list publication — pending QA inventory
 
-## Catalog and product reference-notice slider
-- Catalog heading and individual-product pricing show the same three reference notices.
-- Previous/Next work by click and keyboard; Play/Pause controls automatic rotation.
-- Rotation pauses on hover/focus; reduced-motion preference disables autoplay.
-- Full disclaimer is expanded by default; all statements are present in static SSR.
+## Catalog and product reference-notice news ticker
+- Catalog heading and individual-product pricing show the same three continuously moving notices.
+- All notices loop horizontally and seamlessly; duplicate visual copy is aria-hidden.
+- Play/Pause works by click and keyboard; movement pauses on hover/focus.
+- Reduced-motion preference shows static wrapped text with no animation.
+- Compact Full disclaimer details expand by click or keyboard; SSR includes all text
+  and native pause checkbox with no JavaScript dependency.
 - Catalog search, product links, quantity controls and Add to Cart retain their behavior.
 - Check desktop/mobile overflow, both pages and JavaScript-disabled SSR.
 

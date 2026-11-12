@@ -6,11 +6,12 @@ paid document-reading calls, live emails or imports were performed for this work
 
 ## Scope
 
-- Catalog and product pages share an accessible three-statement reference notice:
+- Catalog and product pages share an accessible continuous reference-news ticker:
   indicative prices, identification-only part numbers and independent-seller/OEM
-  clarification. Full text is expanded by default and included in no-JS SSR.
-  Rotation has keyboard controls, pause/play, hover/focus pause and no autoplay
-  under reduced motion. The contradictory product badge now says Confirm fitment.
+  clarification. Full text remains in compact expandable details and no-JS SSR.
+  Seamlessly repeated visual copy is aria-hidden. Movement has keyboard-operable
+  pause/play, hover/focus pause and a static reduced-motion presentation.
+  SSR uses a native pause checkbox. The contradictory product badge says Confirm fitment.
 - A non-JSON old-backend SPA response now gives an actionable matching-backend
   deployment message rather than an unreadable-response error, retaining the draft.
 

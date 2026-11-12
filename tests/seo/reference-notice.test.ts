@@ -7,7 +7,7 @@ import { REFERENCE_NOTICES, renderReferenceNotice } from "../../shared/reference
 import { renderProductPage } from "../../server/seo-templates";
 
 describe("Shared price and part-reference disclaimer", () => {
-  it("provides all three faithful statements in React and no-JS SSR, expanded by default", () => {
+  it("provides all three statements in a seamless ticker with full accessible text and no-JS controls", () => {
     const client = renderToStaticMarkup(createElement(ReferenceNotice));
     const server = renderReferenceNotice();
     expect(REFERENCE_NOTICES).toHaveLength(3);
@@ -15,12 +15,17 @@ describe("Shared price and part-reference disclaimer", () => {
       expect(client).toContain(statement);
       expect(server).toContain(statement);
     }
-    expect(client).toContain("<details open");
-    expect(server).toContain("<details open");
+    expect(client).toContain("<details");
+    expect(server).toContain("<details");
     expect(server).not.toContain("<script");
-    expect(client).toContain('aria-label="Previous reference notice"');
-    expect(client).toContain('aria-label="Next reference notice"');
-    expect(client).toContain('aria-label="Pause notice rotation"');
+    expect(client).toContain('aria-label="Pause reference ticker"');
+    expect(client).toContain('class="reference-group" aria-hidden="true"');
+    expect(client).toContain("65s linear infinite");
+    expect(client).toContain("translateX(-50%)");
+    expect(client).toContain("prefers-reduced-motion:reduce");
+    expect(server).toContain('type="checkbox" class="reference-pause"');
+    expect(server).toContain(":has(.reference-pause:checked)");
+    expect(client).not.toContain("Previous reference notice");
   });
   it("product SSR includes the complete disclaimer without changing displayed price or identifiers", () => {
     const html = renderProductPage({ id: 1, slug: "qa-part", name: "QA Part", brand: "tata", model: "", category: "filters",

@@ -115,7 +115,7 @@ export default function ProductDetailPage() {
 
       <section className="max-w-7xl mx-auto px-4 sm:px-6 pb-16 grid lg:grid-cols-2 gap-10">
         {/* Image gallery */}
-        <div>
+        <div className="min-w-0">
           <div className="aspect-square rounded-xl overflow-hidden bg-secondary border border-card-border">
             {images.length > 0 ? (
               <img src={images[activeImg]} alt={product.name} className="w-full h-full object-cover" />
@@ -134,7 +134,7 @@ export default function ProductDetailPage() {
           )}
         </div>
 
-        <div>
+        <div className="min-w-0">
           <div className="flex flex-wrap items-center gap-2 mb-3">
             {/* R27.5 #7 — always show the brand. Known brands keep their colored badge;
                 auto-products with a freeform / seller brand (not in the BRANDS map) now
