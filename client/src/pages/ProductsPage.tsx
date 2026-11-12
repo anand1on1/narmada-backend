@@ -4,6 +4,7 @@ import type { Product } from "@shared/schema";
 import { BRAND_WALL, PRODUCT_CATEGORIES } from "@/data/brands";
 import { ProductCard } from "@/components/ProductCard";
 import { SeoHead } from "@/components/SeoHead";
+import { ReferenceNotice } from "@/components/ReferenceNotice";
 import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Button } from "@/components/ui/button";
@@ -70,6 +71,7 @@ export default function ProductsPage() {
           <div className="eyebrow text-[hsl(212_95%_55%)] mb-3">Catalog</div>
           <h1 className="font-display font-black text-[hsl(220_60%_12%)] text-4xl md:text-5xl lg:text-6xl tracking-tight leading-[1.05] max-w-3xl">Spare parts for every commercial vehicle in your fleet.</h1>
           <p className="text-[hsl(220_60%_12%)]/75 mt-5 max-w-2xl text-[15px] leading-relaxed">Explore catalog parts by brand, category or keyword. Confirm the part reference, fitment, price and availability with our team before ordering.</p>
+          <ReferenceNotice />
         </div>
       </section>
 

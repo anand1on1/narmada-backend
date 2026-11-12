@@ -9,6 +9,7 @@ import { renderProductPage, renderNotFoundPage, CRITICAL_CSS } from "./seo-templ
 import { indexedCatalogQuery, publicCatalogPrices } from "./price-catalog";
 import { publicRecord, publicSql } from "../shared/public-visibility";
 import { renderQuotePage } from "./quote-page";
+import { renderReferenceNotice } from "../shared/reference-notice";
 
 const config = { baseUrl: PUBLIC_ORIGIN };
 export const CORE_PATHS = ["/", "/products", "/about", "/contact", "/work-with-us", "/privacy", "/disclaimer", "/blog", "/get-quote"];
@@ -97,6 +98,7 @@ export function registerPublicCatalog(app: Express, db: Database) {
 <link rel="canonical" href="${PUBLIC_ORIGIN}${esc(path)}"><style>${CRITICAL_CSS}</style></head><body>
 <header class="site"><a class="brand" href="${PUBLIC_ORIGIN}/">Narmada Mobility</a><nav><a href="/blog">Insights</a><a href="/contact">Contact</a></nav></header>
 <main class="container"><h1>Commercial vehicle parts</h1><p>${total} catalog products. Confirm fitment and availability with our team.</p>
+${renderReferenceNotice()}
 <nav aria-label="Catalog categories">${(db.prepare("SELECT DISTINCT category FROM products WHERE active=1 ORDER BY category LIMIT 100").all() as any[]).map(c=>`<a href="/products?category=${encodeURIComponent(c.category)}">${esc(c.category)}</a>`).join(" · ")}</nav>
 <form action="/products" method="get"><label>Part name, number, OEM or model <input name="q" value="${esc(q)}"></label><button>Search</button></form>
 <div class="related-grid">${rows.map((p:any) => `<article class="card"><h2><a href="${esc(productPath(p))}">${esc(p.name)}</a></h2><p>${esc(p.partNumber)} · ${esc(p.brand)}</p><p>${p.catalogPriced ? `US$${p.priceUsd.toFixed(2)} · GST included` : `INR ${Number(p.priceInr).toFixed(2)}`}</p>${p.catalogPriced ? `<a href="${esc(productPath(p))}">Contact us for a discount</a>`:""}</article>`).join("")}</div>

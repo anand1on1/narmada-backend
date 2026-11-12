@@ -1,5 +1,13 @@
 # Price-list publication — pending QA inventory
 
+## Catalog and product reference-notice slider
+- Catalog heading and individual-product pricing show the same three reference notices.
+- Previous/Next work by click and keyboard; Play/Pause controls automatic rotation.
+- Rotation pauses on hover/focus; reduced-motion preference disables autoplay.
+- Full disclaimer is expanded by default; all statements are present in static SSR.
+- Catalog search, product links, quantity controls and Add to Cart retain their behavior.
+- Check desktop/mobile overflow, both pages and JavaScript-disabled SSR.
+
 ## November 12 quotation and public visibility change
 - Baseline inspected at local Vite `/get-quote`: existing contact form and five-step wizard.
 - Same-page email verification, resend/error/expiry and changed-email invalidation.

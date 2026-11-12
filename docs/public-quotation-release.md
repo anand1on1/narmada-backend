@@ -6,6 +6,14 @@ paid document-reading calls, live emails or imports were performed for this work
 
 ## Scope
 
+- Catalog and product pages share an accessible three-statement reference notice:
+  indicative prices, identification-only part numbers and independent-seller/OEM
+  clarification. Full text is expanded by default and included in no-JS SSR.
+  Rotation has keyboard controls, pause/play, hover/focus pause and no autoplay
+  under reduced motion. The contradictory product badge now says Confirm fitment.
+- A non-JSON old-backend SPA response now gives an actionable matching-backend
+  deployment message rather than an unreadable-response error, retaining the draft.
+
 - Existing `/get-quote` and RFQ tables reused. Contact details and same-page email
   verification precede upload/manual tiles, editable items, review and saved reference.
 - CSV/XLSX are parsed locally on the server. PDF/JPG/PNG reuse the existing
@@ -77,3 +85,7 @@ editable/missing quantities, expired-token recovery with retained draft/key,
 destination selection, saved reference, pending-versus-sent email status, price-brand
 startup, desktop/mobile layout and absence of excluded/forbidden page copy.
 Browser requests are intercepted, not sent to production.
+
+Reusable slider/upload-mismatch browser runner:
+`tests/quote-rfq/reference-notice.browser.mjs`, export `runReferenceNoticeQa`.
+It accepts an existing Playwright browser plus `{ baseURL, outputDir }`.

@@ -10,6 +10,7 @@ import { MessageCircle, Phone, Mail, Package, ShieldCheck, Truck, ArrowLeft, Sho
 import { whatsappLink, buildBuyMessage, parseJsonArray, productHref } from "@/lib/utils-app";
 import { BRANDS } from "@/data/brands";
 import { SeoHead } from "@/components/SeoHead";
+import { ReferenceNotice } from "@/components/ReferenceNotice";
 import NotFound from "@/pages/not-found";
 import { useState, useEffect } from "react";
 import { useLocation } from "wouter";
@@ -159,7 +160,7 @@ export default function ProductDetailPage() {
               )}
               {product.oemNumber && (
                 <span className="inline-flex items-center gap-1.5 rounded-md bg-secondary border border-card-border px-3 py-1.5 font-mono text-sm font-semibold text-foreground">
-                  <span className="text-muted-foreground font-normal">OEM #</span>{product.oemNumber}
+                  <span className="text-muted-foreground font-normal">OEM reference #</span>{product.oemNumber}
                 </span>
               )}
             </div>
@@ -170,6 +171,7 @@ export default function ProductDetailPage() {
             <div className="text-4xl font-display font-black text-foreground" data-testid="product-price">{product.catalogPriced ? `US$${product.priceUsd!.toFixed(2)}` : formatPrice(product.priceInr)}</div>
             <div className="text-sm text-muted-foreground mt-0.5">{product.catalogPriced ? `GST included · price-list MRP converted from INR · FX verified ${new Date(product.catalogFxAt!).toISOString().slice(0,10)}. Confirm freight and availability.` : getCurrency() === "USD" ? "Converted at live USD/INR rate" : "Inclusive of GST · freight calculated at checkout"}</div>
             {product.catalogPriced && <a className="inline-block mt-3 underline font-semibold" href={buyUrl} target="_blank" rel="noopener noreferrer" data-testid="request-discount">Contact us for a discount</a>}
+            <ReferenceNotice />
 
             {/* Qty stepper */}
             <div className="mt-5 flex items-center gap-3">
@@ -202,7 +204,7 @@ export default function ProductDetailPage() {
 
           <div className="mt-6 grid grid-cols-3 gap-3 text-center">
             <Card className="p-3 border-card-border"><Truck className="h-5 w-5 mx-auto mb-1 text-[hsl(212_95%_50%)]" /><div className="text-xs font-medium">{product.catalogPriced ? "Enquire shipping" : "Global Shipping"}</div></Card>
-            <Card className="p-3 border-card-border"><ShieldCheck className="h-5 w-5 mx-auto mb-1 text-[hsl(212_95%_50%)]" /><div className="text-xs font-medium">{product.catalogPriced ? "Confirm fitment" : "OEM Verified"}</div></Card>
+            <Card className="p-3 border-card-border"><ShieldCheck className="h-5 w-5 mx-auto mb-1 text-[hsl(212_95%_50%)]" /><div className="text-xs font-medium">Confirm fitment</div></Card>
             <Card className="p-3 border-card-border"><Package className="h-5 w-5 mx-auto mb-1 text-[hsl(212_95%_50%)]" /><div className="text-xs font-medium">{product.catalogPriced ? "Confirm packing" : "Safe Packaging"}</div></Card>
           </div>
         </div>

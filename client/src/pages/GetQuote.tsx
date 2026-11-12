@@ -15,6 +15,13 @@ async function request(path: string, body?: unknown, token?: string, multipart =
   const response = await fetch(apiUrl(path), { method: body === undefined ? "GET" : "POST",
     headers: { ...(multipart || body === undefined ? {} : { "Content-Type": "application/json" }), ...(token ? { "x-quote-token": token } : {}) },
     body: body === undefined ? undefined : multipart ? body as FormData : JSON.stringify(body) });
+  const contentType = response.headers.get("content-type") || "";
+  if (!/\bapplication\/(?:[\w.+-]+\+)?json\b/i.test(contentType)) {
+    if (response.status === 404 || (response.ok && /text\/html/i.test(contentType))) {
+      throw Error("This quotation feature is not available on the current server version. Please contact sales so the matching backend can be deployed. Re-uploading the file will not fix this; your draft is retained.");
+    }
+    throw Error("The quotation service is temporarily unavailable. Your draft is retained. Please try later or contact sales.");
+  }
   let result: any;
   try { result = await response.json(); } catch { throw Error("The service returned an unreadable response. Retry without changing your draft."); }
   if (!response.ok) throw Error(result.error || "The request failed. Please try again.");
