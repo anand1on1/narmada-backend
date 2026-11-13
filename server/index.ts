@@ -435,6 +435,9 @@ app.use((req, res, next) => {
   );
 
   // ---- Session C: Start IMAP polling ----
+  const { startQuoteLeadWorker } = await import("./quote-leads");
+  startQuoteLeadWorker();
+
   try {
     const { startImapPolling } = await import("./imap-service");
     startImapPolling();

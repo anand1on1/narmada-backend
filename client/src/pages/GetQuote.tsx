@@ -67,7 +67,8 @@ export default function GetQuote() {
     setSentTo(email); setCode(""); setNotice("Verification email sent. The code expires in 10 minutes.");
   });
   const verify = () => run(async () => {
-    const data = await request("/api/quote/otp/verify", { email: sentTo, code });
+    if (!validContact) throw Error("Complete your contact details before verifying your email.");
+    const data = await request("/api/quote/otp/verify", { email: sentTo, code, contact });
     if (!data.verification_token) throw Error("Verification did not complete. Please request a new code.");
     setToken(data.verification_token); setNotice("Email verified. Continue to choose how to add parts.");
   });
@@ -126,12 +127,13 @@ export default function GetQuote() {
             {!token && <Button onClick={send} disabled={busy || !validContact} data-testid="quote-send-otp">{sentTo ? "Resend code" : "Send email code"}</Button>}
             {sentTo && !token && <><label className="text-sm font-medium">Six-digit email code<Input inputMode="numeric" autoComplete="one-time-code"
               value={code} onChange={e => setCode(e.target.value.replace(/\D/g, "").slice(0, 6))} disabled={busy} className="mt-2 max-w-48" data-testid="quote-otp" /></label>
-              <Button onClick={verify} disabled={busy || code.length !== 6} data-testid="quote-verify">Verify email</Button></>}
+              <Button onClick={verify} disabled={busy || !validContact || code.length !== 6} data-testid="quote-verify">Verify email</Button></>}
             {token && <><p className="text-emerald-800 font-medium">Email verified</p>
               <Button variant="outline" disabled={busy} onClick={() => { setToken(""); setSentTo(""); setCode(""); }} data-testid="quote-reverify">Re-verify email</Button>
               <Button onClick={() => go(2)} disabled={busy || !validContact} data-testid="quote-next">Continue</Button></>}
           </div>
-          <p className="text-sm text-slate-600 mt-5">We use these details to respond to this enquiry. Verification remains valid for 30 minutes.
+          <p className="text-sm text-slate-600 mt-5">By verifying your email, you share your contact details with Narmada Mobility for follow-up,
+            even if you do not finish the quotation. Verification remains valid for 30 minutes.
             Changing your email requires a new code.</p>
         </div>}
         {step === 2 && <div data-testid="quote-parts">

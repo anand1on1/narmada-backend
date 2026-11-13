@@ -36,6 +36,7 @@ import { rawSqlite } from "./storage";
 import { sendGenericSalesEmail } from "./email";
 import { deliverQuote, quoteDeliveryStatus, QUOTE_RECIPIENTS } from "./quote-delivery";
 import { registerQuoteIndentRoute } from "./quote-indent";
+import { parseQuoteLeadContact, saveVerifiedQuoteLead, deliverQuoteLead } from "./quote-leads";
 
 // -------------------- config helpers --------------------
 
@@ -220,10 +221,6 @@ function bumpAttempts(id: number): number {
   return info.changes;
 }
 
-function markVerified(id: number): void {
-  rawSqlite.prepare(`UPDATE quote_otp SET verified = 1 WHERE id = ?`).run(id);
-}
-
 function invalidateOtp(id: number): void {
   // Expire it immediately so no more attempts land against this row.
   rawSqlite.prepare(`UPDATE quote_otp SET expires_at = 0 WHERE id = ?`).run(id);
@@ -328,6 +325,9 @@ export function registerQuoteRfqRoutes(app: Express): void {
 
       if (!isValidEmail(email)) return res.status(400).json({ error: "invalid_email" });
       if (!/^\d{6}$/.test(code)) return res.status(400).json({ error: "invalid_code_format" });
+      let contact;
+      try { contact = parseQuoteLeadContact(req.body?.contact); }
+      catch { return res.status(400).json({ error: "invalid_contact_details" }); }
 
       const now = Date.now();
       const row = findRecentOtp(email, now);
@@ -348,12 +348,21 @@ export function registerQuoteRfqRoutes(app: Express): void {
         return res.status(400).json({ error: "invalid_code", attempts_remaining: OTP_MAX_ATTEMPTS - (row.attempts + 1) });
       }
 
-      markVerified(row.id);
       const token = signVerificationToken({
         email,
         verified_at: now,
         exp: now + VERIFY_TOKEN_TTL_SECONDS * 1000,
       });
+      // Atomic durable capture: a successful verification cannot lose the lead
+      // if the browser closes, the client disconnects, or the next step is abandoned.
+      const leadId = rawSqlite.transaction(() => {
+        const consumed = rawSqlite.prepare("UPDATE quote_otp SET verified=1 WHERE id=? AND verified=0 AND expires_at>?")
+          .run(row.id, now);
+        if (!consumed.changes) throw Error("OTP already consumed");
+        return saveVerifiedQuoteLead(row.id, email, contact, now);
+      })();
+      // Start immediately, but SMTP latency/failure must not block the quotation.
+      void deliverQuoteLead(leadId).catch(() => console.error("[quote-leads] immediate delivery failed; persisted queue retained"));
       return res.json({ ok: true, verification_token: token, ttl_seconds: VERIFY_TOKEN_TTL_SECONDS });
     } catch (e: any) {
       console.error("[quote-rfq] otp/verify failed:", e?.message || e);
