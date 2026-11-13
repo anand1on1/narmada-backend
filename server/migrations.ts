@@ -3406,6 +3406,17 @@ export function runR28_6Migrations() {
     state TEXT NOT NULL DEFAULT 'pending', attempts INTEGER NOT NULL DEFAULT 0,
     updated_at INTEGER NOT NULL, PRIMARY KEY(request_id,recipient)
   );`);
+  run("verified quotation leads", `CREATE TABLE IF NOT EXISTS quote_lead (
+    id INTEGER PRIMARY KEY AUTOINCREMENT, otp_id INTEGER NOT NULL UNIQUE,
+    email TEXT NOT NULL, contact_json TEXT, verified_at INTEGER NOT NULL
+  );`);
+  run("verified quotation lead delivery", `CREATE TABLE IF NOT EXISTS quote_lead_delivery (
+    lead_id INTEGER NOT NULL, recipient TEXT NOT NULL,
+    state TEXT NOT NULL DEFAULT 'pending', attempts INTEGER NOT NULL DEFAULT 0,
+    updated_at INTEGER NOT NULL, PRIMARY KEY(lead_id,recipient)
+  );`);
+  run("verified quotation lead queue index",
+    `CREATE INDEX IF NOT EXISTS idx_quote_lead_delivery_queue ON quote_lead_delivery(state,updated_at);`);
 
   console.log("[migrations] R28.6: complete");
 }
